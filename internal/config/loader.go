@@ -135,13 +135,21 @@ func (l *Loader) WatchProviders(callback func(map[string]domain.Provider)) error
 
 // LoadTeam reads and parses a team config from data/teams/<slug>/team.yaml.
 func (l *Loader) LoadTeam(slug string) (*domain.Team, error) {
-	path := filepath.Join(l.dataDir, "teams", slug, "team.yaml")
+	teamDir, err := ValidateTeamPath(l.dataDir, slug)
+	if err != nil {
+		return nil, err
+	}
+	path := filepath.Join(teamDir, "team.yaml")
 	return LoadTeamFromFile(path, slug)
 }
 
 // SaveTeam writes a team config atomically.
 func (l *Loader) SaveTeam(slug string, team *domain.Team) error {
-	path := filepath.Join(l.dataDir, "teams", slug, "team.yaml")
+	teamDir, err := ValidateTeamPath(l.dataDir, slug)
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(teamDir, "team.yaml")
 	return SaveTeamToFile(path, team)
 }
 
@@ -152,8 +160,11 @@ func (l *Loader) CreateTeamDir(slug string) error {
 
 // DeleteTeamDir removes a team directory.
 func (l *Loader) DeleteTeamDir(slug string) error {
-	path := filepath.Join(l.dataDir, "teams", slug)
-	return os.RemoveAll(path)
+	teamDir, err := ValidateTeamPath(l.dataDir, slug)
+	if err != nil {
+		return err
+	}
+	return os.RemoveAll(teamDir)
 }
 
 // ListTeams returns all team slugs found in data/teams/.
@@ -169,11 +180,18 @@ func (l *Loader) ListTeams() ([]string, error) {
 
 	var slugs []string
 	for _, entry := range entries {
-		if entry.IsDir() {
-			teamFile := filepath.Join(teamsDir, entry.Name(), "team.yaml")
-			if _, err := os.Stat(teamFile); err == nil {
-				slugs = append(slugs, entry.Name())
-			}
+		if !entry.IsDir() {
+			continue
+		}
+		// Validate each directory entry as a slug before using it.
+		// This filters out entries with invalid names (e.g., symlinks with
+		// suspicious names, directories with uppercase, etc.).
+		if err := domain.ValidateSlug(entry.Name()); err != nil {
+			continue
+		}
+		teamFile := filepath.Join(teamsDir, entry.Name(), "team.yaml")
+		if _, err := os.Lstat(teamFile); err == nil {
+			slugs = append(slugs, entry.Name())
 		}
 	}
 	return slugs, nil

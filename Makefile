@@ -37,12 +37,12 @@ test-go:
 test-agent-runner:
 	@echo "==> Running agent-runner tests..."
 	cd agent-runner && bun install --frozen-lockfile 2>/dev/null || cd agent-runner && bun install
-	cd agent-runner && bun test || true
+	cd agent-runner && bun run test
 
 test-web:
 	@echo "==> Running web tests..."
 	cd web && bun install --frozen-lockfile 2>/dev/null || cd web && bun install
-	cd web && bun test || true
+	cd web && bun run test
 
 lint: lint-go lint-agent-runner lint-web
 

@@ -14,6 +14,8 @@ import (
 	"github.com/Z-M-Huang/openhive/internal/channel"
 	"github.com/Z-M-Huang/openhive/internal/config"
 	"github.com/Z-M-Huang/openhive/internal/crypto"
+	"github.com/Z-M-Huang/openhive/internal/domain"
+	"github.com/Z-M-Huang/openhive/internal/event"
 	"github.com/Z-M-Huang/openhive/internal/orchestrator"
 	"github.com/Z-M-Huang/openhive/internal/store"
 	"github.com/Z-M-Huang/openhive/internal/ws"
@@ -59,6 +61,21 @@ func main() {
 	if err != nil {
 		logger.Error("failed to create config loader", "error", err)
 		os.Exit(1)
+	}
+
+	// Event bus for system-wide pub/sub
+	eventBus := event.NewEventBus()
+
+	// Wire config watcher to publish events on config changes.
+	// OrgChart (and future consumers) subscribe to rebuild on config changes.
+	if watchErr := cfgLoader.WatchMaster(func(cfg *domain.MasterConfig) {
+		eventBus.Publish(domain.Event{
+			Type:    domain.EventTypeConfigChanged,
+			Payload: cfg,
+		})
+		logger.Info("master config changed, published event")
+	}); watchErr != nil {
+		logger.Warn("failed to watch master config", "error", watchErr)
 	}
 
 	// SDK tool handler with admin tools
@@ -155,10 +172,13 @@ func main() {
 		logger.Error("shutdown error", "error", shutdownErr)
 	}
 
-	// Suppress unused variable warnings by referencing components not yet fully wired
+	// Suppress unused variable warnings by referencing components not yet fully wired.
+	// These will be connected in subsequent phases (task_result -> Router,
+	// tool_call -> ToolHandler, etc.).
 	_ = router
 	_ = dispatcher
 	_ = toolHandler
+	_ = eventBus
 
 	logger.Info("shutdown complete")
 }

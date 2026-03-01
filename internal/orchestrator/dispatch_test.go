@@ -220,6 +220,60 @@ func TestHandleWSMessage_InvalidJSON(t *testing.T) {
 	d.HandleWSMessage("main", []byte("not json"))
 }
 
+func TestHandleWSMessage_RejectsGoToContainerType(t *testing.T) {
+	d, _, _ := newTestDispatcher(t)
+
+	// A container should NOT be able to send a container_init message.
+	// The dispatcher should reject it via direction validation.
+	msg, err := ws.EncodeMessage(ws.MsgTypeContainerInit, ws.ContainerInitMsg{
+		IsMainAssistant: true,
+		Agents:          []ws.AgentInitConfig{},
+	})
+	require.NoError(t, err)
+
+	// Should not panic and should be silently rejected (logged)
+	d.HandleWSMessage("malicious-team", msg)
+	// No task store calls expected (verified by mockery - no expectations set)
+}
+
+func TestHandleWSMessage_RejectsTaskDispatchFromContainer(t *testing.T) {
+	d, _, _ := newTestDispatcher(t)
+
+	// A container should NOT be able to send a task_dispatch message.
+	msg, err := ws.EncodeMessage(ws.MsgTypeTaskDispatch, ws.TaskDispatchMsg{
+		TaskID:   "task-fake",
+		AgentAID: "aid-fake-001",
+		Prompt:   "malicious prompt",
+	})
+	require.NoError(t, err)
+
+	// Should not panic and should be silently rejected
+	d.HandleWSMessage("malicious-team", msg)
+}
+
+func TestHandleWSMessage_RejectsShutdownFromContainer(t *testing.T) {
+	d, _, _ := newTestDispatcher(t)
+
+	msg, err := ws.EncodeMessage(ws.MsgTypeShutdown, ws.ShutdownMsg{
+		Reason:  "malicious shutdown",
+		Timeout: 0,
+	})
+	require.NoError(t, err)
+
+	d.HandleWSMessage("malicious-team", msg)
+}
+
+func TestHandleWSMessage_RejectsToolResultFromContainer(t *testing.T) {
+	d, _, _ := newTestDispatcher(t)
+
+	msg, err := ws.EncodeMessage(ws.MsgTypeToolResult, ws.ToolResultMsg{
+		CallID: "call-fake",
+	})
+	require.NoError(t, err)
+
+	d.HandleWSMessage("malicious-team", msg)
+}
+
 func TestSendContainerInit(t *testing.T) {
 	d, _, hub := newTestDispatcher(t)
 

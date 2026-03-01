@@ -2,8 +2,8 @@
  * Container Orchestrator - Manages agent lifecycle and message routing.
  *
  * Receives container_init from Go backend, initializes agent configs,
- * routes task_dispatch to agents, forwards tool calls via WebSocket,
- * and sends heartbeat every 30s.
+ * routes task_dispatch to agents via AgentExecutor, forwards tool calls
+ * via WebSocket, and sends heartbeat every 30s.
  */
 
 import type {
@@ -27,6 +27,7 @@ import {
 } from './types.js';
 import type { WSClient } from './ws-client.js';
 import { MCPBridge } from './mcp-bridge.js';
+import { AgentExecutor, type SDKQueryFn } from './agent-executor.js';
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 
@@ -34,20 +35,38 @@ export interface AgentState {
   config: AgentInitConfig;
   status: AgentStatusType;
   mcpBridge: MCPBridge;
+  executor: AgentExecutor;
   idleTimer: ReturnType<typeof setTimeout> | null;
   elapsedSeconds: number;
   taskStartTime: number | null;
 }
 
+/**
+ * Factory function type for creating SDK query functions.
+ * In production, this creates a real Claude Agent SDK query function.
+ * In tests, this returns a mock.
+ */
+export type SDKQueryFactory = (config: AgentInitConfig) => SDKQueryFn;
+
 export class Orchestrator {
   private readonly wsClient: WSClient;
   private readonly agents = new Map<string, AgentState>();
+  private readonly callIdToAid = new Map<string, string>();
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
   private teamId = '';
   private mainAssistant = false;
+  private sdkQueryFactory: SDKQueryFactory | null = null;
 
   constructor(wsClient: WSClient) {
     this.wsClient = wsClient;
+  }
+
+  /**
+   * Set the factory function for creating SDK query functions per agent.
+   * Must be called before container_init if task execution is needed.
+   */
+  setSDKQueryFactory(factory: SDKQueryFactory): void {
+    this.sdkQueryFactory = factory;
   }
 
   /**
@@ -75,16 +94,41 @@ export class Orchestrator {
   private onContainerInit(msg: ContainerInitMsg): void {
     this.mainAssistant = msg.isMainAssistant;
 
-    // Store agent configs (do NOT start agents yet - on-demand per AC20)
+    // Create agent state with MCP bridge and AgentExecutor for each agent.
+    // Agents are NOT started yet (on-demand per AC20).
     for (const agentConfig of msg.agents) {
+      // Track tool call IDs when the bridge sends them via WS
       const mcpBridge = new MCPBridge(agentConfig.aid, (wsMsg) => {
+        // Intercept tool_call messages to track callId -> AID mapping
+        if (wsMsg.type === 'tool_call') {
+          const toolCall = wsMsg.data as { callId: string };
+          if (toolCall.callId) {
+            this.callIdToAid.set(toolCall.callId, agentConfig.aid);
+          }
+        }
         this.wsClient.send(wsMsg);
+      });
+
+      // Create the SDK query function if a factory is available.
+      // In tests without a factory, we use a function that throws immediately.
+      const queryFn: SDKQueryFn = this.sdkQueryFactory
+        ? this.sdkQueryFactory(agentConfig)
+        : (() => {
+            throw new Error('No SDK query factory configured');
+          }) as unknown as SDKQueryFn;
+
+      const executor = new AgentExecutor({
+        config: agentConfig,
+        mcpBridge,
+        sendMessage: (wsMsg) => this.wsClient.send(wsMsg),
+        queryFn,
       });
 
       this.agents.set(agentConfig.aid, {
         config: agentConfig,
         status: 'idle',
         mcpBridge,
+        executor,
         idleTimer: null,
         elapsedSeconds: 0,
         taskStartTime: null,
@@ -128,8 +172,16 @@ export class Orchestrator {
 
     console.log(`Task ${msg.taskId} dispatched to agent ${msg.agentAid}`);
 
-    // Task execution will be handled by the AgentExecutor (Issue #13)
-    // For now, we just update state
+    // Execute the task via AgentExecutor (handles SDK query, sends task_result)
+    agent.executor.executeTask(msg).then(() => {
+      // Update orchestrator state from executor status
+      agent.status = agent.executor.status;
+      agent.taskStartTime = null;
+    }).catch((err) => {
+      console.error(`Agent ${msg.agentAid} task execution error: ${err}`);
+      agent.status = 'error';
+      agent.taskStartTime = null;
+    });
   }
 
   private onShutdown(msg: ShutdownMsg): void {
@@ -138,22 +190,37 @@ export class Orchestrator {
     // Stop heartbeat
     this.stopHeartbeat();
 
-    // Stop all agents
+    // Stop all agents and their executors
     for (const [aid, agent] of this.agents) {
       if (agent.idleTimer) {
         clearTimeout(agent.idleTimer);
       }
+      agent.executor.stop();
       agent.status = 'stopped';
       agent.mcpBridge.rejectAll('Container shutting down');
       console.log(`Agent ${aid} stopped`);
     }
+
+    // Clear callId tracking
+    this.callIdToAid.clear();
 
     // Close WebSocket
     this.wsClient.close();
   }
 
   private onToolResult(msg: ToolResultMsg): void {
-    // Route tool result to the correct agent's MCP bridge
+    // Route tool result to the correct agent using callId -> AID lookup
+    const aid = this.callIdToAid.get(msg.callId);
+    if (aid) {
+      const agent = this.agents.get(aid);
+      if (agent) {
+        agent.mcpBridge.handleToolResult(msg);
+        this.callIdToAid.delete(msg.callId);
+        return;
+      }
+    }
+
+    // Fallback: try all agents (for backwards compatibility or if mapping missed)
     for (const agent of this.agents.values()) {
       if (agent.mcpBridge.pendingCount() > 0) {
         agent.mcpBridge.handleToolResult(msg);
@@ -189,8 +256,8 @@ export class Orchestrator {
 
       agents.push({
         aid,
-        status: state.status,
-        detail: state.status === 'busy' ? 'processing task' : '',
+        status: state.executor.status,
+        detail: state.executor.status === 'busy' ? 'processing task' : '',
         elapsedSeconds: elapsed,
         memoryMB: memUsage.rss / (1024 * 1024),
       });
@@ -246,5 +313,6 @@ export class Orchestrator {
     for (const agent of this.agents.values()) {
       agent.mcpBridge.rejectAll('WebSocket disconnected');
     }
+    this.callIdToAid.clear();
   }
 }

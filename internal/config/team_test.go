@@ -117,3 +117,109 @@ func TestSlugValidation_InCreateTeamDirectory(t *testing.T) {
 		}
 	}
 }
+
+// --- Path Traversal Validation Tests (F1) ---
+
+func TestValidateTeamPath_ValidSlug(t *testing.T) {
+	dir := t.TempDir()
+	path, err := ValidateTeamPath(dir, "my-team")
+	require.NoError(t, err)
+	assert.Contains(t, path, "teams")
+	assert.Contains(t, path, "my-team")
+}
+
+func TestValidateTeamPath_InvalidSlug(t *testing.T) {
+	dir := t.TempDir()
+	_, err := ValidateTeamPath(dir, "INVALID")
+	assert.Error(t, err)
+}
+
+func TestValidateTeamPath_EmptySlug(t *testing.T) {
+	dir := t.TempDir()
+	_, err := ValidateTeamPath(dir, "")
+	assert.Error(t, err)
+}
+
+func TestValidateTeamPath_PathTraversalDotDot(t *testing.T) {
+	// The slug pattern (lowercase letters, numbers, hyphens) rejects ".."
+	// but this test explicitly documents the defense.
+	dir := t.TempDir()
+	_, err := ValidateTeamPath(dir, "../etc/passwd")
+	assert.Error(t, err)
+}
+
+func TestValidateTeamPath_PathTraversalWithSlashes(t *testing.T) {
+	dir := t.TempDir()
+	_, err := ValidateTeamPath(dir, "team/../../etc")
+	assert.Error(t, err)
+}
+
+func TestValidateTeamPath_Symlink(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create a symlink in the teams directory
+	teamsDir := filepath.Join(dir, "teams")
+	require.NoError(t, os.MkdirAll(teamsDir, 0755))
+
+	// Create a target directory
+	targetDir := filepath.Join(dir, "secret")
+	require.NoError(t, os.MkdirAll(targetDir, 0755))
+
+	// Create symlink: teams/evil -> ../secret
+	symlinkPath := filepath.Join(teamsDir, "evil")
+	require.NoError(t, os.Symlink(targetDir, symlinkPath))
+
+	_, err := ValidateTeamPath(dir, "evil")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "symlink")
+}
+
+func TestValidateTeamPath_NonexistentIsOK(t *testing.T) {
+	// A team path that doesn't exist yet should be allowed (for creation).
+	dir := t.TempDir()
+	path, err := ValidateTeamPath(dir, "new-team")
+	require.NoError(t, err)
+	assert.NotEmpty(t, path)
+}
+
+func TestCreateTeamDirectory_PathTraversal(t *testing.T) {
+	dir := t.TempDir()
+	// These are all rejected by slug validation, confirming defense-in-depth
+	err := CreateTeamDirectory(dir, "../escape")
+	assert.Error(t, err)
+
+	err = CreateTeamDirectory(dir, "team/../..")
+	assert.Error(t, err)
+}
+
+func TestLoaderDeleteTeamDir_PathTraversal(t *testing.T) {
+	dir := setupTestDataDir(t)
+	loader, err := NewLoader(dir)
+	require.NoError(t, err)
+
+	// Attempt to delete with an invalid slug
+	err = loader.DeleteTeamDir("../escape")
+	assert.Error(t, err)
+
+	err = loader.DeleteTeamDir("")
+	assert.Error(t, err)
+}
+
+func TestLoaderLoadTeam_PathTraversal(t *testing.T) {
+	dir := setupTestDataDir(t)
+	loader, err := NewLoader(dir)
+	require.NoError(t, err)
+
+	_, err = loader.LoadTeam("../escape")
+	assert.Error(t, err)
+}
+
+func TestLoaderSaveTeam_PathTraversal(t *testing.T) {
+	dir := setupTestDataDir(t)
+	loader, err := NewLoader(dir)
+	require.NoError(t, err)
+
+	team := &domain.Team{Slug: "test"}
+	err = loader.SaveTeam("../escape", team)
+	assert.Error(t, err)
+}

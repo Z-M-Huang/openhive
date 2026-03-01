@@ -134,6 +134,17 @@ func (d *Dispatcher) HandleWSMessage(teamID string, data []byte) {
 		return
 	}
 
+	// Enforce direction validation: containers must only send container-to-Go types.
+	// Reject messages where a container sends Go-to-container types (e.g., container_init).
+	if dirErr := ws.ValidateDirection(msgType, true); dirErr != nil {
+		d.logger.Error("rejected message with invalid direction",
+			"team_id", teamID,
+			"type", msgType,
+			"error", dirErr,
+		)
+		return
+	}
+
 	switch msgType {
 	case ws.MsgTypeTaskResult:
 		result, ok := payload.(*ws.TaskResultMsg)

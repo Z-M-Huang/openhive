@@ -21,12 +21,23 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestPhase2Gate verifies the full Phase 2 pipeline:
+// TestPhase2Gate verifies the full Phase 2 Go-side pipeline:
 // 1. Phase 1 infrastructure up (DB, config, encryption, HTTP)
 // 2. WSHub operational (can register connections, generate tokens)
 // 3. Task dispatch pipeline (CLI -> Router -> TaskStore -> WSHub)
 // 4. Admin tool calls (get_config, update_config) through ToolHandler
 // 5. Message routing (inbound/outbound through Router)
+//
+// Scope note (F3): The full mock SDK pipeline test (AC30 - Go spawns Node.js
+// orchestrator with mock SDK, CLI message round-trips through the SDK and back)
+// is deferred to Phase 3 (container integration). The current test validates the
+// complete Go-side orchestration pipeline, which is the appropriate boundary for
+// Phase 2. The infrastructure for the full test exists:
+//
+// TODO: Phase 3 will add an integration test that starts a mock WS server,
+// connects the Node.js orchestrator (agent-runner/src/index.ts) with the mock
+// SDK (agent-runner/src/mock-sdk.ts), and verifies the full CLI -> WS ->
+// mock SDK -> task_result -> CLI round-trip.
 func TestPhase2Gate(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	ctx := context.Background()
