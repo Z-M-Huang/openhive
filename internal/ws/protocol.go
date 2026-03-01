@@ -163,16 +163,18 @@ func ValidateDirection(msgType string, isFromContainer bool) error {
 }
 
 // MapDomainErrorToWSError maps domain errors to WS error codes and sanitized messages.
+// Known domain error types return stable generic messages; raw domain strings are
+// never exposed to clients. ValidationError keeps user-facing detail by design.
 func MapDomainErrorToWSError(err error) (string, string) {
-	switch e := err.(type) {
+	switch err.(type) {
 	case *domain.NotFoundError:
-		return WSErrorNotFound, e.Error()
+		return WSErrorNotFound, "the requested resource was not found"
 	case *domain.ValidationError:
-		return WSErrorValidation, e.Error()
+		return WSErrorValidation, err.Error()
 	case *domain.ConflictError:
-		return WSErrorConflict, e.Error()
+		return WSErrorConflict, "a resource conflict occurred"
 	case *domain.EncryptionLockedError:
-		return WSErrorEncryptionLocked, e.Error()
+		return WSErrorEncryptionLocked, "encryption is locked"
 	default:
 		return WSErrorInternal, SanitizeErrorMessage(err)
 	}

@@ -160,7 +160,7 @@ func TestValidateDirection_AllContainerToGoTypes(t *testing.T) {
 func TestMapDomainErrorToWSError_NotFound(t *testing.T) {
 	code, msg := MapDomainErrorToWSError(&domain.NotFoundError{Resource: "team", ID: "my-team"})
 	assert.Equal(t, WSErrorNotFound, code)
-	assert.Contains(t, msg, "team not found")
+	assert.Equal(t, "the requested resource was not found", msg)
 }
 
 func TestMapDomainErrorToWSError_Validation(t *testing.T) {
@@ -172,13 +172,13 @@ func TestMapDomainErrorToWSError_Validation(t *testing.T) {
 func TestMapDomainErrorToWSError_Conflict(t *testing.T) {
 	code, msg := MapDomainErrorToWSError(&domain.ConflictError{Resource: "team", Message: "already exists"})
 	assert.Equal(t, WSErrorConflict, code)
-	assert.Contains(t, msg, "already exists")
+	assert.Equal(t, "a resource conflict occurred", msg)
 }
 
 func TestMapDomainErrorToWSError_EncryptionLocked(t *testing.T) {
 	code, msg := MapDomainErrorToWSError(&domain.EncryptionLockedError{})
 	assert.Equal(t, WSErrorEncryptionLocked, code)
-	assert.Contains(t, msg, "encryption locked")
+	assert.Equal(t, "encryption is locked", msg)
 }
 
 func TestMapDomainErrorToWSError_Unknown(t *testing.T) {

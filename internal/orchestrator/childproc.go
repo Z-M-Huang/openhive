@@ -46,6 +46,7 @@ type ChildProcessManager struct {
 	running  bool
 	stopCh   chan struct{}
 	stopped  bool
+	waitDone chan struct{} // closed when monitor goroutine exits
 	onReady  func()
 	cmdStart func(cmd *exec.Cmd) error // for testing
 }
@@ -91,17 +92,20 @@ func (m *ChildProcessManager) Start(ctx context.Context) error {
 	}
 
 	m.running = true
+	m.waitDone = make(chan struct{})
 	go m.monitor(ctx)
 
 	return nil
 }
 
-// Stop gracefully stops the child process.
+// Stop gracefully stops the child process and waits for the monitor
+// goroutine to finish. Only killProcess sends the kill signal; the
+// monitor goroutine is the sole owner of cmd.Wait() to avoid races.
 func (m *ChildProcessManager) Stop() error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	if m.stopped {
+		m.mu.Unlock()
 		return nil
 	}
 	m.stopped = true
@@ -113,7 +117,16 @@ func (m *ChildProcessManager) Stop() error {
 		close(m.stopCh)
 	}
 
-	return m.killProcess()
+	err := m.killProcess()
+	waitDone := m.waitDone
+	m.mu.Unlock()
+
+	// Wait for the monitor goroutine to exit (it owns cmd.Wait).
+	if waitDone != nil {
+		<-waitDone
+	}
+
+	return err
 }
 
 // IsRunning returns whether the child process manager is actively running.
@@ -170,14 +183,18 @@ func (m *ChildProcessManager) killProcess() error {
 		return err
 	}
 
-	// Wait for the process to exit to avoid zombie processes
-	_ = m.cmd.Wait()
+	// Do NOT call cmd.Wait() here — the monitor goroutine is the sole
+	// owner of Wait() to prevent data races. The monitor will reap the
+	// process after Kill() causes Wait() to return.
 	return nil
 }
 
 func (m *ChildProcessManager) monitor(ctx context.Context) {
+	defer close(m.waitDone)
+
 	for {
-		// Wait for the process to exit
+		// Wait for the process to exit. This goroutine is the sole caller
+		// of cmd.Wait() to avoid data races with killProcess().
 		err := m.cmd.Wait()
 
 		m.mu.Lock()
