@@ -12,6 +12,7 @@ import (
 
 	"github.com/Z-M-Huang/openhive/internal/api"
 	"github.com/Z-M-Huang/openhive/internal/channel"
+	"github.com/Z-M-Huang/openhive/internal/config"
 	"github.com/Z-M-Huang/openhive/internal/crypto"
 	"github.com/Z-M-Huang/openhive/internal/orchestrator"
 	"github.com/Z-M-Huang/openhive/internal/store"
@@ -48,6 +49,27 @@ func main() {
 
 	// Task dispatcher
 	dispatcher := orchestrator.NewDispatcher(taskStore, wsHub, logger)
+
+	// Config loader
+	dataDir := os.Getenv("OPENHIVE_DATA_DIR")
+	if dataDir == "" {
+		dataDir = "data"
+	}
+	cfgLoader, err := config.NewLoader(dataDir)
+	if err != nil {
+		logger.Error("failed to create config loader", "error", err)
+		os.Exit(1)
+	}
+
+	// SDK tool handler with admin tools
+	startTime := time.Now()
+	toolHandler := orchestrator.NewToolHandler(logger)
+	orchestrator.RegisterAdminTools(toolHandler, orchestrator.AdminToolsDeps{
+		ConfigLoader: cfgLoader,
+		KeyManager:   km,
+		WSHub:        wsHub,
+		StartTime:    startTime,
+	})
 
 	// Wire up WS message handler
 	wsHub.SetOnMessage(dispatcher.HandleWSMessage)
@@ -133,9 +155,10 @@ func main() {
 		logger.Error("shutdown error", "error", shutdownErr)
 	}
 
-	// Suppress unused variable warnings by referencing router and dispatcher
+	// Suppress unused variable warnings by referencing components not yet fully wired
 	_ = router
 	_ = dispatcher
+	_ = toolHandler
 
 	logger.Info("shutdown complete")
 }

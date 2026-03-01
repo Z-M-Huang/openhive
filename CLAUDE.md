@@ -125,7 +125,7 @@ These are architecture decisions that MUST be followed. Not suggestions — requ
 
 1. **WebSocket, NOT IPC/stdin** — All Go ↔ container communication uses WebSocket. No stdin/stdout markers, no file-based IPC, no polling. [Wiki — WebSocket Protocol](https://github.com/Z-M-Huang/openhive/wiki/WebSocket-Protocol)
 
-2. **SDK Custom Tools, NOT MCP** — Internal management tools (create_team, dispatch_task, etc.) are registered with the Claude Agent SDK directly. Container orchestrator intercepts tool calls → forwards via WebSocket to Go backend. MCP is only for 3rd-party servers (GitHub, databases).
+2. **SDK Custom Tools via MCP Bridge** — Internal management tools (create_team, dispatch_task, get_config, update_config, etc.) are exposed to the Claude Agent SDK as an MCP server process. The MCP bridge runs in each container, receives tool calls from the SDK, forwards them via WebSocket to the Go backend's SDKToolHandler, and returns results. External MCP servers (GitHub, databases) are configured separately per-team.
 
 3. **Team Lead in Parent Container** — Team lead ALWAYS runs in the parent container. Never in the child team's container. Child team's `leader_aid` references an AID from the parent team's config.
 
