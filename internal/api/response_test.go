@@ -55,6 +55,7 @@ func TestMapDomainError_NotFound(t *testing.T) {
 	var resp errorResponse
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Equal(t, "NOT_FOUND", resp.Error.Code)
+	assert.Equal(t, "the requested resource was not found", resp.Error.Message)
 }
 
 func TestMapDomainError_Validation(t *testing.T) {
@@ -65,6 +66,8 @@ func TestMapDomainError_Validation(t *testing.T) {
 	var resp errorResponse
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Equal(t, "VALIDATION_ERROR", resp.Error.Code)
+	// Validation messages are user-facing and should be preserved
+	assert.Contains(t, resp.Error.Message, "too short")
 }
 
 func TestMapDomainError_Conflict(t *testing.T) {
@@ -75,6 +78,7 @@ func TestMapDomainError_Conflict(t *testing.T) {
 	var resp errorResponse
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Equal(t, "CONFLICT", resp.Error.Code)
+	assert.Equal(t, "a resource conflict occurred", resp.Error.Message)
 }
 
 func TestMapDomainError_EncryptionLocked(t *testing.T) {
@@ -85,6 +89,7 @@ func TestMapDomainError_EncryptionLocked(t *testing.T) {
 	var resp errorResponse
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Equal(t, "ENCRYPTION_LOCKED", resp.Error.Code)
+	assert.Equal(t, "encryption is locked", resp.Error.Message)
 }
 
 func TestMapDomainError_RateLimited(t *testing.T) {
@@ -96,6 +101,7 @@ func TestMapDomainError_RateLimited(t *testing.T) {
 	var resp errorResponse
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Equal(t, "RATE_LIMITED", resp.Error.Code)
+	assert.Equal(t, "rate limit exceeded", resp.Error.Message)
 }
 
 func TestMapDomainError_Unknown(t *testing.T) {

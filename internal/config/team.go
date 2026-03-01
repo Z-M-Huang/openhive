@@ -28,7 +28,15 @@ func ValidateTeamPath(dataDir string, slug string) (string, error) {
 		return "", fmt.Errorf("failed to resolve data directory: %w", err)
 	}
 
-	teamsPrefix := filepath.Join(absDataDir, "teams") + string(filepath.Separator)
+	// Check the teams base directory for symlinks before constructing the full path.
+	teamsDir := filepath.Join(absDataDir, "teams")
+	if info, statErr := os.Lstat(teamsDir); statErr == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", &domain.ValidationError{Field: "teams_dir", Message: "teams directory is a symlink"}
+		}
+	}
+
+	teamsPrefix := teamsDir + string(filepath.Separator)
 	teamDir := filepath.Join(absDataDir, "teams", slug)
 
 	absTeamDir, err := filepath.Abs(teamDir)

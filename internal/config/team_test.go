@@ -174,6 +174,22 @@ func TestValidateTeamPath_Symlink(t *testing.T) {
 	assert.Contains(t, err.Error(), "symlink")
 }
 
+func TestValidateTeamPath_TeamsBaseDirSymlink(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create a real target directory
+	targetDir := filepath.Join(dir, "real-teams")
+	require.NoError(t, os.MkdirAll(targetDir, 0755))
+
+	// Make the "teams" directory a symlink pointing to the real directory
+	teamsDir := filepath.Join(dir, "teams")
+	require.NoError(t, os.Symlink(targetDir, teamsDir))
+
+	_, err := ValidateTeamPath(dir, "my-team")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "teams directory is a symlink")
+}
+
 func TestValidateTeamPath_NonexistentIsOK(t *testing.T) {
 	// A team path that doesn't exist yet should be allowed (for creation).
 	dir := t.TempDir()

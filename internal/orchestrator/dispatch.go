@@ -14,9 +14,11 @@ import (
 
 // Dispatcher handles task creation and dispatch to team containers via WebSocket.
 type Dispatcher struct {
-	taskStore domain.TaskStore
-	wsHub     domain.WSHub
-	logger    *slog.Logger
+	taskStore          domain.TaskStore
+	wsHub              domain.WSHub
+	logger             *slog.Logger
+	toolHandler        *ToolHandler
+	taskResultCallback func(context.Context, *ws.TaskResultMsg)
 }
 
 // NewDispatcher creates a new task dispatcher.
@@ -26,6 +28,17 @@ func NewDispatcher(taskStore domain.TaskStore, wsHub domain.WSHub, logger *slog.
 		wsHub:     wsHub,
 		logger:    logger,
 	}
+}
+
+// SetToolHandler sets the handler for SDK tool calls received from containers.
+func (d *Dispatcher) SetToolHandler(handler *ToolHandler) {
+	d.toolHandler = handler
+}
+
+// SetTaskResultCallback sets a callback invoked after a task result is processed.
+// This is used to route results to the message router for outbound delivery.
+func (d *Dispatcher) SetTaskResultCallback(cb func(context.Context, *ws.TaskResultMsg)) {
+	d.taskResultCallback = cb
 }
 
 // CreateAndDispatch creates a task in the database and dispatches it to the
@@ -152,8 +165,12 @@ func (d *Dispatcher) HandleWSMessage(teamID string, data []byte) {
 			d.logger.Error("invalid task_result payload type", "team_id", teamID)
 			return
 		}
-		if handleErr := d.HandleResult(context.Background(), result); handleErr != nil {
+		ctx := context.Background()
+		if handleErr := d.HandleResult(ctx, result); handleErr != nil {
 			d.logger.Error("failed to handle task result", "task_id", result.TaskID, "error", handleErr)
+		}
+		if d.taskResultCallback != nil {
+			d.taskResultCallback(ctx, result)
 		}
 
 	case ws.MsgTypeReady:
@@ -169,17 +186,51 @@ func (d *Dispatcher) HandleWSMessage(teamID string, data []byte) {
 		d.logger.Debug("heartbeat received", "team_id", teamID)
 
 	case ws.MsgTypeToolCall:
-		// Tool calls will be handled by the SDKToolHandler (Issue #16)
 		toolCall, ok := payload.(*ws.ToolCallMsg)
 		if !ok {
 			d.logger.Error("invalid tool_call payload type", "team_id", teamID)
 			return
 		}
-		d.logger.Info("tool call received (handler not yet wired)",
-			"team_id", teamID,
-			"call_id", toolCall.CallID,
-			"tool_name", toolCall.ToolName,
-		)
+
+		if d.toolHandler == nil {
+			d.logger.Error("tool call received but no tool handler configured",
+				"team_id", teamID,
+				"call_id", toolCall.CallID,
+				"tool_name", toolCall.ToolName,
+			)
+			return
+		}
+
+		result, toolErr := d.toolHandler.HandleToolCall(toolCall.CallID, toolCall.ToolName, toolCall.Arguments)
+		var resultMsg ws.ToolResultMsg
+		if toolErr != nil {
+			d.logger.Error("tool call failed",
+				"team_id", teamID,
+				"call_id", toolCall.CallID,
+				"tool_name", toolCall.ToolName,
+				"error", toolErr,
+			)
+			errCode, errMessage := ws.MapDomainErrorToWSError(toolErr)
+			resultMsg = ws.ToolResultMsg{
+				CallID:       toolCall.CallID,
+				ErrorCode:    errCode,
+				ErrorMessage: errMessage,
+			}
+		} else {
+			resultMsg = ws.ToolResultMsg{
+				CallID: toolCall.CallID,
+				Result: result,
+			}
+		}
+
+		encoded, encErr := ws.EncodeMessage(ws.MsgTypeToolResult, resultMsg)
+		if encErr != nil {
+			d.logger.Error("failed to encode tool_result", "call_id", toolCall.CallID, "error", encErr)
+			return
+		}
+		if sendErr := d.wsHub.SendToTeam(teamID, encoded); sendErr != nil {
+			d.logger.Error("failed to send tool_result", "team_id", teamID, "call_id", toolCall.CallID, "error", sendErr)
+		}
 
 	case ws.MsgTypeEscalation:
 		escalation, ok := payload.(*ws.EscalationMsg)

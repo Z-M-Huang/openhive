@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
 	"sync"
 	"time"
@@ -21,8 +22,9 @@ type ChildProcessConfig struct {
 	Command string
 	// Args are the command arguments (e.g., ["agent-runner/dist/index.js", "--mode=master"])
 	Args []string
-	// Env contains additional environment variables for the child process
-	Env []string
+	// Env contains additional environment variables to merge into the child
+	// process environment. Keys and values are merged with os.Environ().
+	Env map[string]string
 	// Dir is the working directory for the child process
 	Dir string
 	// MaxRetries is the maximum number of restart attempts (default 10)
@@ -134,7 +136,12 @@ func (m *ChildProcessManager) startProcess() error {
 		m.cmd.Dir = m.cfg.Dir
 	}
 	if len(m.cfg.Env) > 0 {
-		m.cmd.Env = m.cfg.Env
+		// Inherit the current process environment and merge extra vars.
+		env := os.Environ()
+		for k, v := range m.cfg.Env {
+			env = append(env, k+"="+v)
+		}
+		m.cmd.Env = env
 	}
 
 	if err := m.cmdStart(m.cmd); err != nil {

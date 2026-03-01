@@ -42,16 +42,16 @@ func Error(w http.ResponseWriter, status int, code string, message string) {
 func MapDomainError(w http.ResponseWriter, err error) {
 	switch e := err.(type) {
 	case *domain.NotFoundError:
-		Error(w, http.StatusNotFound, e.Code(), e.Error())
+		Error(w, http.StatusNotFound, e.Code(), "the requested resource was not found")
 	case *domain.ValidationError:
 		Error(w, http.StatusBadRequest, e.Code(), e.Error())
 	case *domain.ConflictError:
-		Error(w, http.StatusConflict, e.Code(), e.Error())
+		Error(w, http.StatusConflict, e.Code(), "a resource conflict occurred")
 	case *domain.EncryptionLockedError:
-		Error(w, http.StatusForbidden, e.Code(), e.Error())
+		Error(w, http.StatusForbidden, e.Code(), "encryption is locked")
 	case *domain.RateLimitedError:
 		w.Header().Set("Retry-After", itoa(e.RetryAfterSeconds))
-		Error(w, http.StatusTooManyRequests, e.Code(), e.Error())
+		Error(w, http.StatusTooManyRequests, e.Code(), "rate limit exceeded")
 	default:
 		Error(w, http.StatusInternalServerError, "INTERNAL_ERROR", "an internal error occurred")
 	}

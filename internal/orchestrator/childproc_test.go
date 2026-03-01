@@ -186,6 +186,62 @@ func TestStartProcess_Failure(t *testing.T) {
 	assert.False(t, m.IsRunning())
 }
 
+func TestChildProcessConfig_EnvMerge(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	m := NewChildProcessManager(ChildProcessConfig{
+		Command:    "env",
+		MaxRetries: 1,
+		Env: map[string]string{
+			"TEST_WS_TOKEN": "tok-123",
+			"TEST_WS_URL":   "ws://localhost:8080/ws",
+		},
+	}, logger)
+
+	// Override cmdStart to capture the command's environment instead of running it
+	var capturedEnv []string
+	m.cmdStart = func(cmd *exec.Cmd) error {
+		capturedEnv = cmd.Env
+		// Create a minimal process that we can clean up
+		cmd.Path = "/bin/sleep"
+		cmd.Args = []string{"sleep", "3600"}
+		return cmd.Start()
+	}
+
+	ctx := context.Background()
+	err := m.Start(ctx)
+	require.NoError(t, err)
+
+	// Verify the env contains our custom vars merged with OS env
+	assert.NotEmpty(t, capturedEnv, "child process should have environment variables")
+
+	// Check that our custom vars are present
+	hasToken := false
+	hasURL := false
+	for _, env := range capturedEnv {
+		if env == "TEST_WS_TOKEN=tok-123" {
+			hasToken = true
+		}
+		if env == "TEST_WS_URL=ws://localhost:8080/ws" {
+			hasURL = true
+		}
+	}
+	assert.True(t, hasToken, "WS_TOKEN should be in child process env")
+	assert.True(t, hasURL, "WS_URL should be in child process env")
+
+	// Verify it also inherited OS env (PATH should always be present)
+	hasPath := false
+	for _, env := range capturedEnv {
+		if len(env) > 5 && env[:5] == "PATH=" {
+			hasPath = true
+		}
+	}
+	assert.True(t, hasPath, "PATH from OS env should be inherited")
+
+	err = m.Stop()
+	assert.NoError(t, err)
+}
+
 func TestBackoffCalculation(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 

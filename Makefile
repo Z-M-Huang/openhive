@@ -53,12 +53,12 @@ lint-go:
 lint-agent-runner:
 	@echo "==> Linting agent-runner..."
 	cd agent-runner && bun install --frozen-lockfile 2>/dev/null || cd agent-runner && bun install
-	cd agent-runner && bun run lint || true
+	cd agent-runner && bun run lint
 
 lint-web:
 	@echo "==> Linting web..."
 	cd web && bun install --frozen-lockfile 2>/dev/null || cd web && bun install
-	cd web && bun run lint || true
+	cd web && bun run lint
 
 coverage: coverage-go coverage-agent-runner coverage-web
 
@@ -72,17 +72,17 @@ coverage-agent-runner:
 	@echo "==> Agent-runner coverage..."
 	@mkdir -p coverage
 	cd agent-runner && bun install --frozen-lockfile 2>/dev/null || cd agent-runner && bun install
-	cd agent-runner && bun run test:coverage || true
+	cd agent-runner && bun run test:coverage
 
 coverage-web:
 	@echo "==> Web coverage..."
 	@mkdir -p coverage
 	cd web && bun install --frozen-lockfile 2>/dev/null || cd web && bun install
-	cd web && bun run test:coverage || true
+	cd web && bun run test:coverage
 
 generate:
 	@echo "==> Generating mocks..."
-	~/go/bin/mockery 2>/dev/null || true
+	~/go/bin/mockery
 
 dev:
 	@echo "==> Starting development mode..."

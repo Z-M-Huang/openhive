@@ -2,8 +2,10 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"os"
+	"sync"
 	"testing"
 
 	"github.com/Z-M-Huang/openhive/internal/domain"
@@ -290,4 +292,188 @@ func TestSendContainerInit(t *testing.T) {
 
 	err := d.SendContainerInit("main", true, agents, map[string]string{"SECRET": "value"})
 	assert.NoError(t, err)
+}
+
+func TestSetToolHandler(t *testing.T) {
+	d, _, _ := newTestDispatcher(t)
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	th := NewToolHandler(logger)
+
+	d.SetToolHandler(th)
+	assert.Equal(t, th, d.toolHandler)
+}
+
+func TestSetTaskResultCallback(t *testing.T) {
+	d, _, _ := newTestDispatcher(t)
+
+	called := false
+	d.SetTaskResultCallback(func(_ context.Context, _ *ws.TaskResultMsg) {
+		called = true
+	})
+
+	assert.NotNil(t, d.taskResultCallback)
+	d.taskResultCallback(context.Background(), &ws.TaskResultMsg{})
+	assert.True(t, called)
+}
+
+func TestHandleWSMessage_ToolCall_Success(t *testing.T) {
+	d, _, hub := newTestDispatcher(t)
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	// Create and wire a tool handler with a test tool
+	th := NewToolHandler(logger)
+	th.Register("test_tool", func(args json.RawMessage) (json.RawMessage, error) {
+		return json.RawMessage(`{"status":"ok"}`), nil
+	})
+	d.SetToolHandler(th)
+
+	// Expect tool_result to be sent back to the team
+	hub.EXPECT().SendToTeam("team-a", mock.MatchedBy(func(data []byte) bool {
+		msgType, payload, err := ws.ParseMessage(data)
+		if err != nil || msgType != ws.MsgTypeToolResult {
+			return false
+		}
+		result, ok := payload.(*ws.ToolResultMsg)
+		return ok && result.CallID == "call-123" && result.ErrorCode == ""
+	})).Return(nil)
+
+	msg, err := ws.EncodeMessage(ws.MsgTypeToolCall, ws.ToolCallMsg{
+		CallID:    "call-123",
+		ToolName:  "test_tool",
+		Arguments: json.RawMessage(`{}`),
+		AgentAID:  "aid-001",
+	})
+	require.NoError(t, err)
+
+	d.HandleWSMessage("team-a", msg)
+}
+
+func TestHandleWSMessage_ToolCall_ToolError(t *testing.T) {
+	d, _, hub := newTestDispatcher(t)
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	// Register a tool that fails
+	th := NewToolHandler(logger)
+	th.Register("fail_tool", func(args json.RawMessage) (json.RawMessage, error) {
+		return nil, &domain.NotFoundError{Resource: "item", ID: "xyz"}
+	})
+	d.SetToolHandler(th)
+
+	// Expect error tool_result to be sent back
+	hub.EXPECT().SendToTeam("team-a", mock.MatchedBy(func(data []byte) bool {
+		msgType, payload, err := ws.ParseMessage(data)
+		if err != nil || msgType != ws.MsgTypeToolResult {
+			return false
+		}
+		result, ok := payload.(*ws.ToolResultMsg)
+		return ok && result.CallID == "call-456" && result.ErrorCode == ws.WSErrorNotFound
+	})).Return(nil)
+
+	msg, err := ws.EncodeMessage(ws.MsgTypeToolCall, ws.ToolCallMsg{
+		CallID:    "call-456",
+		ToolName:  "fail_tool",
+		Arguments: json.RawMessage(`{}`),
+		AgentAID:  "aid-001",
+	})
+	require.NoError(t, err)
+
+	d.HandleWSMessage("team-a", msg)
+}
+
+func TestHandleWSMessage_ToolCall_UnknownTool(t *testing.T) {
+	d, _, hub := newTestDispatcher(t)
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	// Empty tool handler - no tools registered
+	th := NewToolHandler(logger)
+	d.SetToolHandler(th)
+
+	// Expect error tool_result for unknown tool
+	hub.EXPECT().SendToTeam("team-a", mock.MatchedBy(func(data []byte) bool {
+		msgType, payload, err := ws.ParseMessage(data)
+		if err != nil || msgType != ws.MsgTypeToolResult {
+			return false
+		}
+		result, ok := payload.(*ws.ToolResultMsg)
+		return ok && result.CallID == "call-789" && result.ErrorCode != ""
+	})).Return(nil)
+
+	msg, err := ws.EncodeMessage(ws.MsgTypeToolCall, ws.ToolCallMsg{
+		CallID:    "call-789",
+		ToolName:  "nonexistent_tool",
+		Arguments: json.RawMessage(`{}`),
+		AgentAID:  "aid-001",
+	})
+	require.NoError(t, err)
+
+	d.HandleWSMessage("team-a", msg)
+}
+
+func TestHandleWSMessage_ToolCall_NoHandler(t *testing.T) {
+	d, _, _ := newTestDispatcher(t)
+
+	// No tool handler set - should log error but not panic
+	msg, err := ws.EncodeMessage(ws.MsgTypeToolCall, ws.ToolCallMsg{
+		CallID:    "call-no-handler",
+		ToolName:  "any_tool",
+		Arguments: json.RawMessage(`{}`),
+		AgentAID:  "aid-001",
+	})
+	require.NoError(t, err)
+
+	// Should not panic - no hub expectations because no response should be sent
+	d.HandleWSMessage("team-a", msg)
+}
+
+func TestHandleWSMessage_TaskResult_WithCallback(t *testing.T) {
+	d, ts, _ := newTestDispatcher(t)
+
+	ts.EXPECT().Get(mock.Anything, "task-cb-001").Return(&domain.Task{
+		ID:     "task-cb-001",
+		Status: domain.TaskStatusRunning,
+	}, nil)
+	ts.EXPECT().Update(mock.Anything, mock.Anything).Return(nil)
+
+	// Set up callback to track invocation
+	var mu sync.Mutex
+	var callbackResult *ws.TaskResultMsg
+	d.SetTaskResultCallback(func(_ context.Context, result *ws.TaskResultMsg) {
+		mu.Lock()
+		callbackResult = result
+		mu.Unlock()
+	})
+
+	msg, err := ws.EncodeMessage(ws.MsgTypeTaskResult, ws.TaskResultMsg{
+		TaskID: "task-cb-001",
+		Status: "completed",
+		Result: "callback test",
+	})
+	require.NoError(t, err)
+
+	d.HandleWSMessage("main", msg)
+
+	mu.Lock()
+	require.NotNil(t, callbackResult)
+	assert.Equal(t, "task-cb-001", callbackResult.TaskID)
+	assert.Equal(t, "callback test", callbackResult.Result)
+	mu.Unlock()
+}
+
+func TestHandleWSMessage_TaskResult_NoCallback(t *testing.T) {
+	d, ts, _ := newTestDispatcher(t)
+
+	ts.EXPECT().Get(mock.Anything, "task-nocb-001").Return(&domain.Task{
+		ID:     "task-nocb-001",
+		Status: domain.TaskStatusRunning,
+	}, nil)
+	ts.EXPECT().Update(mock.Anything, mock.Anything).Return(nil)
+
+	// No callback set - should not panic
+	msg, err := ws.EncodeMessage(ws.MsgTypeTaskResult, ws.TaskResultMsg{
+		TaskID: "task-nocb-001",
+		Status: "completed",
+	})
+	require.NoError(t, err)
+
+	d.HandleWSMessage("main", msg)
 }

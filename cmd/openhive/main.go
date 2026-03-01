@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"embed"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -88,6 +89,9 @@ func main() {
 		StartTime:    startTime,
 	})
 
+	// Wire dispatcher: tool calls -> toolHandler, task results -> router
+	dispatcher.SetToolHandler(toolHandler)
+
 	// Wire up WS message handler
 	wsHub.SetOnMessage(dispatcher.HandleWSMessage)
 
@@ -98,6 +102,13 @@ func main() {
 		SessionStore: sessionStore,
 		Logger:       logger,
 		MainTeamID:   "main",
+	})
+
+	// Wire task results from dispatcher to router for outbound delivery
+	dispatcher.SetTaskResultCallback(func(ctx context.Context, result *ws.TaskResultMsg) {
+		if routeErr := router.HandleTaskResult(ctx, result); routeErr != nil {
+			logger.Error("failed to route task result", "task_id", result.TaskID, "error", routeErr)
+		}
 	})
 
 	// CLI channel
@@ -122,10 +133,21 @@ func main() {
 		nil, // CORS origins - configured from config
 	)
 
+	// Generate WS token for the master agent-runner child process
+	wsToken, err := wsHub.GenerateToken("main")
+	if err != nil {
+		logger.Error("failed to generate WS token for child process", "error", err)
+		os.Exit(1)
+	}
+
 	// Child process manager for Node.js orchestrator
 	childMgr := orchestrator.NewChildProcessManager(orchestrator.ChildProcessConfig{
 		Command: "node",
 		Args:    []string{"agent-runner/dist/index.js", "--mode=master"},
+		Env: map[string]string{
+			"WS_TOKEN": wsToken,
+			"WS_URL":   fmt.Sprintf("ws://%s/ws/container?token=%s", listenAddr, wsToken),
+		},
 	}, logger)
 
 	// Handle signals for graceful shutdown
@@ -171,14 +193,6 @@ func main() {
 	if shutdownErr := srv.Shutdown(shutdownCtx); shutdownErr != nil {
 		logger.Error("shutdown error", "error", shutdownErr)
 	}
-
-	// Suppress unused variable warnings by referencing components not yet fully wired.
-	// These will be connected in subsequent phases (task_result -> Router,
-	// tool_call -> ToolHandler, etc.).
-	_ = router
-	_ = dispatcher
-	_ = toolHandler
-	_ = eventBus
 
 	logger.Info("shutdown complete")
 }

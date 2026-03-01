@@ -26,13 +26,16 @@ function parseArgs(): CLIArgs {
 
   const mode = get('--mode=', 'master') as 'master' | 'team';
   const teamId = get('--team=', 'main');
-  const token = get('--token=', '');
+  const token = get('--token=', process.env.WS_TOKEN ?? '');
 
-  // Default WS URL depends on mode
+  // Default WS URL: prefer WS_URL env var (set by Go parent), else compute from mode
+  const envWsUrl = process.env.WS_URL ?? '';
   const defaultWsUrl =
-    mode === 'master'
-      ? `ws://localhost:8080/ws/container?token=${token}`
-      : `ws://openhive:8080/ws/container?token=${token}`;
+    envWsUrl !== ''
+      ? envWsUrl
+      : mode === 'master'
+        ? `ws://localhost:8080/ws/container?token=${token}`
+        : `ws://openhive:8080/ws/container?token=${token}`;
 
   const wsUrl = get('--ws-url=', defaultWsUrl);
 
@@ -45,21 +48,22 @@ function main(): void {
 
   // WSClient and Orchestrator reference each other:
   // WSClient routes messages to Orchestrator, Orchestrator sends via WSClient.
-  // We use a late-binding pattern: create Orchestrator first with a placeholder,
-  // then create WSClient, then wire them together.
-  let orchestrator: Orchestrator;
+  // We break the circular dependency by using a deferred reference object that
+  // the closures capture, then assigning the real orchestrator after both are created.
+  const ref: { orchestrator: Orchestrator | null } = { orchestrator: null };
 
   const wsClient = new WSClient({
     url: cliArgs.wsUrl,
-    onMessage: (msg) => orchestrator.handleMessage(msg),
+    onMessage: (msg) => ref.orchestrator!.handleMessage(msg),
     onConnect: () => console.log('Connected to Go backend'),
     onDisconnect: () => {
       console.log('Disconnected from Go backend');
-      orchestrator.onDisconnect();
+      ref.orchestrator!.onDisconnect();
     },
   });
 
-  orchestrator = new Orchestrator(wsClient);
+  const orchestrator = new Orchestrator(wsClient);
+  ref.orchestrator = orchestrator;
   orchestrator.setTeamId(cliArgs.teamId);
 
   wsClient.connect();
