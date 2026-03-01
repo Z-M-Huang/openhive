@@ -2,6 +2,7 @@
 .claude
 
 # Go
+openhive
 bin/
 *.exe
 *.exe~

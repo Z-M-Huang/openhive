@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"sync"
 
+	"github.com/Z-M-Huang/openhive/internal/domain"
 	"github.com/gorilla/websocket"
 )
 
@@ -16,7 +17,7 @@ var upgrader = websocket.Upgrader{
 
 // Hub manages WebSocket connections from team containers.
 type Hub struct {
-	connections map[string]*Connection
+	connections map[string]domain.WSConnection
 	tokens      *TokenManager
 	mu          sync.RWMutex
 	logger      *slog.Logger
@@ -26,7 +27,7 @@ type Hub struct {
 // NewHub creates a new WebSocket hub.
 func NewHub(logger *slog.Logger) *Hub {
 	return &Hub{
-		connections: make(map[string]*Connection),
+		connections: make(map[string]domain.WSConnection),
 		tokens:      NewTokenManager(),
 		logger:      logger,
 	}
@@ -81,13 +82,13 @@ func (h *Hub) handleClose(teamID string) {
 }
 
 // RegisterConnection registers a connection for a team ID.
-func (h *Hub) RegisterConnection(teamID string, conn *Connection) error {
+func (h *Hub) RegisterConnection(teamID string, conn domain.WSConnection) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	// Close existing connection if any
 	if existing, ok := h.connections[teamID]; ok {
-		existing.Close()
+		_ = existing.Close()
 	}
 
 	h.connections[teamID] = conn
@@ -117,7 +118,7 @@ func (h *Hub) SendToTeam(teamID string, msg []byte) error {
 // BroadcastAll sends a message to all connected teams.
 func (h *Hub) BroadcastAll(msg []byte) error {
 	h.mu.RLock()
-	conns := make([]*Connection, 0, len(h.connections))
+	conns := make([]domain.WSConnection, 0, len(h.connections))
 	for _, conn := range h.connections {
 		conns = append(conns, conn)
 	}
