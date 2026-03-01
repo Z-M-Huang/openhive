@@ -1,0 +1,23 @@
+system:
+  listen_address: "127.0.0.1:8080"
+  data_dir: "data"
+  log_level: "info"
+  log_archive:
+    enabled: true
+    max_entries: 100000
+    keep_copies: 5
+    archive_dir: "data/archives"
+
+assistant:
+  name: "OpenHive Assistant"
+  aid: "aid-main-001"
+  provider: "default"
+  model_tier: "sonnet"
+  max_turns: 50
+  timeout_minutes: 10
+
+channels:
+  discord:
+    enabled: false
+  whatsapp:
+    enabled: false
