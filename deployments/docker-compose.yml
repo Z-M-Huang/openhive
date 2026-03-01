@@ -1,0 +1,21 @@
+version: "3.8"
+
+services:
+  openhive:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile
+    ports:
+      - "8080:8080"
+    volumes:
+      - ../data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - OPENHIVE_SYSTEM_DATA_DIR=/app/data
+      - OPENHIVE_SYSTEM_LISTEN_ADDRESS=0.0.0.0:8080
+    networks:
+      - openhive-network
+
+networks:
+  openhive-network:
+    driver: bridge

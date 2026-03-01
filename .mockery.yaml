@@ -1,0 +1,8 @@
+with-expecter: true
+dir: "internal/mocks/{{.InterfaceName}}"
+outpkg: "mock{{.InterfaceName}}"
+mockname: "Mock{{.InterfaceName}}"
+filename: "mock_{{.InterfaceName}}.go"
+packages:
+  github.com/Z-M-Huang/openhive/internal/domain:
+    interfaces:

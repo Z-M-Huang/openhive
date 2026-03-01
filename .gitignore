@@ -1,2 +1,38 @@
 .vcp
 .claude
+
+# Go
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Node.js
+node_modules/
+dist/
+
+# Coverage
+coverage/
+
+# Database
+*.db
+data/openhive.db
+data/workspaces/
+data/archives/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.local
