@@ -11,6 +11,8 @@ build: generate build-agent-runner build-web build-go
 build-go: build-web
 	@echo "==> Building Go binary..."
 	@mkdir -p bin
+	@rm -rf cmd/openhive/web_dist
+	@cp -r web/dist cmd/openhive/web_dist
 	CGO_ENABLED=1 go build -o bin/openhive ./cmd/openhive
 
 build-agent-runner: generate

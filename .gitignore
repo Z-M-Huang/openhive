@@ -12,6 +12,7 @@ bin/
 # Node.js
 node_modules/
 dist/
+cmd/openhive/web_dist/
 
 # Coverage
 coverage/
