@@ -21,3 +21,11 @@ issues:
     - path: _test\.go
       linters:
         - errcheck
+    - path: internal/mocks/
+      linters:
+        - govet
+        - errcheck
+        - staticcheck
+        - unused
+        - gosimple
+        - ineffassign

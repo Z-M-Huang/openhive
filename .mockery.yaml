@@ -6,3 +6,20 @@ filename: "mock_{{.InterfaceName}}.go"
 packages:
   github.com/Z-M-Huang/openhive/internal/domain:
     interfaces:
+      ConfigLoader:
+      OrgChart:
+      GoOrchestrator:
+      WSHub:
+      WSConnection:
+      ContainerRuntime:
+      ContainerManager:
+      HeartbeatMonitor:
+      SDKToolHandler:
+      ChannelAdapter:
+      MessageRouter:
+      EventBus:
+      KeyManager:
+      TaskStore:
+      MessageStore:
+      LogStore:
+      SessionStore:
