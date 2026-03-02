@@ -84,6 +84,54 @@ func TestTokenManager_InMemoryOnly(t *testing.T) {
 	assert.Equal(t, 0, tm2.PendingCount())
 }
 
+func TestTokenManager_Validate_DoesNotConsume(t *testing.T) {
+	tm := NewTokenManager()
+	token, err := tm.GenerateToken("tid-team-001")
+	require.NoError(t, err)
+
+	// Validate does not consume — can be called multiple times
+	teamID, ok := tm.Validate(token)
+	assert.True(t, ok)
+	assert.Equal(t, "tid-team-001", teamID)
+
+	teamID, ok = tm.Validate(token)
+	assert.True(t, ok)
+	assert.Equal(t, "tid-team-001", teamID)
+
+	// Token still pending
+	assert.Equal(t, 1, tm.PendingCount())
+}
+
+func TestTokenManager_Validate_Invalid(t *testing.T) {
+	tm := NewTokenManager()
+	teamID, ok := tm.Validate("nonexistent")
+	assert.False(t, ok)
+	assert.Empty(t, teamID)
+}
+
+func TestTokenManager_Consume_AfterValidate(t *testing.T) {
+	tm := NewTokenManager()
+	token, err := tm.GenerateToken("tid-team-001")
+	require.NoError(t, err)
+
+	// Validate first
+	_, ok := tm.Validate(token)
+	assert.True(t, ok)
+
+	// Consume removes the token
+	ok = tm.Consume(token)
+	assert.True(t, ok)
+	assert.Equal(t, 0, tm.PendingCount())
+
+	// Second consume fails
+	ok = tm.Consume(token)
+	assert.False(t, ok)
+
+	// Validate also fails after consume
+	_, ok = tm.Validate(token)
+	assert.False(t, ok)
+}
+
 func TestTokenManager_ConcurrentAccess(t *testing.T) {
 	tm := NewTokenManager()
 	done := make(chan bool, 20)

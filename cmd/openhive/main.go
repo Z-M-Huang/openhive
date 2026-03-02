@@ -26,7 +26,9 @@ import (
 var webDistFS embed.FS
 
 func main() {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	// Use LevelVar so log level can be updated after config loads and at runtime.
+	logLevel := new(slog.LevelVar)
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel}))
 
 	spaFS, err := fs.Sub(webDistFS, "web_dist")
 	if err != nil {
@@ -64,17 +66,51 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Load master config
+	masterCfg, err := cfgLoader.LoadMaster()
+	if err != nil {
+		logger.Error("failed to load master config", "error", err)
+		os.Exit(1)
+	}
+
+	// Apply configured log level
+	applyLogLevel(logLevel, masterCfg.System.LogLevel)
+	logger.Info("log level set", "level", masterCfg.System.LogLevel)
+
+	// Load providers
+	providers, err := cfgLoader.LoadProviders()
+	if err != nil {
+		logger.Error("failed to load providers config", "error", err)
+		os.Exit(1)
+	}
+
+	// Resolve the main assistant's provider to build container_init agent config
+	assistantProvider, providerExists := providers[masterCfg.Assistant.Provider]
+	if !providerExists {
+		logger.Error("assistant references unknown provider", "provider", masterCfg.Assistant.Provider)
+		os.Exit(1)
+	}
+	mainAgentConfig := ws.AgentInitConfig{
+		AID:       masterCfg.Assistant.AID,
+		Name:      masterCfg.Assistant.Name,
+		RoleFile:  masterCfg.Assistant.RoleFile,
+		PromptFile: masterCfg.Assistant.PromptFile,
+		Provider:  resolveProviderConfig(assistantProvider),
+		ModelTier: masterCfg.Assistant.ModelTier,
+	}
+
 	// Event bus for system-wide pub/sub
 	eventBus := event.NewEventBus()
 
 	// Wire config watcher to publish events on config changes.
 	// OrgChart (and future consumers) subscribe to rebuild on config changes.
 	if watchErr := cfgLoader.WatchMaster(func(cfg *domain.MasterConfig) {
+		applyLogLevel(logLevel, cfg.System.LogLevel)
 		eventBus.Publish(domain.Event{
 			Type:    domain.EventTypeConfigChanged,
 			Payload: cfg,
 		})
-		logger.Info("master config changed, published event")
+		logger.Info("master config changed, published event", "log_level", cfg.System.LogLevel)
 	}); watchErr != nil {
 		logger.Warn("failed to watch master config", "error", watchErr)
 	}
@@ -95,13 +131,25 @@ func main() {
 	// Wire up WS message handler
 	wsHub.SetOnMessage(dispatcher.HandleWSMessage)
 
+	// When a container connects, send container_init with agent configs
+	wsHub.SetOnConnect(func(teamID string) {
+		if teamID == "main" {
+			if initErr := dispatcher.SendContainerInit(teamID, true, []ws.AgentInitConfig{mainAgentConfig}, nil, masterCfg.System.WorkspaceRoot); initErr != nil {
+				logger.Error("failed to send container_init", "team_id", teamID, "error", initErr)
+			} else {
+				logger.Info("sent container_init to main container")
+			}
+		}
+	})
+
 	// Message router
 	router := channel.NewRouter(channel.RouterConfig{
-		WSHub:        wsHub,
-		TaskStore:    taskStore,
-		SessionStore: sessionStore,
-		Logger:       logger,
-		MainTeamID:   "main",
+		WSHub:            wsHub,
+		TaskStore:        taskStore,
+		SessionStore:     sessionStore,
+		Logger:           logger,
+		MainTeamID:       "main",
+		MainAssistantAID: masterCfg.Assistant.AID,
 	})
 
 	// Wire task results from dispatcher to router for outbound delivery
@@ -111,10 +159,14 @@ func main() {
 		}
 	})
 
-	// CLI channel
-	cliCh := channel.NewCLIChannel(os.Stdin, os.Stdout)
-	if regErr := router.RegisterChannel(cliCh); regErr != nil {
-		logger.Error("failed to register CLI channel", "error", regErr)
+	// API channel (REST-based synchronous chat endpoint)
+	apiCh := channel.NewAPIChannel(logger)
+	if regErr := router.RegisterChannel(apiCh); regErr != nil {
+		logger.Error("failed to register API channel", "error", regErr)
+		os.Exit(1)
+	}
+	if connErr := apiCh.Connect(); connErr != nil {
+		logger.Error("failed to connect API channel", "error", connErr)
 		os.Exit(1)
 	}
 
@@ -130,6 +182,7 @@ func main() {
 		km,
 		spaFS,
 		wsHub.HandleUpgrade,
+		apiCh.HandleChat,
 		nil, // CORS origins - configured from config
 	)
 
@@ -170,11 +223,6 @@ func main() {
 		logger.Warn("failed to start child process (may not be compiled yet)", "error", childErr)
 	}
 
-	// Connect CLI channel
-	if connErr := cliCh.Connect(); connErr != nil {
-		logger.Error("failed to connect CLI channel", "error", connErr)
-	}
-
 	sig := <-sigCh
 	logger.Info("received signal, shutting down", "signal", sig.String())
 
@@ -185,7 +233,7 @@ func main() {
 		logger.Error("child process stop error", "error", stopErr)
 	}
 
-	_ = cliCh.Disconnect()
+	_ = apiCh.Disconnect()
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
@@ -195,4 +243,34 @@ func main() {
 	}
 
 	logger.Info("shutdown complete")
+}
+
+// applyLogLevel parses a log level string and sets it on the LevelVar.
+func applyLogLevel(lv *slog.LevelVar, level string) {
+	switch level {
+	case "debug":
+		lv.Set(slog.LevelDebug)
+	case "warn":
+		lv.Set(slog.LevelWarn)
+	case "error":
+		lv.Set(slog.LevelError)
+	default:
+		lv.Set(slog.LevelInfo)
+	}
+}
+
+// resolveProviderConfig converts a domain.Provider to ws.ProviderConfig.
+func resolveProviderConfig(p domain.Provider) ws.ProviderConfig {
+	cfg := ws.ProviderConfig{Type: p.Type}
+
+	pt, _ := domain.ParseProviderType(p.Type)
+	switch pt {
+	case domain.ProviderTypeOAuth:
+		cfg.OAuthToken = p.OAuthToken
+	case domain.ProviderTypeAnthropicDirect:
+		cfg.APIKey = p.APIKey
+		cfg.APIURL = p.BaseURL
+	}
+
+	return cfg
 }

@@ -56,6 +56,7 @@ export class Orchestrator {
   private teamId = '';
   private mainAssistant = false;
   private sdkQueryFactory: SDKQueryFactory | null = null;
+  private workspaceRoot = '/workspace';
 
   constructor(wsClient: WSClient) {
     this.wsClient = wsClient;
@@ -94,6 +95,11 @@ export class Orchestrator {
   private onContainerInit(msg: ContainerInitMsg): void {
     this.mainAssistant = msg.isMainAssistant;
 
+    // Apply workspace root from container_init if provided.
+    if (msg.workspaceRoot) {
+      this.workspaceRoot = msg.workspaceRoot;
+    }
+
     // Create agent state with MCP bridge and AgentExecutor for each agent.
     // Agents are NOT started yet (on-demand per AC20).
     for (const agentConfig of msg.agents) {
@@ -122,6 +128,7 @@ export class Orchestrator {
         mcpBridge,
         sendMessage: (wsMsg) => this.wsClient.send(wsMsg),
         queryFn,
+        workspaceRoot: this.workspaceRoot,
       });
 
       this.agents.set(agentConfig.aid, {
@@ -259,7 +266,7 @@ export class Orchestrator {
         status: state.executor.status,
         detail: state.executor.status === 'busy' ? 'processing task' : '',
         elapsedSeconds: elapsed,
-        memoryMB: memUsage.rss / (1024 * 1024),
+        memoryMb: memUsage.rss / (1024 * 1024),
       });
     }
 
@@ -290,6 +297,15 @@ export class Orchestrator {
    */
   setTeamId(teamId: string): void {
     this.teamId = teamId;
+  }
+
+  /**
+   * Set the workspace root directory for agent task execution.
+   * Defaults to '/workspace' (Docker containers). In dev/master mode,
+   * set to a local writable path (e.g., 'data/workspaces').
+   */
+  setWorkspaceRoot(root: string): void {
+    this.workspaceRoot = root;
   }
 
   /**

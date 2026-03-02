@@ -1,8 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdirSync } from 'node:fs';
 import { AgentExecutor } from './agent-executor.js';
 import { createMockQuery } from './mock-sdk.js';
 import { MCPBridge } from './mcp-bridge.js';
 import type { WSMessage, TaskDispatchMsg, TaskResultMsg, AgentInitConfig } from './types.js';
+
+vi.mock('node:fs', () => ({
+  mkdirSync: vi.fn(),
+}));
 
 function createTestConfig(overrides: Partial<AgentInitConfig> = {}): AgentInitConfig {
   return {
@@ -59,6 +64,38 @@ describe('AgentExecutor', () => {
   });
 
   describe('Environment Variables', () => {
+    it('includes process.env as base (preserves PATH, HOME, etc.)', () => {
+      const { executor } = createTestExecutor();
+      const env = executor.buildEnv();
+      expect(env.PATH).toBe(process.env.PATH);
+    });
+
+    it('strips inherited secrets before overlaying provider credentials', () => {
+      const secretKeys = AgentExecutor.getSecretEnvVars();
+      const saved = new Map<string, string | undefined>();
+      for (const key of secretKeys) {
+        saved.set(key, process.env[key]);
+        process.env[key] = `inherited-${key.toLowerCase()}`;
+      }
+
+      try {
+        // Use a direct provider agent — only ANTHROPIC_API_KEY should be set
+        const { executor } = createTestExecutor({
+          config: { provider: { type: 'anthropic_direct', apiKey: 'sk-test' } },
+        });
+        const env = executor.buildEnv();
+        // Agent's own key should be set
+        expect(env.ANTHROPIC_API_KEY).toBe('sk-test');
+        // Other inherited secrets must be stripped
+        expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+      } finally {
+        for (const [key, val] of saved) {
+          if (val !== undefined) process.env[key] = val;
+          else delete process.env[key];
+        }
+      }
+    });
+
     it('sets CLAUDE_CODE_OAUTH_TOKEN for oauth provider', () => {
       const { executor } = createTestExecutor({
         config: { provider: { type: 'oauth', oauthToken: 'tok-abc' } },
@@ -115,7 +152,23 @@ describe('AgentExecutor', () => {
   });
 
   describe('Task Execution', () => {
-    it('calls SDK query with correct cwd and prompt', async () => {
+    it('creates workspace directory before calling SDK', async () => {
+      const { executor } = createTestExecutor();
+      executor.start();
+
+      await executor.executeTask({
+        taskId: 'task-mkdir',
+        agentAid: 'aid-test-001',
+        prompt: 'Do work',
+      });
+
+      expect(mkdirSync).toHaveBeenCalledWith(
+        '/workspace',
+        { recursive: true },
+      );
+    });
+
+    it('calls SDK query with fixed workspace cwd and prompt', async () => {
       const { executor, mockQuery } = createTestExecutor();
       executor.start();
 
@@ -128,7 +181,7 @@ describe('AgentExecutor', () => {
       await executor.executeTask(task);
 
       expect(mockQuery.calls).toHaveLength(1);
-      expect(mockQuery.calls[0].options.cwd).toBe('/workspace/work/tasks/task-001');
+      expect(mockQuery.calls[0].options.cwd).toBe('/workspace');
       expect(mockQuery.calls[0].prompt).toBe('Write tests');
     });
 
@@ -287,17 +340,25 @@ describe('AgentExecutor', () => {
       expect(executor.status).toBe('idle');
     });
 
-    it('sets working directory to tasks/<task-id>/', async () => {
+    it('uses same fixed workspace cwd across all tasks', async () => {
       const { executor, mockQuery } = createTestExecutor();
       executor.start();
 
       await executor.executeTask({
-        taskId: 'my-task-123',
+        taskId: 'task-first',
         agentAid: 'aid-test-001',
-        prompt: 'Work in dir',
+        prompt: 'First',
       });
 
-      expect(mockQuery.calls[0].options.cwd).toBe('/workspace/work/tasks/my-task-123');
+      await executor.executeTask({
+        taskId: 'task-second',
+        agentAid: 'aid-test-001',
+        prompt: 'Second',
+      });
+
+      // Both tasks use the same workspace root — session state is cwd-relative
+      expect(mockQuery.calls[0].options.cwd).toBe('/workspace');
+      expect(mockQuery.calls[1].options.cwd).toBe('/workspace');
     });
   });
 

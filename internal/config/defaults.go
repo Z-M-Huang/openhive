@@ -8,6 +8,7 @@ func DefaultMasterConfig() *domain.MasterConfig {
 		System: domain.SystemConfig{
 			ListenAddress: "127.0.0.1:8080",
 			DataDir:       "data",
+			WorkspaceRoot: "/openhive/workspace",
 			LogLevel:      "info",
 			LogArchive: domain.ArchiveConfig{
 				Enabled:    true,

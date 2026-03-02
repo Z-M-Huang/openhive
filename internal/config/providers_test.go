@@ -2,7 +2,6 @@ package config
 
 import (
 	"errors"
-	"os"
 	"path/filepath"
 	"testing"
 
@@ -13,7 +12,7 @@ import (
 
 func TestProviderLoadFromFile_Valid(t *testing.T) {
 	dir := t.TempDir()
-	content := "providers:\n  default:\n    type: oauth\n    oauth_token_env: CLAUDE_CODE_OAUTH_TOKEN\n    models:\n      haiku: claude-3-haiku-20240307\n      sonnet: claude-3-5-sonnet-20241022\n      opus: claude-3-opus-20240229\n"
+	content := "providers:\n  default:\n    type: oauth\n    oauth_token: test-token-value\n    models:\n      haiku: claude-3-haiku-20240307\n      sonnet: claude-3-5-sonnet-20241022\n      opus: claude-3-opus-20240229\n"
 	writeTestYAML(t, dir, "providers.yaml", content)
 
 	providers, err := LoadProvidersFromFile(filepath.Join(dir, "providers.yaml"))
@@ -25,7 +24,7 @@ func TestProviderLoadFromFile_Valid(t *testing.T) {
 
 func TestProviderLoadFromFile_MultiplePresets(t *testing.T) {
 	dir := t.TempDir()
-	content := "providers:\n  default:\n    type: oauth\n    oauth_token_env: CLAUDE_CODE_OAUTH_TOKEN\n  direct:\n    type: anthropic_direct\n    api_key_env: MY_KEY_ENV\n    base_url: https://api.anthropic.com\n    models:\n      sonnet: claude-3-5-sonnet-20241022\n"
+	content := "providers:\n  default:\n    type: oauth\n    oauth_token: test-token\n  direct:\n    type: anthropic_direct\n    api_key: sk-test-key\n    base_url: https://api.anthropic.com\n    models:\n      sonnet: claude-3-5-sonnet-20241022\n"
 	writeTestYAML(t, dir, "providers.yaml", content)
 
 	providers, err := LoadProvidersFromFile(filepath.Join(dir, "providers.yaml"))
@@ -72,7 +71,7 @@ func TestProviderValidation_InvalidType(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestProviderValidation_OAuthMissingTokenEnv(t *testing.T) {
+func TestProviderValidation_OAuthMissingToken(t *testing.T) {
 	providers := map[string]domain.Provider{
 		"bad": {Type: "oauth"},
 	}
@@ -94,10 +93,10 @@ func TestProviderSaveAndReload(t *testing.T) {
 
 	providers := map[string]domain.Provider{
 		"test": {
-			Name:          "test",
-			Type:          "oauth",
-			OAuthTokenEnv: "TEST_TOKEN",
-			Models:        map[string]string{"haiku": "test-model"},
+			Name:       "test",
+			Type:       "oauth",
+			OAuthToken: "test-token-value",
+			Models:     map[string]string{"haiku": "test-model"},
 		},
 	}
 
@@ -111,11 +110,9 @@ func TestProviderSaveAndReload(t *testing.T) {
 }
 
 func TestProviderResolveEnv_OAuth(t *testing.T) {
-	t.Setenv("MY_OAUTH_TOKEN", "test-token-value")
-
 	provider := domain.Provider{
-		Type:          "oauth",
-		OAuthTokenEnv: "MY_OAUTH_TOKEN",
+		Type:       "oauth",
+		OAuthToken: "test-token-value",
 		Models: map[string]string{
 			"haiku":  "claude-3-haiku-20240307",
 			"sonnet": "claude-3-5-sonnet-20241022",
@@ -131,13 +128,11 @@ func TestProviderResolveEnv_OAuth(t *testing.T) {
 }
 
 func TestProviderResolveEnv_Direct(t *testing.T) {
-	testVal := "test-credential-placeholder"
-	t.Setenv("MY_DIRECT_CREDENTIAL", testVal)
-
+	testVal := "direct-test-value"
 	provider := domain.Provider{
-		Type:      "anthropic_direct",
-		APIKeyEnv: "MY_DIRECT_CREDENTIAL",
-		BaseURL:   "https://api.anthropic.com",
+		Type:    "anthropic_direct",
+		APIKey:  testVal,
+		BaseURL: "https://api.anthropic.com",
 		Models: map[string]string{
 			"sonnet": "claude-3-5-sonnet-20241022",
 		},
@@ -149,12 +144,9 @@ func TestProviderResolveEnv_Direct(t *testing.T) {
 	assert.Equal(t, "claude-3-5-sonnet-20241022", env["ANTHROPIC_DEFAULT_SONNET_MODEL"])
 }
 
-func TestProviderResolveEnv_OAuthMissingEnvVar(t *testing.T) {
-	os.Unsetenv("NONEXISTENT_TOKEN")
-
+func TestProviderResolveEnv_OAuthEmptyToken(t *testing.T) {
 	provider := domain.Provider{
-		Type:          "oauth",
-		OAuthTokenEnv: "NONEXISTENT_TOKEN",
+		Type: "oauth",
 	}
 
 	env := ResolveProviderEnv(provider, "sonnet")
@@ -164,8 +156,8 @@ func TestProviderResolveEnv_OAuthMissingEnvVar(t *testing.T) {
 
 func TestProviderResolveEnv_AllModelTiers(t *testing.T) {
 	provider := domain.Provider{
-		Type:          "oauth",
-		OAuthTokenEnv: "UNUSED_TOKEN",
+		Type:       "oauth",
+		OAuthToken: "test-token",
 		Models: map[string]string{
 			"haiku":  "haiku-model",
 			"sonnet": "sonnet-model",
@@ -181,14 +173,11 @@ func TestProviderResolveEnv_AllModelTiers(t *testing.T) {
 
 func TestProviderResolveEnv_DirectInlineCredential(t *testing.T) {
 	// Test that inline credentials in the Provider struct get resolved
+	testVal := "inline-test-val"
 	provider := domain.Provider{
 		Type:   "anthropic_direct",
-		APIKey: os.Getenv("TEST_INLINE_CRED"),
+		APIKey: testVal,
 	}
-	// When APIKey is empty string (env not set), nothing should be in the map
-	// because the empty string check in ResolveProviderEnv handles it
-	t.Setenv("TEST_INLINE_CRED", "test-val")
-	provider.APIKey = os.Getenv("TEST_INLINE_CRED")
 	env := ResolveProviderEnv(provider, "sonnet")
-	assert.Equal(t, "test-val", env["ANTHROPIC_API_KEY"])
+	assert.Equal(t, testVal, env["ANTHROPIC_API_KEY"])
 }

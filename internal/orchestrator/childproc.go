@@ -145,6 +145,8 @@ func (m *ChildProcessManager) RetryCount() int {
 
 func (m *ChildProcessManager) startProcess() error {
 	m.cmd = exec.Command(m.cfg.Command, m.cfg.Args...)
+	m.cmd.Stdout = os.Stdout
+	m.cmd.Stderr = os.Stderr
 	if m.cfg.Dir != "" {
 		m.cmd.Dir = m.cfg.Dir
 	}

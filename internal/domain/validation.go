@@ -88,12 +88,12 @@ func ValidateProvider(p *Provider) error {
 	}
 	switch pt {
 	case ProviderTypeOAuth:
-		if p.OAuthTokenEnv == "" {
-			return &ValidationError{Field: "oauth_token_env", Message: "required for oauth provider type"}
+		if p.OAuthToken == "" {
+			return &ValidationError{Field: "oauth_token", Message: "required for oauth provider type"}
 		}
 	case ProviderTypeAnthropicDirect:
-		if p.APIKey == "" && p.APIKeyEnv == "" {
-			return &ValidationError{Field: "api_key", Message: "api_key or api_key_env required for anthropic_direct provider type"}
+		if p.APIKey == "" {
+			return &ValidationError{Field: "api_key", Message: "required for anthropic_direct provider type"}
 		}
 	}
 	return nil

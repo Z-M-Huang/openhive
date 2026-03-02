@@ -17,33 +17,36 @@ import (
 // main assistant via WebSocket. Inbound messages create Tasks and dispatch them
 // via WSHub. Task results are routed back to the originating channel.
 type Router struct {
-	channels     map[string]domain.ChannelAdapter
-	wsHub        domain.WSHub
-	taskStore    domain.TaskStore
-	sessionStore domain.SessionStore
-	logger       *slog.Logger
-	mu           sync.RWMutex
-	mainTeamID   string
+	channels           map[string]domain.ChannelAdapter
+	wsHub              domain.WSHub
+	taskStore          domain.TaskStore
+	sessionStore       domain.SessionStore
+	logger             *slog.Logger
+	mu                 sync.RWMutex
+	mainTeamID         string
+	mainAssistantAID   string
 }
 
 // RouterConfig holds configuration for the message router.
 type RouterConfig struct {
-	WSHub        domain.WSHub
-	TaskStore    domain.TaskStore
-	SessionStore domain.SessionStore
-	Logger       *slog.Logger
-	MainTeamID   string
+	WSHub              domain.WSHub
+	TaskStore          domain.TaskStore
+	SessionStore       domain.SessionStore
+	Logger             *slog.Logger
+	MainTeamID         string
+	MainAssistantAID   string
 }
 
 // NewRouter creates a new message router.
 func NewRouter(cfg RouterConfig) *Router {
 	return &Router{
-		channels:     make(map[string]domain.ChannelAdapter),
-		wsHub:        cfg.WSHub,
-		taskStore:    cfg.TaskStore,
-		sessionStore: cfg.SessionStore,
-		logger:       cfg.Logger,
-		mainTeamID:   cfg.MainTeamID,
+		channels:           make(map[string]domain.ChannelAdapter),
+		wsHub:              cfg.WSHub,
+		taskStore:          cfg.TaskStore,
+		sessionStore:       cfg.SessionStore,
+		logger:             cfg.Logger,
+		mainTeamID:         cfg.MainTeamID,
+		mainAssistantAID:   cfg.MainAssistantAID,
 	}
 }
 
@@ -157,6 +160,7 @@ func (r *Router) RouteInbound(jid string, content string) error {
 
 // RouteOutbound sends a response to the correct channel based on JID prefix.
 func (r *Router) RouteOutbound(jid string, content string) error {
+	r.logger.Debug("routing outbound", "jid", jid, "content_len", len(content))
 	prefix := extractPrefix(jid)
 
 	r.mu.RLock()
@@ -193,6 +197,13 @@ func (r *Router) GetChannels() map[string]bool {
 // HandleTaskResult processes a task result received from a container.
 // Updates the task in the DB and routes the response to the originating channel.
 func (r *Router) HandleTaskResult(ctx context.Context, result *ws.TaskResultMsg) error {
+	r.logger.Debug("handling task result",
+		"task_id", result.TaskID,
+		"status", result.Status,
+		"has_result", result.Result != "",
+		"has_error", result.Error != "",
+	)
+
 	// Update task in DB
 	task, err := r.taskStore.Get(ctx, result.TaskID)
 	if err != nil {
@@ -225,10 +236,18 @@ func (r *Router) HandleTaskResult(ctx context.Context, result *ws.TaskResultMsg)
 	}
 
 	// Route response to the originating channel
-	if result.Result != "" {
-		jid := sessionJIDForTask(task)
-		if jid != "" {
-			if routeErr := r.RouteOutbound(jid, result.Result); routeErr != nil {
+	jid := sessionJIDForTask(task)
+	if jid != "" {
+		var content string
+		if result.Status == "completed" && result.Result != "" {
+			content = result.Result
+		} else if result.Status == "failed" {
+			// Log the internal error for debugging but never expose it to the user.
+			r.logger.Error("task failed", "task_id", result.TaskID, "internal_error", result.Error)
+			content = "Sorry, I encountered an issue processing your request. Please try again."
+		}
+		if content != "" {
+			if routeErr := r.RouteOutbound(jid, content); routeErr != nil {
 				r.logger.Error("failed to route response", "task_id", result.TaskID, "error", routeErr)
 				return routeErr
 			}
@@ -241,10 +260,11 @@ func (r *Router) HandleTaskResult(ctx context.Context, result *ws.TaskResultMsg)
 func (r *Router) getOrCreateSession(ctx context.Context, jid string) (*domain.ChatSession, error) {
 	session, err := r.sessionStore.Get(ctx, jid)
 	if err != nil {
-		// Create new session
+		// Create new session with main assistant as the default agent
 		session = &domain.ChatSession{
 			ChatJID:     jid,
 			ChannelType: extractPrefix(jid),
+			AgentAID:    r.mainAssistantAID,
 		}
 		if err := r.sessionStore.Upsert(ctx, session); err != nil {
 			return nil, fmt.Errorf("failed to create session: %w", err)

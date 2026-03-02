@@ -61,7 +61,7 @@ providers:
   default:
     name: default
     type: oauth
-    oauth_token_env: CLAUDE_CODE_OAUTH_TOKEN
+    oauth_token: test-oauth-token
 `
 	err = os.WriteFile(filepath.Join(tmpDir, "providers.yaml"), []byte(providersYAML), 0600)
 	require.NoError(t, err)
@@ -127,6 +127,7 @@ providers:
 		km,
 		nil,  // no SPA in test
 		nil,  // no WS handler in test
+		nil,  // no chat handler in test
 		nil,  // no CORS origins
 	)
 

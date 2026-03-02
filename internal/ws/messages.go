@@ -46,6 +46,7 @@ type ContainerInitMsg struct {
 	Agents          []AgentInitConfig `json:"agents"`
 	Secrets         map[string]string `json:"secrets,omitempty"`
 	MCPServers      []MCPServerConfig `json:"mcp_servers,omitempty"`
+	WorkspaceRoot   string            `json:"workspace_root,omitempty"`
 }
 
 // AgentInitConfig holds flattened agent config sent to containers.

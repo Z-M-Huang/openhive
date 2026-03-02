@@ -34,9 +34,10 @@ type MasterConfig struct {
 
 // SystemConfig holds system-wide settings.
 type SystemConfig struct {
-	ListenAddress string       `json:"listen_address" yaml:"listen_address"`
-	DataDir       string       `json:"data_dir" yaml:"data_dir"`
-	LogLevel      string       `json:"log_level" yaml:"log_level"`
+	ListenAddress string        `json:"listen_address" yaml:"listen_address"`
+	DataDir       string        `json:"data_dir" yaml:"data_dir"`
+	WorkspaceRoot string        `json:"workspace_root" yaml:"workspace_root"`
+	LogLevel      string        `json:"log_level" yaml:"log_level"`
 	LogArchive    ArchiveConfig `json:"log_archive" yaml:"log_archive"`
 }
 

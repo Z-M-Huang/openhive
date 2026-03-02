@@ -45,7 +45,7 @@ func SaveProvidersToFile(path string, providers map[string]domain.Provider) erro
 	}
 
 	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+	if err := os.WriteFile(tmpPath, data, 0600); err != nil {
 		return fmt.Errorf("failed to write temp providers file: %w", err)
 	}
 
@@ -81,17 +81,11 @@ func ResolveProviderEnv(provider domain.Provider, tier string) map[string]string
 	pt, _ := domain.ParseProviderType(provider.Type)
 	switch pt {
 	case domain.ProviderTypeOAuth:
-		if provider.OAuthTokenEnv != "" {
-			if val := os.Getenv(provider.OAuthTokenEnv); val != "" {
-				env["CLAUDE_CODE_OAUTH_TOKEN"] = val
-			}
+		if provider.OAuthToken != "" {
+			env["CLAUDE_CODE_OAUTH_TOKEN"] = provider.OAuthToken
 		}
 	case domain.ProviderTypeAnthropicDirect:
-		if provider.APIKeyEnv != "" {
-			if val := os.Getenv(provider.APIKeyEnv); val != "" {
-				env["ANTHROPIC_API_KEY"] = val
-			}
-		} else if provider.APIKey != "" {
+		if provider.APIKey != "" {
 			env["ANTHROPIC_API_KEY"] = provider.APIKey
 		}
 		if provider.BaseURL != "" {

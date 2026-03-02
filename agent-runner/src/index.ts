@@ -7,8 +7,12 @@
  *   --mode=team    Runs in team container, connects via Docker network
  */
 
+import { query } from '@anthropic-ai/claude-agent-sdk';
 import { WSClient } from './ws-client.js';
 import { Orchestrator } from './orchestrator.js';
+import type { SDKQueryFactory } from './orchestrator.js';
+import type { AgentInitConfig } from './types.js';
+import type { SDKQueryFn } from './agent-executor.js';
 
 interface CLIArgs {
   mode: 'master' | 'team';
@@ -24,7 +28,7 @@ function parseArgs(): CLIArgs {
     return found ? found.split('=')[1] : defaultVal;
   };
 
-  const mode = get('--mode=', 'master') as 'master' | 'team';
+  const mode = get('--mode=', 'team') as 'master' | 'team';
   const teamId = get('--team=', 'main');
   const token = get('--token=', process.env.WS_TOKEN ?? '');
 
@@ -65,6 +69,19 @@ function main(): void {
   const orchestrator = new Orchestrator(wsClient);
   ref.orchestrator = orchestrator;
   orchestrator.setTeamId(cliArgs.teamId);
+
+  // Wire SDK query factory — creates real Claude Agent SDK query functions per agent
+  const sdkQueryFactory: SDKQueryFactory = (_config: AgentInitConfig): SDKQueryFn => {
+    return (params) => {
+      return query({
+        prompt: params.prompt as string,
+        options: {
+          ...params.options,
+        },
+      });
+    };
+  };
+  orchestrator.setSDKQueryFactory(sdkQueryFactory);
 
   wsClient.connect();
 

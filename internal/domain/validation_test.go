@@ -150,7 +150,7 @@ func TestValidateAgent(t *testing.T) {
 
 func TestValidateProvider(t *testing.T) {
 	t.Run("valid oauth", func(t *testing.T) {
-		p := &Provider{Name: "default", Type: "oauth", OAuthTokenEnv: "CLAUDE_TOKEN"}
+		p := &Provider{Name: "default", Type: "oauth", OAuthToken: "test-oauth-token"}
 		assert.NoError(t, ValidateProvider(p))
 	})
 
@@ -159,13 +159,8 @@ func TestValidateProvider(t *testing.T) {
 		assert.NoError(t, ValidateProvider(p))
 	})
 
-	t.Run("valid direct with api_key_env", func(t *testing.T) {
-		p := &Provider{Name: "direct", Type: "anthropic_direct", APIKeyEnv: "ANTHROPIC_KEY"}
-		assert.NoError(t, ValidateProvider(p))
-	})
-
 	t.Run("empty name", func(t *testing.T) {
-		p := &Provider{Type: "oauth", OAuthTokenEnv: "TOKEN"}
+		p := &Provider{Type: "oauth", OAuthToken: "some-token"}
 		assert.Error(t, ValidateProvider(p))
 	})
 
@@ -177,12 +172,12 @@ func TestValidateProvider(t *testing.T) {
 		assert.True(t, errors.As(err, &ve))
 	})
 
-	t.Run("oauth without token_env", func(t *testing.T) {
+	t.Run("oauth without oauth_token", func(t *testing.T) {
 		p := &Provider{Name: "default", Type: "oauth"}
 		assert.Error(t, ValidateProvider(p))
 	})
 
-	t.Run("direct without api_key or api_key_env", func(t *testing.T) {
+	t.Run("direct without api_key", func(t *testing.T) {
 		p := &Provider{Name: "direct", Type: "anthropic_direct"}
 		assert.Error(t, ValidateProvider(p))
 	})

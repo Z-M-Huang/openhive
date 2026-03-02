@@ -35,13 +35,12 @@ type Agent struct {
 
 // Provider represents an AI provider configuration.
 type Provider struct {
-	Name        string            `json:"name" yaml:"name"`
-	Type        string            `json:"type" yaml:"type"`
-	BaseURL     string            `json:"base_url,omitempty" yaml:"base_url,omitempty"`
-	APIKey      string            `json:"api_key,omitempty" yaml:"api_key,omitempty"`
-	APIKeyEnv   string            `json:"api_key_env,omitempty" yaml:"api_key_env,omitempty"`
-	OAuthTokenEnv string          `json:"oauth_token_env,omitempty" yaml:"oauth_token_env,omitempty"`
-	Models      map[string]string `json:"models,omitempty" yaml:"models,omitempty"`
+	Name       string            `json:"name" yaml:"name"`
+	Type       string            `json:"type" yaml:"type"`
+	BaseURL    string            `json:"base_url,omitempty" yaml:"base_url,omitempty"`
+	APIKey     string            `json:"api_key,omitempty" yaml:"api_key,omitempty"`
+	OAuthToken string            `json:"oauth_token,omitempty" yaml:"oauth_token,omitempty"`
+	Models     map[string]string `json:"models,omitempty" yaml:"models,omitempty"`
 }
 
 // Skill represents a skill assigned to an agent.

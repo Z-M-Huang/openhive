@@ -57,7 +57,7 @@ describe('WSClient', () => {
     client.close();
   });
 
-  it('receives messages from server', async () => {
+  it('receives messages from server (snake_case wire → camelCase internal)', async () => {
     const messages: WSMessage[] = [];
     const client = new WSClient({
       url: `ws://localhost:${port}`,
@@ -65,17 +65,22 @@ describe('WSClient', () => {
     });
 
     wss.on('connection', (ws) => {
-      ws.send(JSON.stringify({ type: 'ready', data: { teamId: 'tid-001', agentCount: 2 } }));
+      // Go sends snake_case on the wire
+      ws.send(JSON.stringify({ type: 'ready', data: { team_id: 'tid-001', agent_count: 2 } }));
     });
 
     client.connect();
 
     await waitFor(() => messages.length > 0);
     expect(messages[0].type).toBe('ready');
+    // TypeScript receives camelCase
+    const data = messages[0].data as { teamId: string; agentCount: number };
+    expect(data.teamId).toBe('tid-001');
+    expect(data.agentCount).toBe(2);
     client.close();
   });
 
-  it('sends messages to server', async () => {
+  it('sends messages to server (camelCase internal → snake_case wire)', async () => {
     const serverMessages: string[] = [];
     const onConnect = vi.fn();
 
@@ -94,13 +99,18 @@ describe('WSClient', () => {
     client.connect();
     await waitFor(() => onConnect.mock.calls.length > 0);
 
+    // TypeScript sends camelCase
     const msg: WSMessage = { type: 'heartbeat', data: { teamId: 'tid-001', agents: [] } };
     client.send(msg);
 
     await waitFor(() => serverMessages.length > 0);
 
-    const parsed = JSON.parse(serverMessages[0]) as WSMessage;
+    // Wire format should be snake_case
+    const parsed = JSON.parse(serverMessages[0]) as Record<string, unknown>;
     expect(parsed.type).toBe('heartbeat');
+    const data = parsed.data as Record<string, unknown>;
+    expect(data.team_id).toBe('tid-001');
+    expect(data.agents).toEqual([]);
     client.close();
   });
 

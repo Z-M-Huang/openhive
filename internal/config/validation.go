@@ -12,6 +12,9 @@ func ValidateMasterConfig(cfg *domain.MasterConfig) error {
 	if cfg.System.DataDir == "" {
 		return &domain.ValidationError{Field: "system.data_dir", Message: "cannot be empty"}
 	}
+	if cfg.System.WorkspaceRoot == "" {
+		return &domain.ValidationError{Field: "system.workspace_root", Message: "cannot be empty"}
+	}
 	if cfg.System.LogLevel != "" {
 		if _, err := domain.ParseLogLevel(cfg.System.LogLevel); err != nil {
 			return &domain.ValidationError{Field: "system.log_level", Message: "invalid log level: " + cfg.System.LogLevel}

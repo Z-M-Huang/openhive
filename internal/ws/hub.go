@@ -22,6 +22,7 @@ type Hub struct {
 	mu          sync.RWMutex
 	logger      *slog.Logger
 	onMessage   func(teamID string, msg []byte)
+	onConnect   func(teamID string)
 }
 
 // NewHub creates a new WebSocket hub.
@@ -38,8 +39,9 @@ func (h *Hub) GenerateToken(teamID string) (string, error) {
 	return h.tokens.GenerateToken(teamID)
 }
 
-// HandleUpgrade handles WebSocket upgrade requests. It expects query params
-// "team" and "token" for authentication.
+// HandleUpgrade handles WebSocket upgrade requests. It expects query param
+// "token" for authentication. The token is only consumed after a successful
+// WebSocket upgrade, allowing retries on transient failures.
 func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	token := r.URL.Query().Get("token")
 	if token == "" {
@@ -47,7 +49,8 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	teamID, ok := h.tokens.ValidateAndConsume(token)
+	// Validate without consuming — token stays valid for retries if upgrade fails.
+	teamID, ok := h.tokens.Validate(token)
 	if !ok {
 		http.Error(w, "invalid or consumed token", http.StatusUnauthorized)
 		return
@@ -59,14 +62,27 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Upgrade succeeded — consume the token so it can't be reused.
+	h.tokens.Consume(token)
+
 	conn := NewConnection(ws, teamID, h.logger, h.handleMessage, h.handleClose)
 	_ = h.RegisterConnection(teamID, conn)
 	conn.Start()
 
 	h.logger.Info("container connected", "team_id", teamID)
+
+	// Notify connect handler (e.g., to send container_init)
+	h.mu.RLock()
+	connectHandler := h.onConnect
+	h.mu.RUnlock()
+	if connectHandler != nil {
+		connectHandler(teamID)
+	}
 }
 
 func (h *Hub) handleMessage(teamID string, msg []byte) {
+	h.logger.Debug("ws message received", "team_id", teamID, "size", len(msg))
+
 	h.mu.RLock()
 	handler := h.onMessage
 	h.mu.RUnlock()
@@ -112,6 +128,7 @@ func (h *Hub) SendToTeam(teamID string, msg []byte) error {
 		return &connectionNotFoundError{teamID: teamID}
 	}
 
+	h.logger.Debug("ws message sent", "team_id", teamID, "size", len(msg))
 	return conn.Send(msg)
 }
 
@@ -149,6 +166,14 @@ func (h *Hub) SetOnMessage(handler func(teamID string, msg []byte)) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.onMessage = handler
+}
+
+// SetOnConnect sets the handler called when a container successfully connects.
+// Used to trigger container_init after WebSocket handshake.
+func (h *Hub) SetOnConnect(handler func(teamID string)) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.onConnect = handler
 }
 
 type connectionNotFoundError struct {

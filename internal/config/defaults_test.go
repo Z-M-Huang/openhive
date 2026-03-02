@@ -11,6 +11,7 @@ func TestDefaultMasterConfig(t *testing.T) {
 
 	assert.Equal(t, "127.0.0.1:8080", cfg.System.ListenAddress)
 	assert.Equal(t, "data", cfg.System.DataDir)
+	assert.Equal(t, "/openhive/workspace", cfg.System.WorkspaceRoot)
 	assert.Equal(t, "info", cfg.System.LogLevel)
 	assert.True(t, cfg.System.LogArchive.Enabled)
 	assert.Equal(t, 100000, cfg.System.LogArchive.MaxEntries)

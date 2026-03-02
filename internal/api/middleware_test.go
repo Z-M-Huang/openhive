@@ -229,6 +229,17 @@ func TestResponseRecorder_DoubleWriteHeader(t *testing.T) {
 	assert.Equal(t, http.StatusCreated, rec.statusCode)
 }
 
+func TestResponseRecorder_Hijack_Supported(t *testing.T) {
+	// httptest.NewRecorder doesn't implement http.Hijacker, so this test
+	// verifies the error path. The success path is exercised in the WS hub
+	// integration test where the real http.Server provides a hijackable conn.
+	w := httptest.NewRecorder()
+	rec := newResponseRecorder(w)
+	_, _, err := rec.Hijack()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "http.Hijacker")
+}
+
 func TestCORS_EmptyOrigins(t *testing.T) {
 	handler := CORS(nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

@@ -9,6 +9,7 @@
  * - Bash sanitization hook to strip secrets from subprocess environments
  */
 
+import { mkdirSync } from 'node:fs';
 import type {
   AgentInitConfig,
   AgentStatusType,
@@ -114,17 +115,21 @@ export class AgentExecutor {
     this._status = 'busy';
     const startTime = Date.now();
 
-    const taskWorkDir = `${this.workspaceRoot}/work/tasks/${task.taskId}`;
+    // Always use a fixed workspace so Claude Code sessions persist across tasks.
+    // Claude Code stores session state relative to cwd — changing cwd between
+    // calls breaks session resume.
+    const workDir = this.workspaceRoot;
     const env = this.buildEnv();
 
     try {
+      mkdirSync(workDir, { recursive: true });
       let resultText: string | undefined;
       let newSessionId: string | undefined;
 
       for await (const message of this.queryFn({
         prompt: task.prompt,
         options: {
-          cwd: taskWorkDir,
+          cwd: workDir,
           resume: task.sessionId ?? this.sessionId,
           env,
           permissionMode: 'bypassPermissions',
@@ -144,7 +149,8 @@ export class AgentExecutor {
         this.sessionId = newSessionId;
       }
 
-      const duration = (Date.now() - startTime) / 1000;
+      // Go's time.Duration is int64 nanoseconds; Date.now() gives ms.
+      const duration = (Date.now() - startTime) * 1_000_000;
 
       const taskResult: TaskResultMsg = {
         taskId: task.taskId,
@@ -162,7 +168,7 @@ export class AgentExecutor {
       this._status = 'idle';
       this.resetIdleTimer();
     } catch (err) {
-      const duration = (Date.now() - startTime) / 1000;
+      const duration = (Date.now() - startTime) * 1_000_000;
       const errorMessage = err instanceof Error ? err.message : String(err);
 
       const taskResult: TaskResultMsg = {
@@ -185,9 +191,20 @@ export class AgentExecutor {
 
   /**
    * Build environment variables for the SDK based on provider config.
+   *
+   * Starts from the current process env (so PATH, HOME, etc. are preserved),
+   * strips known secret vars to prevent leaking into Bash subprocesses,
+   * then overlays the provider-specific credentials for this agent.
    */
   buildEnv(): Record<string, string | undefined> {
-    const env: Record<string, string | undefined> = {};
+    const env: Record<string, string | undefined> = { ...process.env };
+
+    // Strip secrets inherited from the parent process before overlaying
+    // agent-specific credentials. This prevents credential leakage when
+    // the SDK spawns Bash subprocesses.
+    for (const key of SECRET_ENV_VARS) {
+      delete env[key];
+    }
 
     // Provider-specific env vars
     if (this.config.provider.type === 'oauth') {
@@ -207,8 +224,6 @@ export class AgentExecutor {
     // The SDK uses ANTHROPIC_DEFAULT_*_MODEL env vars to map tiers to models
     if (this.config.modelTier) {
       const tierUpper = this.config.modelTier.toUpperCase();
-      // Set a placeholder so the SDK knows which tier this agent uses
-      // In production, the Go backend resolves the actual model name per provider preset
       env[`ANTHROPIC_DEFAULT_${tierUpper}_MODEL`] = this.config.modelTier;
     }
 

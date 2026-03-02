@@ -1,8 +1,11 @@
 package api
 
 import (
+	"bufio"
 	"context"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"runtime/debug"
 	"strings"
@@ -67,6 +70,15 @@ func (rr *responseRecorder) Write(b []byte) (int, error) {
 		rr.written = true
 	}
 	return rr.ResponseWriter.Write(b)
+}
+
+// Hijack implements http.Hijacker, required for WebSocket upgrade support.
+// Delegates to the underlying ResponseWriter if it supports hijacking.
+func (rr *responseRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if hj, ok := rr.ResponseWriter.(http.Hijacker); ok {
+		return hj.Hijack()
+	}
+	return nil, nil, fmt.Errorf("underlying ResponseWriter does not implement http.Hijacker")
 }
 
 // Timing logs the request duration and adds it to the X-Response-Time header.

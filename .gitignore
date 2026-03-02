@@ -19,8 +19,7 @@ cmd/openhive/web_dist/
 coverage/
 
 # Database
-*.db
-data/openhive.db
+data/openhive.db*
 data/workspaces/
 data/archives/
 
@@ -38,3 +37,7 @@ Thumbs.db
 # Env
 .env
 .env.local
+
+# Credentials
+data/providers.yaml
+data/providers.yaml

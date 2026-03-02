@@ -290,7 +290,7 @@ func TestSendContainerInit(t *testing.T) {
 
 	hub.EXPECT().SendToTeam("main", mock.Anything).Return(nil)
 
-	err := d.SendContainerInit("main", true, agents, map[string]string{"SECRET": "value"})
+	err := d.SendContainerInit("main", true, agents, map[string]string{"SECRET": "value"}, "/openhive/workspace")
 	assert.NoError(t, err)
 }
 

@@ -79,8 +79,8 @@ Full dependency list: [Technology Stack](https://github.com/Z-M-Huang/openhive/w
 # 1. Clone and configure
 git clone https://github.com/Z-M-Huang/openhive.git
 cd openhive
-cp .env.example .env
-# Edit .env with your API keys and channel tokens
+cp data/providers.yaml.example data/providers.yaml
+# Edit data/providers.yaml with your provider credentials
 
 # 2. Build and run
 docker compose up -d
@@ -112,12 +112,12 @@ Full schemas and examples: [Configuration Schemas](https://github.com/Z-M-Huang/
 ### Commands
 
 ```bash
-make build          # Build everything
-make test           # Run all tests
-make lint           # Lint all code
-make dev            # Development mode
-make docker-build   # Build Docker images
-make generate       # Generate mocks
+bun run build          # Build everything
+bun run test           # Run all tests
+bun run lint           # Lint all code
+bun run dev            # Development mode
+bun run docker:build   # Build Docker images
+bun run generate       # Generate mocks
 ```
 
 ## Documentation

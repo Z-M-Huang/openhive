@@ -42,7 +42,7 @@ channels:
 providers:
   default:
     type: oauth
-    oauth_token_env: CLAUDE_OAUTH_TOKEN
+    oauth_token: test-oauth-token
     models:
       haiku: claude-3-haiku-20240307
       sonnet: claude-3-5-sonnet-20241022
@@ -117,9 +117,9 @@ func TestLoader_SaveProviders(t *testing.T) {
 
 	providers := map[string]domain.Provider{
 		"test": {
-			Name:          "test",
-			Type:          "oauth",
-			OAuthTokenEnv: "TEST_TOKEN",
+			Name:       "test",
+			Type:       "oauth",
+			OAuthToken: "test-token-value",
 		},
 	}
 

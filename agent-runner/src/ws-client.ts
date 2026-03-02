@@ -5,7 +5,7 @@
 
 import WebSocket from 'ws';
 import type { WSMessage } from './types.js';
-import { parseMessage } from './types.js';
+import { parseMessage, toWireFormat } from './types.js';
 
 export interface WSClientOptions {
   url: string;
@@ -70,7 +70,7 @@ export class WSClient {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new Error('WebSocket is not connected');
     }
-    this.ws.send(JSON.stringify(msg));
+    this.ws.send(JSON.stringify(toWireFormat(msg)));
   }
 
   close(): void {

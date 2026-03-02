@@ -56,6 +56,28 @@ func (tm *TokenManager) ValidateAndConsume(token string) (string, bool) {
 	return teamID, true
 }
 
+// Validate checks if a token is valid without consuming it.
+// Returns the team ID and true if valid.
+func (tm *TokenManager) Validate(token string) (string, bool) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
+	teamID, ok := tm.tokens[token]
+	return teamID, ok
+}
+
+// Consume removes a previously validated token. Returns false if already consumed.
+func (tm *TokenManager) Consume(token string) bool {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
+	if _, ok := tm.tokens[token]; !ok {
+		return false
+	}
+	delete(tm.tokens, token)
+	return true
+}
+
 // PendingCount returns the number of unused tokens. Useful for testing.
 func (tm *TokenManager) PendingCount() int {
 	tm.mu.Lock()

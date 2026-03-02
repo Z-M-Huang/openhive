@@ -30,6 +30,7 @@ func NewServer(
 	km domain.KeyManager,
 	spaFS fs.FS,
 	wsHandler WSUpgradeHandler,
+	chatHandler http.HandlerFunc,
 	allowedOrigins []string,
 ) *Server {
 	startTime := time.Now()
@@ -53,6 +54,9 @@ func NewServer(
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/health", HealthHandler(startTime))
 		r.Post("/auth/unlock", UnlockHandler(km))
+		if chatHandler != nil {
+			r.Post("/chat", chatHandler)
+		}
 	})
 
 	// WebSocket upgrade path (handler may be nil if ws package not initialized yet)

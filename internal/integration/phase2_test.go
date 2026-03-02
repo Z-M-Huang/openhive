@@ -69,6 +69,7 @@ func TestPhase2Gate(t *testing.T) {
 		nil,
 		wsHub.HandleUpgrade,
 		nil,
+		nil,
 	)
 
 	// Verify health endpoint
@@ -85,11 +86,12 @@ func TestPhase2Gate(t *testing.T) {
 
 	// --- Message Router ---
 	router := channel.NewRouter(channel.RouterConfig{
-		WSHub:        wsHub,
-		TaskStore:    taskStore,
-		SessionStore: sessionStore,
-		Logger:       logger,
-		MainTeamID:   "main",
+		WSHub:            wsHub,
+		TaskStore:        taskStore,
+		SessionStore:     sessionStore,
+		Logger:           logger,
+		MainTeamID:       "main",
+		MainAssistantAID: "aid-main-001",
 	})
 
 	// --- Admin Tool Handler ---
@@ -114,7 +116,7 @@ channels:
 	require.NoError(t, err)
 	err = os.WriteFile(tmpDir+"/openhive.yaml", []byte(masterYAML), 0600)
 	require.NoError(t, err)
-	err = os.WriteFile(tmpDir+"/providers.yaml", []byte("providers:\n  default:\n    name: default\n    type: oauth\n    oauth_token_env: CLAUDE_CODE_OAUTH_TOKEN\n"), 0600)
+	err = os.WriteFile(tmpDir+"/providers.yaml", []byte("providers:\n  default:\n    name: default\n    type: oauth\n    oauth_token: test-oauth-token\n"), 0600)
 	require.NoError(t, err)
 
 	// Import config package

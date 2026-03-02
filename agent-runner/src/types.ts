@@ -116,6 +116,7 @@ export interface ContainerInitMsg {
   agents: AgentInitConfig[];
   secrets?: Record<string, string>;
   mcpServers?: MCPServerConfig[];
+  workspaceRoot?: string;
 }
 
 /** Task dispatch message */
@@ -155,7 +156,7 @@ export interface AgentStatus {
   status: AgentStatusType;
   detail?: string;
   elapsedSeconds: number;
-  memoryMB: number;
+  memoryMb: number;
 }
 
 /** Heartbeat message */
@@ -198,15 +199,69 @@ export interface StatusUpdateMsg {
   detail?: string;
 }
 
+// --- Wire Format Conversion ---
+
+/**
+ * Convert a camelCase key to snake_case.
+ * Example: "teamId" → "team_id", "isMainAssistant" → "is_main_assistant"
+ */
+function camelToSnakeKey(key: string): string {
+  return key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
+}
+
+/**
+ * Convert a snake_case key to camelCase.
+ * Example: "team_id" → "teamId", "is_main_assistant" → "isMainAssistant"
+ */
+function snakeToCamelKey(key: string): string {
+  return key.replace(/_([a-z])/g, (_, letter: string) => letter.toUpperCase());
+}
+
+/**
+ * Recursively convert all object keys using the given converter function.
+ * Arrays are traversed, primitives are returned as-is.
+ */
+function deepConvertKeys(obj: unknown, converter: (key: string) => string): unknown {
+  if (Array.isArray(obj)) {
+    return obj.map((item) => deepConvertKeys(item, converter));
+  }
+  if (obj !== null && typeof obj === 'object') {
+    const result: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
+      result[converter(key)] = deepConvertKeys(value, converter);
+    }
+    return result;
+  }
+  return obj;
+}
+
+/**
+ * Convert a camelCase message to snake_case for the wire protocol.
+ * Used by ws-client before JSON.stringify.
+ */
+export function toWireFormat(msg: WSMessage): unknown {
+  return deepConvertKeys(msg, camelToSnakeKey);
+}
+
+/**
+ * Convert a snake_case wire message to camelCase for TypeScript consumption.
+ * Used by ws-client after JSON.parse.
+ */
+export function fromWireFormat(raw: unknown): WSMessage {
+  return deepConvertKeys(raw, snakeToCamelKey) as WSMessage;
+}
+
 // --- Parse Function ---
 
 /**
  * Parses a raw WebSocket message into a typed message.
+ * Converts snake_case wire keys to camelCase TypeScript keys.
  * Returns the message type and data, or throws on invalid input.
  */
 export function parseMessage(raw: string | Buffer): WSMessage {
   const str = typeof raw === 'string' ? raw : raw.toString('utf-8');
-  const envelope = JSON.parse(str) as WSMessage;
+  const wireEnvelope = JSON.parse(str);
+  const envelope = fromWireFormat(wireEnvelope);
 
   if (!envelope.type) {
     throw new Error('message type is required');

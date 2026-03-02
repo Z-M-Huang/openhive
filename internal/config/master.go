@@ -59,13 +59,14 @@ func SaveMasterToFile(path string, cfg *domain.MasterConfig) error {
 // e.g., OPENHIVE_SYSTEM_LISTEN_ADDRESS -> System.ListenAddress
 func applyEnvOverrides(cfg *domain.MasterConfig) {
 	envMap := map[string]*string{
-		"OPENHIVE_SYSTEM_LISTEN_ADDRESS": &cfg.System.ListenAddress,
-		"OPENHIVE_SYSTEM_DATA_DIR":       &cfg.System.DataDir,
-		"OPENHIVE_SYSTEM_LOG_LEVEL":      &cfg.System.LogLevel,
-		"OPENHIVE_ASSISTANT_NAME":        &cfg.Assistant.Name,
-		"OPENHIVE_ASSISTANT_AID":         &cfg.Assistant.AID,
-		"OPENHIVE_ASSISTANT_PROVIDER":    &cfg.Assistant.Provider,
-		"OPENHIVE_ASSISTANT_MODEL_TIER":  &cfg.Assistant.ModelTier,
+		"OPENHIVE_SYSTEM_LISTEN_ADDRESS":  &cfg.System.ListenAddress,
+		"OPENHIVE_SYSTEM_DATA_DIR":        &cfg.System.DataDir,
+		"OPENHIVE_SYSTEM_WORKSPACE_ROOT":  &cfg.System.WorkspaceRoot,
+		"OPENHIVE_SYSTEM_LOG_LEVEL":       &cfg.System.LogLevel,
+		"OPENHIVE_ASSISTANT_NAME":         &cfg.Assistant.Name,
+		"OPENHIVE_ASSISTANT_AID":          &cfg.Assistant.AID,
+		"OPENHIVE_ASSISTANT_PROVIDER":     &cfg.Assistant.Provider,
+		"OPENHIVE_ASSISTANT_MODEL_TIER":   &cfg.Assistant.ModelTier,
 	}
 
 	for envKey, fieldPtr := range envMap {

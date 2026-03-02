@@ -25,11 +25,12 @@ func newTestRouter(t *testing.T) (*Router, *mockWSHub.MockWSHub, *mockTaskStore.
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 
 	r := NewRouter(RouterConfig{
-		WSHub:        hub,
-		TaskStore:    ts,
-		SessionStore: ss,
-		Logger:       logger,
-		MainTeamID:   "main",
+		WSHub:            hub,
+		TaskStore:        ts,
+		SessionStore:     ss,
+		Logger:           logger,
+		MainTeamID:       "main",
+		MainAssistantAID: "aid-main-001",
 	})
 
 	return r, hub, ts, ss
@@ -111,10 +112,10 @@ func TestUnregisterChannel_NotFound(t *testing.T) {
 func TestRouteInbound_CreatesTaskAndDispatches(t *testing.T) {
 	r, hub, ts, ss := newTestRouter(t)
 
-	// Session does not exist yet, create new
+	// Session does not exist yet, create new with main assistant AID
 	ss.EXPECT().Get(mock.Anything, "cli:local").Return(nil, &domain.NotFoundError{Resource: "session", ID: "cli:local"})
 	ss.EXPECT().Upsert(mock.Anything, mock.MatchedBy(func(s *domain.ChatSession) bool {
-		return s.ChatJID == "cli:local" && s.ChannelType == "cli"
+		return s.ChatJID == "cli:local" && s.ChannelType == "cli" && s.AgentAID == "aid-main-001"
 	})).Return(nil)
 
 	// Second upsert for timestamp update
@@ -255,6 +256,11 @@ func TestHandleTaskResult_CompletedTask(t *testing.T) {
 func TestHandleTaskResult_FailedTask(t *testing.T) {
 	r, _, ts, ss := newTestRouter(t)
 
+	// Register a channel adapter so the error can be routed back
+	adapter := newMockAdapter(t, "cli")
+	adapter.EXPECT().IsConnected().Return(true).Maybe()
+	r.RegisterChannel(adapter)
+
 	ts.EXPECT().Get(mock.Anything, "task-002").Return(&domain.Task{
 		ID:       "task-002",
 		TeamSlug: "main",
@@ -271,6 +277,9 @@ func TestHandleTaskResult_FailedTask(t *testing.T) {
 	}, nil)
 	ss.EXPECT().Upsert(mock.Anything, mock.Anything).Return(nil)
 
+	// Internal errors are sanitized — user gets a generic message, not the raw error
+	adapter.EXPECT().SendMessage("cli:local", "Sorry, I encountered an issue processing your request. Please try again.").Return(nil)
+
 	ctx := context.Background()
 	result := &ws.TaskResultMsg{
 		TaskID:   "task-002",
@@ -286,10 +295,10 @@ func TestHandleTaskResult_FailedTask(t *testing.T) {
 func TestSessionCreation_NewChat(t *testing.T) {
 	r, hub, ts, ss := newTestRouter(t)
 
-	// First call: session not found → create new
+	// First call: session not found → create new with main assistant AID
 	ss.EXPECT().Get(mock.Anything, "discord:123").Return(nil, &domain.NotFoundError{Resource: "session", ID: "discord:123"})
 	ss.EXPECT().Upsert(mock.Anything, mock.MatchedBy(func(s *domain.ChatSession) bool {
-		return s.ChatJID == "discord:123" && s.ChannelType == "discord"
+		return s.ChatJID == "discord:123" && s.ChannelType == "discord" && s.AgentAID == "aid-main-001"
 	})).Return(nil)
 	ss.EXPECT().Upsert(mock.Anything, mock.Anything).Return(nil)
 

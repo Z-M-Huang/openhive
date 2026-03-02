@@ -78,7 +78,7 @@ openhive/
 │   │       ├── agents/               # .role.md + .prompt.md files
 │   │       └── skills/               # Skill YAML files
 │   └── workspaces/                   # Nested workspace tree
-├── Makefile
+├── package.json
 ├── go.mod
 └── README.md
 ```
@@ -172,12 +172,12 @@ Containers contain **only compiled code** — no TypeScript source, no Go source
 ## Build & Run
 
 ```bash
-make build          # Build Go binary + compile TypeScript + build React SPA
-make test           # Run all tests (Go + Node.js + React)
-make lint           # Run linters (golangci-lint + eslint)
-make dev            # Development mode
-make docker-build   # Build both Docker images
-make generate       # Generate mocks (mockery)
+bun run build          # Build Go binary + compile TypeScript + build React SPA
+bun run test           # Run all tests (Go + Node.js + React)
+bun run lint           # Run linters (golangci-lint + eslint)
+bun run dev            # Development mode
+bun run docker:build   # Build both Docker images
+bun run generate       # Generate mocks (mockery)
 ```
 
 ## Design Documentation

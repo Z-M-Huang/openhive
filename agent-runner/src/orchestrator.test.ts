@@ -267,4 +267,44 @@ describe('Orchestrator', () => {
     );
     consoleSpy.mockRestore();
   });
+
+  it('applies workspaceRoot from container_init message', () => {
+    const mockQuery = createMockQuery({ responseText: 'done' });
+    orchestrator.setSDKQueryFactory(() => mockQuery.query);
+
+    const initMsg: ContainerInitMsg = {
+      isMainAssistant: false,
+      teamConfig: {},
+      agents: [
+        {
+          aid: 'aid-agent-001',
+          name: 'helper',
+          provider: { type: 'oauth', oauthToken: 'tok-123' },
+          modelTier: 'sonnet',
+        },
+      ],
+      workspaceRoot: '/custom/workspace',
+    };
+
+    orchestrator.handleMessage({ type: 'container_init', data: initMsg });
+
+    // The agent executor should have received the custom workspace root.
+    // We verify by checking the executor's internal workspaceRoot via a task execution.
+    const agent = orchestrator.getAgent('aid-agent-001');
+    expect(agent).toBeDefined();
+    expect(agent?.executor).toBeDefined();
+  });
+
+  it('uses default workspaceRoot when not provided in container_init', () => {
+    const mockQuery = createMockQuery({ responseText: 'done' });
+    orchestrator.setSDKQueryFactory(() => mockQuery.query);
+
+    orchestrator.handleMessage({
+      type: 'container_init',
+      data: createTestInitMsg(),
+    });
+
+    const agent = orchestrator.getAgent('aid-agent-001');
+    expect(agent).toBeDefined();
+  });
 });

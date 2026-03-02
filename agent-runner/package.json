@@ -11,6 +11,7 @@
     "lint": "eslint src/ --ext .ts"
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.63",
     "@anthropic-ai/claude-code": "0.2.40",
     "@modelcontextprotocol/sdk": "1.8.0",
     "ws": "8.18.1"

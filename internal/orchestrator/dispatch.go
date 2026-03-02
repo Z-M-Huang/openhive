@@ -158,6 +158,8 @@ func (d *Dispatcher) HandleWSMessage(teamID string, data []byte) {
 		return
 	}
 
+	d.logger.Debug("ws message dispatching", "team_id", teamID, "type", msgType)
+
 	switch msgType {
 	case ws.MsgTypeTaskResult:
 		result, ok := payload.(*ws.TaskResultMsg)
@@ -253,12 +255,13 @@ func (d *Dispatcher) HandleWSMessage(teamID string, data []byte) {
 }
 
 // SendContainerInit sends a container_init message to a team container.
-func (d *Dispatcher) SendContainerInit(teamID string, isMain bool, agents []ws.AgentInitConfig, secrets map[string]string) error {
+func (d *Dispatcher) SendContainerInit(teamID string, isMain bool, agents []ws.AgentInitConfig, secrets map[string]string, workspaceRoot string) error {
 	initMsg := ws.ContainerInitMsg{
 		IsMainAssistant: isMain,
 		TeamConfig:      json.RawMessage(`{}`),
 		Agents:          agents,
 		Secrets:         secrets,
+		WorkspaceRoot:   workspaceRoot,
 	}
 
 	encoded, err := ws.EncodeMessage(ws.MsgTypeContainerInit, initMsg)

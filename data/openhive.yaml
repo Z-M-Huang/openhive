@@ -1,7 +1,8 @@
 system:
   listen_address: "127.0.0.1:8080"
   data_dir: "data"
-  log_level: "info"
+  workspace_root: "data/workspaces"
+  log_level: "debug"
   log_archive:
     enabled: true
     max_entries: 100000
@@ -12,7 +13,7 @@ assistant:
   name: "OpenHive Assistant"
   aid: "aid-main-001"
   provider: "default"
-  model_tier: "sonnet"
+  model_tier: "opus"
   max_turns: 50
   timeout_minutes: 10
 
