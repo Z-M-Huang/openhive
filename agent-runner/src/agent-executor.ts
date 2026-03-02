@@ -23,6 +23,17 @@ import type { WSMessage } from './types.js';
 /** Secrets to strip from Bash tool subprocess environments */
 const SECRET_ENV_VARS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'];
 
+/**
+ * Claude Code session vars to strip so spawned instances don't think
+ * they're nested inside the parent session and refuse to start.
+ */
+const CLAUDE_SESSION_VARS = [
+  'CLAUDECODE',
+  'CLAUDE_CODE_SSE_PORT',
+  'CLAUDE_CODE_ENTRYPOINT',
+  'CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS',
+];
+
 /** Default idle timeout in minutes */
 const DEFAULT_IDLE_TIMEOUT_MINUTES = 10;
 
@@ -203,6 +214,12 @@ export class AgentExecutor {
     // agent-specific credentials. This prevents credential leakage when
     // the SDK spawns Bash subprocesses.
     for (const key of SECRET_ENV_VARS) {
+      delete env[key];
+    }
+
+    // Strip Claude Code session vars so spawned instances start fresh
+    // instead of refusing with "nested session" error.
+    for (const key of CLAUDE_SESSION_VARS) {
       delete env[key];
     }
 

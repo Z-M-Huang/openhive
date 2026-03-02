@@ -4,6 +4,10 @@ import { createMockQuery } from './mock-sdk.js';
 import type { WSClient } from './ws-client.js';
 import type { WSMessage, ContainerInitMsg, TaskDispatchMsg, ShutdownMsg, ToolResultMsg, AgentInitConfig } from './types.js';
 
+vi.mock('node:fs', () => ({
+  mkdirSync: vi.fn(),
+}));
+
 function createMockWSClient(): WSClient {
   return {
     connect: vi.fn(),

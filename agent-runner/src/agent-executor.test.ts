@@ -149,6 +149,28 @@ describe('AgentExecutor', () => {
       const env = executor.buildEnv();
       expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe('haiku');
     });
+
+    it('strips Claude Code session vars to prevent nested-session errors', () => {
+      const sessionVars = ['CLAUDECODE', 'CLAUDE_CODE_SSE_PORT', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS'];
+      const saved = new Map<string, string | undefined>();
+      for (const key of sessionVars) {
+        saved.set(key, process.env[key]);
+        process.env[key] = 'test-value';
+      }
+
+      try {
+        const { executor } = createTestExecutor();
+        const env = executor.buildEnv();
+        for (const key of sessionVars) {
+          expect(env[key]).toBeUndefined();
+        }
+      } finally {
+        for (const [key, val] of saved) {
+          if (val !== undefined) process.env[key] = val;
+          else delete process.env[key];
+        }
+      }
+    });
   });
 
   describe('Task Execution', () => {
