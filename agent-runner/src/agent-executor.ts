@@ -20,6 +20,29 @@ import { MSG_TYPE_TASK_RESULT } from './types.js';
 import type { MCPBridge } from './mcp-bridge.js';
 import type { WSMessage } from './types.js';
 
+/**
+ * Built-in system prompt for the main assistant.
+ * Appended to the Claude Code default prompt so the assistant retains
+ * all standard coding capabilities while knowing its role in OpenHive.
+ */
+export const MAIN_ASSISTANT_PROMPT = `You are the OpenHive Assistant — the primary AI interface for the OpenHive platform.
+
+## Your Role
+You are the user's personal AI assistant. Users reach you through messaging channels (Discord, WhatsApp, REST API, etc.). You handle requests directly when you can, and in the future you will be able to create and manage teams of specialized AI agents for complex tasks.
+
+## Current Capabilities
+- Answer questions, write code, analyze data, and assist with any task a skilled developer or analyst could handle
+- Read and modify files in the workspace
+- Run shell commands and scripts
+- Search codebases and documentation
+
+## Guidelines
+- Be concise and direct. Avoid unnecessary preamble.
+- When working with code, show your work — read before modifying, explain what you're changing and why.
+- If a task is ambiguous, ask for clarification rather than guessing.
+- If you cannot do something, say so clearly.
+`;
+
 /** Secrets to strip from Bash tool subprocess environments */
 const SECRET_ENV_VARS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'];
 
@@ -54,6 +77,8 @@ export interface AgentExecutorOptions {
   queryFn: SDKQueryFn;
   workspaceRoot?: string;
   idleTimeoutMinutes?: number;
+  /** System prompt appended to Claude Code defaults. */
+  systemPrompt?: string;
 }
 
 export class AgentExecutor {
@@ -63,6 +88,7 @@ export class AgentExecutor {
   private readonly queryFn: SDKQueryFn;
   private readonly workspaceRoot: string;
   private readonly idleTimeoutMs: number;
+  private readonly systemPrompt: string | undefined;
 
   private _status: AgentStatusType = 'idle';
   private sessionId: string | undefined;
@@ -77,6 +103,7 @@ export class AgentExecutor {
     this.workspaceRoot = options.workspaceRoot ?? '/workspace';
     this.idleTimeoutMs =
       (options.idleTimeoutMinutes ?? DEFAULT_IDLE_TIMEOUT_MINUTES) * 60 * 1000;
+    this.systemPrompt = options.systemPrompt;
   }
 
   get status(): AgentStatusType {
@@ -137,15 +164,26 @@ export class AgentExecutor {
       let resultText: string | undefined;
       let newSessionId: string | undefined;
 
+      // Build SDK options. Use preset-append form for system prompt so the
+      // agent inherits Claude Code's built-in tool capabilities.
+      const sdkOptions: Record<string, unknown> = {
+        cwd: workDir,
+        resume: task.sessionId ?? this.sessionId,
+        env,
+        permissionMode: 'bypassPermissions',
+        allowDangerouslySkipPermissions: true,
+      };
+      if (this.systemPrompt) {
+        sdkOptions.systemPrompt = {
+          type: 'preset',
+          preset: 'claude_code',
+          append: this.systemPrompt,
+        };
+      }
+
       for await (const message of this.queryFn({
         prompt: task.prompt,
-        options: {
-          cwd: workDir,
-          resume: task.sessionId ?? this.sessionId,
-          env,
-          permissionMode: 'bypassPermissions',
-          allowDangerouslySkipPermissions: true,
-        },
+        options: sdkOptions,
       })) {
         if (message.type === 'system' && message.subtype === 'init' && message.session_id) {
           newSessionId = message.session_id;

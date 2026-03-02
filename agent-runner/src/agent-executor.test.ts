@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mkdirSync } from 'node:fs';
-import { AgentExecutor } from './agent-executor.js';
+import { AgentExecutor, MAIN_ASSISTANT_PROMPT } from './agent-executor.js';
 import { createMockQuery } from './mock-sdk.js';
 import { MCPBridge } from './mcp-bridge.js';
 import type { WSMessage, TaskDispatchMsg, TaskResultMsg, AgentInitConfig } from './types.js';
@@ -457,6 +457,55 @@ describe('AgentExecutor', () => {
       vi.advanceTimersByTime(10 * 60 * 1000);
       expect(executor.status).toBe('stopped');
       consoleSpy.mockRestore();
+    });
+  });
+
+  describe('System Prompt', () => {
+    it('passes system prompt as preset-append to SDK when configured', async () => {
+      const { executor, mockQuery } = createTestExecutor();
+      // Create a new executor with system prompt
+      const sentMessages: WSMessage[] = [];
+      const mockQuery2 = createMockQuery({ responseText: 'done', sessionId: 'sess-1' });
+      const mcpBridge = new MCPBridge('aid-test-001', (msg) => sentMessages.push(msg));
+      const executor2 = new AgentExecutor({
+        config: createTestConfig(),
+        mcpBridge,
+        sendMessage: (msg) => sentMessages.push(msg),
+        queryFn: mockQuery2.query,
+        workspaceRoot: '/workspace',
+        systemPrompt: 'You are a test assistant.',
+      });
+      executor2.start();
+
+      await executor2.executeTask({
+        taskId: 'task-prompt',
+        agentAid: 'aid-test-001',
+        prompt: 'Hello',
+      });
+
+      expect(mockQuery2.calls[0].options.systemPrompt).toEqual({
+        type: 'preset',
+        preset: 'claude_code',
+        append: 'You are a test assistant.',
+      });
+    });
+
+    it('does not set systemPrompt when not configured', async () => {
+      const { executor, mockQuery } = createTestExecutor();
+      executor.start();
+
+      await executor.executeTask({
+        taskId: 'task-no-prompt',
+        agentAid: 'aid-test-001',
+        prompt: 'Hello',
+      });
+
+      expect(mockQuery.calls[0].options.systemPrompt).toBeUndefined();
+    });
+
+    it('exports MAIN_ASSISTANT_PROMPT constant', () => {
+      expect(MAIN_ASSISTANT_PROMPT).toBeDefined();
+      expect(MAIN_ASSISTANT_PROMPT).toContain('OpenHive');
     });
   });
 

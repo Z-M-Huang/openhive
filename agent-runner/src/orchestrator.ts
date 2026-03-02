@@ -27,7 +27,7 @@ import {
 } from './types.js';
 import type { WSClient } from './ws-client.js';
 import { MCPBridge } from './mcp-bridge.js';
-import { AgentExecutor, type SDKQueryFn } from './agent-executor.js';
+import { AgentExecutor, MAIN_ASSISTANT_PROMPT, type SDKQueryFn } from './agent-executor.js';
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 
@@ -129,6 +129,7 @@ export class Orchestrator {
         sendMessage: (wsMsg) => this.wsClient.send(wsMsg),
         queryFn,
         workspaceRoot: this.workspaceRoot,
+        systemPrompt: this.mainAssistant ? MAIN_ASSISTANT_PROMPT : undefined,
       });
 
       this.agents.set(agentConfig.aid, {
