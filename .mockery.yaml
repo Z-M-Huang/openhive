@@ -8,7 +8,6 @@ packages:
     interfaces:
       ConfigLoader:
       OrgChart:
-      GoOrchestrator:
       WSHub:
       WSConnection:
       ContainerRuntime:

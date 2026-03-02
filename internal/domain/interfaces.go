@@ -11,6 +11,7 @@ import (
 type ConfigLoader interface {
 	LoadMaster() (*MasterConfig, error)
 	SaveMaster(cfg *MasterConfig) error
+	GetMaster() *MasterConfig
 	LoadProviders() (map[string]Provider, error)
 	SaveProviders(providers map[string]Provider) error
 	LoadTeam(slug string) (*Team, error)
@@ -85,13 +86,7 @@ type OrgChart interface {
 	RebuildFromConfig(master *MasterConfig, teams map[string]*Team) error
 }
 
-// GoOrchestrator manages task dispatch and routing between Go and containers.
-type GoOrchestrator interface {
-	DispatchTask(ctx context.Context, task *Task) error
-	CancelTask(ctx context.Context, taskID string) error
-	HandleTaskResult(result *TaskResult) error
-	RouteMessage(ctx context.Context, jid string, content string) error
-}
+// TODO: GoOrchestrator interface -- see wiki Architecture Decisions for design
 
 // WSHub manages WebSocket connections to containers.
 type WSHub interface {
@@ -103,6 +98,7 @@ type WSHub interface {
 	HandleUpgrade(w http.ResponseWriter, r *http.Request)
 	GetConnectedTeams() []string
 	SetOnMessage(handler func(teamID string, msg []byte))
+	SetOnConnect(handler func(teamID string))
 }
 
 // WSConnection represents a single WebSocket connection.

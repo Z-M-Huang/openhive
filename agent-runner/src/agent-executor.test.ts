@@ -4,6 +4,7 @@ import { AgentExecutor, MAIN_ASSISTANT_PROMPT } from './agent-executor.js';
 import { createMockQuery } from './mock-sdk.js';
 import { MCPBridge } from './mcp-bridge.js';
 import type { WSMessage, TaskDispatchMsg, TaskResultMsg, AgentInitConfig } from './types.js';
+import { NullLogger } from './logger.js';
 
 vi.mock('node:fs', () => ({
   mkdirSync: vi.fn(),
@@ -40,7 +41,7 @@ function createTestExecutor(
     delayMs: overrides.delayMs,
     sessionId: 'session-test-001',
   });
-  const mcpBridge = new MCPBridge('aid-test-001', (msg) => sentMessages.push(msg));
+  const mcpBridge = new MCPBridge('aid-test-001', (msg) => sentMessages.push(msg), new NullLogger());
 
   const executor = new AgentExecutor({
     config: createTestConfig(overrides.config),
@@ -49,6 +50,7 @@ function createTestExecutor(
     queryFn: mockQuery.query,
     workspaceRoot: '/workspace',
     idleTimeoutMinutes: overrides.idleTimeoutMinutes,
+    logger: new NullLogger(),
   });
 
   return { executor, sentMessages, mockQuery, mcpBridge };
@@ -249,7 +251,6 @@ describe('AgentExecutor', () => {
     });
 
     it('sends task result with error on SDK failure', async () => {
-      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       const { executor, sentMessages } = createTestExecutor({
         error: new Error('SDK crashed'),
       });
@@ -269,8 +270,6 @@ describe('AgentExecutor', () => {
       const data = resultMsg!.data as TaskResultMsg;
       expect(data.status).toBe('failed');
       expect(data.error).toBe('SDK crashed');
-
-      consoleSpy.mockRestore();
     });
 
     it('transitions status to busy during task and idle after', async () => {
@@ -293,7 +292,6 @@ describe('AgentExecutor', () => {
     });
 
     it('transitions status to error on SDK failure', async () => {
-      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       const { executor } = createTestExecutor({
         error: new Error('boom'),
       });
@@ -306,7 +304,6 @@ describe('AgentExecutor', () => {
       });
 
       expect(executor.status).toBe('error');
-      consoleSpy.mockRestore();
     });
 
     it('uses session resume when session ID is available', async () => {
@@ -398,7 +395,6 @@ describe('AgentExecutor', () => {
     });
 
     it('idle timeout stops agent after configured period', () => {
-      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
       const { executor } = createTestExecutor({
         idleTimeoutMinutes: 5,
       });
@@ -410,11 +406,9 @@ describe('AgentExecutor', () => {
       vi.advanceTimersByTime(5 * 60 * 1000 + 1);
 
       expect(executor.status).toBe('stopped');
-      consoleSpy.mockRestore();
     });
 
     it('idle timeout resets on new task', async () => {
-      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
       const { executor } = createTestExecutor({
         idleTimeoutMinutes: 5,
       });
@@ -439,11 +433,9 @@ describe('AgentExecutor', () => {
       // Advance past full timeout from last task
       vi.advanceTimersByTime(2 * 60 * 1000);
       expect(executor.status).toBe('stopped');
-      consoleSpy.mockRestore();
     });
 
     it('stop clears idle timer', () => {
-      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
       const { executor } = createTestExecutor({
         idleTimeoutMinutes: 5,
       });
@@ -456,7 +448,6 @@ describe('AgentExecutor', () => {
       // Advancing time should not cause issues
       vi.advanceTimersByTime(10 * 60 * 1000);
       expect(executor.status).toBe('stopped');
-      consoleSpy.mockRestore();
     });
   });
 
@@ -466,7 +457,7 @@ describe('AgentExecutor', () => {
       // Create a new executor with system prompt
       const sentMessages: WSMessage[] = [];
       const mockQuery2 = createMockQuery({ responseText: 'done', sessionId: 'sess-1' });
-      const mcpBridge = new MCPBridge('aid-test-001', (msg) => sentMessages.push(msg));
+      const mcpBridge = new MCPBridge('aid-test-001', (msg) => sentMessages.push(msg), new NullLogger());
       const executor2 = new AgentExecutor({
         config: createTestConfig(),
         mcpBridge,
@@ -474,6 +465,7 @@ describe('AgentExecutor', () => {
         queryFn: mockQuery2.query,
         workspaceRoot: '/workspace',
         systemPrompt: 'You are a test assistant.',
+        logger: new NullLogger(),
       });
       executor2.start();
 

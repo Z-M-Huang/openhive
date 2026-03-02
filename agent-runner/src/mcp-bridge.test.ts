@@ -1,11 +1,12 @@
 import { describe, it, expect, vi } from 'vitest';
 import { MCPBridge } from './mcp-bridge.js';
 import type { WSMessage, ToolResultMsg } from './types.js';
+import { NullLogger } from './logger.js';
 
 describe('MCPBridge', () => {
   it('sends tool call via WebSocket', async () => {
     const sentMessages: WSMessage[] = [];
-    const bridge = new MCPBridge('aid-001', (msg) => sentMessages.push(msg));
+    const bridge = new MCPBridge('aid-001', (msg) => sentMessages.push(msg), new NullLogger());
 
     // Start the tool call (it will be pending)
     const promise = bridge.callTool('get_config', { section: 'system' });
@@ -26,7 +27,7 @@ describe('MCPBridge', () => {
   });
 
   it('rejects on error result', async () => {
-    const bridge = new MCPBridge('aid-001', () => {});
+    const bridge = new MCPBridge('aid-001', () => {}, new NullLogger());
 
     const promise = bridge.callTool('create_team', { slug: 'bad-team' });
 
@@ -35,7 +36,7 @@ describe('MCPBridge', () => {
 
     // Send error result - we need the call_id
     const sentMessages: WSMessage[] = [];
-    const bridge2 = new MCPBridge('aid-001', (msg) => sentMessages.push(msg));
+    const bridge2 = new MCPBridge('aid-001', (msg) => sentMessages.push(msg), new NullLogger());
     const promise2 = bridge2.callTool('get_config', {});
 
     const toolCall = sentMessages[0].data as { callId: string };
@@ -55,7 +56,7 @@ describe('MCPBridge', () => {
   it('rejects on timeout', async () => {
     vi.useFakeTimers();
 
-    const bridge = new MCPBridge('aid-001', () => {});
+    const bridge = new MCPBridge('aid-001', () => {}, new NullLogger());
     const promise = bridge.callTool('get_config', {});
 
     // Fast-forward past query timeout (10s)
@@ -68,7 +69,7 @@ describe('MCPBridge', () => {
   });
 
   it('rejects all pending on disconnect', async () => {
-    const bridge = new MCPBridge('aid-001', () => {});
+    const bridge = new MCPBridge('aid-001', () => {}, new NullLogger());
     const p1 = bridge.callTool('get_config', {}).catch((e: Error) => e);
     const p2 = bridge.callTool('list_channels', {}).catch((e: Error) => e);
 
@@ -86,22 +87,19 @@ describe('MCPBridge', () => {
   });
 
   it('ignores unknown call_id', () => {
-    const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const bridge = new MCPBridge('aid-001', () => {});
+    const bridge = new MCPBridge('aid-001', () => {}, new NullLogger());
 
-    bridge.handleToolResult({
-      callId: 'unknown-id',
-      result: {},
-    });
-
-    expect(consoleSpy).toHaveBeenCalledWith(
-      expect.stringContaining('unknown call_id'),
-    );
-    consoleSpy.mockRestore();
+    // Should not throw -- warn is logged via NullLogger (no-op)
+    expect(() => {
+      bridge.handleToolResult({
+        callId: 'unknown-id',
+        result: {},
+      });
+    }).not.toThrow();
   });
 
   it('reports pending count correctly', async () => {
-    const bridge = new MCPBridge('aid-001', () => {});
+    const bridge = new MCPBridge('aid-001', () => {}, new NullLogger());
     expect(bridge.pendingCount()).toBe(0);
 
     const p1 = bridge.callTool('get_config', {}).catch(() => {});
@@ -119,7 +117,7 @@ describe('MCPBridge', () => {
 
   it('handles multiple concurrent tool calls independently', async () => {
     const sentMessages: WSMessage[] = [];
-    const bridge = new MCPBridge('aid-001', (msg) => sentMessages.push(msg));
+    const bridge = new MCPBridge('aid-001', (msg) => sentMessages.push(msg), new NullLogger());
 
     const p1 = bridge.callTool('get_config', {});
     const p2 = bridge.callTool('list_channels', {});

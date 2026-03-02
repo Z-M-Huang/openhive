@@ -19,6 +19,7 @@ import type {
 import { MSG_TYPE_TASK_RESULT } from './types.js';
 import type { MCPBridge } from './mcp-bridge.js';
 import type { WSMessage } from './types.js';
+import type { Logger } from './logger.js';
 
 /**
  * Built-in system prompt for the main assistant.
@@ -79,6 +80,7 @@ export interface AgentExecutorOptions {
   idleTimeoutMinutes?: number;
   /** System prompt appended to Claude Code defaults. */
   systemPrompt?: string;
+  logger: Logger;
 }
 
 export class AgentExecutor {
@@ -89,6 +91,7 @@ export class AgentExecutor {
   private readonly workspaceRoot: string;
   private readonly idleTimeoutMs: number;
   private readonly systemPrompt: string | undefined;
+  private readonly logger: Logger;
 
   private _status: AgentStatusType = 'idle';
   private sessionId: string | undefined;
@@ -104,6 +107,7 @@ export class AgentExecutor {
     this.idleTimeoutMs =
       (options.idleTimeoutMinutes ?? DEFAULT_IDLE_TIMEOUT_MINUTES) * 60 * 1000;
     this.systemPrompt = options.systemPrompt;
+    this.logger = options.logger;
   }
 
   get status(): AgentStatusType {
@@ -234,7 +238,7 @@ export class AgentExecutor {
       });
 
       this._status = 'error';
-      console.error(`Agent ${this.config.aid} task ${task.taskId} failed: ${errorMessage}`);
+      this.logger.error('Agent task failed', { aid: this.config.aid, taskId: task.taskId, error: errorMessage });
     }
   }
 
@@ -304,7 +308,7 @@ export class AgentExecutor {
     this.clearIdleTimer();
     if (this.idleTimeoutMs > 0 && this.running) {
       this.idleTimer = setTimeout(() => {
-        console.log(`Agent ${this.config.aid} idle timeout reached, stopping`);
+        this.logger.info('Agent idle timeout reached, stopping', { aid: this.config.aid });
         this.stop();
       }, this.idleTimeoutMs);
     }

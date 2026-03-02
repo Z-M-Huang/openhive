@@ -6,6 +6,7 @@
 import WebSocket from 'ws';
 import type { WSMessage } from './types.js';
 import { parseMessage, toWireFormat } from './types.js';
+import type { Logger } from './logger.js';
 
 export interface WSClientOptions {
   url: string;
@@ -14,6 +15,7 @@ export interface WSClientOptions {
   onDisconnect?: () => void;
   maxReconnectAttempts?: number;
   initialBackoffMs?: number;
+  logger: Logger;
 }
 
 export class WSClient {
@@ -24,6 +26,7 @@ export class WSClient {
   private readonly onDisconnect?: () => void;
   private readonly maxReconnectAttempts: number;
   private readonly initialBackoffMs: number;
+  private readonly logger: Logger;
   private reconnectAttempts = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private closed = false;
@@ -35,6 +38,7 @@ export class WSClient {
     this.onDisconnect = options.onDisconnect;
     this.maxReconnectAttempts = options.maxReconnectAttempts ?? 10;
     this.initialBackoffMs = options.initialBackoffMs ?? 1000;
+    this.logger = options.logger;
   }
 
   connect(): void {
@@ -52,7 +56,7 @@ export class WSClient {
         const msg = parseMessage(data.toString());
         this.onMessage(msg);
       } catch (err) {
-        console.error('Failed to parse WebSocket message:', err);
+        this.logger.error('Failed to parse WebSocket message', { error: String(err) });
       }
     });
 
@@ -62,7 +66,7 @@ export class WSClient {
     });
 
     this.ws.on('error', (err: Error) => {
-      console.error('WebSocket error:', err.message);
+      this.logger.error('WebSocket error', { error: err.message });
     });
   }
 
@@ -92,7 +96,7 @@ export class WSClient {
   private scheduleReconnect(): void {
     if (this.closed) return;
     if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      console.error('Max reconnection attempts reached');
+      this.logger.error('Max reconnection attempts reached');
       return;
     }
 

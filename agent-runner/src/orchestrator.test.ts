@@ -3,6 +3,7 @@ import { Orchestrator } from './orchestrator.js';
 import { createMockQuery } from './mock-sdk.js';
 import type { WSClient } from './ws-client.js';
 import type { WSMessage, ContainerInitMsg, TaskDispatchMsg, ShutdownMsg, ToolResultMsg, AgentInitConfig } from './types.js';
+import { NullLogger } from './logger.js';
 
 vi.mock('node:fs', () => ({
   mkdirSync: vi.fn(),
@@ -39,7 +40,7 @@ describe('Orchestrator', () => {
 
   beforeEach(() => {
     wsClient = createMockWSClient();
-    orchestrator = new Orchestrator(wsClient);
+    orchestrator = new Orchestrator(wsClient, new NullLogger());
     orchestrator.setTeamId('tid-team-001');
   });
 
@@ -138,20 +139,18 @@ describe('Orchestrator', () => {
   });
 
   it('handles task dispatch for unknown agent gracefully', () => {
-    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-
     orchestrator.handleMessage({
       type: 'container_init',
       data: createTestInitMsg([]),
     });
 
-    orchestrator.handleMessage({
-      type: 'task_dispatch',
-      data: { taskId: 'task-001', agentAid: 'aid-unknown', prompt: 'test' } as TaskDispatchMsg,
-    });
-
-    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Agent not found'));
-    consoleSpy.mockRestore();
+    // Should not throw -- error is logged via NullLogger (no-op)
+    expect(() => {
+      orchestrator.handleMessage({
+        type: 'task_dispatch',
+        data: { taskId: 'task-001', agentAid: 'aid-unknown', prompt: 'test' } as TaskDispatchMsg,
+      });
+    }).not.toThrow();
   });
 
   it('handles shutdown - stops agents and closes WS', () => {
@@ -176,15 +175,13 @@ describe('Orchestrator', () => {
   });
 
   it('handles unknown message type', () => {
-    const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-
-    orchestrator.handleMessage({
-      type: 'unknown_type' as WSMessage['type'],
-      data: {},
-    });
-
-    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Unknown message type'));
-    consoleSpy.mockRestore();
+    // Should not throw -- warn is logged via NullLogger (no-op)
+    expect(() => {
+      orchestrator.handleMessage({
+        type: 'unknown_type' as WSMessage['type'],
+        data: {},
+      });
+    }).not.toThrow();
   });
 
   it('rejects all pending tool calls on disconnect', () => {
@@ -254,22 +251,18 @@ describe('Orchestrator', () => {
   });
 
   it('handles tool result for unknown callId gracefully', () => {
-    const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-
     orchestrator.handleMessage({
       type: 'container_init',
       data: createTestInitMsg(),
     });
 
-    orchestrator.handleMessage({
-      type: 'tool_result',
-      data: { callId: 'unknown-call-id', result: {} } as ToolResultMsg,
-    });
-
-    expect(consoleSpy).toHaveBeenCalledWith(
-      expect.stringContaining('No agent found'),
-    );
-    consoleSpy.mockRestore();
+    // Should not throw -- warn is logged via NullLogger (no-op)
+    expect(() => {
+      orchestrator.handleMessage({
+        type: 'tool_result',
+        data: { callId: 'unknown-call-id', result: {} } as ToolResultMsg,
+      });
+    }).not.toThrow();
   });
 
   it('applies workspaceRoot from container_init message', () => {

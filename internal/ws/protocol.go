@@ -2,6 +2,7 @@ package ws
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 
@@ -166,15 +167,23 @@ func ValidateDirection(msgType string, isFromContainer bool) error {
 // Known domain error types return stable generic messages; raw domain strings are
 // never exposed to clients. ValidationError keeps user-facing detail by design.
 func MapDomainErrorToWSError(err error) (string, string) {
-	switch err.(type) {
-	case *domain.NotFoundError:
+	var nfe *domain.NotFoundError
+	var ve *domain.ValidationError
+	var ce *domain.ConflictError
+	var ele *domain.EncryptionLockedError
+	var rle *domain.RateLimitedError
+
+	switch {
+	case errors.As(err, &nfe):
 		return WSErrorNotFound, "the requested resource was not found"
-	case *domain.ValidationError:
-		return WSErrorValidation, err.Error()
-	case *domain.ConflictError:
+	case errors.As(err, &ve):
+		return WSErrorValidation, ve.Error()
+	case errors.As(err, &ce):
 		return WSErrorConflict, "a resource conflict occurred"
-	case *domain.EncryptionLockedError:
+	case errors.As(err, &ele):
 		return WSErrorEncryptionLocked, "encryption is locked"
+	case errors.As(err, &rle):
+		return WSErrorRateLimited, "rate limit exceeded"
 	default:
 		return WSErrorInternal, SanitizeErrorMessage(err)
 	}

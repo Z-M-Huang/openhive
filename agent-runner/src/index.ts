@@ -13,6 +13,7 @@ import { Orchestrator } from './orchestrator.js';
 import type { SDKQueryFactory } from './orchestrator.js';
 import type { AgentInitConfig } from './types.js';
 import type { SDKQueryFn } from './agent-executor.js';
+import { JSONLogger } from './logger.js';
 
 interface CLIArgs {
   mode: 'master' | 'team';
@@ -48,7 +49,8 @@ function parseArgs(): CLIArgs {
 
 function main(): void {
   const cliArgs = parseArgs();
-  console.log(`OpenHive Agent Runner starting (mode=${cliArgs.mode}, team=${cliArgs.teamId})`);
+  const logger = new JSONLogger('agent-runner', { teamId: cliArgs.teamId, mode: cliArgs.mode });
+  logger.info('OpenHive Agent Runner starting', { mode: cliArgs.mode, team: cliArgs.teamId });
 
   // WSClient and Orchestrator reference each other:
   // WSClient routes messages to Orchestrator, Orchestrator sends via WSClient.
@@ -59,14 +61,15 @@ function main(): void {
   const wsClient = new WSClient({
     url: cliArgs.wsUrl,
     onMessage: (msg) => ref.orchestrator!.handleMessage(msg),
-    onConnect: () => console.log('Connected to Go backend'),
+    onConnect: () => logger.info('Connected to Go backend'),
     onDisconnect: () => {
-      console.log('Disconnected from Go backend');
+      logger.info('Disconnected from Go backend');
       ref.orchestrator!.onDisconnect();
     },
+    logger: logger.child({ component: 'ws-client' }),
   });
 
-  const orchestrator = new Orchestrator(wsClient);
+  const orchestrator = new Orchestrator(wsClient, logger.child({ component: 'orchestrator' }));
   ref.orchestrator = orchestrator;
   orchestrator.setTeamId(cliArgs.teamId);
 
@@ -87,7 +90,7 @@ function main(): void {
 
   // Handle process signals
   const shutdown = (): void => {
-    console.log('Shutting down...');
+    logger.info('Shutting down');
     wsClient.close();
     process.exit(0);
   };

@@ -299,6 +299,39 @@ func (_c *MockWSHub_SendToTeam_Call) RunAndReturn(run func(string, []byte) error
 	return _c
 }
 
+// SetOnConnect provides a mock function with given fields: handler
+func (_m *MockWSHub) SetOnConnect(handler func(string)) {
+	_m.Called(handler)
+}
+
+// MockWSHub_SetOnConnect_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'SetOnConnect'
+type MockWSHub_SetOnConnect_Call struct {
+	*mock.Call
+}
+
+// SetOnConnect is a helper method to define mock.On call
+//   - handler func(string)
+func (_e *MockWSHub_Expecter) SetOnConnect(handler interface{}) *MockWSHub_SetOnConnect_Call {
+	return &MockWSHub_SetOnConnect_Call{Call: _e.mock.On("SetOnConnect", handler)}
+}
+
+func (_c *MockWSHub_SetOnConnect_Call) Run(run func(handler func(string))) *MockWSHub_SetOnConnect_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(func(string)))
+	})
+	return _c
+}
+
+func (_c *MockWSHub_SetOnConnect_Call) Return() *MockWSHub_SetOnConnect_Call {
+	_c.Call.Return()
+	return _c
+}
+
+func (_c *MockWSHub_SetOnConnect_Call) RunAndReturn(run func(func(string))) *MockWSHub_SetOnConnect_Call {
+	_c.Run(run)
+	return _c
+}
+
 // SetOnMessage provides a mock function with given fields: handler
 func (_m *MockWSHub) SetOnMessage(handler func(string, []byte)) {
 	_m.Called(handler)

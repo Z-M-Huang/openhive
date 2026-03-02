@@ -9,6 +9,7 @@ import { randomUUID } from 'node:crypto';
 import type { WSMessage, ToolCallMsg, ToolResultMsg } from './types.js';
 import { MSG_TYPE_TOOL_CALL, MSG_TYPE_TOOL_RESULT } from './types.js';
 import { getToolTimeout } from './sdk-tools.js';
+import type { Logger } from './logger.js';
 
 interface PendingCall {
   resolve: (result: unknown) => void;
@@ -20,10 +21,12 @@ export class MCPBridge {
   private pending = new Map<string, PendingCall>();
   private readonly sendMessage: (msg: WSMessage) => void;
   private readonly agentAID: string;
+  private readonly logger: Logger;
 
-  constructor(agentAID: string, sendMessage: (msg: WSMessage) => void) {
+  constructor(agentAID: string, sendMessage: (msg: WSMessage) => void, logger: Logger) {
     this.agentAID = agentAID;
     this.sendMessage = sendMessage;
+    this.logger = logger;
   }
 
   /**
@@ -62,7 +65,7 @@ export class MCPBridge {
   handleToolResult(msg: ToolResultMsg): void {
     const pending = this.pending.get(msg.callId);
     if (!pending) {
-      console.warn(`Received tool result for unknown call_id: ${msg.callId}`);
+      this.logger.warn('Received tool result for unknown call_id', { callId: msg.callId });
       return;
     }
 

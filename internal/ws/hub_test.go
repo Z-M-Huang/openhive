@@ -2,6 +2,7 @@ package ws
 
 import (
 	"bytes"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Z-M-Huang/openhive/internal/domain"
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -296,7 +298,12 @@ func TestHub_SetOnMessage(t *testing.T) {
 	}, 2*time.Second, 10*time.Millisecond)
 }
 
-func TestHub_ConnectionNotFoundError(t *testing.T) {
-	e := &connectionNotFoundError{teamID: "tid-team-001"}
-	assert.Contains(t, e.Error(), "tid-team-001")
+func TestHub_SendToTeam_NotFound_DomainError(t *testing.T) {
+	hub := newTestHub(t)
+	err := hub.SendToTeam("nonexistent", []byte("msg"))
+	assert.Error(t, err)
+	var nfe *domain.NotFoundError
+	assert.True(t, errors.As(err, &nfe))
+	assert.Equal(t, "ws_connection", nfe.Resource)
+	assert.Equal(t, "nonexistent", nfe.ID)
 }

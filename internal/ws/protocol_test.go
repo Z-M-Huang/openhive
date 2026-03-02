@@ -3,6 +3,7 @@ package ws
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/Z-M-Huang/openhive/internal/domain"
@@ -179,6 +180,26 @@ func TestMapDomainErrorToWSError_EncryptionLocked(t *testing.T) {
 	code, msg := MapDomainErrorToWSError(&domain.EncryptionLockedError{})
 	assert.Equal(t, WSErrorEncryptionLocked, code)
 	assert.Equal(t, "encryption is locked", msg)
+}
+
+func TestMapDomainErrorToWSError_RateLimited(t *testing.T) {
+	code, msg := MapDomainErrorToWSError(&domain.RateLimitedError{RetryAfterSeconds: 30})
+	assert.Equal(t, WSErrorRateLimited, code)
+	assert.Equal(t, "rate limit exceeded", msg)
+}
+
+func TestMapDomainErrorToWSError_WrappedConflict(t *testing.T) {
+	wrapped := fmt.Errorf("lookup failed: %w", &domain.ConflictError{Resource: "agent", Message: "dup"})
+	code, msg := MapDomainErrorToWSError(wrapped)
+	assert.Equal(t, WSErrorConflict, code)
+	assert.Equal(t, "a resource conflict occurred", msg)
+}
+
+func TestMapDomainErrorToWSError_WrappedRateLimited(t *testing.T) {
+	wrapped := fmt.Errorf("rate check: %w", &domain.RateLimitedError{RetryAfterSeconds: 60})
+	code, msg := MapDomainErrorToWSError(wrapped)
+	assert.Equal(t, WSErrorRateLimited, code)
+	assert.Equal(t, "rate limit exceeded", msg)
 }
 
 func TestMapDomainErrorToWSError_Unknown(t *testing.T) {

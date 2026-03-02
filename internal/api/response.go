@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/Z-M-Huang/openhive/internal/domain"
@@ -40,18 +41,24 @@ func Error(w http.ResponseWriter, status int, code string, message string) {
 
 // MapDomainError maps domain errors to HTTP status codes and writes the response.
 func MapDomainError(w http.ResponseWriter, err error) {
-	switch e := err.(type) {
-	case *domain.NotFoundError:
-		Error(w, http.StatusNotFound, e.Code(), "the requested resource was not found")
-	case *domain.ValidationError:
-		Error(w, http.StatusBadRequest, e.Code(), e.Error())
-	case *domain.ConflictError:
-		Error(w, http.StatusConflict, e.Code(), "a resource conflict occurred")
-	case *domain.EncryptionLockedError:
-		Error(w, http.StatusForbidden, e.Code(), "encryption is locked")
-	case *domain.RateLimitedError:
-		w.Header().Set("Retry-After", itoa(e.RetryAfterSeconds))
-		Error(w, http.StatusTooManyRequests, e.Code(), "rate limit exceeded")
+	var nfe *domain.NotFoundError
+	var ve *domain.ValidationError
+	var ce *domain.ConflictError
+	var ele *domain.EncryptionLockedError
+	var rle *domain.RateLimitedError
+
+	switch {
+	case errors.As(err, &nfe):
+		Error(w, http.StatusNotFound, nfe.Code(), "the requested resource was not found")
+	case errors.As(err, &ve):
+		Error(w, http.StatusBadRequest, ve.Code(), ve.Error())
+	case errors.As(err, &ce):
+		Error(w, http.StatusConflict, ce.Code(), "a resource conflict occurred")
+	case errors.As(err, &ele):
+		Error(w, http.StatusForbidden, ele.Code(), "encryption is locked")
+	case errors.As(err, &rle):
+		w.Header().Set("Retry-After", itoa(rle.RetryAfterSeconds))
+		Error(w, http.StatusTooManyRequests, rle.Code(), "rate limit exceeded")
 	default:
 		Error(w, http.StatusInternalServerError, "INTERNAL_ERROR", "an internal error occurred")
 	}

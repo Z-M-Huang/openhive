@@ -28,6 +28,7 @@ import {
 import type { WSClient } from './ws-client.js';
 import { MCPBridge } from './mcp-bridge.js';
 import { AgentExecutor, MAIN_ASSISTANT_PROMPT, type SDKQueryFn } from './agent-executor.js';
+import type { Logger } from './logger.js';
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 
@@ -50,6 +51,7 @@ export type SDKQueryFactory = (config: AgentInitConfig) => SDKQueryFn;
 
 export class Orchestrator {
   private readonly wsClient: WSClient;
+  private readonly logger: Logger;
   private readonly agents = new Map<string, AgentState>();
   private readonly callIdToAid = new Map<string, string>();
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
@@ -58,8 +60,9 @@ export class Orchestrator {
   private sdkQueryFactory: SDKQueryFactory | null = null;
   private workspaceRoot = '/workspace';
 
-  constructor(wsClient: WSClient) {
+  constructor(wsClient: WSClient, logger: Logger) {
     this.wsClient = wsClient;
+    this.logger = logger;
   }
 
   /**
@@ -88,7 +91,7 @@ export class Orchestrator {
         this.onToolResult(msg.data as ToolResultMsg);
         break;
       default:
-        console.warn(`Unknown message type: ${msg.type}`);
+        this.logger.warn('Unknown message type', { type: msg.type });
     }
   }
 
@@ -113,7 +116,7 @@ export class Orchestrator {
           }
         }
         this.wsClient.send(wsMsg);
-      });
+      }, this.logger.child({ aid: agentConfig.aid }));
 
       // Create the SDK query function if a factory is available.
       // In tests without a factory, we use a function that throws immediately.
@@ -130,6 +133,7 @@ export class Orchestrator {
         queryFn,
         workspaceRoot: this.workspaceRoot,
         systemPrompt: this.mainAssistant ? MAIN_ASSISTANT_PROMPT : undefined,
+        logger: this.logger.child({ aid: agentConfig.aid }),
       });
 
       this.agents.set(agentConfig.aid, {
@@ -156,15 +160,13 @@ export class Orchestrator {
       },
     });
 
-    console.log(
-      `Container initialized: ${msg.agents.length} agents configured, main=${msg.isMainAssistant}`,
-    );
+    this.logger.info('Container initialized', { agentCount: msg.agents.length, isMainAssistant: msg.isMainAssistant });
   }
 
   private onTaskDispatch(msg: TaskDispatchMsg): void {
     const agent = this.agents.get(msg.agentAid);
     if (!agent) {
-      console.error(`Agent not found: ${msg.agentAid}`);
+      this.logger.error('Agent not found', { agentAid: msg.agentAid });
       return;
     }
 
@@ -178,7 +180,7 @@ export class Orchestrator {
     agent.status = 'busy';
     agent.taskStartTime = Date.now();
 
-    console.log(`Task ${msg.taskId} dispatched to agent ${msg.agentAid}`);
+    this.logger.info('Task dispatched to agent', { taskId: msg.taskId, agentAid: msg.agentAid });
 
     // Execute the task via AgentExecutor (handles SDK query, sends task_result)
     agent.executor.executeTask(msg).then(() => {
@@ -186,14 +188,14 @@ export class Orchestrator {
       agent.status = agent.executor.status;
       agent.taskStartTime = null;
     }).catch((err) => {
-      console.error(`Agent ${msg.agentAid} task execution error: ${err}`);
+      this.logger.error('Agent task execution error', { agentAid: msg.agentAid, error: String(err) });
       agent.status = 'error';
       agent.taskStartTime = null;
     });
   }
 
   private onShutdown(msg: ShutdownMsg): void {
-    console.log(`Shutdown requested: ${msg.reason}, timeout: ${msg.timeout}s`);
+    this.logger.info('Shutdown requested', { reason: msg.reason, timeout: msg.timeout });
 
     // Stop heartbeat
     this.stopHeartbeat();
@@ -206,7 +208,7 @@ export class Orchestrator {
       agent.executor.stop();
       agent.status = 'stopped';
       agent.mcpBridge.rejectAll('Container shutting down');
-      console.log(`Agent ${aid} stopped`);
+      this.logger.info('Agent stopped', { aid });
     }
 
     // Clear callId tracking
@@ -235,7 +237,7 @@ export class Orchestrator {
         return;
       }
     }
-    console.warn(`No agent found with pending tool call for call_id: ${msg.callId}`);
+    this.logger.warn('No agent found with pending tool call', { callId: msg.callId });
   }
 
   private startHeartbeat(): void {

@@ -24,11 +24,12 @@ const (
 
 // WS error code constants
 const (
-	WSErrorNotFound           = "NOT_FOUND"
-	WSErrorValidation         = "VALIDATION_ERROR"
-	WSErrorConflict           = "CONFLICT"
-	WSErrorEncryptionLocked   = "ENCRYPTION_LOCKED"
-	WSErrorInternal           = "INTERNAL_ERROR"
+	WSErrorNotFound         = "NOT_FOUND"
+	WSErrorValidation       = "VALIDATION_ERROR"
+	WSErrorConflict         = "CONFLICT"
+	WSErrorEncryptionLocked = "ENCRYPTION_LOCKED"
+	WSErrorRateLimited      = "RATE_LIMITED"
+	WSErrorInternal         = "INTERNAL_ERROR"
 )
 
 // WSMessage is the envelope for all WebSocket messages.

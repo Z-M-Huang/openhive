@@ -125,7 +125,7 @@ func (h *Hub) SendToTeam(teamID string, msg []byte) error {
 	h.mu.RUnlock()
 
 	if !ok {
-		return &connectionNotFoundError{teamID: teamID}
+		return &domain.NotFoundError{Resource: "ws_connection", ID: teamID}
 	}
 
 	h.logger.Debug("ws message sent", "team_id", teamID, "size", len(msg))
@@ -176,10 +176,3 @@ func (h *Hub) SetOnConnect(handler func(teamID string)) {
 	h.onConnect = handler
 }
 
-type connectionNotFoundError struct {
-	teamID string
-}
-
-func (e *connectionNotFoundError) Error() string {
-	return "no connection found for team " + e.teamID
-}

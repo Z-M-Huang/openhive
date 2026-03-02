@@ -17,7 +17,7 @@ type Dispatcher struct {
 	taskStore          domain.TaskStore
 	wsHub              domain.WSHub
 	logger             *slog.Logger
-	toolHandler        *ToolHandler
+	toolHandler        domain.SDKToolHandler
 	taskResultCallback func(context.Context, *ws.TaskResultMsg)
 }
 
@@ -31,7 +31,7 @@ func NewDispatcher(taskStore domain.TaskStore, wsHub domain.WSHub, logger *slog.
 }
 
 // SetToolHandler sets the handler for SDK tool calls received from containers.
-func (d *Dispatcher) SetToolHandler(handler *ToolHandler) {
+func (d *Dispatcher) SetToolHandler(handler domain.SDKToolHandler) {
 	d.toolHandler = handler
 }
 

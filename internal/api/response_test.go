@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -113,6 +114,30 @@ func TestMapDomainError_Unknown(t *testing.T) {
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Equal(t, "INTERNAL_ERROR", resp.Error.Code)
 	assert.Equal(t, "an internal error occurred", resp.Error.Message)
+}
+
+func TestMapDomainError_WrappedNotFound(t *testing.T) {
+	w := httptest.NewRecorder()
+	wrapped := fmt.Errorf("outer: %w", &domain.NotFoundError{Resource: "team", ID: "x"})
+	MapDomainError(w, wrapped)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+	var resp errorResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "NOT_FOUND", resp.Error.Code)
+	assert.Equal(t, "the requested resource was not found", resp.Error.Message)
+}
+
+func TestMapDomainError_WrappedValidation(t *testing.T) {
+	w := httptest.NewRecorder()
+	wrapped := fmt.Errorf("lookup failed: %w", &domain.ValidationError{Field: "slug", Message: "invalid"})
+	MapDomainError(w, wrapped)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	var resp errorResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "VALIDATION_ERROR", resp.Error.Code)
+	assert.Contains(t, resp.Error.Message, "invalid")
 }
 
 func TestItoa(t *testing.T) {
