@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { MCPBridge } from './mcp-bridge.js';
-import type { WSMessage, ToolResultMsg } from './types.js';
+import type { WSMessage, ToolResultMsg, ToolCallMsg } from './types.js';
 import { NullLogger } from './logger.js';
 
 describe('MCPBridge', () => {
@@ -15,7 +15,7 @@ describe('MCPBridge', () => {
     expect(sentMessages[0].type).toBe('tool_call');
 
     // Resolve it
-    const toolCall = sentMessages[0].data as { callId: string };
+    const toolCall = sentMessages[0].data as ToolCallMsg;
     const result: ToolResultMsg = {
       callId: toolCall.callId,
       result: { listen_address: '127.0.0.1:8080' },
@@ -39,7 +39,7 @@ describe('MCPBridge', () => {
     const bridge2 = new MCPBridge('aid-001', (msg) => sentMessages.push(msg), new NullLogger());
     const promise2 = bridge2.callTool('get_config', {});
 
-    const toolCall = sentMessages[0].data as { callId: string };
+    const toolCall = sentMessages[0].data as ToolCallMsg;
     bridge2.handleToolResult({
       callId: toolCall.callId,
       errorCode: 'VALIDATION_ERROR',
@@ -124,8 +124,8 @@ describe('MCPBridge', () => {
 
     expect(sentMessages).toHaveLength(2);
 
-    const call1 = sentMessages[0].data as { callId: string };
-    const call2 = sentMessages[1].data as { callId: string };
+    const call1 = sentMessages[0].data as ToolCallMsg;
+    const call2 = sentMessages[1].data as ToolCallMsg;
 
     // Resolve in reverse order
     bridge.handleToolResult({ callId: call2.callId, result: { channels: [] } });

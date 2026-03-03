@@ -67,7 +67,7 @@ providers:
 	require.NoError(t, err)
 
 	// --- Step 1: Load and validate config ---
-	loader, err := config.NewLoader(tmpDir)
+	loader, err := config.NewLoader(tmpDir, tmpDir)
 	require.NoError(t, err)
 
 	masterCfg, err := loader.LoadMaster()
@@ -125,10 +125,12 @@ providers:
 		"127.0.0.1:0",
 		logger,
 		km,
-		nil,  // no SPA in test
-		nil,  // no WS handler in test
-		nil,  // no chat handler in test
-		nil,  // no CORS origins
+		nil, // no SPA in test
+		nil, // no WS handler in test
+		nil, // no chat handler in test
+		nil, // no CORS origins
+		nil, // no portal WS
+		nil, // no dbLogger
 	)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/health", nil)

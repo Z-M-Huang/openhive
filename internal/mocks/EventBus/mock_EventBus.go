@@ -20,6 +20,86 @@ func (_m *MockEventBus) EXPECT() *MockEventBus_Expecter {
 	return &MockEventBus_Expecter{mock: &_m.Mock}
 }
 
+// Close provides a mock function with no fields
+func (_m *MockEventBus) Close() {
+	_m.Called()
+}
+
+// MockEventBus_Close_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Close'
+type MockEventBus_Close_Call struct {
+	*mock.Call
+}
+
+// Close is a helper method to define mock.On call
+func (_e *MockEventBus_Expecter) Close() *MockEventBus_Close_Call {
+	return &MockEventBus_Close_Call{Call: _e.mock.On("Close")}
+}
+
+func (_c *MockEventBus_Close_Call) Run(run func()) *MockEventBus_Close_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockEventBus_Close_Call) Return() *MockEventBus_Close_Call {
+	_c.Call.Return()
+	return _c
+}
+
+func (_c *MockEventBus_Close_Call) RunAndReturn(run func()) *MockEventBus_Close_Call {
+	_c.Run(run)
+	return _c
+}
+
+// FilteredSubscribe provides a mock function with given fields: eventType, filter, handler
+func (_m *MockEventBus) FilteredSubscribe(eventType domain.EventType, filter func(domain.Event) bool, handler func(domain.Event)) string {
+	ret := _m.Called(eventType, filter, handler)
+
+	if len(ret) == 0 {
+		panic("no return value specified for FilteredSubscribe")
+	}
+
+	var r0 string
+	if rf, ok := ret.Get(0).(func(domain.EventType, func(domain.Event) bool, func(domain.Event)) string); ok {
+		r0 = rf(eventType, filter, handler)
+	} else {
+		r0 = ret.Get(0).(string)
+	}
+
+	return r0
+}
+
+// MockEventBus_FilteredSubscribe_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'FilteredSubscribe'
+type MockEventBus_FilteredSubscribe_Call struct {
+	*mock.Call
+}
+
+// FilteredSubscribe is a helper method to define mock.On call
+//   - eventType domain.EventType
+//   - filter func(domain.Event) bool
+//   - handler func(domain.Event)
+func (_e *MockEventBus_Expecter) FilteredSubscribe(eventType interface{}, filter interface{}, handler interface{}) *MockEventBus_FilteredSubscribe_Call {
+	return &MockEventBus_FilteredSubscribe_Call{Call: _e.mock.On("FilteredSubscribe", eventType, filter, handler)}
+}
+
+func (_c *MockEventBus_FilteredSubscribe_Call) Run(run func(eventType domain.EventType, filter func(domain.Event) bool, handler func(domain.Event))) *MockEventBus_FilteredSubscribe_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(domain.EventType), args[1].(func(domain.Event) bool), args[2].(func(domain.Event)))
+	})
+	return _c
+}
+
+func (_c *MockEventBus_FilteredSubscribe_Call) Return(_a0 string) *MockEventBus_FilteredSubscribe_Call {
+	_c.Call.Return(_a0)
+	return _c
+}
+
+func (_c *MockEventBus_FilteredSubscribe_Call) RunAndReturn(run func(domain.EventType, func(domain.Event) bool, func(domain.Event)) string) *MockEventBus_FilteredSubscribe_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // Publish provides a mock function with given fields: event
 func (_m *MockEventBus) Publish(event domain.Event) {
 	_m.Called(event)

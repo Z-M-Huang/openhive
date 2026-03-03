@@ -327,8 +327,8 @@ func TestHandleWSMessage_ToolCall_Success(t *testing.T) {
 	})
 	d.SetToolHandler(th)
 
-	// Expect tool_result to be sent back to the team
-	hub.EXPECT().SendToTeam("team-a", mock.MatchedBy(func(data []byte) bool {
+	// Expect tool_result to be sent back to the team (use "main" for full tool access)
+	hub.EXPECT().SendToTeam("main", mock.MatchedBy(func(data []byte) bool {
 		msgType, payload, err := ws.ParseMessage(data)
 		if err != nil || msgType != ws.MsgTypeToolResult {
 			return false
@@ -345,7 +345,7 @@ func TestHandleWSMessage_ToolCall_Success(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	d.HandleWSMessage("team-a", msg)
+	d.HandleWSMessage("main", msg)
 }
 
 func TestHandleWSMessage_ToolCall_ToolError(t *testing.T) {
@@ -359,8 +359,8 @@ func TestHandleWSMessage_ToolCall_ToolError(t *testing.T) {
 	})
 	d.SetToolHandler(th)
 
-	// Expect error tool_result to be sent back
-	hub.EXPECT().SendToTeam("team-a", mock.MatchedBy(func(data []byte) bool {
+	// Expect error tool_result to be sent back (use "main" for full tool access)
+	hub.EXPECT().SendToTeam("main", mock.MatchedBy(func(data []byte) bool {
 		msgType, payload, err := ws.ParseMessage(data)
 		if err != nil || msgType != ws.MsgTypeToolResult {
 			return false
@@ -377,7 +377,7 @@ func TestHandleWSMessage_ToolCall_ToolError(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	d.HandleWSMessage("team-a", msg)
+	d.HandleWSMessage("main", msg)
 }
 
 func TestHandleWSMessage_ToolCall_UnknownTool(t *testing.T) {
@@ -388,8 +388,8 @@ func TestHandleWSMessage_ToolCall_UnknownTool(t *testing.T) {
 	th := NewToolHandler(logger)
 	d.SetToolHandler(th)
 
-	// Expect error tool_result for unknown tool
-	hub.EXPECT().SendToTeam("team-a", mock.MatchedBy(func(data []byte) bool {
+	// Expect error tool_result for unknown tool (use "main" for full tool access)
+	hub.EXPECT().SendToTeam("main", mock.MatchedBy(func(data []byte) bool {
 		msgType, payload, err := ws.ParseMessage(data)
 		if err != nil || msgType != ws.MsgTypeToolResult {
 			return false
@@ -406,7 +406,58 @@ func TestHandleWSMessage_ToolCall_UnknownTool(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	d.HandleWSMessage("team-a", msg)
+	d.HandleWSMessage("main", msg)
+}
+
+func TestHandleWSMessage_ToolCall_ChildTeamAuthorization(t *testing.T) {
+	d, _, hub := newTestDispatcher(t)
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	// Register both a whitelisted and non-whitelisted tool
+	th := NewToolHandler(logger)
+	th.Register("get_task_status", func(args json.RawMessage) (json.RawMessage, error) {
+		return json.RawMessage(`{"status":"ok"}`), nil
+	})
+	th.Register("create_team", func(args json.RawMessage) (json.RawMessage, error) {
+		return json.RawMessage(`{"status":"created"}`), nil
+	})
+	d.SetToolHandler(th)
+
+	// Child team calling whitelisted tool should succeed
+	hub.EXPECT().SendToTeam("team-child", mock.MatchedBy(func(data []byte) bool {
+		msgType, payload, err := ws.ParseMessage(data)
+		if err != nil || msgType != ws.MsgTypeToolResult {
+			return false
+		}
+		result, ok := payload.(*ws.ToolResultMsg)
+		return ok && result.CallID == "call-whitelist" && result.ErrorCode == ""
+	})).Return(nil)
+
+	msg, err := ws.EncodeMessage(ws.MsgTypeToolCall, ws.ToolCallMsg{
+		CallID:   "call-whitelist",
+		ToolName: "get_task_status",
+		AgentAID: "aid-001",
+	})
+	require.NoError(t, err)
+	d.HandleWSMessage("team-child", msg)
+
+	// Child team calling non-whitelisted tool should be rejected
+	hub.EXPECT().SendToTeam("team-child", mock.MatchedBy(func(data []byte) bool {
+		msgType, payload, err := ws.ParseMessage(data)
+		if err != nil || msgType != ws.MsgTypeToolResult {
+			return false
+		}
+		result, ok := payload.(*ws.ToolResultMsg)
+		return ok && result.CallID == "call-blocked" && result.ErrorCode == ws.WSErrorAccessDenied
+	})).Return(nil)
+
+	msg2, err := ws.EncodeMessage(ws.MsgTypeToolCall, ws.ToolCallMsg{
+		CallID:   "call-blocked",
+		ToolName: "create_team",
+		AgentAID: "aid-001",
+	})
+	require.NoError(t, err)
+	d.HandleWSMessage("team-child", msg2)
 }
 
 func TestHandleWSMessage_ToolCall_NoHandler(t *testing.T) {
@@ -476,4 +527,64 @@ func TestHandleWSMessage_TaskResult_NoCallback(t *testing.T) {
 	require.NoError(t, err)
 
 	d.HandleWSMessage("main", msg)
+}
+
+// --- mockHeartbeatMonitor for dispatcher tests ---
+
+type mockHeartbeatMonitor struct {
+	processHeartbeatCalled bool
+	lastTeamID             string
+	lastAgents             []domain.AgentHeartbeatStatus
+	mu                     sync.Mutex
+}
+
+func (m *mockHeartbeatMonitor) ProcessHeartbeat(teamID string, agents []domain.AgentHeartbeatStatus) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.processHeartbeatCalled = true
+	m.lastTeamID = teamID
+	m.lastAgents = agents
+}
+func (m *mockHeartbeatMonitor) GetStatus(teamID string) (*domain.HeartbeatStatus, error) { return nil, nil }
+func (m *mockHeartbeatMonitor) GetAllStatuses() map[string]*domain.HeartbeatStatus       { return nil }
+func (m *mockHeartbeatMonitor) SetOnUnhealthy(callback func(teamID string))              {}
+func (m *mockHeartbeatMonitor) StartMonitoring()                                         {}
+func (m *mockHeartbeatMonitor) StopMonitoring()                                          {}
+
+func TestHandleWSMessage_Heartbeat_CallsMonitor(t *testing.T) {
+	d, _, _ := newTestDispatcher(t)
+
+	monitor := &mockHeartbeatMonitor{}
+	d.SetHeartbeatMonitor(monitor)
+
+	msg, err := ws.EncodeMessage(ws.MsgTypeHeartbeat, ws.HeartbeatMsg{
+		TeamID: "team-hb-001",
+		Agents: []ws.AgentStatus{
+			{AID: "aid-001", Status: "idle", MemoryMB: 128.0},
+		},
+	})
+	require.NoError(t, err)
+
+	d.HandleWSMessage("team-hb-001", msg)
+
+	monitor.mu.Lock()
+	defer monitor.mu.Unlock()
+	assert.True(t, monitor.processHeartbeatCalled)
+	assert.Equal(t, "team-hb-001", monitor.lastTeamID)
+	require.Len(t, monitor.lastAgents, 1)
+	assert.Equal(t, "aid-001", monitor.lastAgents[0].AID)
+}
+
+func TestHandleWSMessage_Heartbeat_NoMonitor_DoesNotPanic(t *testing.T) {
+	d, _, _ := newTestDispatcher(t)
+	// No heartbeat monitor set
+
+	msg, err := ws.EncodeMessage(ws.MsgTypeHeartbeat, ws.HeartbeatMsg{
+		TeamID: "team-hb-002",
+		Agents: []ws.AgentStatus{},
+	})
+	require.NoError(t, err)
+
+	// Should not panic
+	d.HandleWSMessage("team-hb-002", msg)
 }

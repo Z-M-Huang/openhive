@@ -172,6 +172,7 @@ func MapDomainErrorToWSError(err error) (string, string) {
 	var ce *domain.ConflictError
 	var ele *domain.EncryptionLockedError
 	var rle *domain.RateLimitedError
+	var ade *domain.AccessDeniedError
 
 	switch {
 	case errors.As(err, &nfe):
@@ -184,6 +185,8 @@ func MapDomainErrorToWSError(err error) (string, string) {
 		return WSErrorEncryptionLocked, "encryption is locked"
 	case errors.As(err, &rle):
 		return WSErrorRateLimited, "rate limit exceeded"
+	case errors.As(err, &ade):
+		return WSErrorAccessDenied, "access denied"
 	default:
 		return WSErrorInternal, SanitizeErrorMessage(err)
 	}

@@ -1,6 +1,9 @@
 package domain
 
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // TaskStatus represents the lifecycle state of a task.
 type TaskStatus int
@@ -66,32 +69,45 @@ const (
 	EventTypeAgentStarted
 	EventTypeAgentStopped
 	EventTypeChannelMessage
+	// New event types for Phase 4-6.
+	EventTypeHeartbeatReceived
+	EventTypeContainerStateChanged
+	EventTypeLogEntry
+	EventTypeTaskCancelled
 )
 
 var eventTypeNames = map[EventType]string{
-	EventTypeTaskCreated:    "task_created",
-	EventTypeTaskUpdated:    "task_updated",
-	EventTypeTaskCompleted:  "task_completed",
-	EventTypeTaskFailed:     "task_failed",
-	EventTypeConfigChanged:  "config_changed",
-	EventTypeTeamCreated:    "team_created",
-	EventTypeTeamDeleted:    "team_deleted",
-	EventTypeAgentStarted:   "agent_started",
-	EventTypeAgentStopped:   "agent_stopped",
-	EventTypeChannelMessage: "channel_message",
+	EventTypeTaskCreated:           "task_created",
+	EventTypeTaskUpdated:           "task_updated",
+	EventTypeTaskCompleted:         "task_completed",
+	EventTypeTaskFailed:            "task_failed",
+	EventTypeConfigChanged:         "config_changed",
+	EventTypeTeamCreated:           "team_created",
+	EventTypeTeamDeleted:           "team_deleted",
+	EventTypeAgentStarted:          "agent_started",
+	EventTypeAgentStopped:          "agent_stopped",
+	EventTypeChannelMessage:        "channel_message",
+	EventTypeHeartbeatReceived:     "heartbeat_received",
+	EventTypeContainerStateChanged: "container_state_changed",
+	EventTypeLogEntry:              "log_entry",
+	EventTypeTaskCancelled:         "task_cancelled",
 }
 
 var eventTypeValues = map[string]EventType{
-	"task_created":    EventTypeTaskCreated,
-	"task_updated":    EventTypeTaskUpdated,
-	"task_completed":  EventTypeTaskCompleted,
-	"task_failed":     EventTypeTaskFailed,
-	"config_changed":  EventTypeConfigChanged,
-	"team_created":    EventTypeTeamCreated,
-	"team_deleted":    EventTypeTeamDeleted,
-	"agent_started":   EventTypeAgentStarted,
-	"agent_stopped":   EventTypeAgentStopped,
-	"channel_message": EventTypeChannelMessage,
+	"task_created":            EventTypeTaskCreated,
+	"task_updated":            EventTypeTaskUpdated,
+	"task_completed":          EventTypeTaskCompleted,
+	"task_failed":             EventTypeTaskFailed,
+	"config_changed":          EventTypeConfigChanged,
+	"team_created":            EventTypeTeamCreated,
+	"team_deleted":            EventTypeTeamDeleted,
+	"agent_started":           EventTypeAgentStarted,
+	"agent_stopped":           EventTypeAgentStopped,
+	"channel_message":         EventTypeChannelMessage,
+	"heartbeat_received":      EventTypeHeartbeatReceived,
+	"container_state_changed": EventTypeContainerStateChanged,
+	"log_entry":               EventTypeLogEntry,
+	"task_cancelled":          EventTypeTaskCancelled,
 }
 
 func (e EventType) String() string {
@@ -106,6 +122,29 @@ func (e EventType) Validate() error {
 	if _, ok := eventTypeNames[e]; !ok {
 		return fmt.Errorf("invalid event type: %d", e)
 	}
+	return nil
+}
+
+// MarshalJSON serializes EventType as a JSON string (e.g., "log_entry").
+func (e EventType) MarshalJSON() ([]byte, error) {
+	name, ok := eventTypeNames[e]
+	if !ok {
+		return nil, fmt.Errorf("unknown event type: %d", e)
+	}
+	return []byte(`"` + name + `"`), nil
+}
+
+// UnmarshalJSON deserializes EventType from a JSON string.
+func (e *EventType) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return fmt.Errorf("event type must be a string: %w", err)
+	}
+	v, ok := eventTypeValues[s]
+	if !ok {
+		return fmt.Errorf("invalid event type: %q", s)
+	}
+	*e = v
 	return nil
 }
 

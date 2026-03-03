@@ -81,3 +81,21 @@ func (e *RateLimitedError) Error() string {
 func (e *RateLimitedError) Code() string {
 	return "RATE_LIMITED"
 }
+
+// AccessDeniedError is returned when an operation is not authorized.
+type AccessDeniedError struct {
+	Resource string
+	Message  string
+}
+
+func (e *AccessDeniedError) Error() string {
+	if e.Resource != "" {
+		return fmt.Sprintf("access denied on %s: %s", e.Resource, e.Message)
+	}
+	return fmt.Sprintf("access denied: %s", e.Message)
+}
+
+// Code returns the error code for API/WS protocol mapping.
+func (e *AccessDeniedError) Code() string {
+	return "ACCESS_DENIED"
+}

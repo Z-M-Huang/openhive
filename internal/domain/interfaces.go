@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 // ConfigLoader handles config file I/O and watching.
@@ -35,12 +37,20 @@ type MasterConfig struct {
 
 // SystemConfig holds system-wide settings.
 type SystemConfig struct {
-	ListenAddress string        `json:"listen_address" yaml:"listen_address"`
-	DataDir       string        `json:"data_dir" yaml:"data_dir"`
-	WorkspaceRoot string        `json:"workspace_root" yaml:"workspace_root"`
-	LogLevel      string        `json:"log_level" yaml:"log_level"`
-	LogArchive    ArchiveConfig `json:"log_archive" yaml:"log_archive"`
+	ListenAddress          string         `json:"listen_address" yaml:"listen_address"`
+	DataDir                string         `json:"data_dir" yaml:"data_dir"`
+	WorkspaceRoot          string         `json:"workspace_root" yaml:"workspace_root"`
+	LogLevel               string         `json:"log_level" yaml:"log_level"`
+	LogArchive             ArchiveConfig  `json:"log_archive" yaml:"log_archive"`
+	MaxMessageLength       int            `json:"max_message_length" yaml:"max_message_length"`
+	DefaultIdleTimeout     string         `json:"default_idle_timeout" yaml:"default_idle_timeout"`
+	EventBusWorkers        int            `json:"event_bus_workers" yaml:"event_bus_workers"`
+	PortalWSMaxConnections int            `json:"portal_ws_max_connections" yaml:"portal_ws_max_connections"`
+	MessageArchive         ArchiveConfig  `json:"message_archive" yaml:"message_archive"`
 }
+
+// MessageArchiveConfig is an alias for ArchiveConfig used for message archival settings.
+// Kept as ArchiveConfig for consistency.
 
 // ArchiveConfig holds log archive settings.
 type ArchiveConfig struct {
@@ -70,8 +80,10 @@ type ChannelsConfig struct {
 
 // ChannelConfig holds settings for a single channel.
 type ChannelConfig struct {
-	Enabled bool   `json:"enabled" yaml:"enabled"`
-	Token   string `json:"token,omitempty" yaml:"token,omitempty"`
+	Enabled   bool   `json:"enabled" yaml:"enabled"`
+	Token     string `json:"token,omitempty" yaml:"token,omitempty"`
+	ChannelID string `json:"channel_id,omitempty" yaml:"channel_id,omitempty"`
+	StorePath string `json:"store_path,omitempty" yaml:"store_path,omitempty"`
 }
 
 // OrgChart provides hierarchy query operations on the agent/team structure.
@@ -128,15 +140,21 @@ type ContainerInfo struct {
 // ContainerManager provides higher-level container lifecycle management.
 type ContainerManager interface {
 	EnsureRunning(ctx context.Context, teamSlug string) error
+	ProvisionTeam(ctx context.Context, teamSlug string, secrets map[string]string) error
+	RemoveTeam(ctx context.Context, teamSlug string) error
+	RestartTeam(ctx context.Context, teamSlug string) error
 	StopTeam(ctx context.Context, teamSlug string) error
 	Cleanup(ctx context.Context) error
 	GetStatus(teamSlug string) (ContainerState, error)
+	GetContainerID(teamSlug string) (string, error)
 }
 
 // HeartbeatMonitor tracks container health via heartbeat messages.
 type HeartbeatMonitor interface {
 	ProcessHeartbeat(teamID string, agents []AgentHeartbeatStatus)
 	GetStatus(teamID string) (*HeartbeatStatus, error)
+	GetAllStatuses() map[string]*HeartbeatStatus
+	SetOnUnhealthy(callback func(teamID string))
 	StartMonitoring()
 	StopMonitoring()
 }
@@ -161,6 +179,7 @@ type HeartbeatStatus struct {
 // SDKToolHandler handles SDK custom tool calls forwarded from containers.
 type SDKToolHandler interface {
 	HandleToolCall(callID string, toolName string, args json.RawMessage) (json.RawMessage, error)
+	HandleToolCallWithContext(teamID, callID, toolName, agentAID string, args json.RawMessage) (json.RawMessage, error)
 }
 
 // ChannelAdapter provides a messaging channel interface.
@@ -187,7 +206,9 @@ type MessageRouter interface {
 type EventBus interface {
 	Publish(event Event)
 	Subscribe(eventType EventType, handler func(Event)) string
+	FilteredSubscribe(eventType EventType, filter func(Event) bool, handler func(Event)) string
 	Unsubscribe(id string)
+	Close()
 }
 
 // KeyManager handles API key encryption and decryption.
@@ -216,6 +237,9 @@ type MessageStore interface {
 	GetByChat(ctx context.Context, chatJID string, since time.Time, limit int) ([]*Message, error)
 	GetLatest(ctx context.Context, chatJID string, n int) ([]*Message, error)
 	DeleteByChat(ctx context.Context, chatJID string) error
+	// DeleteBefore removes all messages older than the given cutoff time.
+	// Returns the number of deleted rows.
+	DeleteBefore(ctx context.Context, before time.Time) (int64, error)
 }
 
 // LogStore provides persistence for log entries.
@@ -231,6 +255,9 @@ type LogStore interface {
 type LogQueryOpts struct {
 	Level     *LogLevel  `json:"level,omitempty"`
 	Component string     `json:"component,omitempty"`
+	TeamName  string     `json:"team_name,omitempty"`
+	AgentName string     `json:"agent_name,omitempty"`
+	TaskID    string     `json:"task_id,omitempty"`
 	Since     *time.Time `json:"since,omitempty"`
 	Until     *time.Time `json:"until,omitempty"`
 	Limit     int        `json:"limit,omitempty"`
@@ -243,4 +270,44 @@ type SessionStore interface {
 	Upsert(ctx context.Context, session *ChatSession) error
 	Delete(ctx context.Context, chatJID string) error
 	ListAll(ctx context.Context) ([]*ChatSession, error)
+}
+
+// Transactor provides database transaction support.
+// The concrete implementation is provided by store.DB.
+type Transactor interface {
+	WithTransaction(fn func(tx *gorm.DB) error) error
+}
+
+// TeamProvisioner handles team lifecycle operations.
+type TeamProvisioner interface {
+	CreateTeam(ctx context.Context, slug string, leaderAID string) (*Team, error)
+	DeleteTeam(ctx context.Context, slug string) error
+	GetTeam(ctx context.Context, slug string) (*Team, error)
+	ListTeams(ctx context.Context) ([]*Team, error)
+	UpdateTeam(ctx context.Context, slug string, updates map[string]interface{}) (*Team, error)
+}
+
+// TaskCoordinator handles task dispatch and result tracking.
+type TaskCoordinator interface {
+	DispatchTask(ctx context.Context, task *Task) error
+	HandleTaskResult(ctx context.Context, taskID string, result string, errMsg string) error
+	CancelTask(ctx context.Context, taskID string) error
+	GetTaskStatus(ctx context.Context, taskID string) (*Task, error)
+	CreateSubtasks(ctx context.Context, parentID string, prompts []string, teamSlug string) ([]*Task, error)
+}
+
+// HealthManager handles container health monitoring.
+type HealthManager interface {
+	GetHealthStatus(teamSlug string) (*HeartbeatStatus, error)
+	HandleUnhealthy(ctx context.Context, teamID string) error
+	GetAllStatuses() map[string]*HeartbeatStatus
+}
+
+// GoOrchestrator is the composite orchestrator interface combining all sub-interfaces.
+type GoOrchestrator interface {
+	TeamProvisioner
+	TaskCoordinator
+	HealthManager
+	Start(ctx context.Context) error
+	Stop() error
 }

@@ -70,6 +70,8 @@ func TestPhase2Gate(t *testing.T) {
 		wsHub.HandleUpgrade,
 		nil,
 		nil,
+		nil, // no portal WS
+		nil, // no dbLogger
 	)
 
 	// Verify health endpoint

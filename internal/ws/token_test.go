@@ -2,6 +2,7 @@ package ws
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -154,4 +155,100 @@ func TestTokenManager_ConcurrentAccess(t *testing.T) {
 	for range 20 {
 		<-done
 	}
+}
+
+// TestTokenExpiration verifies that a token is rejected after the TTL has elapsed.
+// To avoid a 5-minute wait, we directly insert an expired entry into the map.
+func TestTokenExpiration_RejectsExpiredToken(t *testing.T) {
+	tm := NewTokenManager()
+	defer tm.Close()
+
+	// Manually insert an expired entry (created 6 minutes ago).
+	expiredToken := "expired-token-deadbeef"
+	tm.mu.Lock()
+	tm.tokens[expiredToken] = tokenEntry{
+		teamID:    "tid-team-001",
+		createdAt: time.Now().Add(-6 * time.Minute),
+	}
+	tm.mu.Unlock()
+
+	// Validate should reject expired token.
+	teamID, ok := tm.Validate(expiredToken)
+	assert.False(t, ok, "expired token should be rejected")
+	assert.Empty(t, teamID)
+
+	// ValidateAndConsume should also reject.
+	teamID, ok = tm.ValidateAndConsume(expiredToken)
+	assert.False(t, ok)
+	assert.Empty(t, teamID)
+}
+
+func TestTokenExpiration_ValidTokenAcceptedWithinTTL(t *testing.T) {
+	tm := NewTokenManager()
+	defer tm.Close()
+
+	token, err := tm.GenerateToken("tid-team-001")
+	require.NoError(t, err)
+
+	// Token was just generated — must be valid.
+	teamID, ok := tm.Validate(token)
+	assert.True(t, ok)
+	assert.Equal(t, "tid-team-001", teamID)
+}
+
+func TestTokenCleanup_RemovesExpiredTokens(t *testing.T) {
+	tm := NewTokenManager()
+	defer tm.Close()
+
+	// Insert one valid and one expired token.
+	validToken := "valid-token-aabbccdd"
+	expiredToken := "expired-token-11223344"
+
+	tm.mu.Lock()
+	tm.tokens[validToken] = tokenEntry{teamID: "tid-valid", createdAt: time.Now()}
+	tm.tokens[expiredToken] = tokenEntry{teamID: "tid-expired", createdAt: time.Now().Add(-10 * time.Minute)}
+	tm.mu.Unlock()
+
+	// Run cleanup directly.
+	tm.cleanupExpiredTokens()
+
+	// Expired token should be gone; valid token should remain.
+	tm.mu.Lock()
+	_, expiredPresent := tm.tokens[expiredToken]
+	_, validPresent := tm.tokens[validToken]
+	tm.mu.Unlock()
+
+	assert.False(t, expiredPresent, "expired token should be removed by cleanup")
+	assert.True(t, validPresent, "valid token should remain after cleanup")
+}
+
+func TestTokenOneTimeUse_CannotReuseConsumedToken(t *testing.T) {
+	tm := NewTokenManager()
+	defer tm.Close()
+
+	token, err := tm.GenerateToken("tid-team-001")
+	require.NoError(t, err)
+
+	// First use: validate
+	teamID, ok := tm.Validate(token)
+	assert.True(t, ok)
+	assert.Equal(t, "tid-team-001", teamID)
+
+	// Consume
+	consumed := tm.Consume(token)
+	assert.True(t, consumed)
+
+	// Second use: must fail
+	_, ok = tm.Validate(token)
+	assert.False(t, ok)
+
+	_, ok = tm.ValidateAndConsume(token)
+	assert.False(t, ok)
+}
+
+func TestTokenManager_Close_StopsCleanup(t *testing.T) {
+	tm := NewTokenManager()
+	// Should not panic when closed twice.
+	tm.Close()
+	tm.Close()
 }

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { WebSocketServer } from 'ws';
 import { WSClient } from './ws-client.js';
-import type { WSMessage } from './types.js';
+import type { WSMessage, ReadyMsg, HeartbeatMsg, JSONValue } from './types.js';
 import { NullLogger } from './logger.js';
 
 let wss: WebSocketServer;
@@ -77,7 +77,7 @@ describe('WSClient', () => {
     await waitFor(() => messages.length > 0);
     expect(messages[0].type).toBe('ready');
     // TypeScript receives camelCase
-    const data = messages[0].data as { teamId: string; agentCount: number };
+    const data = messages[0].data as ReadyMsg;
     expect(data.teamId).toBe('tid-001');
     expect(data.agentCount).toBe(2);
     client.close();
@@ -110,11 +110,10 @@ describe('WSClient', () => {
     await waitFor(() => serverMessages.length > 0);
 
     // Wire format should be snake_case
-    const parsed = JSON.parse(serverMessages[0]) as Record<string, unknown>;
+    const parsed = JSON.parse(serverMessages[0]) as { type: string; data: Record<string, JSONValue> };
     expect(parsed.type).toBe('heartbeat');
-    const data = parsed.data as Record<string, unknown>;
-    expect(data.team_id).toBe('tid-001');
-    expect(data.agents).toEqual([]);
+    expect(parsed.data.team_id).toBe('tid-001');
+    expect(parsed.data.agents).toEqual([]);
     client.close();
   });
 
@@ -125,7 +124,7 @@ describe('WSClient', () => {
       logger: new NullLogger(),
     });
 
-    expect(() => client.send({ type: 'heartbeat', data: {} })).toThrow('not connected');
+    expect(() => client.send({ type: 'heartbeat', data: { teamId: '', agents: [] } })).toThrow('not connected');
   });
 
   it('calls onDisconnect when server closes', async () => {

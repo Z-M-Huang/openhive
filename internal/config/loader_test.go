@@ -3,10 +3,12 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/Z-M-Huang/openhive/internal/crypto"
 	"github.com/Z-M-Huang/openhive/internal/domain"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -55,7 +57,7 @@ providers:
 
 func TestLoader_LoadMaster(t *testing.T) {
 	dir := setupTestDataDir(t)
-	loader, err := NewLoader(dir)
+	loader, err := NewLoader(dir, dir)
 	require.NoError(t, err)
 
 	cfg, err := loader.LoadMaster()
@@ -71,7 +73,7 @@ func TestLoader_LoadMaster(t *testing.T) {
 
 func TestLoader_SaveMaster(t *testing.T) {
 	dir := setupTestDataDir(t)
-	loader, err := NewLoader(dir)
+	loader, err := NewLoader(dir, dir)
 	require.NoError(t, err)
 
 	cfg := DefaultMasterConfig()
@@ -89,7 +91,7 @@ func TestLoader_SaveMaster(t *testing.T) {
 
 func TestLoader_SaveMaster_InvalidConfig(t *testing.T) {
 	dir := setupTestDataDir(t)
-	loader, err := NewLoader(dir)
+	loader, err := NewLoader(dir, dir)
 	require.NoError(t, err)
 
 	cfg := DefaultMasterConfig()
@@ -100,7 +102,7 @@ func TestLoader_SaveMaster_InvalidConfig(t *testing.T) {
 
 func TestLoader_LoadProviders(t *testing.T) {
 	dir := setupTestDataDir(t)
-	loader, err := NewLoader(dir)
+	loader, err := NewLoader(dir, dir)
 	require.NoError(t, err)
 
 	providers, err := loader.LoadProviders()
@@ -112,7 +114,7 @@ func TestLoader_LoadProviders(t *testing.T) {
 
 func TestLoader_SaveProviders(t *testing.T) {
 	dir := setupTestDataDir(t)
-	loader, err := NewLoader(dir)
+	loader, err := NewLoader(dir, dir)
 	require.NoError(t, err)
 
 	providers := map[string]domain.Provider{
@@ -133,7 +135,7 @@ func TestLoader_SaveProviders(t *testing.T) {
 
 func TestLoader_CreateTeamDir(t *testing.T) {
 	dir := setupTestDataDir(t)
-	loader, err := NewLoader(dir)
+	loader, err := NewLoader(dir, dir)
 	require.NoError(t, err)
 
 	err = loader.CreateTeamDir("my-team")
@@ -150,7 +152,7 @@ func TestLoader_CreateTeamDir(t *testing.T) {
 
 func TestLoader_ListTeams(t *testing.T) {
 	dir := setupTestDataDir(t)
-	loader, err := NewLoader(dir)
+	loader, err := NewLoader(dir, dir)
 	require.NoError(t, err)
 
 	// No teams initially
@@ -171,7 +173,7 @@ func TestLoader_ListTeams(t *testing.T) {
 
 func TestLoader_DeleteTeamDir(t *testing.T) {
 	dir := setupTestDataDir(t)
-	loader, err := NewLoader(dir)
+	loader, err := NewLoader(dir, dir)
 	require.NoError(t, err)
 
 	require.NoError(t, loader.CreateTeamDir("to-delete"))
@@ -184,7 +186,7 @@ func TestLoader_DeleteTeamDir(t *testing.T) {
 
 func TestLoader_LoadTeam(t *testing.T) {
 	dir := setupTestDataDir(t)
-	loader, err := NewLoader(dir)
+	loader, err := NewLoader(dir, dir)
 	require.NoError(t, err)
 
 	require.NoError(t, loader.CreateTeamDir("my-team"))
@@ -196,7 +198,7 @@ func TestLoader_LoadTeam(t *testing.T) {
 
 func TestLoader_SaveTeam(t *testing.T) {
 	dir := setupTestDataDir(t)
-	loader, err := NewLoader(dir)
+	loader, err := NewLoader(dir, dir)
 	require.NoError(t, err)
 
 	require.NoError(t, loader.CreateTeamDir("my-team"))
@@ -214,7 +216,7 @@ func TestLoader_SaveTeam(t *testing.T) {
 
 func TestLoader_WatchMaster(t *testing.T) {
 	dir := setupTestDataDir(t)
-	loader, err := NewLoader(dir)
+	loader, err := NewLoader(dir, dir)
 	require.NoError(t, err)
 	defer loader.StopWatching()
 
@@ -246,7 +248,7 @@ assistant:
 
 func TestLoader_ConcurrentReads(t *testing.T) {
 	dir := setupTestDataDir(t)
-	loader, err := NewLoader(dir)
+	loader, err := NewLoader(dir, dir)
 	require.NoError(t, err)
 
 	_, err = loader.LoadMaster()
@@ -267,8 +269,211 @@ func TestLoader_ConcurrentReads(t *testing.T) {
 }
 
 func TestLoader_StopWatching_NilWatcher(t *testing.T) {
-	loader, err := NewLoader(t.TempDir())
+	loader, err := NewLoader(t.TempDir(), "")
 	require.NoError(t, err)
 	// Should not panic
 	loader.StopWatching()
+}
+
+// --- Token encryption tests ---
+
+func setupTestDataDirWithTokens(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	yaml := `
+system:
+  listen_address: "127.0.0.1:8080"
+  data_dir: "` + dir + `"
+  log_level: "info"
+assistant:
+  name: "Test"
+  aid: "aid-test-001"
+  provider: "default"
+  model_tier: "sonnet"
+  max_turns: 50
+  timeout_minutes: 10
+channels:
+  discord:
+    enabled: true
+    token: "plaintext-discord-token"
+  whatsapp:
+    enabled: false
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "openhive.yaml"), []byte(yaml), 0644))
+	return dir
+}
+
+func TestLoader_AutoEncryptPlaintextToken(t *testing.T) {
+	dir := setupTestDataDirWithTokens(t)
+	loader, err := NewLoader(dir, dir)
+	require.NoError(t, err)
+
+	km := crypto.NewManager()
+	require.NoError(t, km.Unlock("test-master-key-16chars"))
+	loader.SetKeyManager(km)
+
+	cfg, err := loader.LoadMaster()
+	require.NoError(t, err)
+
+	// Token should now be encrypted
+	assert.True(t, strings.HasPrefix(cfg.Channels.Discord.Token, "enc:"),
+		"discord token should be encrypted after LoadMaster")
+
+	// File on disk should also be updated with encrypted token
+	reloaded, err := LoadMasterFromFile(filepath.Join(dir, "openhive.yaml"))
+	require.NoError(t, err)
+	assert.True(t, strings.HasPrefix(reloaded.Channels.Discord.Token, "enc:"),
+		"disk token should be encrypted")
+}
+
+func TestLoader_AlreadyEncryptedTokenNotReEncrypted(t *testing.T) {
+	km := crypto.NewManager()
+	require.NoError(t, km.Unlock("test-master-key-16chars"))
+
+	// Pre-encrypt a token
+	encrypted, err := km.Encrypt("plaintext-discord-token")
+	require.NoError(t, err)
+
+	dir := t.TempDir()
+	yaml := `
+system:
+  listen_address: "127.0.0.1:8080"
+  data_dir: "` + dir + `"
+  log_level: "info"
+assistant:
+  name: "Test"
+  aid: "aid-test-001"
+  provider: "default"
+  model_tier: "sonnet"
+  max_turns: 50
+  timeout_minutes: 10
+channels:
+  discord:
+    enabled: true
+    token: "` + encrypted + `"
+  whatsapp:
+    enabled: false
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "openhive.yaml"), []byte(yaml), 0644))
+
+	loader, err := NewLoader(dir, dir)
+	require.NoError(t, err)
+	loader.SetKeyManager(km)
+
+	cfg, err := loader.LoadMaster()
+	require.NoError(t, err)
+
+	// Token should remain the same (not double-encrypted)
+	assert.Equal(t, encrypted, cfg.Channels.Discord.Token)
+}
+
+func TestLoader_DecryptChannelTokens(t *testing.T) {
+	km := crypto.NewManager()
+	require.NoError(t, km.Unlock("test-master-key-16chars"))
+
+	plaintext := "my-discord-bot-token"
+	encrypted, err := km.Encrypt(plaintext)
+	require.NoError(t, err)
+
+	loader, _ := NewLoader(t.TempDir(), "")
+	loader.SetKeyManager(km)
+
+	channels := domain.ChannelsConfig{
+		Discord: domain.ChannelConfig{Token: encrypted},
+	}
+
+	decrypted, err := loader.DecryptChannelTokens(channels)
+	require.NoError(t, err)
+	assert.Equal(t, plaintext, decrypted.Discord.Token)
+}
+
+func TestLoader_DecryptChannelTokens_LockedKeyManager(t *testing.T) {
+	km := crypto.NewManager()
+	// Key manager is locked (never unlocked)
+
+	loader, _ := NewLoader(t.TempDir(), "")
+	loader.SetKeyManager(km)
+
+	channels := domain.ChannelsConfig{
+		Discord: domain.ChannelConfig{Token: "enc:some-encrypted-value"},
+	}
+
+	// Should return tokens as-is when locked
+	result, err := loader.DecryptChannelTokens(channels)
+	require.NoError(t, err)
+	assert.Equal(t, "enc:some-encrypted-value", result.Discord.Token)
+}
+
+func TestLoader_EncryptionLockedSkipsAutoEncrypt(t *testing.T) {
+	dir := setupTestDataDirWithTokens(t)
+	loader, err := NewLoader(dir, dir)
+	require.NoError(t, err)
+
+	km := crypto.NewManager()
+	// Key manager is locked — no auto-encryption should happen
+	loader.SetKeyManager(km)
+
+	cfg, err := loader.LoadMaster()
+	require.NoError(t, err)
+
+	// Token should remain plaintext since key manager is locked
+	assert.Equal(t, "plaintext-discord-token", cfg.Channels.Discord.Token,
+		"token should not be modified when key manager is locked")
+}
+
+func TestLoader_PlaintextTokenWarning_LockedKeyManager(t *testing.T) {
+	// Verify that when the key manager is locked and a plaintext token is present,
+	// the loader still loads successfully (no hard error) and the token is unchanged.
+	dir := setupTestDataDirWithTokens(t)
+	loader, err := NewLoader(dir, dir)
+	require.NoError(t, err)
+
+	km := crypto.NewManager()
+	// Key manager locked
+	loader.SetKeyManager(km)
+
+	cfg, err := loader.LoadMaster()
+	require.NoError(t, err, "loading with a locked key manager should not error")
+
+	// Token is plaintext and unchanged — it is still usable at runtime.
+	assert.Equal(t, "plaintext-discord-token", cfg.Channels.Discord.Token)
+
+	// No enc: prefix on plaintext token — it was not encrypted.
+	assert.False(t, strings.HasPrefix(cfg.Channels.Discord.Token, encTokenPrefix),
+		"plaintext token should remain plaintext when key manager is locked")
+}
+
+func TestLoader_PlaintextTokenWarning_WhatsApp(t *testing.T) {
+	// Verify that a plaintext WhatsApp token with a locked key manager is also handled.
+	dir := t.TempDir()
+	yaml := `
+system:
+  listen_address: "127.0.0.1:8080"
+  data_dir: "` + dir + `"
+  log_level: "info"
+assistant:
+  name: "Test"
+  aid: "aid-test-001"
+  provider: "default"
+  model_tier: "sonnet"
+  max_turns: 50
+  timeout_minutes: 10
+channels:
+  discord:
+    enabled: false
+  whatsapp:
+    enabled: true
+    token: "plaintext-wa-token"
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "openhive.yaml"), []byte(yaml), 0644))
+
+	loader, err := NewLoader(dir, dir)
+	require.NoError(t, err)
+
+	km := crypto.NewManager()
+	loader.SetKeyManager(km)
+
+	cfg, err := loader.LoadMaster()
+	require.NoError(t, err, "loading with locked key manager should not error")
+	assert.Equal(t, "plaintext-wa-token", cfg.Channels.WhatsApp.Token)
 }

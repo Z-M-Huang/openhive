@@ -19,6 +19,7 @@ type Dispatcher struct {
 	logger             *slog.Logger
 	toolHandler        domain.SDKToolHandler
 	taskResultCallback func(context.Context, *ws.TaskResultMsg)
+	heartbeatMonitor   domain.HeartbeatMonitor
 }
 
 // NewDispatcher creates a new task dispatcher.
@@ -39,6 +40,11 @@ func (d *Dispatcher) SetToolHandler(handler domain.SDKToolHandler) {
 // This is used to route results to the message router for outbound delivery.
 func (d *Dispatcher) SetTaskResultCallback(cb func(context.Context, *ws.TaskResultMsg)) {
 	d.taskResultCallback = cb
+}
+
+// SetHeartbeatMonitor sets the heartbeat monitor for processing container health data.
+func (d *Dispatcher) SetHeartbeatMonitor(monitor domain.HeartbeatMonitor) {
+	d.heartbeatMonitor = monitor
 }
 
 // CreateAndDispatch creates a task in the database and dispatches it to the
@@ -184,8 +190,18 @@ func (d *Dispatcher) HandleWSMessage(teamID string, data []byte) {
 		d.logger.Info("container ready", "team_id", ready.TeamID, "agent_count", ready.AgentCount)
 
 	case ws.MsgTypeHeartbeat:
-		// Heartbeat processing will be handled by the HeartbeatMonitor
-		d.logger.Debug("heartbeat received", "team_id", teamID)
+		hb, ok := payload.(*ws.HeartbeatMsg)
+		if !ok {
+			d.logger.Error("invalid heartbeat payload type", "team_id", teamID)
+			return
+		}
+		d.logger.Debug("heartbeat received", "team_id", teamID, "agent_count", len(hb.Agents))
+		if d.heartbeatMonitor != nil {
+			agents := ConvertAgentStatuses(hb.Agents)
+			d.heartbeatMonitor.ProcessHeartbeat(teamID, agents)
+		} else {
+			d.logger.Warn("heartbeat received but no heartbeat monitor configured", "team_id", teamID)
+		}
 
 	case ws.MsgTypeToolCall:
 		toolCall, ok := payload.(*ws.ToolCallMsg)
@@ -203,7 +219,7 @@ func (d *Dispatcher) HandleWSMessage(teamID string, data []byte) {
 			return
 		}
 
-		result, toolErr := d.toolHandler.HandleToolCall(toolCall.CallID, toolCall.ToolName, toolCall.Arguments)
+		result, toolErr := d.toolHandler.HandleToolCallWithContext(teamID, toolCall.CallID, toolCall.ToolName, toolCall.AgentAID, toolCall.Arguments)
 		var resultMsg ws.ToolResultMsg
 		if toolErr != nil {
 			d.logger.Error("tool call failed",

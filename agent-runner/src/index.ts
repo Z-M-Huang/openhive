@@ -77,7 +77,7 @@ function main(): void {
   const sdkQueryFactory: SDKQueryFactory = (_config: AgentInitConfig): SDKQueryFn => {
     return (params) => {
       return query({
-        prompt: params.prompt as string,
+        prompt: params.prompt,
         options: {
           ...params.options,
         },

@@ -58,6 +58,7 @@ type Task struct {
 	ParentID    string     `json:"parent_id,omitempty"`
 	TeamSlug    string     `json:"team_slug"`
 	AgentAID    string     `json:"agent_aid,omitempty"`
+	JID         string     `json:"jid,omitempty"`
 	Status      TaskStatus `json:"status"`
 	Prompt      string     `json:"prompt"`
 	Result      string     `json:"result,omitempty"`
@@ -125,7 +126,11 @@ type MCPServer struct {
 type ContainerConfig struct {
 	MaxMemory      string            `json:"max_memory,omitempty" yaml:"max_memory,omitempty"`
 	MaxOldSpace    int               `json:"max_old_space,omitempty" yaml:"max_old_space,omitempty"`
+	IdleTimeout    string            `json:"idle_timeout,omitempty" yaml:"idle_timeout,omitempty"`
 	Env            map[string]string `json:"env,omitempty" yaml:"env,omitempty"`
+	// Name and ImageName are set at runtime, not in config files.
+	Name           string            `json:"name,omitempty" yaml:"-"`
+	ImageName      string            `json:"image_name,omitempty" yaml:"-"`
 }
 
 // Event represents a system event for the event bus.

@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -71,6 +72,72 @@ func TestParseEventType(t *testing.T) {
 
 	_, err = ParseEventType("invalid")
 	assert.Error(t, err)
+}
+
+func TestEventType_MarshalJSON(t *testing.T) {
+	tests := []struct {
+		et       EventType
+		expected string
+	}{
+		{EventTypeTaskCreated, `"task_created"`},
+		{EventTypeLogEntry, `"log_entry"`},
+		{EventTypeChannelMessage, `"channel_message"`},
+		{EventTypeConfigChanged, `"config_changed"`},
+	}
+	for _, tt := range tests {
+		data, err := json.Marshal(tt.et)
+		require.NoError(t, err)
+		assert.Equal(t, tt.expected, string(data))
+	}
+
+	// Unknown EventType should return an error.
+	_, err := json.Marshal(EventType(999))
+	assert.Error(t, err)
+}
+
+func TestEventType_UnmarshalJSON(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected EventType
+	}{
+		{`"task_created"`, EventTypeTaskCreated},
+		{`"log_entry"`, EventTypeLogEntry},
+		{`"channel_message"`, EventTypeChannelMessage},
+	}
+	for _, tt := range tests {
+		var et EventType
+		err := json.Unmarshal([]byte(tt.input), &et)
+		require.NoError(t, err)
+		assert.Equal(t, tt.expected, et)
+	}
+
+	// Invalid string value.
+	var et EventType
+	err := json.Unmarshal([]byte(`"nonexistent_type"`), &et)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid event type")
+
+	// Non-string JSON (numeric) should fail.
+	err = json.Unmarshal([]byte(`42`), &et)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "string")
+}
+
+func TestEventType_MarshalJSON_Roundtrip(t *testing.T) {
+	// Wrap in a struct to test realistic JSON serialization.
+	type wrapper struct {
+		Type EventType `json:"type"`
+	}
+
+	original := wrapper{Type: EventTypeHeartbeatReceived}
+	data, err := json.Marshal(original)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"heartbeat_received"`)
+
+	var decoded wrapper
+	err = json.Unmarshal(data, &decoded)
+	require.NoError(t, err)
+	assert.Equal(t, original.Type, decoded.Type)
 }
 
 func TestProviderType_String(t *testing.T) {

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/Z-M-Huang/openhive/internal/domain"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -60,7 +61,7 @@ func TestTiming(t *testing.T) {
 func TestStructuredLogging(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
-	handler := StructuredLogging(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := StructuredLogging(logger, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -77,7 +78,7 @@ func TestStructuredLogging(t *testing.T) {
 func TestStructuredLogging_CapturesStatus(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
-	handler := StructuredLogging(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := StructuredLogging(logger, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusCreated)
 	}))
 
@@ -86,6 +87,71 @@ func TestStructuredLogging_CapturesStatus(t *testing.T) {
 	handler.ServeHTTP(w, req)
 
 	assert.Contains(t, buf.String(), "201")
+}
+
+// mockDBLogWriter captures log entries for testing.
+type mockDBLogWriter struct {
+	entries []*domain.LogEntry
+}
+
+func (m *mockDBLogWriter) Log(entry *domain.LogEntry) {
+	m.entries = append(m.entries, entry)
+}
+
+func TestStructuredLogging_WritesToDBLogger(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	mock := &mockDBLogWriter{}
+
+	handler := StructuredLogging(logger, mock)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/health", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	require.Len(t, mock.entries, 1)
+	entry := mock.entries[0]
+	assert.Equal(t, domain.LogLevelInfo, entry.Level)
+	assert.Equal(t, "api", entry.Component)
+	assert.Equal(t, "GET /api/v1/health", entry.Action)
+	assert.Contains(t, entry.Message, "GET")
+	assert.Contains(t, entry.Message, "200")
+}
+
+func TestStructuredLogging_ErrorStatusSetsErrorLevel(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	mock := &mockDBLogWriter{}
+
+	handler := StructuredLogging(logger, mock)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	require.Len(t, mock.entries, 1)
+	assert.Equal(t, domain.LogLevelError, mock.entries[0].Level)
+}
+
+func TestStructuredLogging_ClientErrorSetsWarnLevel(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	mock := &mockDBLogWriter{}
+
+	handler := StructuredLogging(logger, mock)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	require.Len(t, mock.entries, 1)
+	assert.Equal(t, domain.LogLevelWarn, mock.entries[0].Level)
 }
 
 func TestCORS_AllowedOrigin(t *testing.T) {

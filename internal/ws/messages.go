@@ -29,6 +29,7 @@ const (
 	WSErrorConflict         = "CONFLICT"
 	WSErrorEncryptionLocked = "ENCRYPTION_LOCKED"
 	WSErrorRateLimited      = "RATE_LIMITED"
+	WSErrorAccessDenied     = "ACCESS_DENIED"
 	WSErrorInternal         = "INTERNAL_ERROR"
 )
 

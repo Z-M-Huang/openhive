@@ -20,6 +20,53 @@ func (_m *MockHeartbeatMonitor) EXPECT() *MockHeartbeatMonitor_Expecter {
 	return &MockHeartbeatMonitor_Expecter{mock: &_m.Mock}
 }
 
+// GetAllStatuses provides a mock function with no fields
+func (_m *MockHeartbeatMonitor) GetAllStatuses() map[string]*domain.HeartbeatStatus {
+	ret := _m.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetAllStatuses")
+	}
+
+	var r0 map[string]*domain.HeartbeatStatus
+	if rf, ok := ret.Get(0).(func() map[string]*domain.HeartbeatStatus); ok {
+		r0 = rf()
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(map[string]*domain.HeartbeatStatus)
+		}
+	}
+
+	return r0
+}
+
+// MockHeartbeatMonitor_GetAllStatuses_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetAllStatuses'
+type MockHeartbeatMonitor_GetAllStatuses_Call struct {
+	*mock.Call
+}
+
+// GetAllStatuses is a helper method to define mock.On call
+func (_e *MockHeartbeatMonitor_Expecter) GetAllStatuses() *MockHeartbeatMonitor_GetAllStatuses_Call {
+	return &MockHeartbeatMonitor_GetAllStatuses_Call{Call: _e.mock.On("GetAllStatuses")}
+}
+
+func (_c *MockHeartbeatMonitor_GetAllStatuses_Call) Run(run func()) *MockHeartbeatMonitor_GetAllStatuses_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockHeartbeatMonitor_GetAllStatuses_Call) Return(_a0 map[string]*domain.HeartbeatStatus) *MockHeartbeatMonitor_GetAllStatuses_Call {
+	_c.Call.Return(_a0)
+	return _c
+}
+
+func (_c *MockHeartbeatMonitor_GetAllStatuses_Call) RunAndReturn(run func() map[string]*domain.HeartbeatStatus) *MockHeartbeatMonitor_GetAllStatuses_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // GetStatus provides a mock function with given fields: teamID
 func (_m *MockHeartbeatMonitor) GetStatus(teamID string) (*domain.HeartbeatStatus, error) {
 	ret := _m.Called(teamID)
@@ -108,6 +155,39 @@ func (_c *MockHeartbeatMonitor_ProcessHeartbeat_Call) Return() *MockHeartbeatMon
 }
 
 func (_c *MockHeartbeatMonitor_ProcessHeartbeat_Call) RunAndReturn(run func(string, []domain.AgentHeartbeatStatus)) *MockHeartbeatMonitor_ProcessHeartbeat_Call {
+	_c.Run(run)
+	return _c
+}
+
+// SetOnUnhealthy provides a mock function with given fields: callback
+func (_m *MockHeartbeatMonitor) SetOnUnhealthy(callback func(string)) {
+	_m.Called(callback)
+}
+
+// MockHeartbeatMonitor_SetOnUnhealthy_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'SetOnUnhealthy'
+type MockHeartbeatMonitor_SetOnUnhealthy_Call struct {
+	*mock.Call
+}
+
+// SetOnUnhealthy is a helper method to define mock.On call
+//   - callback func(string)
+func (_e *MockHeartbeatMonitor_Expecter) SetOnUnhealthy(callback interface{}) *MockHeartbeatMonitor_SetOnUnhealthy_Call {
+	return &MockHeartbeatMonitor_SetOnUnhealthy_Call{Call: _e.mock.On("SetOnUnhealthy", callback)}
+}
+
+func (_c *MockHeartbeatMonitor_SetOnUnhealthy_Call) Run(run func(callback func(string))) *MockHeartbeatMonitor_SetOnUnhealthy_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(func(string)))
+	})
+	return _c
+}
+
+func (_c *MockHeartbeatMonitor_SetOnUnhealthy_Call) Return() *MockHeartbeatMonitor_SetOnUnhealthy_Call {
+	_c.Call.Return()
+	return _c
+}
+
+func (_c *MockHeartbeatMonitor_SetOnUnhealthy_Call) RunAndReturn(run func(func(string))) *MockHeartbeatMonitor_SetOnUnhealthy_Call {
 	_c.Run(run)
 	return _c
 }

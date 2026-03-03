@@ -115,6 +115,62 @@ func (_c *MockContainerManager_EnsureRunning_Call) RunAndReturn(run func(context
 	return _c
 }
 
+// GetContainerID provides a mock function with given fields: teamSlug
+func (_m *MockContainerManager) GetContainerID(teamSlug string) (string, error) {
+	ret := _m.Called(teamSlug)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetContainerID")
+	}
+
+	var r0 string
+	var r1 error
+	if rf, ok := ret.Get(0).(func(string) (string, error)); ok {
+		return rf(teamSlug)
+	}
+	if rf, ok := ret.Get(0).(func(string) string); ok {
+		r0 = rf(teamSlug)
+	} else {
+		r0 = ret.Get(0).(string)
+	}
+
+	if rf, ok := ret.Get(1).(func(string) error); ok {
+		r1 = rf(teamSlug)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// MockContainerManager_GetContainerID_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetContainerID'
+type MockContainerManager_GetContainerID_Call struct {
+	*mock.Call
+}
+
+// GetContainerID is a helper method to define mock.On call
+//   - teamSlug string
+func (_e *MockContainerManager_Expecter) GetContainerID(teamSlug interface{}) *MockContainerManager_GetContainerID_Call {
+	return &MockContainerManager_GetContainerID_Call{Call: _e.mock.On("GetContainerID", teamSlug)}
+}
+
+func (_c *MockContainerManager_GetContainerID_Call) Run(run func(teamSlug string)) *MockContainerManager_GetContainerID_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(string))
+	})
+	return _c
+}
+
+func (_c *MockContainerManager_GetContainerID_Call) Return(_a0 string, _a1 error) *MockContainerManager_GetContainerID_Call {
+	_c.Call.Return(_a0, _a1)
+	return _c
+}
+
+func (_c *MockContainerManager_GetContainerID_Call) RunAndReturn(run func(string) (string, error)) *MockContainerManager_GetContainerID_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // GetStatus provides a mock function with given fields: teamSlug
 func (_m *MockContainerManager) GetStatus(teamSlug string) (domain.ContainerState, error) {
 	ret := _m.Called(teamSlug)
@@ -167,6 +223,148 @@ func (_c *MockContainerManager_GetStatus_Call) Return(_a0 domain.ContainerState,
 }
 
 func (_c *MockContainerManager_GetStatus_Call) RunAndReturn(run func(string) (domain.ContainerState, error)) *MockContainerManager_GetStatus_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// ProvisionTeam provides a mock function with given fields: ctx, teamSlug, secrets
+func (_m *MockContainerManager) ProvisionTeam(ctx context.Context, teamSlug string, secrets map[string]string) error {
+	ret := _m.Called(ctx, teamSlug, secrets)
+
+	if len(ret) == 0 {
+		panic("no return value specified for ProvisionTeam")
+	}
+
+	var r0 error
+	if rf, ok := ret.Get(0).(func(context.Context, string, map[string]string) error); ok {
+		r0 = rf(ctx, teamSlug, secrets)
+	} else {
+		r0 = ret.Error(0)
+	}
+
+	return r0
+}
+
+// MockContainerManager_ProvisionTeam_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ProvisionTeam'
+type MockContainerManager_ProvisionTeam_Call struct {
+	*mock.Call
+}
+
+// ProvisionTeam is a helper method to define mock.On call
+//   - ctx context.Context
+//   - teamSlug string
+//   - secrets map[string]string
+func (_e *MockContainerManager_Expecter) ProvisionTeam(ctx interface{}, teamSlug interface{}, secrets interface{}) *MockContainerManager_ProvisionTeam_Call {
+	return &MockContainerManager_ProvisionTeam_Call{Call: _e.mock.On("ProvisionTeam", ctx, teamSlug, secrets)}
+}
+
+func (_c *MockContainerManager_ProvisionTeam_Call) Run(run func(ctx context.Context, teamSlug string, secrets map[string]string)) *MockContainerManager_ProvisionTeam_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(context.Context), args[1].(string), args[2].(map[string]string))
+	})
+	return _c
+}
+
+func (_c *MockContainerManager_ProvisionTeam_Call) Return(_a0 error) *MockContainerManager_ProvisionTeam_Call {
+	_c.Call.Return(_a0)
+	return _c
+}
+
+func (_c *MockContainerManager_ProvisionTeam_Call) RunAndReturn(run func(context.Context, string, map[string]string) error) *MockContainerManager_ProvisionTeam_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// RemoveTeam provides a mock function with given fields: ctx, teamSlug
+func (_m *MockContainerManager) RemoveTeam(ctx context.Context, teamSlug string) error {
+	ret := _m.Called(ctx, teamSlug)
+
+	if len(ret) == 0 {
+		panic("no return value specified for RemoveTeam")
+	}
+
+	var r0 error
+	if rf, ok := ret.Get(0).(func(context.Context, string) error); ok {
+		r0 = rf(ctx, teamSlug)
+	} else {
+		r0 = ret.Error(0)
+	}
+
+	return r0
+}
+
+// MockContainerManager_RemoveTeam_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'RemoveTeam'
+type MockContainerManager_RemoveTeam_Call struct {
+	*mock.Call
+}
+
+// RemoveTeam is a helper method to define mock.On call
+//   - ctx context.Context
+//   - teamSlug string
+func (_e *MockContainerManager_Expecter) RemoveTeam(ctx interface{}, teamSlug interface{}) *MockContainerManager_RemoveTeam_Call {
+	return &MockContainerManager_RemoveTeam_Call{Call: _e.mock.On("RemoveTeam", ctx, teamSlug)}
+}
+
+func (_c *MockContainerManager_RemoveTeam_Call) Run(run func(ctx context.Context, teamSlug string)) *MockContainerManager_RemoveTeam_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(context.Context), args[1].(string))
+	})
+	return _c
+}
+
+func (_c *MockContainerManager_RemoveTeam_Call) Return(_a0 error) *MockContainerManager_RemoveTeam_Call {
+	_c.Call.Return(_a0)
+	return _c
+}
+
+func (_c *MockContainerManager_RemoveTeam_Call) RunAndReturn(run func(context.Context, string) error) *MockContainerManager_RemoveTeam_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// RestartTeam provides a mock function with given fields: ctx, teamSlug
+func (_m *MockContainerManager) RestartTeam(ctx context.Context, teamSlug string) error {
+	ret := _m.Called(ctx, teamSlug)
+
+	if len(ret) == 0 {
+		panic("no return value specified for RestartTeam")
+	}
+
+	var r0 error
+	if rf, ok := ret.Get(0).(func(context.Context, string) error); ok {
+		r0 = rf(ctx, teamSlug)
+	} else {
+		r0 = ret.Error(0)
+	}
+
+	return r0
+}
+
+// MockContainerManager_RestartTeam_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'RestartTeam'
+type MockContainerManager_RestartTeam_Call struct {
+	*mock.Call
+}
+
+// RestartTeam is a helper method to define mock.On call
+//   - ctx context.Context
+//   - teamSlug string
+func (_e *MockContainerManager_Expecter) RestartTeam(ctx interface{}, teamSlug interface{}) *MockContainerManager_RestartTeam_Call {
+	return &MockContainerManager_RestartTeam_Call{Call: _e.mock.On("RestartTeam", ctx, teamSlug)}
+}
+
+func (_c *MockContainerManager_RestartTeam_Call) Run(run func(ctx context.Context, teamSlug string)) *MockContainerManager_RestartTeam_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(context.Context), args[1].(string))
+	})
+	return _c
+}
+
+func (_c *MockContainerManager_RestartTeam_Call) Return(_a0 error) *MockContainerManager_RestartTeam_Call {
+	_c.Call.Return(_a0)
+	return _c
+}
+
+func (_c *MockContainerManager_RestartTeam_Call) RunAndReturn(run func(context.Context, string) error) *MockContainerManager_RestartTeam_Call {
 	_c.Call.Return(run)
 	return _c
 }

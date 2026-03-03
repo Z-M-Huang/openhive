@@ -61,6 +61,19 @@ func TestRateLimitedError(t *testing.T) {
 	assert.Equal(t, 30, rle.RetryAfterSeconds)
 }
 
+func TestAccessDeniedError(t *testing.T) {
+	err := &AccessDeniedError{Resource: "tool", Message: "not allowed"}
+	assert.Equal(t, "access denied on tool: not allowed", err.Error())
+	assert.Equal(t, "ACCESS_DENIED", err.Code())
+
+	errNoResource := &AccessDeniedError{Message: "forbidden"}
+	assert.Equal(t, "access denied: forbidden", errNoResource.Error())
+
+	var ade *AccessDeniedError
+	assert.True(t, errors.As(err, &ade))
+	assert.Equal(t, "tool", ade.Resource)
+}
+
 func TestErrorInterfaceCompliance(t *testing.T) {
 	// All error types implement the error interface
 	var _ error = &NotFoundError{}
@@ -68,4 +81,5 @@ func TestErrorInterfaceCompliance(t *testing.T) {
 	var _ error = &ConflictError{}
 	var _ error = &EncryptionLockedError{}
 	var _ error = &RateLimitedError{}
+	var _ error = &AccessDeniedError{}
 }

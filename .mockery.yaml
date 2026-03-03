@@ -22,3 +22,8 @@ packages:
       MessageStore:
       LogStore:
       SessionStore:
+      Transactor:
+      GoOrchestrator:
+      TeamProvisioner:
+      TaskCoordinator:
+      HealthManager:

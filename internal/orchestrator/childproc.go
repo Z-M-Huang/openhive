@@ -6,7 +6,9 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"runtime"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -27,6 +29,11 @@ type ChildProcessConfig struct {
 	Env map[string]string
 	// Dir is the working directory for the child process
 	Dir string
+	// UID is the user ID to run the child process as (Linux only, 0 = inherit).
+	// Used to drop privileges when the parent runs as root.
+	UID uint32
+	// GID is the group ID to run the child process as (Linux only, 0 = inherit).
+	GID uint32
 	// MaxRetries is the maximum number of restart attempts (default 10)
 	MaxRetries int
 	// InitialBackoff is the initial backoff duration (default 1s)
@@ -157,6 +164,18 @@ func (m *ChildProcessManager) startProcess() error {
 			env = append(env, k+"="+v)
 		}
 		m.cmd.Env = env
+	}
+
+	// Drop privileges: run child as specified UID/GID (Linux only).
+	// Required in the master container where Go runs as root but the
+	// Node.js agent-runner must be non-root for Claude Code SDK.
+	if runtime.GOOS == "linux" && m.cfg.UID > 0 {
+		m.cmd.SysProcAttr = &syscall.SysProcAttr{
+			Credential: &syscall.Credential{
+				Uid: m.cfg.UID,
+				Gid: m.cfg.GID,
+			},
+		}
 	}
 
 	if err := m.cmdStart(m.cmd); err != nil {

@@ -18,10 +18,8 @@ cmd/openhive/web_dist/
 # Coverage
 coverage/
 
-# Database
-data/openhive.db*
-data/workspaces/
-data/archives/
+# Runtime state (database, workspaces, archives, docker logs)
+.run/
 
 # IDE
 .idea/
@@ -38,6 +36,9 @@ Thumbs.db
 .env
 .env.local
 
-# Credentials
+# Credentials (real configs contain tokens/keys — only .example files are committed)
+data/openhive.yaml
 data/providers.yaml
-data/providers.yaml
+coverage.out
+docker.log
+*.tsbuildinfo

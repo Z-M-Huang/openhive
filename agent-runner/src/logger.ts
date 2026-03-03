@@ -5,8 +5,11 @@
  * and NullLogger (no-op for tests).
  */
 
+/** Allowed log field value types. Covers all JSON-serializable primitives and nested structures. */
+export type LogFieldValue = string | number | boolean | null | undefined | LogFieldValue[] | { [key: string]: LogFieldValue };
+
 export interface LogFields {
-  [key: string]: unknown;
+  [key: string]: LogFieldValue;
 }
 
 export interface Logger {
@@ -18,9 +21,11 @@ export interface Logger {
 }
 
 export class JSONLogger implements Logger {
+  private readonly component: string;
   private readonly baseFields: LogFields;
 
   constructor(component: string, fields?: LogFields) {
+    this.component = component;
     this.baseFields = { component, ...fields };
   }
 
@@ -42,7 +47,7 @@ export class JSONLogger implements Logger {
 
   child(fields: LogFields): Logger {
     return new JSONLogger(
-      this.baseFields.component as string,
+      this.component,
       { ...this.baseFields, ...fields },
     );
   }

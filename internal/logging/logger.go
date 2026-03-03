@@ -3,6 +3,7 @@ package logging
 import (
 	"context"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/Z-M-Huang/openhive/internal/domain"
@@ -17,13 +18,14 @@ const (
 // DBLogger implements structured logging with dual output (DB + slog stdout),
 // write batching, and sensitive field redaction.
 type DBLogger struct {
-	store    domain.LogStore
-	minLevel domain.LogLevel
-	redactor *Redactor
-	slogger  *slog.Logger
-	batchCh  chan *domain.LogEntry
-	stopCh   chan struct{}
-	doneCh   chan struct{}
+	store        domain.LogStore
+	minLevel     domain.LogLevel
+	redactor     *Redactor
+	slogger      *slog.Logger
+	batchCh      chan *domain.LogEntry
+	stopCh       chan struct{}
+	doneCh       chan struct{}
+	droppedCount atomic.Int64
 }
 
 // NewDBLogger creates a new DBLogger and starts the batch writer goroutine.
@@ -69,6 +71,7 @@ func (l *DBLogger) Log(entry *domain.LogEntry) {
 	select {
 	case l.batchCh <- entry:
 	default:
+		l.droppedCount.Add(1)
 		l.slogger.Warn("log batch channel full, dropping entry",
 			"component", entry.Component,
 			"action", entry.Action,
@@ -169,11 +172,18 @@ func (l *DBLogger) flushBatch(batch []*domain.LogEntry) {
 	defer cancel()
 
 	if err := l.store.Create(ctx, batch); err != nil {
+		l.droppedCount.Add(int64(len(batch)))
 		l.slogger.Error("failed to flush log batch to DB",
 			"error", err,
 			"count", len(batch),
 		)
 	}
+}
+
+// DroppedCount returns the number of log entries that were dropped due to
+// backpressure (channel full) or DB write failures since startup.
+func (l *DBLogger) DroppedCount() int64 {
+	return l.droppedCount.Load()
 }
 
 // Stop signals the batch writer to flush remaining entries and shut down.

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Z-M-Huang/openhive/internal/domain"
 	"github.com/google/uuid"
 )
 
@@ -42,6 +43,27 @@ func SecurityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Content-Security-Policy", "default-src 'self'")
+		next.ServeHTTP(w, r)
+	})
+}
+
+// SecurityHeadersWithWS adds security headers with WebSocket and Tailwind support.
+// Use this variant for servers that serve the React SPA.
+func SecurityHeadersWithWS(next http.Handler) http.Handler {
+	// CSP allows:
+	//   - default-src 'self': only same-origin by default
+	//   - style-src 'self' 'unsafe-inline': Tailwind injects inline styles
+	//   - connect-src 'self' ws: wss:: WebSocket connections for portal event stream
+	//   - img-src 'self' data:: data: URIs for inline icons
+	const csp = "default-src 'self'; " +
+		"style-src 'self' 'unsafe-inline'; " +
+		"connect-src 'self' ws: wss:; " +
+		"img-src 'self' data:"
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Content-Security-Policy", csp)
 		next.ServeHTTP(w, r)
 	})
 }
@@ -92,8 +114,14 @@ func Timing(next http.Handler) http.Handler {
 	})
 }
 
-// StructuredLogging logs requests with slog, including request ID, method, path, status, and duration.
-func StructuredLogging(logger *slog.Logger) func(http.Handler) http.Handler {
+// DBLogWriter can record structured log entries to a persistent store.
+type DBLogWriter interface {
+	Log(entry *domain.LogEntry)
+}
+
+// StructuredLogging logs requests with slog and optionally writes to a DB logger.
+// If dbLogger is nil, only slog output is produced.
+func StructuredLogging(logger *slog.Logger, dbLogger DBLogWriter) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
@@ -109,6 +137,24 @@ func StructuredLogging(logger *slog.Logger) func(http.Handler) http.Handler {
 				"status", rec.statusCode,
 				"duration", duration.String(),
 			)
+
+			if dbLogger != nil {
+				level := domain.LogLevelInfo
+				if rec.statusCode >= 500 {
+					level = domain.LogLevelError
+				} else if rec.statusCode >= 400 {
+					level = domain.LogLevelWarn
+				}
+				dbLogger.Log(&domain.LogEntry{
+					Level:      level,
+					Component:  "api",
+					Action:     r.Method + " " + r.URL.Path,
+					Message:    fmt.Sprintf("%s %s %d", r.Method, r.URL.Path, rec.statusCode),
+					RequestID:  reqID,
+					DurationMs: duration.Milliseconds(),
+					CreatedAt:  start,
+				})
+			}
 		})
 	}
 }

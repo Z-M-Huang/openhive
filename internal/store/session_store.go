@@ -39,6 +39,15 @@ func (s *SessionStoreImpl) Upsert(_ context.Context, session *domain.ChatSession
 	}).Create(model).Error
 }
 
+// UpsertWithTx creates or updates a chat session within the provided transaction.
+func (s *SessionStoreImpl) UpsertWithTx(tx *gorm.DB, session *domain.ChatSession) error {
+	model := ChatSessionModelFromDomain(session)
+	return tx.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "chat_jid"}},
+		DoUpdates: clause.AssignmentColumns([]string{"channel_type", "last_timestamp", "last_agent_timestamp", "session_id", "agent_aid"}),
+	}).Create(model).Error
+}
+
 // Delete removes a chat session.
 func (s *SessionStoreImpl) Delete(_ context.Context, chatJID string) error {
 	return s.db.Writer.Where("chat_jid = ?", chatJID).Delete(&ChatSessionModel{}).Error

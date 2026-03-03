@@ -18,7 +18,7 @@ import (
 
 func TestHealthHandler(t *testing.T) {
 	startTime := time.Now().Add(-5 * time.Minute)
-	handler := HealthHandler(startTime)
+	handler := HealthHandler(startTime, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/health", nil)
 	w := httptest.NewRecorder()
@@ -34,6 +34,33 @@ func TestHealthHandler(t *testing.T) {
 	assert.Equal(t, "ok", data["status"])
 	assert.Equal(t, "0.1.0", data["version"])
 	assert.NotEmpty(t, data["uptime"])
+	// No dbLogger provided — field should be absent
+	_, hasDropped := data["dropped_log_entries"]
+	assert.False(t, hasDropped, "dropped_log_entries should not be present when dbLogger is nil")
+}
+
+// mockDroppedCounter is a test implementation of DroppedLogCounter.
+type mockDroppedCounter struct{ count int64 }
+
+func (m *mockDroppedCounter) DroppedCount() int64 { return m.count }
+
+func TestHealthHandler_WithDroppedLogCounter(t *testing.T) {
+	startTime := time.Now().Add(-1 * time.Minute)
+	counter := &mockDroppedCounter{count: 7}
+	handler := HealthHandler(startTime, counter)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/health", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp successResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	data, ok := resp.Data.(map[string]interface{})
+	require.True(t, ok)
+	// JSON numbers deserialize as float64
+	assert.Equal(t, float64(7), data["dropped_log_entries"])
 }
 
 func TestUnlockHandler_Success(t *testing.T) {

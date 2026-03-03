@@ -8,7 +8,9 @@
  * This module is NOT imported by production code. Only tests use it.
  */
 
-/** Message types emitted by the SDK query() */
+import type { SDKQueryOptions } from './agent-executor.js';
+
+/** Mock-specific message types (more detailed than SDKStreamMessage for test assertions) */
 export interface SDKSystemInitMessage {
   type: 'system';
   subtype: 'init';
@@ -34,20 +36,6 @@ export interface SDKResultMessage {
 
 export type SDKMessage = SDKSystemInitMessage | SDKAssistantMessage | SDKResultMessage;
 
-/** Options matching the real SDK query() options */
-export interface SDKQueryOptions {
-  cwd?: string;
-  resume?: string;
-  resumeSessionAt?: string;
-  systemPrompt?: unknown;
-  allowedTools?: string[];
-  env?: Record<string, string | undefined>;
-  permissionMode?: string;
-  allowDangerouslySkipPermissions?: boolean;
-  mcpServers?: Record<string, unknown>;
-  hooks?: Record<string, unknown>;
-}
-
 /** Configuration for the mock SDK behavior */
 export interface MockSDKConfig {
   /** Response text to return */
@@ -66,7 +54,7 @@ export interface MockSDKConfig {
  * Records the last query() call for test assertions.
  */
 export interface MockSDKCallRecord {
-  prompt: string | AsyncIterable<unknown>;
+  prompt: string;
   options: SDKQueryOptions;
 }
 
@@ -75,13 +63,13 @@ export interface MockSDKCallRecord {
  * Returns the mock function and a record of the last call.
  */
 export function createMockQuery(config: MockSDKConfig = {}): {
-  query: (params: { prompt: string | AsyncIterable<unknown>; options: SDKQueryOptions }) => AsyncIterable<SDKMessage>;
+  query: (params: { prompt: string; options: SDKQueryOptions }) => AsyncIterable<SDKMessage>;
   calls: MockSDKCallRecord[];
 } {
   const calls: MockSDKCallRecord[] = [];
 
   async function* mockQuery(params: {
-    prompt: string | AsyncIterable<unknown>;
+    prompt: string;
     options: SDKQueryOptions;
   }): AsyncIterable<SDKMessage> {
     calls.push({ prompt: params.prompt, options: params.options });

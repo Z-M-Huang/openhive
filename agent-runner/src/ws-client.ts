@@ -8,6 +8,17 @@ import type { WSMessage } from './types.js';
 import { parseMessage, toWireFormat } from './types.js';
 import type { Logger } from './logger.js';
 
+/**
+ * Interface for WebSocket client, used by Orchestrator and tests.
+ * Allows mock injection without casting through `unknown`.
+ */
+export interface IWSClient {
+  connect(): void;
+  send(msg: WSMessage): void;
+  close(): void;
+  isConnected(): boolean;
+}
+
 export interface WSClientOptions {
   url: string;
   onMessage: (msg: WSMessage) => void;

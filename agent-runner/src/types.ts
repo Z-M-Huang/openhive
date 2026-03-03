@@ -16,6 +16,15 @@ export type ProviderType = 'oauth' | 'anthropic_direct';
 /** Task status */
 export type TaskStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
 
+/** JSON-compatible primitive types */
+export type JSONPrimitive = string | number | boolean | null;
+
+/**
+ * Recursive JSON value type. Represents any valid JSON structure.
+ * Used at serialization boundaries and for genuinely unstructured JSON data.
+ */
+export type JSONValue = JSONPrimitive | JSONValue[] | { [key: string]: JSONValue };
+
 // --- WebSocket Message Types ---
 
 /** Go-to-Container message types */
@@ -74,10 +83,23 @@ const CONTAINER_TO_GO_TYPES = new Set<string>([
 
 // --- WebSocket Message Envelope ---
 
+/** Union of all valid WebSocket message data types */
+export type WSMessageData =
+  | ContainerInitMsg
+  | TaskDispatchMsg
+  | ShutdownMsg
+  | ToolResultMsg
+  | ReadyMsg
+  | HeartbeatMsg
+  | TaskResultMsg
+  | EscalationMsg
+  | ToolCallMsg
+  | StatusUpdateMsg;
+
 /** WebSocket message envelope */
 export interface WSMessage {
   type: MessageType;
-  data: unknown;
+  data: WSMessageData;
 }
 
 // --- Go-to-Container Messages ---
@@ -112,7 +134,7 @@ export interface MCPServerConfig {
 /** Container initialization message */
 export interface ContainerInitMsg {
   isMainAssistant: boolean;
-  teamConfig: unknown;
+  teamConfig: Record<string, JSONValue>;
   agents: AgentInitConfig[];
   secrets?: Record<string, string>;
   mcpServers?: MCPServerConfig[];
@@ -137,7 +159,7 @@ export interface ShutdownMsg {
 /** Tool result message */
 export interface ToolResultMsg {
   callId: string;
-  result?: unknown;
+  result?: JSONValue;
   errorCode?: string;
   errorMessage?: string;
 }
@@ -188,7 +210,7 @@ export interface EscalationMsg {
 export interface ToolCallMsg {
   callId: string;
   toolName: string;
-  arguments: unknown;
+  arguments: Record<string, JSONValue>;
   agentAid: string;
 }
 
@@ -221,13 +243,13 @@ function snakeToCamelKey(key: string): string {
  * Recursively convert all object keys using the given converter function.
  * Arrays are traversed, primitives are returned as-is.
  */
-function deepConvertKeys(obj: unknown, converter: (key: string) => string): unknown {
+function deepConvertKeys(obj: JSONValue, converter: (key: string) => string): JSONValue {
   if (Array.isArray(obj)) {
     return obj.map((item) => deepConvertKeys(item, converter));
   }
   if (obj !== null && typeof obj === 'object') {
-    const result: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
+    const result: { [key: string]: JSONValue } = {};
+    for (const [key, value] of Object.entries(obj)) {
       result[converter(key)] = deepConvertKeys(value, converter);
     }
     return result;
@@ -239,16 +261,11 @@ function deepConvertKeys(obj: unknown, converter: (key: string) => string): unkn
  * Convert a camelCase message to snake_case for the wire protocol.
  * Used by ws-client before JSON.stringify.
  */
-export function toWireFormat(msg: WSMessage): unknown {
-  return deepConvertKeys(msg, camelToSnakeKey);
-}
-
-/**
- * Convert a snake_case wire message to camelCase for TypeScript consumption.
- * Used by ws-client after JSON.parse.
- */
-export function fromWireFormat(raw: unknown): WSMessage {
-  return deepConvertKeys(raw, snakeToCamelKey) as WSMessage;
+export function toWireFormat(msg: WSMessage): JSONValue {
+  // WSMessage types are pure data interfaces — always JSON-serializable.
+  // JSON round-trip converts typed interfaces to plain JSONValue at the serialization boundary.
+  const plain: JSONValue = JSON.parse(JSON.stringify(msg));
+  return deepConvertKeys(plain, camelToSnakeKey);
 }
 
 // --- Parse Function ---
@@ -256,22 +273,39 @@ export function fromWireFormat(raw: unknown): WSMessage {
 /**
  * Parses a raw WebSocket message into a typed message.
  * Converts snake_case wire keys to camelCase TypeScript keys.
- * Returns the message type and data, or throws on invalid input.
+ * Validates the message type and constructs a typed WSMessage.
  */
 export function parseMessage(raw: string | Buffer): WSMessage {
   const str = typeof raw === 'string' ? raw : raw.toString('utf-8');
-  const wireEnvelope = JSON.parse(str);
-  const envelope = fromWireFormat(wireEnvelope);
+  const wireEnvelope: JSONValue = JSON.parse(str);
+  const converted = deepConvertKeys(wireEnvelope, snakeToCamelKey);
 
-  if (!envelope.type) {
+  if (typeof converted !== 'object' || converted === null || Array.isArray(converted)) {
+    throw new Error('Expected JSON object for wire message');
+  }
+
+  const msgType = converted.type;
+  if (typeof msgType !== 'string' || !msgType) {
     throw new Error('message type is required');
   }
 
-  if (!GO_TO_CONTAINER_TYPES.has(envelope.type) && !CONTAINER_TO_GO_TYPES.has(envelope.type)) {
-    throw new Error(`unknown message type: ${envelope.type}`);
+  if (!GO_TO_CONTAINER_TYPES.has(msgType) && !CONTAINER_TO_GO_TYPES.has(msgType)) {
+    throw new Error(`unknown message type: ${msgType}`);
   }
 
-  return envelope;
+  const msgData = converted.data;
+  if (typeof msgData !== 'object' || msgData === null || Array.isArray(msgData)) {
+    throw new Error('message data must be an object');
+  }
+
+  // At the deserialization boundary: type string is validated above,
+  // data is a JSON object that structurally matches the corresponding WSMessageData variant.
+  // Assert through 'object' (base type for all non-primitives) to bridge the gap
+  // between index-signatured JSON objects and specific typed interfaces.
+  return {
+    type: msgType as MessageType,
+    data: msgData as object as WSMessageData,
+  };
 }
 
 /**

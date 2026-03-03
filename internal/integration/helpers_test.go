@@ -6,5 +6,5 @@ import (
 )
 
 func newConfigLoader(dataDir string) (domain.ConfigLoader, error) {
-	return config.NewLoader(dataDir)
+	return config.NewLoader(dataDir, dataDir)
 }

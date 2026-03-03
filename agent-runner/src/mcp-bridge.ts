@@ -6,13 +6,13 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import type { WSMessage, ToolCallMsg, ToolResultMsg } from './types.js';
+import type { WSMessage, ToolCallMsg, ToolResultMsg, JSONValue } from './types.js';
 import { MSG_TYPE_TOOL_CALL, MSG_TYPE_TOOL_RESULT } from './types.js';
 import { getToolTimeout } from './sdk-tools.js';
 import type { Logger } from './logger.js';
 
 interface PendingCall {
-  resolve: (result: unknown) => void;
+  resolve: (result: JSONValue | undefined) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
 }
@@ -33,11 +33,11 @@ export class MCPBridge {
    * Forward a tool call to the Go backend via WebSocket.
    * Returns a promise that resolves with the tool result.
    */
-  async callTool(toolName: string, args: unknown): Promise<unknown> {
+  async callTool(toolName: string, args: Record<string, JSONValue>): Promise<JSONValue | undefined> {
     const callId = randomUUID();
     const timeout = getToolTimeout(toolName);
 
-    return new Promise<unknown>((resolve, reject) => {
+    return new Promise<JSONValue | undefined>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(callId);
         reject(new Error(`Tool call ${toolName} timed out after ${timeout}ms`));

@@ -176,3 +176,19 @@ func (h *Hub) SetOnConnect(handler func(teamID string)) {
 	h.onConnect = handler
 }
 
+// Close stops background goroutines (e.g., token cleanup) and closes all connections.
+func (h *Hub) Close() {
+	h.mu.Lock()
+	conns := make([]domain.WSConnection, 0, len(h.connections))
+	for _, conn := range h.connections {
+		conns = append(conns, conn)
+	}
+	h.mu.Unlock()
+
+	for _, conn := range conns {
+		_ = conn.Close()
+	}
+
+	h.tokens.Close()
+}
+

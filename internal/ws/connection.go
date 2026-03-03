@@ -14,7 +14,7 @@ const (
 	writeDeadline  = 10 * time.Second
 	pingInterval   = 30 * time.Second
 	pongDeadline   = 10 * time.Second
-	readWriteBuffer = 4096
+	readWriteBuffer = 16384
 
 	// Rate limiting: 100 messages/second with burst of 100
 	messageRateLimit = 100

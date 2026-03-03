@@ -1,21 +1,21 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Orchestrator } from './orchestrator.js';
 import { createMockQuery } from './mock-sdk.js';
-import type { WSClient } from './ws-client.js';
-import type { WSMessage, ContainerInitMsg, TaskDispatchMsg, ShutdownMsg, ToolResultMsg, AgentInitConfig } from './types.js';
+import type { IWSClient } from './ws-client.js';
+import type { WSMessage, ContainerInitMsg, TaskDispatchMsg, ShutdownMsg, ToolResultMsg, ToolCallMsg, AgentInitConfig } from './types.js';
 import { NullLogger } from './logger.js';
 
 vi.mock('node:fs', () => ({
   mkdirSync: vi.fn(),
 }));
 
-function createMockWSClient(): WSClient {
+function createMockWSClient(): IWSClient {
   return {
     connect: vi.fn(),
     send: vi.fn(),
     close: vi.fn(),
     isConnected: vi.fn(() => true),
-  } as unknown as WSClient;
+  };
 }
 
 function createTestInitMsg(agents: Partial<AgentInitConfig>[] = [
@@ -179,7 +179,7 @@ describe('Orchestrator', () => {
     expect(() => {
       orchestrator.handleMessage({
         type: 'unknown_type' as WSMessage['type'],
-        data: {},
+        data: { teamId: '', agentCount: 0 },
       });
     }).not.toThrow();
   });
@@ -237,7 +237,7 @@ describe('Orchestrator', () => {
       (call: WSMessage[]) => call[0]?.type === 'tool_call',
     );
     expect(toolCallSend).toBeDefined();
-    const callId = (toolCallSend![0].data as { callId: string }).callId;
+    const callId = (toolCallSend![0].data as ToolCallMsg).callId;
 
     // Route the tool result back
     const toolResult: ToolResultMsg = {

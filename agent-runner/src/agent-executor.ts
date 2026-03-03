@@ -19,7 +19,32 @@ import type {
 import { MSG_TYPE_TASK_RESULT } from './types.js';
 import type { MCPBridge } from './mcp-bridge.js';
 import type { WSMessage } from './types.js';
-import type { Logger } from './logger.js';
+import type { McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk';
+import { createToolsMcpServer } from './mcp-server.js';
+import type { LogFields, Logger } from './logger.js';
+
+/** Structured error details logged when a task fails. */
+interface TaskErrorDetails extends LogFields {
+  aid: string;
+  taskId: string;
+  error: string;
+  stack?: string;
+  cause?: string;
+  stderr?: string;
+  stdout?: string;
+  exitCode?: number;
+}
+
+/** Shape of extra properties the Claude Agent SDK may attach to errors. */
+interface SDKError extends Error {
+  stderr?: string;
+  stdout?: string;
+  exitCode?: number;
+}
+
+function isSDKError(err: unknown): err is SDKError {
+  return err instanceof Error;
+}
 
 /**
  * Built-in system prompt for the main assistant.
@@ -61,14 +86,48 @@ const CLAUDE_SESSION_VARS = [
 /** Default idle timeout in minutes */
 const DEFAULT_IDLE_TIMEOUT_MINUTES = 10;
 
+/** Message type emitted by the SDK query() stream */
+export interface SDKStreamMessage {
+  type: string;
+  subtype?: string;
+  result?: string;
+  error?: string;
+  session_id?: string;
+  uuid?: string;
+}
+
+/** System prompt configuration for the SDK */
+export interface SDKSystemPrompt {
+  type: 'preset';
+  preset: 'claude_code';
+  append?: string;
+}
+
+/** Permission mode values matching the Claude Agent SDK. */
+export type PermissionMode = 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'dontAsk';
+
+/** Options passed to the SDK query function */
+export interface SDKQueryOptions {
+  cwd?: string;
+  resume?: string;
+  env?: Record<string, string | undefined>;
+  permissionMode?: PermissionMode;
+  allowDangerouslySkipPermissions?: boolean;
+  systemPrompt?: SDKSystemPrompt;
+  /** Capture stderr from the Claude Code process for debugging. */
+  stderr?: (data: string) => void;
+  /** MCP servers to register with the SDK (e.g., openhive-tools). */
+  mcpServers?: Record<string, McpSdkServerConfigWithInstance>;
+}
+
 /**
  * Interface for the SDK query function, allowing mock injection.
  */
 export interface SDKQueryFn {
   (params: {
-    prompt: string | AsyncIterable<unknown>;
-    options: Record<string, unknown>;
-  }): AsyncIterable<{ type: string; subtype?: string; result?: string; error?: string; session_id?: string; uuid?: string }>;
+    prompt: string;
+    options: SDKQueryOptions;
+  }): AsyncIterable<SDKStreamMessage>;
 }
 
 export interface AgentExecutorOptions {
@@ -163,6 +222,11 @@ export class AgentExecutor {
     const workDir = this.workspaceRoot;
     const env = this.buildEnv();
 
+    // Capture stderr from the Claude Code process for debugging.
+    // The SDK suppresses stderr by default — without this callback
+    // we get "exited with code 1" with zero context.
+    const stderrChunks: string[] = [];
+
     try {
       mkdirSync(workDir, { recursive: true });
       let resultText: string | undefined;
@@ -170,12 +234,19 @@ export class AgentExecutor {
 
       // Build SDK options. Use preset-append form for system prompt so the
       // agent inherits Claude Code's built-in tool capabilities.
-      const sdkOptions: Record<string, unknown> = {
+      // Register OpenHive SDK tools via in-process MCP server (CLAUDE.md Pattern #2).
+      const toolsServer = createToolsMcpServer(this.mcpBridge);
+      const sdkOptions: SDKQueryOptions = {
         cwd: workDir,
         resume: task.sessionId ?? this.sessionId,
         env,
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
+        stderr: (data: string) => {
+          stderrChunks.push(data);
+          this.logger.debug('SDK stderr', { aid: this.config.aid, data });
+        },
+        mcpServers: { [toolsServer.name]: toolsServer },
       };
       if (this.systemPrompt) {
         sdkOptions.systemPrompt = {
@@ -220,9 +291,31 @@ export class AgentExecutor {
 
       this._status = 'idle';
       this.resetIdleTimer();
-    } catch (err) {
+    } catch (err: unknown) {
       const duration = (Date.now() - startTime) * 1_000_000;
       const errorMessage = err instanceof Error ? err.message : String(err);
+
+      // Capture all available error details for debugging.
+      // The SDK may attach stderr, stdout, cause, or exitCode to the error object.
+      const errorDetails: TaskErrorDetails = {
+        aid: this.config.aid,
+        taskId: task.taskId,
+        error: errorMessage,
+      };
+      if (err instanceof Error) {
+        errorDetails.stack = err.stack;
+        if (err.cause) errorDetails.cause = String(err.cause);
+      }
+      // The SDK error may carry extra properties beyond the standard Error interface.
+      if (isSDKError(err)) {
+        if (err.stderr) errorDetails.stderr = err.stderr;
+        if (err.stdout) errorDetails.stdout = err.stdout;
+        if (err.exitCode !== undefined) errorDetails.exitCode = err.exitCode;
+      }
+      // Include captured stderr if the SDK error didn't provide it.
+      if (!errorDetails.stderr && stderrChunks.length > 0) {
+        errorDetails.stderr = stderrChunks.join('');
+      }
 
       const taskResult: TaskResultMsg = {
         taskId: task.taskId,
@@ -238,7 +331,7 @@ export class AgentExecutor {
       });
 
       this._status = 'error';
-      this.logger.error('Agent task failed', { aid: this.config.aid, taskId: task.taskId, error: errorMessage });
+      this.logger.error('Agent task failed', errorDetails);
     }
   }
 

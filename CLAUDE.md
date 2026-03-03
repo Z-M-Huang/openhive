@@ -107,7 +107,7 @@ Full stack: [Wiki — Technology Stack](https://github.com/Z-M-Huang/openhive/wi
 - `testify` for assertions
 
 ### Node.js (agent-runner)
-- TypeScript strict mode
+- TypeScript strict mode — no `any` or `unknown` types. All values must be strongly typed with explicit interfaces. Use type guards and discriminated unions instead of type assertions.
 - bun for package management and scripts
 - vitest for testing
 - Claude Agent SDK (`@anthropic-ai/claude-agent-sdk`)

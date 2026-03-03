@@ -216,6 +216,48 @@ func TestDBLogger_NonBlockingSend(t *testing.T) {
 	}
 }
 
+func TestDBLogger_DroppedCount_InitiallyZero(t *testing.T) {
+	logger, _, _ := setupLoggerTest(t)
+	assert.Equal(t, int64(0), logger.DroppedCount())
+}
+
+func TestDBLogger_DroppedCount_IncreasesWhenChannelFull(t *testing.T) {
+	// Create a logger with a tiny channel to force drops.
+	db, err := store.NewInMemoryDB()
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() })
+
+	logStore := store.NewLogStore(db)
+	var buf bytes.Buffer
+	slogger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	// Directly create a logger with a tiny channel (1 slot) by overriding batchCh.
+	logger := &DBLogger{
+		store:    logStore,
+		minLevel: domain.LogLevelInfo,
+		redactor: NewRedactor(),
+		slogger:  slogger,
+		batchCh:  make(chan *domain.LogEntry, 1), // very small buffer
+		stopCh:   make(chan struct{}),
+		doneCh:   make(chan struct{}),
+	}
+	go logger.batchWriter()
+	t.Cleanup(func() { logger.Stop() })
+
+	// Flood the tiny channel to guarantee drops.
+	for range 100 {
+		logger.Log(&domain.LogEntry{
+			Level:     domain.LogLevelInfo,
+			Component: "test",
+			Action:    "flood",
+			Message:   "overflow",
+		})
+	}
+
+	assert.Greater(t, logger.DroppedCount(), int64(0),
+		"DroppedCount should increase when batch channel is full")
+}
+
 func TestDBLogger_RedactionBeforeDBWrite(t *testing.T) {
 	logger, logStore, _ := setupLoggerTest(t)
 

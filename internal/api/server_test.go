@@ -38,6 +38,8 @@ func newTestServer(t *testing.T) (*Server, *mockkm.MockKeyManager) {
 		nil,
 		nil,
 		[]string{"http://localhost:3000"},
+		nil,
+		nil,
 	)
 	return s, km
 }
@@ -78,7 +80,11 @@ func TestServer_HealthEndpoint_HasSecurityHeaders(t *testing.T) {
 
 	assert.Equal(t, "nosniff", w.Header().Get("X-Content-Type-Options"))
 	assert.Equal(t, "DENY", w.Header().Get("X-Frame-Options"))
-	assert.Equal(t, "default-src 'self'", w.Header().Get("Content-Security-Policy"))
+	// CSP includes WebSocket and Tailwind (unsafe-inline) support
+	csp := w.Header().Get("Content-Security-Policy")
+	assert.Contains(t, csp, "default-src 'self'")
+	assert.Contains(t, csp, "ws:")
+	assert.Contains(t, csp, "unsafe-inline")
 }
 
 func TestServer_UnlockEndpoint_Success(t *testing.T) {
@@ -133,7 +139,7 @@ func TestServer_NotFound_ReturnsJSON(t *testing.T) {
 	// Create server without SPA FS to test JSON 404
 	km := mockkm.NewMockKeyManager(t)
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
-	s := NewServer("127.0.0.1:0", logger, km, nil, nil, nil, nil)
+	s := NewServer("127.0.0.1:0", logger, km, nil, nil, nil, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/nonexistent", nil)
 	w := httptest.NewRecorder()
@@ -179,7 +185,7 @@ func TestServer_CORS_WithDisallowedOrigin(t *testing.T) {
 func TestServer_DefaultBindAddress(t *testing.T) {
 	km := mockkm.NewMockKeyManager(t)
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
-	s := NewServer("127.0.0.1:8080", logger, km, nil, nil, nil, nil)
+	s := NewServer("127.0.0.1:8080", logger, km, nil, nil, nil, nil, nil, nil)
 
 	assert.Equal(t, "127.0.0.1:8080", s.httpServer.Addr)
 }
@@ -194,7 +200,7 @@ func TestServer_GracefulShutdown(t *testing.T) {
 	addr := listener.Addr().String()
 	listener.Close()
 
-	s := NewServer(addr, logger, km, nil, nil, nil, nil)
+	s := NewServer(addr, logger, km, nil, nil, nil, nil, nil, nil)
 
 	// Start server in background
 	errCh := make(chan error, 1)
@@ -232,7 +238,7 @@ func TestServer_WithWSHandler(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}
 
-	s := NewServer("127.0.0.1:0", logger, km, nil, wsHandler, nil, nil)
+	s := NewServer("127.0.0.1:0", logger, km, nil, wsHandler, nil, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/ws/container", nil)
 	w := httptest.NewRecorder()
@@ -251,7 +257,7 @@ func TestServer_WithChatHandler(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	s := NewServer("127.0.0.1:0", logger, km, nil, nil, chatHandler, nil)
+	s := NewServer("127.0.0.1:0", logger, km, nil, nil, chatHandler, nil, nil, nil)
 
 	body := `{"content": "hello"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat", strings.NewReader(body))
@@ -265,7 +271,7 @@ func TestServer_NoChatHandler_Returns404(t *testing.T) {
 	km := mockkm.NewMockKeyManager(t)
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 
-	s := NewServer("127.0.0.1:0", logger, km, nil, nil, nil, nil)
+	s := NewServer("127.0.0.1:0", logger, km, nil, nil, nil, nil, nil, nil)
 
 	body := `{"content": "hello"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat", strings.NewReader(body))

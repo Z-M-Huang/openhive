@@ -21,8 +21,11 @@
     "coverage:agent-runner": "mkdir -p coverage && cd agent-runner && bun run test:coverage",
     "coverage:web": "mkdir -p coverage && cd web && bun run test:coverage",
     "generate": "~/go/bin/mockery",
-    "dev": "mkdir -p cmd/openhive/web_dist && touch cmd/openhive/web_dist/.gitkeep && bun run build:agent-runner && go run ./cmd/openhive",
-    "docker:build": "docker build -t openhive-team -f deployments/Dockerfile.team . && docker build -t openhive -f deployments/Dockerfile .",
+    "docker:build": "cd deployments && docker build -t openhive-team -f Dockerfile.team ..",
+    "docker": "mkdir -p .run && chmod a+w data .run && cd deployments && docker compose up --build -d",
+    "docker:logs": "cd deployments && docker compose logs -f --no-log-prefix -t",
+    "docker:clean": "cd deployments && docker compose down --rmi local --volumes && rm -rf ../.run && mkdir -p ../.run",
+    "docker:stop": "cd deployments && docker compose down",
     "cli": "bun run cli/index.ts",
     "clean": "rm -rf bin/ coverage/ agent-runner/dist/ agent-runner/node_modules/ web/dist/ web/node_modules/"
   }

@@ -131,6 +131,58 @@ func TestLogStore_GetOldest(t *testing.T) {
 	assert.Equal(t, "second", oldest[1].Message)
 }
 
+func TestLogStore_QueryByTeamName(t *testing.T) {
+	store, cleanup := setupLogStore(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	entries := []*domain.LogEntry{
+		{Level: domain.LogLevelInfo, Component: "api", Action: "test", Message: "team-a msg", TeamName: "team-a", CreatedAt: time.Now()},
+		{Level: domain.LogLevelInfo, Component: "api", Action: "test", Message: "team-b msg", TeamName: "team-b", CreatedAt: time.Now()},
+		{Level: domain.LogLevelInfo, Component: "api", Action: "test", Message: "no team", CreatedAt: time.Now()},
+	}
+	require.NoError(t, store.Create(ctx, entries))
+
+	results, err := store.Query(ctx, domain.LogQueryOpts{TeamName: "team-a", Limit: 100})
+	require.NoError(t, err)
+	assert.Len(t, results, 1)
+	assert.Equal(t, "team-a msg", results[0].Message)
+}
+
+func TestLogStore_QueryByAgentName(t *testing.T) {
+	store, cleanup := setupLogStore(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	entries := []*domain.LogEntry{
+		{Level: domain.LogLevelInfo, Component: "ws", Action: "test", Message: "agent-1 msg", AgentName: "researcher", CreatedAt: time.Now()},
+		{Level: domain.LogLevelInfo, Component: "ws", Action: "test", Message: "agent-2 msg", AgentName: "coder", CreatedAt: time.Now()},
+	}
+	require.NoError(t, store.Create(ctx, entries))
+
+	results, err := store.Query(ctx, domain.LogQueryOpts{AgentName: "researcher", Limit: 100})
+	require.NoError(t, err)
+	assert.Len(t, results, 1)
+	assert.Equal(t, "agent-1 msg", results[0].Message)
+}
+
+func TestLogStore_QueryByTaskID(t *testing.T) {
+	store, cleanup := setupLogStore(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	entries := []*domain.LogEntry{
+		{Level: domain.LogLevelInfo, Component: "orch", Action: "dispatch", Message: "task-1 msg", TaskID: "task-001", CreatedAt: time.Now()},
+		{Level: domain.LogLevelInfo, Component: "orch", Action: "dispatch", Message: "task-2 msg", TaskID: "task-002", CreatedAt: time.Now()},
+	}
+	require.NoError(t, store.Create(ctx, entries))
+
+	results, err := store.Query(ctx, domain.LogQueryOpts{TaskID: "task-001", Limit: 100})
+	require.NoError(t, err)
+	assert.Len(t, results, 1)
+	assert.Equal(t, "task-1 msg", results[0].Message)
+}
+
 func TestLogStore_CreateEmpty(t *testing.T) {
 	store, cleanup := setupLogStore(t)
 	defer cleanup()

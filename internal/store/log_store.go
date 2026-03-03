@@ -41,6 +41,15 @@ func (s *LogStoreImpl) Query(_ context.Context, opts domain.LogQueryOpts) ([]*do
 	if opts.Component != "" {
 		query = query.Where("component = ?", opts.Component)
 	}
+	if opts.TeamName != "" {
+		query = query.Where("team_name = ?", opts.TeamName)
+	}
+	if opts.AgentName != "" {
+		query = query.Where("agent_name = ?", opts.AgentName)
+	}
+	if opts.TaskID != "" {
+		query = query.Where("task_id = ?", opts.TaskID)
+	}
 	if opts.Since != nil {
 		query = query.Where("created_at >= ?", *opts.Since)
 	}

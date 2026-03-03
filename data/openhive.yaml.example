@@ -1,3 +1,9 @@
+# OpenHive Master Configuration
+#
+# cp data/openhive.yaml.example data/openhive.yaml
+#
+# openhive.yaml is gitignored — never commit it (contains channel tokens).
+
 system:
   listen_address: "127.0.0.1:8080"
   data_dir: "data"
@@ -20,5 +26,8 @@ assistant:
 channels:
   discord:
     enabled: false
+    token: ""             # Bot token from https://discord.com/developers/applications
+    channel_id: ""        # Right-click channel > Copy Channel ID
   whatsapp:
     enabled: false
+    store_path: "data/whatsapp"  # Session persistence directory (QR auth on first run)

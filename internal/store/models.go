@@ -13,6 +13,7 @@ type TaskModel struct {
 	ParentID    string     `gorm:"column:parent_id;index"`
 	TeamSlug    string     `gorm:"column:team_slug;index"`
 	AgentAID    string     `gorm:"column:agent_aid;index"`
+	JID         string     `gorm:"column:jid;index"`
 	Status      int        `gorm:"column:status;index"`
 	Prompt      string     `gorm:"column:prompt"`
 	Result      string     `gorm:"column:result"`
@@ -32,6 +33,7 @@ func (m *TaskModel) ToDomain() *domain.Task {
 		ParentID:    m.ParentID,
 		TeamSlug:    m.TeamSlug,
 		AgentAID:    m.AgentAID,
+		JID:         m.JID,
 		Status:      domain.TaskStatus(m.Status),
 		Prompt:      m.Prompt,
 		Result:      m.Result,
@@ -49,6 +51,7 @@ func TaskModelFromDomain(t *domain.Task) *TaskModel {
 		ParentID:    t.ParentID,
 		TeamSlug:    t.TeamSlug,
 		AgentAID:    t.AgentAID,
+		JID:         t.JID,
 		Status:      int(t.Status),
 		Prompt:      t.Prompt,
 		Result:      t.Result,

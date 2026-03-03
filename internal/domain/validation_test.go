@@ -73,6 +73,13 @@ func TestValidateSlug(t *testing.T) {
 		{"spaces", "my team", true},
 		{"leading hyphen", "-team", true},
 		{"trailing hyphen", "team-", true},
+		{"path traversal", "../etc", true},
+		{"path traversal embedded", "team..name", true},
+		{"forward slash", "team/name", true},
+		{"backslash", "team\\name", true},
+		{"too long", "a234567890123456789012345678901234567890123456789012345678901234", true},
+		{"exactly 63 chars", "a23456789012345678901234567890123456789012345678901234567890123", false},
+		{"consecutive hyphens", "team--name", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -84,6 +91,44 @@ func TestValidateSlug(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestValidateJID(t *testing.T) {
+	tests := []struct {
+		name    string
+		jid     string
+		wantErr bool
+	}{
+		{"valid discord", "discord:123456789:987654321", false},
+		{"valid whatsapp", "whatsapp:1234567890", false},
+		{"valid api", "api:42", false},
+		{"valid cli", "cli:session-abc", false},
+		{"empty", "", true},
+		{"no prefix", "123456", true},
+		{"unknown prefix", "telegram:123:456", true},
+		{"discord missing user", "discord:123456789", true},
+		{"discord non-numeric channel", "discord:abc:123", true},
+		{"whatsapp with letters", "whatsapp:abc123", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateJID(tt.jid)
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestValidateJIDPrefix(t *testing.T) {
+	assert.NoError(t, ValidateJIDPrefix("discord"))
+	assert.NoError(t, ValidateJIDPrefix("whatsapp"))
+	assert.NoError(t, ValidateJIDPrefix("api"))
+	assert.NoError(t, ValidateJIDPrefix("cli"))
+	assert.Error(t, ValidateJIDPrefix("telegram"))
+	assert.Error(t, ValidateJIDPrefix(""))
 }
 
 func TestValidateTeam(t *testing.T) {
@@ -181,6 +226,22 @@ func TestValidateProvider(t *testing.T) {
 		p := &Provider{Name: "direct", Type: "anthropic_direct"}
 		assert.Error(t, ValidateProvider(p))
 	})
+}
+
+func TestIsReservedSlug(t *testing.T) {
+	reserved := []string{"main", "admin", "system", "root", "openhive"}
+	for _, s := range reserved {
+		t.Run("reserved_"+s, func(t *testing.T) {
+			assert.True(t, IsReservedSlug(s), "expected %q to be reserved", s)
+		})
+	}
+
+	notReserved := []string{"my-team", "alpha", "dev-ops", "openhive-extra"}
+	for _, s := range notReserved {
+		t.Run("not_reserved_"+s, func(t *testing.T) {
+			assert.False(t, IsReservedSlug(s), "expected %q to not be reserved", s)
+		})
+	}
 }
 
 func TestSlugToDisplayName(t *testing.T) {

@@ -55,6 +55,13 @@ func (s *MessageStoreImpl) DeleteByChat(_ context.Context, chatJID string) error
 	return s.db.Writer.Where("chat_jid = ?", chatJID).Delete(&MessageModel{}).Error
 }
 
+// DeleteBefore removes all messages older than the given time.
+// Returns the count of deleted rows.
+func (s *MessageStoreImpl) DeleteBefore(_ context.Context, before time.Time) (int64, error) {
+	result := s.db.Writer.Where("timestamp < ?", before).Delete(&MessageModel{})
+	return result.RowsAffected, result.Error
+}
+
 // GetByID retrieves a single message by ID (used for testing).
 func (s *MessageStoreImpl) GetByID(_ context.Context, id string) (*domain.Message, error) {
 	var model MessageModel

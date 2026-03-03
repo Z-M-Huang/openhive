@@ -1,0 +1,24 @@
+# Git history
+.git
+.gitignore
+
+# Source files not needed in team image (but Go source IS needed for master build)
+web/
+docs/
+agent-runner/src/
+agent-runner/*.ts
+agent-runner/tsconfig.json
+
+# Dev tooling
+.vcp/
+coverage/
+*.out
+*.test
+
+# Node dev artifacts
+node_modules/
+agent-runner/node_modules/
+
+# Documentation
+CONTRIBUTING.md
+CHANGELOG.md

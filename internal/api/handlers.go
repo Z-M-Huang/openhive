@@ -13,15 +13,27 @@ type Deps struct {
 	KeyManager domain.KeyManager
 }
 
+// DroppedLogCounter provides the count of dropped log entries.
+// Implemented by logging.DBLogger.
+type DroppedLogCounter interface {
+	DroppedCount() int64
+}
+
 // HealthHandler returns the health check handler.
-func HealthHandler(startTime time.Time) http.HandlerFunc {
+// If a DroppedLogCounter is provided (non-nil), the dropped_log_entries field
+// is included in the response.
+func HealthHandler(startTime time.Time, dbLogger DroppedLogCounter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		uptime := time.Since(startTime).Truncate(time.Second).String()
-		JSON(w, http.StatusOK, map[string]string{
+		resp := map[string]interface{}{
 			"status":  "ok",
 			"version": "0.1.0",
 			"uptime":  uptime,
-		})
+		}
+		if dbLogger != nil {
+			resp["dropped_log_entries"] = dbLogger.DroppedCount()
+		}
+		JSON(w, http.StatusOK, resp)
 	}
 }
 

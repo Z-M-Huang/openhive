@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   openhive:
     build:
@@ -8,14 +6,29 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ../data:/app/data
+      # Config and team definitions (read-write: API updates config, creates teams)
+      # OPENHIVE_HOST_DIR: absolute host path of the project root.
+      # Required when running from inside a dev container (Docker can't resolve
+      # container-local paths). Defaults to '..' (parent of deployments/) for
+      # direct use from the host terminal.
+      - ${OPENHIVE_HOST_DIR:-..}/data:/app/data
+      # Runtime state: database, workspaces, archives (read-write)
+      - ${OPENHIVE_HOST_DIR:-..}/.run:/app/run
+      # Docker socket for spawning team containers (sibling containers, not DinD)
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
-      - OPENHIVE_SYSTEM_DATA_DIR=/app/data
+      - OPENHIVE_DATA_DIR=/app/data
+      - OPENHIVE_RUN_DIR=/app/run
       - OPENHIVE_SYSTEM_LISTEN_ADDRESS=0.0.0.0:8080
+      # Optional: set to unlock token encryption at startup
+      # - OPENHIVE_MASTER_KEY=<your-master-key>
     networks:
       - openhive-network
 
 networks:
   openhive-network:
     driver: bridge
+    driver_opts:
+      # Disable inter-container communication — containers can only communicate
+      # via the Go backend, not directly with each other.
+      com.docker.network.bridge.enable_icc: "false"

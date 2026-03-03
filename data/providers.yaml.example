@@ -1,18 +1,11 @@
 # OpenHive Provider Configuration
 #
-# Copy this file to providers.yaml and fill in your credentials:
-#   cp data/providers.yaml.example data/providers.yaml
+# cp data/providers.yaml.example data/providers.yaml
 #
-# This file contains sensitive credentials. providers.yaml is gitignored
-# and should never be committed. Treat it like a .env file.
-#
-# Provider types:
-#   oauth            - Claude Code OAuth subscription (sets CLAUDE_CODE_OAUTH_TOKEN)
-#   anthropic_direct - Direct Anthropic API key (sets ANTHROPIC_API_KEY + ANTHROPIC_BASE_URL)
-#
-# Model tiers map skill-level names (haiku/sonnet/opus) to actual model identifiers.
+# providers.yaml is gitignored — never commit it.
 
 providers:
+  # Option A: Claude Code OAuth (run "claude auth login", token is in ~/.claude/.credentials.json)
   default:
     type: oauth
     oauth_token: ""
@@ -21,10 +14,10 @@ providers:
       sonnet: sonnet
       opus: opus
 
-  # Example: direct Anthropic API access
+  # Option B: Direct Anthropic API key (https://console.anthropic.com/settings/keys)
   # direct:
   #   type: anthropic_direct
-  #   api_key: ""
+  #   api_key: ""                          # sk-ant-...
   #   base_url: "https://api.anthropic.com"
   #   models:
   #     haiku: claude-3-haiku-20240307

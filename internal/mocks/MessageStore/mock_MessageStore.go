@@ -70,6 +70,63 @@ func (_c *MockMessageStore_Create_Call) RunAndReturn(run func(context.Context, *
 	return _c
 }
 
+// DeleteBefore provides a mock function with given fields: ctx, before
+func (_m *MockMessageStore) DeleteBefore(ctx context.Context, before time.Time) (int64, error) {
+	ret := _m.Called(ctx, before)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DeleteBefore")
+	}
+
+	var r0 int64
+	var r1 error
+	if rf, ok := ret.Get(0).(func(context.Context, time.Time) (int64, error)); ok {
+		return rf(ctx, before)
+	}
+	if rf, ok := ret.Get(0).(func(context.Context, time.Time) int64); ok {
+		r0 = rf(ctx, before)
+	} else {
+		r0 = ret.Get(0).(int64)
+	}
+
+	if rf, ok := ret.Get(1).(func(context.Context, time.Time) error); ok {
+		r1 = rf(ctx, before)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// MockMessageStore_DeleteBefore_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeleteBefore'
+type MockMessageStore_DeleteBefore_Call struct {
+	*mock.Call
+}
+
+// DeleteBefore is a helper method to define mock.On call
+//   - ctx context.Context
+//   - before time.Time
+func (_e *MockMessageStore_Expecter) DeleteBefore(ctx interface{}, before interface{}) *MockMessageStore_DeleteBefore_Call {
+	return &MockMessageStore_DeleteBefore_Call{Call: _e.mock.On("DeleteBefore", ctx, before)}
+}
+
+func (_c *MockMessageStore_DeleteBefore_Call) Run(run func(ctx context.Context, before time.Time)) *MockMessageStore_DeleteBefore_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(context.Context), args[1].(time.Time))
+	})
+	return _c
+}
+
+func (_c *MockMessageStore_DeleteBefore_Call) Return(_a0 int64, _a1 error) *MockMessageStore_DeleteBefore_Call {
+	_c.Call.Return(_a0, _a1)
+	return _c
+}
+
+func (_c *MockMessageStore_DeleteBefore_Call) RunAndReturn(run func(context.Context, time.Time) (int64, error)) *MockMessageStore_DeleteBefore_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // DeleteByChat provides a mock function with given fields: ctx, chatJID
 func (_m *MockMessageStore) DeleteByChat(ctx context.Context, chatJID string) error {
 	ret := _m.Called(ctx, chatJID)

@@ -210,7 +210,7 @@ func TestCreateTeamDirectory_PathTraversal(t *testing.T) {
 
 func TestLoaderDeleteTeamDir_PathTraversal(t *testing.T) {
 	dir := setupTestDataDir(t)
-	loader, err := NewLoader(dir)
+	loader, err := NewLoader(dir, dir)
 	require.NoError(t, err)
 
 	// Attempt to delete with an invalid slug
@@ -223,7 +223,7 @@ func TestLoaderDeleteTeamDir_PathTraversal(t *testing.T) {
 
 func TestLoaderLoadTeam_PathTraversal(t *testing.T) {
 	dir := setupTestDataDir(t)
-	loader, err := NewLoader(dir)
+	loader, err := NewLoader(dir, dir)
 	require.NoError(t, err)
 
 	_, err = loader.LoadTeam("../escape")
@@ -232,7 +232,7 @@ func TestLoaderLoadTeam_PathTraversal(t *testing.T) {
 
 func TestLoaderSaveTeam_PathTraversal(t *testing.T) {
 	dir := setupTestDataDir(t)
-	loader, err := NewLoader(dir)
+	loader, err := NewLoader(dir, dir)
 	require.NoError(t, err)
 
 	team := &domain.Team{Slug: "test"}

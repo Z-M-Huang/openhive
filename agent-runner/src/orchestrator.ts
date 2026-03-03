@@ -6,6 +6,7 @@
  * via WebSocket, and sends heartbeat every 30s.
  */
 
+import { execFileSync } from 'node:child_process';
 import type {
   WSMessage,
   ContainerInitMsg,
@@ -25,7 +26,7 @@ import {
   MSG_TYPE_HEARTBEAT,
   MSG_TYPE_READY,
 } from './types.js';
-import type { WSClient } from './ws-client.js';
+import type { IWSClient } from './ws-client.js';
 import { MCPBridge } from './mcp-bridge.js';
 import { AgentExecutor, MAIN_ASSISTANT_PROMPT, type SDKQueryFn } from './agent-executor.js';
 import type { Logger } from './logger.js';
@@ -50,7 +51,7 @@ export interface AgentState {
 export type SDKQueryFactory = (config: AgentInitConfig) => SDKQueryFn;
 
 export class Orchestrator {
-  private readonly wsClient: WSClient;
+  private readonly wsClient: IWSClient;
   private readonly logger: Logger;
   private readonly agents = new Map<string, AgentState>();
   private readonly callIdToAid = new Map<string, string>();
@@ -60,7 +61,7 @@ export class Orchestrator {
   private sdkQueryFactory: SDKQueryFactory | null = null;
   private workspaceRoot = '/workspace';
 
-  constructor(wsClient: WSClient, logger: Logger) {
+  constructor(wsClient: IWSClient, logger: Logger) {
     this.wsClient = wsClient;
     this.logger = logger;
   }
@@ -103,6 +104,9 @@ export class Orchestrator {
       this.workspaceRoot = msg.workspaceRoot;
     }
 
+    // Diagnostic: log environment details for debugging CLI/auth issues.
+    this.logEnvironmentDiagnostics(msg);
+
     // Create agent state with MCP bridge and AgentExecutor for each agent.
     // Agents are NOT started yet (on-demand per AC20).
     for (const agentConfig of msg.agents) {
@@ -122,9 +126,9 @@ export class Orchestrator {
       // In tests without a factory, we use a function that throws immediately.
       const queryFn: SDKQueryFn = this.sdkQueryFactory
         ? this.sdkQueryFactory(agentConfig)
-        : (() => {
+        : async function* () {
             throw new Error('No SDK query factory configured');
-          }) as unknown as SDKQueryFn;
+          };
 
       const executor = new AgentExecutor({
         config: agentConfig,
@@ -256,13 +260,14 @@ export class Orchestrator {
   private sendHeartbeat(): void {
     const agents: AgentStatus[] = [];
 
+    // Call process.memoryUsage() once per heartbeat cycle, reuse for all agents.
+    const memUsage = process.memoryUsage();
+
     for (const [aid, state] of this.agents) {
       let elapsed = state.elapsedSeconds;
       if (state.taskStartTime) {
         elapsed = (Date.now() - state.taskStartTime) / 1000;
       }
-
-      const memUsage = process.memoryUsage();
 
       agents.push({
         aid,
@@ -333,5 +338,43 @@ export class Orchestrator {
       agent.mcpBridge.rejectAll('WebSocket disconnected');
     }
     this.callIdToAid.clear();
+  }
+
+  /**
+   * Log environment diagnostics at container init for debugging CLI/auth issues.
+   */
+  private logEnvironmentDiagnostics(msg: ContainerInitMsg): void {
+    let claudePath = 'NOT FOUND';
+    let claudeVersion = 'unknown';
+    try {
+      claudePath = execFileSync('which', ['claude'], { encoding: 'utf8' }).trim();
+    } catch {
+      // binary not on PATH
+    }
+    try {
+      claudeVersion = execFileSync('claude', ['--version'], { encoding: 'utf8' }).trim();
+    } catch {
+      // version check failed
+    }
+
+    // Log agent provider info (without secrets)
+    const agentSummary = msg.agents.map(a => ({
+      aid: a.aid,
+      name: a.name,
+      providerType: a.provider.type,
+      hasOAuthToken: !!a.provider.oauthToken,
+      hasApiKey: !!a.provider.apiKey,
+      modelTier: a.modelTier,
+    }));
+
+    this.logger.info('Container environment diagnostics', {
+      claudePath,
+      claudeVersion,
+      workspaceRoot: msg.workspaceRoot,
+      isMainAssistant: msg.isMainAssistant,
+      agentCount: msg.agents.length,
+      agents: agentSummary,
+      PATH: process.env.PATH,
+    });
   }
 }

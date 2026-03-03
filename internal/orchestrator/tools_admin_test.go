@@ -277,7 +277,10 @@ func TestUnknownTool(t *testing.T) {
 
 	_, err := h.HandleToolCall("call-015", "nonexistent_tool", json.RawMessage(`{}`))
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "unknown tool")
+	// Now returns NotFoundError: "tool not found: nonexistent_tool"
+	var nfe *domain.NotFoundError
+	assert.ErrorAs(t, err, &nfe)
+	assert.Equal(t, "tool", nfe.Resource)
 }
 
 func TestAllAdminToolsRegistered(t *testing.T) {
