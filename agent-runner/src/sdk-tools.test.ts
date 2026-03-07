@@ -5,6 +5,7 @@ import {
   SDK_TOOLS,
   MUTATING_TIMEOUT_MS,
   QUERY_TIMEOUT_MS,
+  LONG_RUNNING_TIMEOUT_MS,
 } from './sdk-tools.js';
 
 describe('SDK Tools', () => {
@@ -39,6 +40,10 @@ describe('SDK Tools', () => {
 
     it('returns 10s for get_system_status', () => {
       expect(getToolTimeout('get_system_status')).toBe(QUERY_TIMEOUT_MS);
+    });
+
+    it('returns 300s for dispatch_task_and_wait', () => {
+      expect(getToolTimeout('dispatch_task_and_wait')).toBe(LONG_RUNNING_TIMEOUT_MS);
     });
 
     it('returns 60s (mutating) for unknown tools', () => {
@@ -83,11 +88,23 @@ describe('SDK Tools', () => {
     });
 
     it('contains all new task management tools', () => {
-      const taskTools = ['dispatch_subtask', 'get_task_status', 'cancel_task', 'list_tasks', 'get_member_status'];
+      const taskTools = ['dispatch_task_and_wait', 'dispatch_subtask', 'get_task_status', 'cancel_task', 'list_tasks', 'get_member_status'];
       for (const toolName of taskTools) {
         const tool = SDK_TOOLS.find((t) => t.name === toolName);
         expect(tool).toBeDefined();
       }
+    });
+
+    it('dispatch_task_and_wait has 300s (long-running) timeout', () => {
+      expect(getToolTimeout('dispatch_task_and_wait')).toBe(LONG_RUNNING_TIMEOUT_MS);
+    });
+
+    it('dispatch_task_and_wait schema requires agent_aid and prompt', () => {
+      const tool = SDK_TOOLS.find((t) => t.name === 'dispatch_task_and_wait');
+      expect(tool).toBeDefined();
+      expect(tool!.parameters.required).toContain('agent_aid');
+      expect(tool!.parameters.required).toContain('prompt');
+      expect(tool!.parameters.properties['timeout_seconds']).toBeDefined();
     });
 
     it('contains skill and coordination tools', () => {
@@ -100,6 +117,17 @@ describe('SDK Tools', () => {
 
     it('create_agent is in MUTATING_TOOLS', () => {
       expect(isMutatingTool('create_agent')).toBe(true);
+    });
+
+    it('create_agent schema uses description instead of role_file', () => {
+      const tool = SDK_TOOLS.find((t) => t.name === 'create_agent');
+      expect(tool).toBeDefined();
+      const props = tool!.parameters.properties;
+      expect(props['description']).toBeDefined();
+      expect(props['description']?.description).toContain('MUST be non-empty');
+      expect(props['role_file']).toBeUndefined();
+      expect(tool!.parameters.required).toContain('description');
+      expect(tool!.parameters.required).not.toContain('role_file');
     });
 
     it('delete_team is in MUTATING_TOOLS', () => {
@@ -127,6 +155,40 @@ describe('SDK Tools', () => {
     it('contains get_config tool', () => {
       const tool = SDK_TOOLS.find((t) => t.name === 'get_config');
       expect(tool).toBeDefined();
+    });
+
+    it('contains create_skill tool', () => {
+      const tool = SDK_TOOLS.find((t) => t.name === 'create_skill');
+      expect(tool).toBeDefined();
+    });
+
+    it('create_skill is in MUTATING_TOOLS', () => {
+      expect(isMutatingTool('create_skill')).toBe(true);
+    });
+
+    it('create_skill has 60s timeout', () => {
+      expect(getToolTimeout('create_skill')).toBe(MUTATING_TIMEOUT_MS);
+    });
+
+    it('create_skill schema requires name, body, and team_slug', () => {
+      const tool = SDK_TOOLS.find((t) => t.name === 'create_skill');
+      expect(tool).toBeDefined();
+      expect(tool!.parameters.required).toContain('name');
+      expect(tool!.parameters.required).toContain('body');
+      expect(tool!.parameters.required).toContain('team_slug');
+    });
+
+    it('create_skill schema has optional description, argument_hint, and allowed_tools', () => {
+      const tool = SDK_TOOLS.find((t) => t.name === 'create_skill');
+      expect(tool).toBeDefined();
+      const props = tool!.parameters.properties;
+      expect(props['description']).toBeDefined();
+      expect(props['argument_hint']).toBeDefined();
+      expect(props['allowed_tools']).toBeDefined();
+      // Optional fields not in required
+      expect(tool!.parameters.required).not.toContain('description');
+      expect(tool!.parameters.required).not.toContain('argument_hint');
+      expect(tool!.parameters.required).not.toContain('allowed_tools');
     });
   });
 });

@@ -4,8 +4,8 @@ import { defineConfig, devices } from '@playwright/test';
  * Playwright configuration for OpenHive web portal E2E tests.
  *
  * Tests run against the Vite dev server which proxies /api/v1 to the
- * Go backend. In CI, set the OPENHIVE_E2E_BASE_URL environment variable
- * to point at the compiled binary.
+ * backend. In CI, set the OPENHIVE_E2E_BASE_URL environment variable
+ * to point at the running server.
  */
 
 const BASE_URL = process.env.OPENHIVE_E2E_BASE_URL ?? 'http://localhost:5173';

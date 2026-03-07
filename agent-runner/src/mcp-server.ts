@@ -5,7 +5,7 @@
  * the Claude Agent SDK as an MCP server process." This module bridges SDK_TOOLS
  * definitions with the Claude Agent SDK's MCP server mechanism.
  *
- * Tool call flow: SDK → MCP Server (in-process) → MCPBridge → WebSocket → Go Backend → Result
+ * Tool call flow: SDK → MCP Server (in-process) → MCPBridge → WebSocket → Backend → Result
  */
 
 import { createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
@@ -50,7 +50,7 @@ export function toZodType(prop: JSONSchemaProperty, isRequired: boolean): z.ZodT
 
 /**
  * Create an in-process MCP server that exposes SDK custom tools.
- * Each tool handler forwards calls via the MCPBridge to the Go backend.
+ * Each tool handler forwards calls via the MCPBridge to the backend.
  *
  * Returns a McpSdkServerConfigWithInstance that can be passed to the SDK's
  * query() options.mcpServers. The SDK manages the server lifecycle.

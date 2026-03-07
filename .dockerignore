@@ -2,23 +2,46 @@
 .git
 .gitignore
 
-# Source files not needed in team image (but Go source IS needed for master build)
-web/
-docs/
+# Web source (keep web/dist/ for master image SPA)
+web/src/
+web/node_modules/
+web/package.json
+web/vite.config.*
+web/tsconfig.*
+web/index.html
+web/postcss.*
+web/tailwind.*
+web/components.json
+web/eslint.*
+
+# Backend dev-only files (src/ and tsconfig needed for Docker build stage)
+backend/vitest.config.*
+backend/eslint.*
+
+# Agent-runner source (keep dist/ and production deps for team image)
 agent-runner/src/
 agent-runner/*.ts
 agent-runner/tsconfig.json
 
+# Documentation
+docs/
+CONTRIBUTING.md
+CHANGELOG.md
+
 # Dev tooling
 .vcp/
+.claude/
 coverage/
 *.out
 *.test
 
+# Go artifacts (removed from project)
+cmd/
+internal/
+go.mod
+go.sum
+bin/
+
 # Node dev artifacts
 node_modules/
 agent-runner/node_modules/
-
-# Documentation
-CONTRIBUTING.md
-CHANGELOG.md

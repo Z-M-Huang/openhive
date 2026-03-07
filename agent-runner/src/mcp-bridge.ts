@@ -30,7 +30,7 @@ export class MCPBridge {
   }
 
   /**
-   * Forward a tool call to the Go backend via WebSocket.
+   * Forward a tool call to the backend via WebSocket.
    * Returns a promise that resolves with the tool result.
    */
   async callTool(toolName: string, args: Record<string, JSONValue>): Promise<JSONValue | undefined> {
@@ -60,7 +60,7 @@ export class MCPBridge {
   }
 
   /**
-   * Handle a tool result message from the Go backend.
+   * Handle a tool result message from the backend.
    */
   handleToolResult(msg: ToolResultMsg): void {
     const pending = this.pending.get(msg.callId);

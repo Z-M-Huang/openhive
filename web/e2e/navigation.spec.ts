@@ -5,7 +5,7 @@ import { test, expect } from '@playwright/test';
  * and that the sidebar reflects the active route.
  *
  * These tests mock all /api/v1/* calls so they work without a running
- * Go backend.
+ * backend.
  */
 
 test.beforeEach(async ({ page }) => {

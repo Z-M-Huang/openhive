@@ -3,7 +3,7 @@
  *
  * Tools are registered with the Claude Agent SDK for internal management
  * operations. Tool calls are intercepted by the MCP bridge and forwarded
- * via WebSocket to the Go backend.
+ * via WebSocket to the backend.
  */
 
 /** JSON Schema property definition for tool parameters */
@@ -29,6 +29,12 @@ export interface ToolDefinition {
 /** Timeout categories for tool operations */
 export const MUTATING_TIMEOUT_MS = 60_000;
 export const QUERY_TIMEOUT_MS = 10_000;
+export const LONG_RUNNING_TIMEOUT_MS = 300_000;
+
+/** Tools that block until a long-running operation completes (5m timeout) */
+const LONG_RUNNING_TOOLS: ReadonlySet<string> = new Set([
+  'dispatch_task_and_wait',
+]);
 
 /** Tools that perform mutating/container operations (60s timeout) */
 const MUTATING_TOOLS = new Set([
@@ -44,7 +50,7 @@ const MUTATING_TOOLS = new Set([
   'disable_channel',
   'escalate',
   'cancel_task',
-  'load_skill',
+  'create_skill',
 ]);
 
 /** Tools that perform read/query operations (10s timeout) */
@@ -58,6 +64,7 @@ const QUERY_TOOLS = new Set([
   'consolidate_results',
   'get_task_status',
   'list_tasks',
+  'load_skill',
 ]);
 
 /**
@@ -65,6 +72,9 @@ const QUERY_TOOLS = new Set([
  * Mutating operations get 60s, query operations get 10s.
  */
 export function getToolTimeout(toolName: string): number {
+  if (LONG_RUNNING_TOOLS.has(toolName)) {
+    return LONG_RUNNING_TIMEOUT_MS;
+  }
   if (MUTATING_TOOLS.has(toolName)) {
     return MUTATING_TIMEOUT_MS;
   }
@@ -150,12 +160,12 @@ export const SDK_TOOLS: ToolDefinition[] = [
   // --- Team management tools ---
   {
     name: 'create_team',
-    description: 'Create a new team of agents (step 2: requires an existing agent AID as leader)',
+    description: 'Create a new team (step 2 after create_agent). The leader agent must already exist. Example: slug="weather", leader_aid="aid-weatherbot-abc12345".',
     parameters: {
       type: 'object',
       properties: {
-        slug: { type: 'string', description: 'Team slug (lowercase, hyphens only)' },
-        leader_aid: { type: 'string', description: 'AID of the team leader (must exist)' },
+        slug: { type: 'string', description: 'Team slug (lowercase, hyphens only, e.g. "weather-team")' },
+        leader_aid: { type: 'string', description: 'AID of the team leader returned by create_agent (e.g. "aid-weatherbot-abc12345")' },
         parent_slug: { type: 'string', description: 'Parent team slug for hierarchy (optional)' },
       },
       required: ['slug', 'leader_aid'],
@@ -163,17 +173,17 @@ export const SDK_TOOLS: ToolDefinition[] = [
   },
   {
     name: 'create_agent',
-    description: 'Create a new agent in a team (step 1 before create_team when adding a team lead)',
+    description: 'Create a new agent in a team. All three required parameters (name, description, team_slug) MUST be provided. Example: name="WeatherBot", description="Fetches weather data for any location", team_slug="master".',
     parameters: {
       type: 'object',
       properties: {
-        name: { type: 'string', description: 'Agent display name' },
-        role_file: { type: 'string', description: 'Path to the role definition file (.role.md)' },
-        team_slug: { type: 'string', description: 'Team slug to add agent to (use "master" for top-level)' },
-        provider: { type: 'string', description: 'Provider preset name (optional)' },
-        model_tier: { type: 'string', description: 'Model tier: haiku, sonnet, or opus (optional)' },
+        name: { type: 'string', description: 'Agent display name (e.g. "WeatherBot")' },
+        description: { type: 'string', description: 'A 1-2 sentence summary of the agent role (e.g. "Fetches current weather conditions for any location worldwide"). MUST be non-empty.' },
+        team_slug: { type: 'string', description: 'Team slug to add agent to. Use "master" for top-level agents.' },
+        provider: { type: 'string', description: 'Provider preset name (optional, omit to use default)' },
+        model_tier: { type: 'string', description: 'Model tier: haiku, sonnet, or opus (optional, defaults to sonnet)' },
       },
-      required: ['name', 'role_file', 'team_slug'],
+      required: ['name', 'description', 'team_slug'],
     },
   },
   {
@@ -242,6 +252,19 @@ export const SDK_TOOLS: ToolDefinition[] = [
         agent_aid: { type: 'string', description: 'Target agent AID' },
         prompt: { type: 'string', description: 'Task prompt' },
         task_id: { type: 'string', description: 'Task identifier (optional, auto-generated if omitted)' },
+      },
+      required: ['agent_aid', 'prompt'],
+    },
+  },
+  {
+    name: 'dispatch_task_and_wait',
+    description: 'Dispatch a task to an agent and block until it completes, fails, or times out. Preferred over dispatch_task for synchronous workflows.',
+    parameters: {
+      type: 'object',
+      properties: {
+        agent_aid: { type: 'string', description: 'Target agent AID' },
+        prompt: { type: 'string', description: 'Task prompt' },
+        timeout_seconds: { type: 'number', description: 'Maximum seconds to wait (default 300, max 600)' },
       },
       required: ['agent_aid', 'prompt'],
     },
@@ -333,14 +356,29 @@ export const SDK_TOOLS: ToolDefinition[] = [
 
   // --- Skill management tools ---
   {
-    name: 'load_skill',
-    description: 'Load a skill definition from a local file and attach it to an agent or team',
+    name: 'create_skill',
+    description: 'Create a new skill definition file in the workspace for a team or the root assistant',
     parameters: {
       type: 'object',
       properties: {
-        skill_name: { type: 'string', description: 'Skill name (matches filename without extension)' },
-        team_slug: { type: 'string', description: 'Team slug whose skills directory contains the skill file' },
-        agent_aid: { type: 'string', description: 'Agent AID to assign the skill to (optional; assigns to team if omitted)' },
+        name: { type: 'string', description: 'Skill name (lowercase, hyphens allowed, no path separators)' },
+        body: { type: 'string', description: 'Skill body / system prompt addition written to SKILL.md' },
+        team_slug: { type: 'string', description: 'Team slug whose workspace to write the skill into (use "master" for root assistant)' },
+        description: { type: 'string', description: 'Human-readable description of what the skill does (optional)' },
+        argument_hint: { type: 'string', description: 'Hint text for the argument the skill expects (optional)' },
+        allowed_tools: { type: 'array', description: 'List of tool names the skill is allowed to invoke (optional)' },
+      },
+      required: ['name', 'body', 'team_slug'],
+    },
+  },
+  {
+    name: 'load_skill',
+    description: 'Load a skill definition by name, returning its description and body content',
+    parameters: {
+      type: 'object',
+      properties: {
+        skill_name: { type: 'string', description: 'Name of the skill to load' },
+        team_slug: { type: 'string', description: 'Team slug whose workspace contains the skill (use "master" for root assistant)' },
       },
       required: ['skill_name', 'team_slug'],
     },

@@ -1,7 +1,7 @@
 /**
  * Container Orchestrator - Manages agent lifecycle and message routing.
  *
- * Receives container_init from Go backend, initializes agent configs,
+ * Receives container_init from backend, initializes agent configs,
  * routes task_dispatch to agents via AgentExecutor, forwards tool calls
  * via WebSocket, and sends heartbeat every 30s.
  */
@@ -13,6 +13,7 @@ import type {
   TaskDispatchMsg,
   ShutdownMsg,
   ToolResultMsg,
+  AgentAddedMsg,
   AgentInitConfig,
   AgentStatusType,
   HeartbeatMsg,
@@ -23,12 +24,14 @@ import {
   MSG_TYPE_TASK_DISPATCH,
   MSG_TYPE_SHUTDOWN,
   MSG_TYPE_TOOL_RESULT,
+  MSG_TYPE_AGENT_ADDED,
   MSG_TYPE_HEARTBEAT,
   MSG_TYPE_READY,
+  MSG_TYPE_AGENT_READY,
 } from './types.js';
 import type { IWSClient } from './ws-client.js';
 import { MCPBridge } from './mcp-bridge.js';
-import { AgentExecutor, MAIN_ASSISTANT_PROMPT, type SDKQueryFn } from './agent-executor.js';
+import { AgentExecutor, selectSystemPrompt, type SDKQueryFn } from './agent-executor.js';
 import type { Logger } from './logger.js';
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
@@ -75,7 +78,7 @@ export class Orchestrator {
   }
 
   /**
-   * Handle an incoming WebSocket message from the Go backend.
+   * Handle an incoming WebSocket message from the backend.
    */
   handleMessage(msg: WSMessage): void {
     switch (msg.type) {
@@ -90,6 +93,9 @@ export class Orchestrator {
         break;
       case MSG_TYPE_TOOL_RESULT:
         this.onToolResult(msg.data as ToolResultMsg);
+        break;
+      case MSG_TYPE_AGENT_ADDED:
+        this.onAgentAdded(msg.data as AgentAddedMsg);
         break;
       default:
         this.logger.warn('Unknown message type', { type: msg.type });
@@ -136,7 +142,7 @@ export class Orchestrator {
         sendMessage: (wsMsg) => this.wsClient.send(wsMsg),
         queryFn,
         workspaceRoot: this.workspaceRoot,
-        systemPrompt: this.mainAssistant ? MAIN_ASSISTANT_PROMPT : undefined,
+        systemPrompt: selectSystemPrompt(agentConfig.role),
         logger: this.logger.child({ aid: agentConfig.aid }),
       });
 
@@ -242,6 +248,70 @@ export class Orchestrator {
       }
     }
     this.logger.warn('No agent found with pending tool call', { callId: msg.callId });
+  }
+
+  /**
+   * Handle agent_added: hot-load a new agent into this running container.
+   * Creates AgentState + AgentExecutor, sends agent_ready ack.
+   */
+  private onAgentAdded(msg: AgentAddedMsg): void {
+    const agentConfig = msg.agent;
+
+    if (this.agents.has(agentConfig.aid)) {
+      this.logger.warn('Agent already exists, ignoring agent_added', { aid: agentConfig.aid });
+      // Still send ack so backend doesn't hang waiting.
+      this.wsClient.send({
+        type: MSG_TYPE_AGENT_READY,
+        data: { aid: agentConfig.aid },
+      });
+      return;
+    }
+
+    // Create MCP bridge for the new agent
+    const mcpBridge = new MCPBridge(agentConfig.aid, (wsMsg) => {
+      if (wsMsg.type === 'tool_call') {
+        const toolCall = wsMsg.data as { callId: string };
+        if (toolCall.callId) {
+          this.callIdToAid.set(toolCall.callId, agentConfig.aid);
+        }
+      }
+      this.wsClient.send(wsMsg);
+    }, this.logger.child({ aid: agentConfig.aid }));
+
+    // Create SDK query function
+    const queryFn: SDKQueryFn = this.sdkQueryFactory
+      ? this.sdkQueryFactory(agentConfig)
+      : async function* () {
+          throw new Error('No SDK query factory configured');
+        };
+
+    const executor = new AgentExecutor({
+      config: agentConfig,
+      mcpBridge,
+      sendMessage: (wsMsg) => this.wsClient.send(wsMsg),
+      queryFn,
+      workspaceRoot: this.workspaceRoot,
+      systemPrompt: selectSystemPrompt(agentConfig.role),
+      logger: this.logger.child({ aid: agentConfig.aid }),
+    });
+
+    this.agents.set(agentConfig.aid, {
+      config: agentConfig,
+      status: 'idle',
+      mcpBridge,
+      executor,
+      idleTimer: null,
+      elapsedSeconds: 0,
+      taskStartTime: null,
+    });
+
+    // Send ack so backend knows the agent is ready to receive tasks
+    this.wsClient.send({
+      type: MSG_TYPE_AGENT_READY,
+      data: { aid: agentConfig.aid },
+    });
+
+    this.logger.info('Agent hot-loaded', { aid: agentConfig.aid, name: agentConfig.name });
   }
 
   private startHeartbeat(): void {

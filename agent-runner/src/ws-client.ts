@@ -1,5 +1,5 @@
 /**
- * WebSocket client for connecting to the Go backend.
+ * WebSocket client for connecting to the backend.
  * Handles connection, reconnection with exponential backoff, and message routing.
  */
 

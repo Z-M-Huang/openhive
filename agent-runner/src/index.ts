@@ -33,7 +33,7 @@ function parseArgs(): CLIArgs {
   const teamId = get('--team=', 'main');
   const token = get('--token=', process.env.WS_TOKEN ?? '');
 
-  // Default WS URL: prefer WS_URL env var (set by Go parent), else compute from mode
+  // Default WS URL: prefer WS_URL env var (set by parent process), else compute from mode
   const envWsUrl = process.env.WS_URL ?? '';
   const defaultWsUrl =
     envWsUrl !== ''
@@ -61,9 +61,9 @@ function main(): void {
   const wsClient = new WSClient({
     url: cliArgs.wsUrl,
     onMessage: (msg) => ref.orchestrator!.handleMessage(msg),
-    onConnect: () => logger.info('Connected to Go backend'),
+    onConnect: () => logger.info('Connected to backend'),
     onDisconnect: () => {
-      logger.info('Disconnected from Go backend');
+      logger.info('Disconnected from backend');
       ref.orchestrator!.onDisconnect();
     },
     logger: logger.child({ component: 'ws-client' }),

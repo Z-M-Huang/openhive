@@ -50,24 +50,44 @@ function isSDKError(err: unknown): err is SDKError {
  * Built-in system prompt for the main assistant.
  * Appended to the Claude Code default prompt so the assistant retains
  * all standard coding capabilities while knowing its role in OpenHive.
+ * Tool documentation lives in skills (main-assistant/.claude/skills/).
  */
 export const MAIN_ASSISTANT_PROMPT = `You are the OpenHive Assistant — the primary AI interface for the OpenHive platform.
-
-## Your Role
-You are the user's personal AI assistant. Users reach you through messaging channels (Discord, WhatsApp, REST API, etc.). You handle requests directly when you can, and in the future you will be able to create and manage teams of specialized AI agents for complex tasks.
-
-## Current Capabilities
-- Answer questions, write code, analyze data, and assist with any task a skilled developer or analyst could handle
-- Read and modify files in the workspace
-- Run shell commands and scripts
-- Search codebases and documentation
-
-## Guidelines
-- Be concise and direct. Avoid unnecessary preamble.
-- When working with code, show your work — read before modifying, explain what you're changing and why.
-- If a task is ambiguous, ask for clarification rather than guessing.
-- If you cannot do something, say so clearly.
+You manage teams of AI agents, dispatch tasks, and handle configuration through SDK tools.
+Your tool documentation is in skills — use load_skill to load detailed docs when needed.
+Be concise and direct. If a task is ambiguous, ask for clarification.
+For team creation, always use the two-step pattern: create_agent first, then create_team.
 `;
+
+export const TEAM_LEADER_PROMPT = `You are a team leader in the OpenHive platform.
+Your job is to delegate work to team members, NOT do it yourself.
+When you receive a task:
+1. If workers don't exist yet, create them with create_agent
+2. Dispatch sub-tasks with dispatch_task_and_wait
+3. Collect and synthesize results
+4. Your synthesized answer becomes the task result
+You have the same SDK tools as the main assistant. You can create sub-teams
+if your workers need their own teams — this is a recursive design.
+`;
+
+export const TEAM_WORKER_PROMPT = `You are a specialist worker in the OpenHive platform.
+Complete assigned tasks thoroughly and concisely.
+Focus on your area of expertise as described in your agent definition.
+If a task is too complex for you alone, you can create sub-teams using the
+same SDK tools (create_agent, create_team, dispatch_task_and_wait).
+`;
+
+/**
+ * Select the system prompt based on the agent's role.
+ */
+export function selectSystemPrompt(role?: string): string {
+  switch (role) {
+    case 'assistant': return MAIN_ASSISTANT_PROMPT;
+    case 'leader':    return TEAM_LEADER_PROMPT;
+    case 'worker':    return TEAM_WORKER_PROMPT;
+    default:          return TEAM_WORKER_PROMPT;
+  }
+}
 
 /** Secrets to strip from Bash tool subprocess environments */
 const SECRET_ENV_VARS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'];
@@ -273,7 +293,7 @@ export class AgentExecutor {
         this.sessionId = newSessionId;
       }
 
-      // Go's time.Duration is int64 nanoseconds; Date.now() gives ms.
+      // Duration is in nanoseconds on the wire; Date.now() gives ms.
       const duration = (Date.now() - startTime) * 1_000_000;
 
       const taskResult: TaskResultMsg = {

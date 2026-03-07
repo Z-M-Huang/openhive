@@ -1,13 +1,13 @@
 /**
  * OpenHive Agent Runner - Shared type definitions
  *
- * These types mirror the Go domain types and WebSocket protocol messages.
+ * These types mirror the backend domain types and WebSocket protocol messages.
  */
 
-/** Agent status types matching Go enum */
+/** Agent status types matching backend enum */
 export type AgentStatusType = 'idle' | 'busy' | 'starting' | 'stopped' | 'error';
 
-/** Model tier types matching Go enum */
+/** Model tier types matching backend enum */
 export type ModelTier = 'haiku' | 'sonnet' | 'opus';
 
 /** Provider type */
@@ -27,19 +27,21 @@ export type JSONValue = JSONPrimitive | JSONValue[] | { [key: string]: JSONValue
 
 // --- WebSocket Message Types ---
 
-/** Go-to-Container message types */
+/** Backend-to-Container message types */
 export const MSG_TYPE_CONTAINER_INIT = 'container_init' as const;
 export const MSG_TYPE_TASK_DISPATCH = 'task_dispatch' as const;
 export const MSG_TYPE_SHUTDOWN = 'shutdown' as const;
 export const MSG_TYPE_TOOL_RESULT = 'tool_result' as const;
+export const MSG_TYPE_AGENT_ADDED = 'agent_added' as const;
 
-/** Container-to-Go message types */
+/** Container-to-Backend message types */
 export const MSG_TYPE_READY = 'ready' as const;
 export const MSG_TYPE_HEARTBEAT = 'heartbeat' as const;
 export const MSG_TYPE_TASK_RESULT = 'task_result' as const;
 export const MSG_TYPE_ESCALATION = 'escalation' as const;
 export const MSG_TYPE_TOOL_CALL = 'tool_call' as const;
 export const MSG_TYPE_STATUS_UPDATE = 'status_update' as const;
+export const MSG_TYPE_AGENT_READY = 'agent_ready' as const;
 
 /** All valid message types */
 export type MessageType =
@@ -47,12 +49,14 @@ export type MessageType =
   | typeof MSG_TYPE_TASK_DISPATCH
   | typeof MSG_TYPE_SHUTDOWN
   | typeof MSG_TYPE_TOOL_RESULT
+  | typeof MSG_TYPE_AGENT_ADDED
   | typeof MSG_TYPE_READY
   | typeof MSG_TYPE_HEARTBEAT
   | typeof MSG_TYPE_TASK_RESULT
   | typeof MSG_TYPE_ESCALATION
   | typeof MSG_TYPE_TOOL_CALL
-  | typeof MSG_TYPE_STATUS_UPDATE;
+  | typeof MSG_TYPE_STATUS_UPDATE
+  | typeof MSG_TYPE_AGENT_READY;
 
 /** WS error code constants */
 export const WS_ERROR_NOT_FOUND = 'NOT_FOUND' as const;
@@ -70,6 +74,7 @@ const GO_TO_CONTAINER_TYPES = new Set<string>([
   MSG_TYPE_TASK_DISPATCH,
   MSG_TYPE_SHUTDOWN,
   MSG_TYPE_TOOL_RESULT,
+  MSG_TYPE_AGENT_ADDED,
 ]);
 
 const CONTAINER_TO_GO_TYPES = new Set<string>([
@@ -79,6 +84,7 @@ const CONTAINER_TO_GO_TYPES = new Set<string>([
   MSG_TYPE_ESCALATION,
   MSG_TYPE_TOOL_CALL,
   MSG_TYPE_STATUS_UPDATE,
+  MSG_TYPE_AGENT_READY,
 ]);
 
 // --- WebSocket Message Envelope ---
@@ -89,12 +95,14 @@ export type WSMessageData =
   | TaskDispatchMsg
   | ShutdownMsg
   | ToolResultMsg
+  | AgentAddedMsg
   | ReadyMsg
   | HeartbeatMsg
   | TaskResultMsg
   | EscalationMsg
   | ToolCallMsg
-  | StatusUpdateMsg;
+  | StatusUpdateMsg
+  | AgentReadyMsg;
 
 /** WebSocket message envelope */
 export interface WSMessage {
@@ -102,17 +110,20 @@ export interface WSMessage {
   data: WSMessageData;
 }
 
-// --- Go-to-Container Messages ---
+// --- Backend-to-Container Messages ---
+
+/** Agent role within a container (determines system prompt). */
+export type AgentRole = 'assistant' | 'leader' | 'worker';
 
 /** Agent configuration received during container init */
 export interface AgentInitConfig {
   aid: string;
   name: string;
-  roleFile?: string;
-  promptFile?: string;
   provider: ProviderConfig;
   modelTier: ModelTier;
   skills?: string[];
+  role?: AgentRole;
+  leadsTeam?: string;
 }
 
 /** Flattened provider configuration */
@@ -164,7 +175,7 @@ export interface ToolResultMsg {
   errorMessage?: string;
 }
 
-// --- Container-to-Go Messages ---
+// --- Container-to-Backend Messages ---
 
 /** Ready message */
 export interface ReadyMsg {
@@ -187,7 +198,7 @@ export interface HeartbeatMsg {
   agents: AgentStatus[];
 }
 
-/** Task result message (container-to-Go) */
+/** Task result message (container-to-backend) */
 export interface TaskResultMsg {
   taskId: string;
   agentAid: string;
@@ -219,6 +230,16 @@ export interface StatusUpdateMsg {
   agentAid: string;
   status: AgentStatusType;
   detail?: string;
+}
+
+/** Agent added message (backend-to-container: hot-reload a new agent) */
+export interface AgentAddedMsg {
+  agent: AgentInitConfig;
+}
+
+/** Agent ready message (container-to-backend: ack that agent_added was processed) */
+export interface AgentReadyMsg {
+  aid: string;
 }
 
 // --- Wire Format Conversion ---

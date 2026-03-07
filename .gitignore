@@ -36,6 +36,9 @@ Thumbs.db
 .env
 .env.local
 
+# Docker compose local override (contains host-specific volume paths)
+deployments/docker-compose.override.yml
+
 # Credentials (real configs contain tokens/keys — only .example files are committed)
 data/openhive.yaml
 data/providers.yaml

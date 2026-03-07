@@ -499,6 +499,20 @@ describe('AgentExecutor', () => {
       expect(MAIN_ASSISTANT_PROMPT).toBeDefined();
       expect(MAIN_ASSISTANT_PROMPT).toContain('OpenHive');
     });
+
+    it('MAIN_ASSISTANT_PROMPT includes two-step team creation reference', () => {
+      expect(MAIN_ASSISTANT_PROMPT).toContain('create_agent');
+      expect(MAIN_ASSISTANT_PROMPT).toContain('create_team');
+    });
+
+    it('MAIN_ASSISTANT_PROMPT references skills for tool docs', () => {
+      expect(MAIN_ASSISTANT_PROMPT).toContain('load_skill');
+      expect(MAIN_ASSISTANT_PROMPT).toContain('skills');
+    });
+
+    it('MAIN_ASSISTANT_PROMPT is concise (under 500 chars)', () => {
+      expect(MAIN_ASSISTANT_PROMPT.length).toBeLessThan(500);
+    });
   });
 
   describe('Bash Sanitization', () => {
