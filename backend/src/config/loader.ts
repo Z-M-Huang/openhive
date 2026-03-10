@@ -45,8 +45,8 @@ const DEFAULT_DEBOUNCE_MS = 200;
  *
  * Constructor parameters:
  *   - dataDir:  path to the global config directory (openhive.yaml, providers.yaml)
- *   - teamsDir: path to the directory containing the teams/ subdirectory.
- *               Defaults to dataDir if not provided.
+ *   - teamsDir: path to the workspace root containing teams/ subdirectory
+ *               (e.g. .run/workspace/). Defaults to dataDir if not provided.
  */
 export class ConfigLoaderImpl implements ConfigLoader {
   private readonly dataDir: string;
@@ -269,14 +269,15 @@ export class ConfigLoaderImpl implements ConfigLoader {
   // -------------------------------------------------------------------------
 
   /**
-   * Creates the config directory for a new team under teamsDir.
+   * Creates the team directory and minimal team.yaml under teamsDir
+   * (the workspace root).
    *
    * Delegates to createTeamDirectory which creates:
    *   <teamsDir>/teams/<slug>/
    *   <teamsDir>/teams/<slug>/team.yaml  (minimal, if absent)
    *
    * Workspace files (CLAUDE.md, .claude/agents/, .claude/skills/) are
-   * created separately by scaffoldTeamWorkspace() in .run/teams/<slug>/.
+   * created separately by scaffoldTeamWorkspace().
    */
   async createTeamDir(slug: string): Promise<void> {
     createTeamDirectory(this.teamsDir, slug);
@@ -548,7 +549,8 @@ export class ConfigLoaderImpl implements ConfigLoader {
  *
  *   - dataDir:  global config files (openhive.yaml, providers.yaml).
  *               Defaults to "data" if empty.
- *   - teamsDir: team definitions (teams/<slug>/). Defaults to dataDir if empty.
+ *   - teamsDir: workspace root containing teams/ (e.g. .run/workspace/).
+ *              Defaults to dataDir if empty.
  */
 export function newConfigLoader(dataDir: string = 'data', teamsDir: string = ''): ConfigLoaderImpl {
   return new ConfigLoaderImpl(dataDir, teamsDir);

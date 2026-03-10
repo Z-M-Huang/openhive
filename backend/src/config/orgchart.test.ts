@@ -27,7 +27,7 @@ function makeMaster(overrides: Partial<MasterConfig> = {}): MasterConfig {
     system: {
       listen_address: ':8080',
       data_dir: 'data',
-      workspace_root: '.run/teams',
+      workspace_root: '.run/workspace',
       log_level: 'info',
       log_archive: { enabled: false, max_entries: 0, keep_copies: 0, archive_dir: '' },
       max_message_length: 4096,

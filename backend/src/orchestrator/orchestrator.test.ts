@@ -1,5 +1,5 @@
 /**
- * Tests for Orchestrator (GoOrchestrator implementation).
+ * Tests for OrchestratorImpl (Orchestrator interface implementation).
  *
  * Tests cover:
  *   - CreateTeam: validation, TID generation, config creation, container provisioning, events
@@ -20,11 +20,14 @@ import { tmpdir } from 'node:os';
 import { resolve as resolvePath, join as joinPath, sep } from 'node:path';
 import { mkdirSync, writeFileSync, readFileSync, existsSync, symlinkSync, lstatSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
-import { Orchestrator, newOrchestrator, copyFileWithContainment, validateWorkspacePath, scaffoldTeamWorkspace } from './orchestrator.js';
+import { OrchestratorImpl, newOrchestrator, copyFileWithContainment, validateWorkspacePath, scaffoldTeamWorkspace } from './orchestrator.js';
 import type { OrchestratorDeps, OrchestratorLogger } from './orchestrator.js';
 import type { TaskStore, WSHub, ContainerManager, OrgChart, ConfigLoader, HeartbeatMonitor, EventBus } from '../domain/interfaces.js';
 import type { Task, Team, Agent, MasterConfig, HeartbeatStatus } from '../domain/types.js';
 import { NotFoundError, ValidationError, ConflictError } from '../domain/errors.js';
+import type { Dispatcher } from './dispatch.js';
+import type { EscalationRouter } from './escalation-router.js';
+import type { EscalationMsg } from '../ws/messages.js';
 
 // ---------------------------------------------------------------------------
 // Logger stub
@@ -52,6 +55,11 @@ function makeTaskStore(overrides?: Partial<TaskStore>): TaskStore {
     listByTeam: vi.fn().mockResolvedValue([]),
     listByStatus: vi.fn().mockResolvedValue([]),
     getSubtree: vi.fn().mockResolvedValue([]),
+    getDependents: vi.fn().mockResolvedValue([]),
+    getBlockedBy: vi.fn().mockResolvedValue([]),
+    unblockTask: vi.fn().mockResolvedValue(true),
+    retryTask: vi.fn().mockResolvedValue(false),
+    validateDependencies: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
 }
@@ -67,6 +75,7 @@ function makeWSHub(overrides?: Partial<WSHub>): WSHub {
     getConnectedTeams: vi.fn().mockReturnValue([]),
     setOnMessage: vi.fn(),
     setOnConnect: vi.fn(),
+    close: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
 }
@@ -123,7 +132,7 @@ const SAMPLE_MASTER: MasterConfig = {
   system: {
     listen_address: ':8080',
     data_dir: './data',
-    workspace_root: './teams',
+    workspace_root: './workspace',
     log_level: 'info',
     log_archive: { enabled: false, max_entries: 1000, keep_copies: 3, archive_dir: './archive' },
     max_message_length: 4096,
@@ -181,6 +190,7 @@ function makeHeartbeatMonitor(overrides?: Partial<HeartbeatMonitor>): HeartbeatM
     setOnUnhealthy: vi.fn(),
     startMonitoring: vi.fn(),
     stopMonitoring: vi.fn(),
+    clearAll: vi.fn(),
     ...overrides,
   };
 }
@@ -199,6 +209,49 @@ function makeEventBus(): EventBus & { published: Array<{ type: string; payload: 
   };
 }
 
+function makeDispatcher(): Dispatcher & {
+  onTaskCompletedCallback: ((taskId: string) => Promise<void>) | null;
+  onTaskRetryNeededCallback: ((taskId: string) => Promise<void>) | null;
+  onTaskTerminalFailedCallback: ((taskId: string) => Promise<void>) | null;
+} {
+  const mock = {
+    onTaskCompletedCallback: null as ((taskId: string) => Promise<void>) | null,
+    onTaskRetryNeededCallback: null as ((taskId: string) => Promise<void>) | null,
+    onTaskTerminalFailedCallback: null as ((taskId: string) => Promise<void>) | null,
+    setToolHandler: vi.fn(),
+    setTaskResultCallback: vi.fn(),
+    setHeartbeatMonitor: vi.fn(),
+    setTaskWaiter: vi.fn(),
+    setEscalationRouter: vi.fn(),
+    setOnTaskCompleted: vi.fn().mockImplementation((cb: (taskId: string) => Promise<void>) => {
+      mock.onTaskCompletedCallback = cb;
+    }),
+    setOnTaskRetryNeeded: vi.fn().mockImplementation((cb: (taskId: string) => Promise<void>) => {
+      mock.onTaskRetryNeededCallback = cb;
+    }),
+    setOnTaskTerminalFailed: vi.fn().mockImplementation((cb: (taskId: string) => Promise<void>) => {
+      mock.onTaskTerminalFailedCallback = cb;
+    }),
+    createAndDispatch: vi.fn().mockResolvedValue(undefined),
+    handleResult: vi.fn().mockResolvedValue(undefined),
+    handleWSMessage: vi.fn(),
+    sendContainerInit: vi.fn().mockResolvedValue(undefined),
+  };
+  return mock as unknown as Dispatcher & {
+    onTaskCompletedCallback: ((taskId: string) => Promise<void>) | null;
+    onTaskRetryNeededCallback: ((taskId: string) => Promise<void>) | null;
+    onTaskTerminalFailedCallback: ((taskId: string) => Promise<void>) | null;
+  };
+}
+
+function makeEscalationRouter(overrides?: Partial<EscalationRouter>): EscalationRouter {
+  return {
+    handleEscalation: vi.fn().mockResolvedValue(undefined),
+    handleEscalationResponse: vi.fn().mockResolvedValue(undefined),
+    ...overrides,
+  } as unknown as EscalationRouter;
+}
+
 function makeDeps(partial?: Partial<OrchestratorDeps>): OrchestratorDeps {
   return {
     taskStore: makeTaskStore(),
@@ -209,6 +262,8 @@ function makeDeps(partial?: Partial<OrchestratorDeps>): OrchestratorDeps {
     heartbeatMonitor: makeHeartbeatMonitor(),
     eventBus: makeEventBus(),
     dispatcher: null,
+    taskWaiter: null,
+    escalationRouter: null,
     logger: makeLogger(),
     runDir: '/tmp/openhive-test',
     ...partial,
@@ -384,7 +439,7 @@ describe('createTeam', () => {
 
       await orch.createTeam('scaffold-test', 'aid-lead-0001');
 
-      const workspaceDir = joinPath(runDir, 'teams', 'scaffold-test');
+      const workspaceDir = joinPath(runDir, 'workspace', 'teams', 'scaffold-test');
 
       // Verify standard directory structure was created.
       expect(existsSync(joinPath(workspaceDir, '.claude', 'agents'))).toBe(true);
@@ -456,7 +511,7 @@ describe('deleteTeam', () => {
 
   it('cancels in-progress tasks before removing workspace', async () => {
     const runDir = resolvePath(joinPath(tmpdir(), `openhive-del-task-${Date.now()}`));
-    mkdirSync(joinPath(runDir, 'teams', 'my-team'), { recursive: true });
+    mkdirSync(joinPath(runDir, 'workspace', 'teams', 'my-team'), { recursive: true });
 
     const pendingTask: Task = makeTask({ id: 'task-pending', team_slug: 'my-team', status: 'pending' });
     const runningTask: Task = makeTask({ id: 'task-running', team_slug: 'my-team', status: 'running' });
@@ -491,9 +546,9 @@ describe('deleteTeam', () => {
     await rm(runDir, { recursive: true, force: true });
   });
 
-  it('removes .run/teams/<slug>/ directory on success', async () => {
+  it('removes .run/workspace/teams/<slug>/ directory on success', async () => {
     const runDir = resolvePath(joinPath(tmpdir(), `openhive-del-ws-${Date.now()}`));
-    const workspaceDir = joinPath(runDir, 'teams', 'my-team');
+    const workspaceDir = joinPath(runDir, 'workspace', 'teams', 'my-team');
     mkdirSync(workspaceDir, { recursive: true });
     writeFileSync(joinPath(workspaceDir, 'CLAUDE.md'), '# My Team\n');
 
@@ -546,12 +601,12 @@ describe('deleteTeam', () => {
 
   it('propagates ValidationError when validateWorkspacePath detects symlink — rm must NOT be called', async () => {
     const runDir = resolvePath(joinPath(tmpdir(), `openhive-del-sym-${Date.now()}`));
-    const teamsRoot = joinPath(runDir, 'teams');
+    const teamsRoot = joinPath(runDir, 'workspace', 'teams');
     const outside = joinPath(runDir, 'outside');
     mkdirSync(teamsRoot, { recursive: true });
     mkdirSync(outside, { recursive: true });
 
-    // Create a symlink at teams/my-team pointing outside teamsRoot
+    // Create a symlink at workspace/teams/my-team pointing outside teamsRoot
     const symlinkPath = joinPath(teamsRoot, 'my-team');
     symlinkSync(outside, symlinkPath);
 
@@ -571,8 +626,8 @@ describe('deleteTeam', () => {
   it('tolerates ENOENT from rm (workspace already removed) — logs warning and continues', async () => {
     // Do NOT create the workspace directory — rm will get ENOENT, which must be tolerated.
     const runDir = resolvePath(joinPath(tmpdir(), `openhive-del-enoent-${Date.now()}`));
-    mkdirSync(joinPath(runDir, 'teams'), { recursive: true });
-    // Intentionally do NOT create teams/my-team/ — simulate already-removed workspace.
+    mkdirSync(joinPath(runDir, 'workspace', 'teams'), { recursive: true });
+    // Intentionally do NOT create workspace/teams/my-team/ — simulate already-removed workspace.
 
     const logger = makeLogger();
     const deps = makeDeps({ runDir, logger });
@@ -591,7 +646,7 @@ describe('deleteTeam', () => {
     // Reading a directory with mode 000 fails with EACCES — rm throws, and deleteTeam
     // must rethrow (not swallow) any non-ENOENT error from rm.
     const runDir = resolvePath(joinPath(tmpdir(), `openhive-del-eacces-${Date.now()}`));
-    const workspaceDir = joinPath(runDir, 'teams', 'my-team');
+    const workspaceDir = joinPath(runDir, 'workspace', 'teams', 'my-team');
     mkdirSync(workspaceDir, { recursive: true });
 
     // Create a subdirectory with a file inside, then chmod the dir to 000.
@@ -621,9 +676,9 @@ describe('deleteTeam', () => {
 
   it('removes leader from master.agents after deleting team', async () => {
     const runDir = resolvePath(joinPath(tmpdir(), `openhive-del-leader-${Date.now()}`));
-    mkdirSync(joinPath(runDir, 'teams', 'my-team'), { recursive: true });
+    mkdirSync(joinPath(runDir, 'workspace', 'teams', 'my-team'), { recursive: true });
     // Create leader .md file so unlink succeeds
-    const agentsDir = joinPath(runDir, 'teams', 'main', '.claude', 'agents');
+    const agentsDir = joinPath(runDir, 'workspace', '.claude', 'agents');
     mkdirSync(agentsDir, { recursive: true });
     writeFileSync(joinPath(agentsDir, 'leader.md'), '# Leader');
 
@@ -671,8 +726,8 @@ describe('deleteTeam', () => {
 
   it('deletes leader .md from parent workspace', async () => {
     const runDir = resolvePath(joinPath(tmpdir(), `openhive-del-leadermd-${Date.now()}`));
-    mkdirSync(joinPath(runDir, 'teams', 'my-team'), { recursive: true });
-    const agentsDir = joinPath(runDir, 'teams', 'main', '.claude', 'agents');
+    mkdirSync(joinPath(runDir, 'workspace', 'teams', 'my-team'), { recursive: true });
+    const agentsDir = joinPath(runDir, 'workspace', '.claude', 'agents');
     mkdirSync(agentsDir, { recursive: true });
     const leaderMdPath = joinPath(agentsDir, 'leader.md');
     writeFileSync(leaderMdPath, '# Leader');
@@ -717,7 +772,7 @@ describe('deleteTeam', () => {
 
   it('skips cleanup for main assistant (aid-main-001)', async () => {
     const runDir = resolvePath(joinPath(tmpdir(), `openhive-del-mainasst-${Date.now()}`));
-    mkdirSync(joinPath(runDir, 'teams', 'my-team'), { recursive: true });
+    mkdirSync(joinPath(runDir, 'workspace', 'teams', 'my-team'), { recursive: true });
 
     const mainAssistant: Agent = { aid: 'aid-main-001', name: 'Main' };
     const teamWithMainAssistant: Team = {
@@ -990,8 +1045,8 @@ describe('cancelTask', () => {
     await expect(orch.cancelTask('task-fail')).rejects.toThrow(ValidationError);
   });
 
-  // 13. CancelTask sends shutdown signal
-  it('calls wsHub.sendToTeam with shutdown message', async () => {
+  // 13. CancelTask sends TaskCancelMsg (not ShutdownMsg)
+  it('calls wsHub.sendToTeam with task_cancel message', async () => {
     const runningTask: Task = {
       id: 'task-run',
       team_slug: 'my-team',
@@ -1008,12 +1063,198 @@ describe('cancelTask', () => {
     const deps = makeDeps({ taskStore, wsHub });
     const orch = newOrchestrator(deps);
 
-    await orch.cancelTask('task-run');
+    const result = await orch.cancelTask('task-run');
 
+    expect(result).toEqual(['task-run']);
     expect(wsHub.sendToTeam).toHaveBeenCalledWith(
       'my-team',
-      expect.stringContaining('"type":"shutdown"'),
+      expect.stringContaining('"type":"task_cancel"'),
     );
+    // Verify it does NOT send shutdown
+    const calls = (wsHub.sendToTeam as ReturnType<typeof vi.fn>).mock.calls;
+    for (const [, msg] of calls) {
+      expect(msg as string).not.toContain('"type":"shutdown"');
+    }
+  });
+
+  it('returns array of cancelled task IDs', async () => {
+    const runningTask: Task = {
+      id: 'task-single',
+      team_slug: 'my-team',
+      status: 'running',
+      prompt: 'running',
+      created_at: new Date(),
+      updated_at: new Date(),
+      completed_at: null,
+    };
+    const taskStore = makeTaskStore({
+      get: vi.fn().mockResolvedValue(runningTask),
+    });
+    const deps = makeDeps({ taskStore });
+    const orch = newOrchestrator(deps);
+
+    const result = await orch.cancelTask('task-single');
+    expect(Array.isArray(result)).toBe(true);
+    expect(result).toContain('task-single');
+  });
+
+  it('cascade cancel marks subtasks in DB before sending messages', async () => {
+    const parentTask: Task = {
+      id: 'parent-1',
+      team_slug: 'my-team',
+      status: 'running',
+      prompt: 'parent',
+      created_at: new Date(),
+      updated_at: new Date(),
+      completed_at: null,
+    };
+    const childTask1: Task = {
+      id: 'child-1',
+      parent_id: 'parent-1',
+      team_slug: 'my-team',
+      status: 'running',
+      prompt: 'child 1',
+      created_at: new Date(),
+      updated_at: new Date(),
+      completed_at: null,
+    };
+    const childTask2: Task = {
+      id: 'child-2',
+      parent_id: 'parent-1',
+      team_slug: 'my-team',
+      status: 'pending',
+      prompt: 'child 2',
+      created_at: new Date(),
+      updated_at: new Date(),
+      completed_at: null,
+    };
+    const completedChild: Task = {
+      id: 'child-3',
+      parent_id: 'parent-1',
+      team_slug: 'my-team',
+      status: 'completed',
+      prompt: 'child 3',
+      created_at: new Date(),
+      updated_at: new Date(),
+      completed_at: new Date(),
+    };
+    const taskStore = makeTaskStore({
+      get: vi.fn().mockResolvedValue(parentTask),
+      getSubtree: vi.fn().mockResolvedValue([parentTask, childTask1, childTask2, completedChild]),
+    });
+    const wsHub = makeWSHub();
+
+    // Track order: updates must happen before sendToTeam
+    const callOrder: string[] = [];
+    (taskStore.update as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      callOrder.push('update');
+      return Promise.resolve();
+    });
+    (wsHub.sendToTeam as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      callOrder.push('send');
+      return Promise.resolve();
+    });
+
+    const deps = makeDeps({ taskStore, wsHub });
+    const orch = newOrchestrator(deps);
+
+    const result = await orch.cancelTask('parent-1', true);
+
+    // Should cancel parent + child-1 + child-2 (not completedChild)
+    expect(result).toHaveLength(3);
+    expect(result).toContain('parent-1');
+    expect(result).toContain('child-1');
+    expect(result).toContain('child-2');
+    expect(result).not.toContain('child-3');
+
+    // DB updates come before WS sends
+    const firstSend = callOrder.indexOf('send');
+    const lastUpdate = callOrder.lastIndexOf('update');
+    expect(lastUpdate).toBeLessThan(firstSend);
+  });
+
+  it('non-cascade mode only cancels the target task', async () => {
+    const parentTask: Task = {
+      id: 'parent-nc',
+      team_slug: 'my-team',
+      status: 'running',
+      prompt: 'parent',
+      created_at: new Date(),
+      updated_at: new Date(),
+      completed_at: null,
+    };
+    const taskStore = makeTaskStore({
+      get: vi.fn().mockResolvedValue(parentTask),
+    });
+    const deps = makeDeps({ taskStore });
+    const orch = newOrchestrator(deps);
+
+    const result = await orch.cancelTask('parent-nc', false);
+
+    expect(result).toEqual(['parent-nc']);
+    // getSubtree should NOT be called when cascade is false
+    expect(taskStore.getSubtree).not.toHaveBeenCalled();
+  });
+
+  it('notifies TaskWaiter for each cancelled task', async () => {
+    const parentTask: Task = {
+      id: 'parent-tw',
+      team_slug: 'my-team',
+      status: 'running',
+      prompt: 'parent',
+      created_at: new Date(),
+      updated_at: new Date(),
+      completed_at: null,
+    };
+    const childTask: Task = {
+      id: 'child-tw',
+      parent_id: 'parent-tw',
+      team_slug: 'my-team',
+      status: 'pending',
+      prompt: 'child',
+      created_at: new Date(),
+      updated_at: new Date(),
+      completed_at: null,
+    };
+    const mockWaiter = {
+      notifyComplete: vi.fn().mockReturnValue(true),
+      waitForTask: vi.fn(),
+      cancelAll: vi.fn(),
+      activeCount: 0,
+    };
+    const taskStore = makeTaskStore({
+      get: vi.fn().mockResolvedValue(parentTask),
+      getSubtree: vi.fn().mockResolvedValue([parentTask, childTask]),
+    });
+    const deps = makeDeps({ taskStore, taskWaiter: mockWaiter as unknown as import('./task-waiter.js').TaskWaiter });
+    const orch = newOrchestrator(deps);
+
+    await orch.cancelTask('parent-tw', true);
+
+    expect(mockWaiter.notifyComplete).toHaveBeenCalledTimes(2);
+    expect(mockWaiter.notifyComplete).toHaveBeenCalledWith('parent-tw', 'cancelled', undefined, 'task cancelled');
+    expect(mockWaiter.notifyComplete).toHaveBeenCalledWith('child-tw', 'cancelled', undefined, 'task cancelled');
+  });
+
+  it('does not send WS message when team_slug is empty', async () => {
+    const noTeamTask: Task = {
+      id: 'task-noteam',
+      team_slug: '',
+      status: 'pending',
+      prompt: 'no team',
+      created_at: new Date(),
+      updated_at: new Date(),
+      completed_at: null,
+    };
+    const taskStore = makeTaskStore({
+      get: vi.fn().mockResolvedValue(noTeamTask),
+    });
+    const wsHub = makeWSHub();
+    const deps = makeDeps({ taskStore, wsHub });
+    const orch = newOrchestrator(deps);
+
+    await orch.cancelTask('task-noteam');
+    expect(wsHub.sendToTeam).not.toHaveBeenCalled();
   });
 });
 
@@ -1343,11 +1584,11 @@ describe('concurrent rebuildOrgChart', () => {
 // ---------------------------------------------------------------------------
 
 describe('newOrchestrator', () => {
-  it('creates an Orchestrator instance implementing GoOrchestrator', () => {
+  it('creates an OrchestratorImpl instance implementing Orchestrator', () => {
     const deps = makeDeps();
     const orch = newOrchestrator(deps);
 
-    expect(orch).toBeInstanceOf(Orchestrator);
+    expect(orch).toBeInstanceOf(OrchestratorImpl);
     expect(typeof orch.createTeam).toBe('function');
     expect(typeof orch.deleteTeam).toBe('function');
     expect(typeof orch.getTeam).toBe('function');
@@ -1400,7 +1641,7 @@ describe('validateWorkspacePath', () => {
     mkdirSync(tmpBase, { recursive: true });
 
     const result = validateWorkspacePath(tmpBase, 'my-team');
-    const expected = resolvePath(joinPath(tmpBase, 'teams', 'my-team'));
+    const expected = resolvePath(joinPath(tmpBase, 'workspace', 'teams', 'my-team'));
     expect(result).toBe(expected);
   });
 
@@ -1421,13 +1662,13 @@ describe('validateWorkspacePath', () => {
 
   it('rejects an existing symlink at the target path', () => {
     const tmpBase = joinPath(tmpdir(), crypto.randomUUID());
-    const teamsRoot = joinPath(tmpBase, 'teams');
+    const teamsRoot = joinPath(tmpBase, 'workspace', 'teams');
     const symlinkTarget = joinPath(tmpBase, 'outside');
 
     mkdirSync(teamsRoot, { recursive: true });
     mkdirSync(symlinkTarget, { recursive: true });
 
-    // Create a symlink at teams/evil-team pointing outside teamsRoot
+    // Create a symlink at workspace/teams/evil-team pointing outside teamsRoot
     const symlinkPath = joinPath(teamsRoot, 'evil-team');
     symlinkSync(symlinkTarget, symlinkPath);
 
@@ -1437,13 +1678,13 @@ describe('validateWorkspacePath', () => {
 
   it('rejects a symlink in an ancestor directory (non-existent target, parent is symlink)', () => {
     const tmpBase = joinPath(tmpdir(), crypto.randomUUID());
-    const teamsRoot = joinPath(tmpBase, 'teams');
+    const teamsRoot = joinPath(tmpBase, 'workspace', 'teams');
     const outside = joinPath(tmpBase, 'outside');
 
     mkdirSync(teamsRoot, { recursive: true });
     mkdirSync(outside, { recursive: true });
 
-    // Create a symlink at teams/parent-link pointing to an outside directory
+    // Create a symlink at workspace/teams/parent-link pointing to an outside directory
     const parentLink = joinPath(teamsRoot, 'parent-link');
     symlinkSync(outside, parentLink);
 
@@ -1460,7 +1701,7 @@ describe('validateWorkspacePath', () => {
 
     // Should not throw — all parents are non-existent (will be created by mkdir)
     const result = validateWorkspacePath(tmpBase, 'new-team');
-    expect(result).toBe(resolvePath(joinPath(tmpBase, 'teams', 'new-team')));
+    expect(result).toBe(resolvePath(joinPath(tmpBase, 'workspace', 'teams', 'new-team')));
   });
 
   it('accepts "main" slug (no isReservedSlug check in validateWorkspacePath)', () => {
@@ -1470,12 +1711,12 @@ describe('validateWorkspacePath', () => {
     // 'main' is a reserved slug for team creation, but validateWorkspacePath
     // must NOT call isReservedSlug — it must accept it.
     const result = validateWorkspacePath(tmpBase, 'main');
-    expect(result).toBe(resolvePath(joinPath(tmpBase, 'teams', 'main')));
+    expect(result).toBe(resolvePath(joinPath(tmpBase, 'workspace', 'teams', 'main')));
   });
 
   it('accepts an existing real directory (ENOENT path not taken)', () => {
     const tmpBase = joinPath(tmpdir(), crypto.randomUUID());
-    const teamsRoot = joinPath(tmpBase, 'teams');
+    const teamsRoot = joinPath(tmpBase, 'workspace', 'teams');
     const teamDir = joinPath(teamsRoot, 'existing-team');
 
     mkdirSync(teamDir, { recursive: true });
@@ -1511,7 +1752,7 @@ describe('validateWorkspacePath', () => {
     // implementation's isNodeError + code check, which we confirmed above is correct.
     // For a proper integration test, verify that a normal non-existent path works:
     const result = validateWorkspacePath(tmpBase, 'safe-team');
-    expect(result).toBe(resolvePath(joinPath(tmpBase, 'teams', 'safe-team')));
+    expect(result).toBe(resolvePath(joinPath(tmpBase, 'workspace', 'teams', 'safe-team')));
   });
 });
 
@@ -1526,7 +1767,7 @@ describe('scaffoldTeamWorkspace', () => {
 
     await scaffoldTeamWorkspace(tmpBase, 'my-team');
 
-    const teamDir = resolvePath(joinPath(tmpBase, 'teams', 'my-team'));
+    const teamDir = resolvePath(joinPath(tmpBase, 'workspace', 'teams', 'my-team'));
 
     // Directories
     expect(existsSync(joinPath(teamDir, '.claude', 'agents'))).toBe(true);
@@ -1550,7 +1791,7 @@ describe('scaffoldTeamWorkspace', () => {
 
     await scaffoldTeamWorkspace(tmpBase, 'code-review-team');
 
-    const teamDir = resolvePath(joinPath(tmpBase, 'teams', 'code-review-team'));
+    const teamDir = resolvePath(joinPath(tmpBase, 'workspace', 'teams', 'code-review-team'));
     const claudeMd = readFileSync(joinPath(teamDir, 'CLAUDE.md'), 'utf8');
     expect(claudeMd).toContain('# Code Review Team');
     expect(claudeMd).toContain('team_slug="code-review-team"');
@@ -1564,7 +1805,7 @@ describe('scaffoldTeamWorkspace', () => {
     // Second call must be a no-op (mkdir recursive + writeFile overwrite)
     await expect(scaffoldTeamWorkspace(tmpBase, 'stable-team')).resolves.toBeUndefined();
 
-    const teamDir = resolvePath(joinPath(tmpBase, 'teams', 'stable-team'));
+    const teamDir = resolvePath(joinPath(tmpBase, 'workspace', 'teams', 'stable-team'));
     const claudeMd = readFileSync(joinPath(teamDir, 'CLAUDE.md'), 'utf8');
     expect(claudeMd).toContain('# Stable Team');
     expect(claudeMd).toContain('Available Skills');
@@ -1585,7 +1826,7 @@ describe('scaffoldTeamWorkspace', () => {
 
     await scaffoldTeamWorkspace(tmpBase, 'format-check');
 
-    const teamDir = resolvePath(joinPath(tmpBase, 'teams', 'format-check'));
+    const teamDir = resolvePath(joinPath(tmpBase, 'workspace', 'teams', 'format-check'));
     const raw = readFileSync(joinPath(teamDir, '.claude', 'settings.json'), 'utf8');
     // Ends with newline
     expect(raw.endsWith('\n')).toBe(true);
@@ -1596,7 +1837,7 @@ describe('scaffoldTeamWorkspace', () => {
 
   it('verifies lstatSync is used (symlink at target is rejected by scaffoldTeamWorkspace)', async () => {
     const tmpBase = joinPath(tmpdir(), crypto.randomUUID());
-    const teamsRoot = joinPath(tmpBase, 'teams');
+    const teamsRoot = joinPath(tmpBase, 'workspace', 'teams');
     const outside = joinPath(tmpBase, 'outside');
 
     mkdirSync(teamsRoot, { recursive: true });
@@ -1607,5 +1848,761 @@ describe('scaffoldTeamWorkspace', () => {
     symlinkSync(outside, symlinkPath);
 
     await expect(scaffoldTeamWorkspace(tmpBase, 'sym-team')).rejects.toThrow(/symlink rejected/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Auto-unblock on task completion
+// ---------------------------------------------------------------------------
+
+describe('handleTaskCompleted — auto-unblock dependents', () => {
+  it('registers onTaskCompleted callback on dispatcher during start()', async () => {
+    const dispatcher = makeDispatcher();
+    const deps = makeDeps({ dispatcher: dispatcher as unknown as Dispatcher });
+    const orch = newOrchestrator(deps);
+
+    await orch.start();
+
+    expect(dispatcher.onTaskCompletedCallback).not.toBeNull();
+
+    await orch.stop();
+  });
+
+  it('unblocks and dispatches a single-blocker dependent when blocker completes', async () => {
+    const dispatcher = makeDispatcher();
+    const now = new Date();
+
+    // Create the dependent task that is blocked by 'task-blocker'
+    const dependentTask: Task = {
+      id: 'task-dependent',
+      team_slug: 'my-team',
+      agent_aid: 'aid-lead-0001',
+      status: 'pending',
+      prompt: 'Do something after blocker',
+      blocked_by: ['task-blocker'],
+      priority: 0,
+      retry_count: 0,
+      max_retries: 0,
+      created_at: now,
+      updated_at: now,
+      completed_at: null,
+    };
+
+    const taskStore = makeTaskStore({
+      getDependents: vi.fn().mockResolvedValue([dependentTask]),
+      get: vi.fn().mockImplementation(async (id: string) => {
+        if (id === 'task-dependent') return dependentTask;
+        throw new NotFoundError('task', id);
+      }),
+    });
+
+    const deps = makeDeps({
+      dispatcher: dispatcher as unknown as Dispatcher,
+      taskStore,
+    });
+    const orch = newOrchestrator(deps);
+    await orch.start();
+
+    // Simulate the callback being fired by the Dispatcher
+    expect(dispatcher.onTaskCompletedCallback).not.toBeNull();
+    await dispatcher.onTaskCompletedCallback!('task-blocker');
+
+    // Verify the dependent task's blocked_by was cleared.
+    // handleTaskCompleted first updates blocked_by to [] with status 'pending',
+    // then dispatchTask is called which updates status to 'running'.
+    expect(taskStore.update).toHaveBeenCalled();
+    const updateCalls = vi.mocked(taskStore.update).mock.calls;
+
+    // Find the unblock update (blocked_by cleared)
+    const unblockUpdate = updateCalls.find(
+      ([t]) => t.id === 'task-dependent' && t.blocked_by.length === 0,
+    );
+    expect(unblockUpdate).toBeDefined();
+
+    // dispatchTask should also have been called (task dispatched via WS)
+    // Verify by checking that sendToTeam was called (task dispatch sends WS message)
+    expect(deps.wsHub.sendToTeam).toHaveBeenCalled();
+
+    await orch.stop();
+  });
+
+  it('does NOT dispatch multi-blocker dependent when only one blocker completes', async () => {
+    const dispatcher = makeDispatcher();
+    const now = new Date();
+
+    // Dependent blocked by TWO tasks
+    const dependentTask: Task = {
+      id: 'task-multi-dep',
+      team_slug: 'my-team',
+      agent_aid: 'aid-lead-0001',
+      status: 'pending',
+      prompt: 'Needs both blockers done',
+      blocked_by: ['task-blocker-1', 'task-blocker-2'],
+      priority: 0,
+      retry_count: 0,
+      max_retries: 0,
+      created_at: now,
+      updated_at: now,
+      completed_at: null,
+    };
+
+    const taskStore = makeTaskStore({
+      getDependents: vi.fn().mockResolvedValue([dependentTask]),
+    });
+
+    const deps = makeDeps({
+      dispatcher: dispatcher as unknown as Dispatcher,
+      taskStore,
+    });
+    const orch = newOrchestrator(deps);
+    await orch.start();
+
+    // Only blocker-1 completes
+    await dispatcher.onTaskCompletedCallback!('task-blocker-1');
+
+    // Verify the dependent's blocked_by was updated (removed blocker-1)
+    const updateCalls = vi.mocked(taskStore.update).mock.calls;
+    const updatedDep = updateCalls.find(([t]) => t.id === 'task-multi-dep');
+    expect(updatedDep).toBeDefined();
+    // Should still have blocker-2 remaining
+    expect(updatedDep![0].blocked_by).toEqual(['task-blocker-2']);
+    // Status should stay pending (with remaining blockers - not dispatched)
+    // dispatchTask is NOT called because blocked_by is not empty
+    // (the task stays as-is in DB, just with updated blocked_by)
+
+    await orch.stop();
+  });
+
+  it('dispatches multi-blocker dependent only when ALL blockers complete', async () => {
+    const dispatcher = makeDispatcher();
+    const now = new Date();
+
+    // First call: blocker-1 completes, dependent still has blocker-2
+    const depAfterFirst: Task = {
+      id: 'task-multi-dep',
+      team_slug: 'my-team',
+      agent_aid: 'aid-lead-0001',
+      status: 'pending',
+      prompt: 'Needs both blockers done',
+      blocked_by: ['task-blocker-1', 'task-blocker-2'],
+      priority: 0,
+      retry_count: 0,
+      max_retries: 0,
+      created_at: now,
+      updated_at: now,
+      completed_at: null,
+    };
+
+    // Second call: blocker-2 completes, dependent has only blocker-2 left
+    const depAfterSecond: Task = {
+      id: 'task-multi-dep',
+      team_slug: 'my-team',
+      agent_aid: 'aid-lead-0001',
+      status: 'pending',
+      prompt: 'Needs both blockers done',
+      blocked_by: ['task-blocker-2'],
+      priority: 0,
+      retry_count: 0,
+      max_retries: 0,
+      created_at: now,
+      updated_at: now,
+      completed_at: null,
+    };
+
+    const taskStore = makeTaskStore({
+      getDependents: vi.fn()
+        .mockResolvedValueOnce([depAfterFirst])
+        .mockResolvedValueOnce([depAfterSecond]),
+    });
+
+    const deps = makeDeps({
+      dispatcher: dispatcher as unknown as Dispatcher,
+      taskStore,
+    });
+    const orch = newOrchestrator(deps);
+    await orch.start();
+
+    // First blocker completes — dependent still blocked by blocker-2
+    await dispatcher.onTaskCompletedCallback!('task-blocker-1');
+
+    // Second blocker completes — dependent now fully unblocked
+    await dispatcher.onTaskCompletedCallback!('task-blocker-2');
+
+    // Verify that update was called with empty blocked_by on the second call
+    const updateCalls = vi.mocked(taskStore.update).mock.calls;
+    const fullyUnblockedCall = updateCalls.find(
+      ([t]) => t.id === 'task-multi-dep' && t.blocked_by.length === 0,
+    );
+    expect(fullyUnblockedCall).toBeDefined();
+
+    await orch.stop();
+  });
+
+  it('does nothing when completed task has no dependents', async () => {
+    const dispatcher = makeDispatcher();
+
+    const taskStore = makeTaskStore({
+      getDependents: vi.fn().mockResolvedValue([]),
+    });
+
+    const deps = makeDeps({
+      dispatcher: dispatcher as unknown as Dispatcher,
+      taskStore,
+    });
+    const orch = newOrchestrator(deps);
+    await orch.start();
+
+    await dispatcher.onTaskCompletedCallback!('task-no-deps');
+
+    // No update calls — nothing to unblock
+    expect(taskStore.update).not.toHaveBeenCalled();
+
+    await orch.stop();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleTaskRetry — re-dispatch on retry
+// ---------------------------------------------------------------------------
+
+describe('handleTaskRetry — retry callback triggers re-dispatch', () => {
+  it('registers onTaskRetryNeeded callback on dispatcher during start()', async () => {
+    const dispatcher = makeDispatcher();
+    const deps = makeDeps({ dispatcher: dispatcher as unknown as Dispatcher });
+    const orch = newOrchestrator(deps);
+
+    await orch.start();
+
+    expect(dispatcher.onTaskRetryNeededCallback).not.toBeNull();
+
+    await orch.stop();
+  });
+
+  it('re-dispatches a retried task via the normal dispatch pipeline', async () => {
+    const dispatcher = makeDispatcher();
+
+    const retryTask: Task = {
+      id: 'task-retry-1',
+      team_slug: 'team-alpha',
+      agent_aid: 'aid-alpha-001',
+      status: 'pending',
+      prompt: 'do something',
+      blocked_by: [],
+      priority: 0,
+      retry_count: 1,
+      max_retries: 3,
+      created_at: new Date(),
+      updated_at: new Date(),
+      completed_at: null,
+    };
+
+    const taskStore = makeTaskStore({
+      get: vi.fn().mockResolvedValue(retryTask),
+    });
+
+    // OrgChart needs to resolve the agent and team
+    const orgChart = makeOrgChart({
+      getAgentByAID: vi.fn().mockReturnValue({
+        aid: 'aid-alpha-001',
+        name: 'worker',
+        slug: 'worker',
+      }),
+      getTeamForAgent: vi.fn().mockReturnValue({
+        slug: 'team-alpha',
+        leader_aid: 'aid-alpha-001',
+        agents: [],
+      }),
+    });
+
+    const deps = makeDeps({
+      dispatcher: dispatcher as unknown as Dispatcher,
+      taskStore,
+      orgChart,
+    });
+    const orch = newOrchestrator(deps);
+    await orch.start();
+
+    // Fire the retry callback
+    expect(dispatcher.onTaskRetryNeededCallback).not.toBeNull();
+    await dispatcher.onTaskRetryNeededCallback!('task-retry-1');
+
+    // Verify the task was fetched
+    expect(taskStore.get).toHaveBeenCalledWith('task-retry-1');
+
+    await orch.stop();
+  });
+
+  it('does not register retry callback when dispatcher is null', async () => {
+    const deps = makeDeps({ dispatcher: null });
+    const orch = newOrchestrator(deps);
+    await orch.start();
+
+    // No crash, no callback — nothing to verify except no errors
+    await orch.stop();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleBlockerTerminalFailed — auto-escalate permanently blocked dependents
+// ---------------------------------------------------------------------------
+
+describe('handleBlockerTerminalFailed — auto-escalate permanently blocked', () => {
+  it('registers onTaskTerminalFailed callback on dispatcher during start()', async () => {
+    const dispatcher = makeDispatcher();
+    const deps = makeDeps({ dispatcher: dispatcher as unknown as Dispatcher });
+    const orch = newOrchestrator(deps);
+
+    await orch.start();
+
+    expect(dispatcher.onTaskTerminalFailedCallback).not.toBeNull();
+
+    await orch.stop();
+  });
+
+  it('auto-escalates when all blockers are terminal and at least one failed', async () => {
+    const dispatcher = makeDispatcher();
+    const now = new Date();
+
+    // Dependent task blocked by two tasks
+    const dependentTask: Task = {
+      id: 'task-dependent',
+      team_slug: 'my-team',
+      agent_aid: 'aid-worker-001',
+      status: 'pending',
+      prompt: 'Depends on two blockers',
+      blocked_by: ['task-b1', 'task-b2'],
+      priority: 0,
+      retry_count: 0,
+      max_retries: 0,
+      created_at: now,
+      updated_at: now,
+      completed_at: null,
+    };
+
+    // Blocker 1 failed, blocker 2 completed — both terminal
+    const blockerB1: Task = {
+      id: 'task-b1',
+      team_slug: 'my-team',
+      agent_aid: 'aid-worker-001',
+      status: 'failed',
+      prompt: 'blocker 1',
+      blocked_by: [],
+      priority: 0,
+      retry_count: 2,
+      max_retries: 2,
+      created_at: now,
+      updated_at: now,
+      completed_at: now,
+    };
+
+    const blockerB2: Task = {
+      id: 'task-b2',
+      team_slug: 'my-team',
+      agent_aid: 'aid-worker-001',
+      status: 'completed',
+      prompt: 'blocker 2',
+      blocked_by: [],
+      priority: 0,
+      retry_count: 0,
+      max_retries: 0,
+      created_at: now,
+      updated_at: now,
+      completed_at: now,
+    };
+
+    const taskStore = makeTaskStore({
+      getDependents: vi.fn().mockResolvedValue([dependentTask]),
+      get: vi.fn().mockImplementation(async (id: string) => {
+        if (id === 'task-b1') return blockerB1;
+        if (id === 'task-b2') return blockerB2;
+        if (id === 'task-dependent') return dependentTask;
+        throw new NotFoundError('task', id);
+      }),
+    });
+
+    const escalationRouter = makeEscalationRouter();
+
+    const deps = makeDeps({
+      dispatcher: dispatcher as unknown as Dispatcher,
+      taskStore,
+      escalationRouter,
+    });
+    const orch = newOrchestrator(deps);
+    await orch.start();
+
+    // Fire the terminal failed callback
+    expect(dispatcher.onTaskTerminalFailedCallback).not.toBeNull();
+    await dispatcher.onTaskTerminalFailedCallback!('task-b1');
+
+    // Verify auto-escalation was triggered
+    expect(escalationRouter.handleEscalation).toHaveBeenCalledTimes(1);
+    const escalationCall = vi.mocked(escalationRouter.handleEscalation).mock.calls[0]!;
+    expect(escalationCall[0]).toBe('my-team');
+    const msg = escalationCall[1] as EscalationMsg;
+    expect(msg.task_id).toBe('task-dependent');
+    expect(msg.reason).toContain('task-b1');
+    expect(msg.reason).toContain('permanently blocked');
+
+    await orch.stop();
+  });
+
+  it('does NOT escalate when some blockers are still pending', async () => {
+    const dispatcher = makeDispatcher();
+    const now = new Date();
+
+    const dependentTask: Task = {
+      id: 'task-dependent',
+      team_slug: 'my-team',
+      agent_aid: 'aid-worker-001',
+      status: 'pending',
+      prompt: 'Depends on two blockers',
+      blocked_by: ['task-b1', 'task-b2'],
+      priority: 0,
+      retry_count: 0,
+      max_retries: 0,
+      created_at: now,
+      updated_at: now,
+      completed_at: null,
+    };
+
+    // Blocker 1 failed, blocker 2 still pending
+    const blockerB1: Task = {
+      id: 'task-b1',
+      team_slug: 'my-team',
+      agent_aid: 'aid-worker-001',
+      status: 'failed',
+      prompt: 'blocker 1',
+      blocked_by: [],
+      priority: 0,
+      retry_count: 0,
+      max_retries: 0,
+      created_at: now,
+      updated_at: now,
+      completed_at: now,
+    };
+
+    const blockerB2: Task = {
+      id: 'task-b2',
+      team_slug: 'my-team',
+      agent_aid: 'aid-worker-001',
+      status: 'pending',
+      prompt: 'blocker 2',
+      blocked_by: [],
+      priority: 0,
+      retry_count: 0,
+      max_retries: 0,
+      created_at: now,
+      updated_at: now,
+      completed_at: null,
+    };
+
+    const taskStore = makeTaskStore({
+      getDependents: vi.fn().mockResolvedValue([dependentTask]),
+      get: vi.fn().mockImplementation(async (id: string) => {
+        if (id === 'task-b1') return blockerB1;
+        if (id === 'task-b2') return blockerB2;
+        throw new NotFoundError('task', id);
+      }),
+    });
+
+    const escalationRouter = makeEscalationRouter();
+
+    const deps = makeDeps({
+      dispatcher: dispatcher as unknown as Dispatcher,
+      taskStore,
+      escalationRouter,
+    });
+    const orch = newOrchestrator(deps);
+    await orch.start();
+
+    await dispatcher.onTaskTerminalFailedCallback!('task-b1');
+
+    // Escalation should NOT have been triggered — blocker 2 is still pending
+    expect(escalationRouter.handleEscalation).not.toHaveBeenCalled();
+
+    await orch.stop();
+  });
+
+  it('escalates when all blockers are failed (no completed ones)', async () => {
+    const dispatcher = makeDispatcher();
+    const now = new Date();
+
+    const dependentTask: Task = {
+      id: 'task-dep-all-fail',
+      team_slug: 'team-x',
+      agent_aid: 'aid-x-001',
+      status: 'pending',
+      prompt: 'Depends on two failed blockers',
+      blocked_by: ['task-f1', 'task-f2'],
+      priority: 0,
+      retry_count: 0,
+      max_retries: 0,
+      created_at: now,
+      updated_at: now,
+      completed_at: null,
+    };
+
+    const makeFailedBlocker = (id: string): Task => ({
+      id,
+      team_slug: 'team-x',
+      agent_aid: 'aid-x-001',
+      status: 'failed',
+      prompt: `failed blocker ${id}`,
+      blocked_by: [],
+      priority: 0,
+      retry_count: 0,
+      max_retries: 0,
+      created_at: now,
+      updated_at: now,
+      completed_at: now,
+    });
+
+    const taskStore = makeTaskStore({
+      getDependents: vi.fn().mockResolvedValue([dependentTask]),
+      get: vi.fn().mockImplementation(async (id: string) => {
+        if (id === 'task-f1') return makeFailedBlocker('task-f1');
+        if (id === 'task-f2') return makeFailedBlocker('task-f2');
+        throw new NotFoundError('task', id);
+      }),
+    });
+
+    const escalationRouter = makeEscalationRouter();
+
+    const deps = makeDeps({
+      dispatcher: dispatcher as unknown as Dispatcher,
+      taskStore,
+      escalationRouter,
+    });
+    const orch = newOrchestrator(deps);
+    await orch.start();
+
+    await dispatcher.onTaskTerminalFailedCallback!('task-f1');
+
+    // Both blockers failed → should escalate
+    expect(escalationRouter.handleEscalation).toHaveBeenCalledTimes(1);
+    const msg = vi.mocked(escalationRouter.handleEscalation).mock.calls[0]![1] as EscalationMsg;
+    expect(msg.reason).toContain('task-f1');
+    expect(msg.reason).toContain('task-f2');
+
+    await orch.stop();
+  });
+
+  it('does NOT escalate when all blockers completed successfully', async () => {
+    const dispatcher = makeDispatcher();
+    const now = new Date();
+
+    // Dependent blocked by two tasks that both completed
+    const dependentTask: Task = {
+      id: 'task-dep-ok',
+      team_slug: 'my-team',
+      agent_aid: 'aid-worker-001',
+      status: 'pending',
+      prompt: 'Depends on completed blockers',
+      blocked_by: ['task-ok1', 'task-ok2'],
+      priority: 0,
+      retry_count: 0,
+      max_retries: 0,
+      created_at: now,
+      updated_at: now,
+      completed_at: null,
+    };
+
+    const makeCompletedBlocker = (id: string): Task => ({
+      id,
+      team_slug: 'my-team',
+      agent_aid: 'aid-worker-001',
+      status: 'completed',
+      prompt: `completed blocker ${id}`,
+      blocked_by: [],
+      priority: 0,
+      retry_count: 0,
+      max_retries: 0,
+      created_at: now,
+      updated_at: now,
+      completed_at: now,
+    });
+
+    const taskStore = makeTaskStore({
+      getDependents: vi.fn().mockResolvedValue([dependentTask]),
+      get: vi.fn().mockImplementation(async (id: string) => {
+        if (id === 'task-ok1') return makeCompletedBlocker('task-ok1');
+        if (id === 'task-ok2') return makeCompletedBlocker('task-ok2');
+        throw new NotFoundError('task', id);
+      }),
+    });
+
+    const escalationRouter = makeEscalationRouter();
+
+    const deps = makeDeps({
+      dispatcher: dispatcher as unknown as Dispatcher,
+      taskStore,
+      escalationRouter,
+    });
+    const orch = newOrchestrator(deps);
+    await orch.start();
+
+    // This callback wouldn't normally fire for completed tasks,
+    // but we test the logic: all blockers completed = no escalation
+    await dispatcher.onTaskTerminalFailedCallback!('task-ok1');
+
+    expect(escalationRouter.handleEscalation).not.toHaveBeenCalled();
+
+    await orch.stop();
+  });
+
+  it('does nothing when failed task has no dependents', async () => {
+    const dispatcher = makeDispatcher();
+
+    const taskStore = makeTaskStore({
+      getDependents: vi.fn().mockResolvedValue([]),
+    });
+
+    const escalationRouter = makeEscalationRouter();
+
+    const deps = makeDeps({
+      dispatcher: dispatcher as unknown as Dispatcher,
+      taskStore,
+      escalationRouter,
+    });
+    const orch = newOrchestrator(deps);
+    await orch.start();
+
+    await dispatcher.onTaskTerminalFailedCallback!('task-no-deps');
+
+    expect(escalationRouter.handleEscalation).not.toHaveBeenCalled();
+
+    await orch.stop();
+  });
+
+  it('escalation message identifies failed blockers', async () => {
+    const dispatcher = makeDispatcher();
+    const now = new Date();
+
+    const dependentTask: Task = {
+      id: 'task-dep-msg',
+      team_slug: 'team-msg',
+      agent_aid: 'aid-msg-001',
+      status: 'pending',
+      prompt: 'Check escalation message',
+      blocked_by: ['task-fail-a', 'task-cancel-b', 'task-ok-c'],
+      priority: 0,
+      retry_count: 0,
+      max_retries: 0,
+      created_at: now,
+      updated_at: now,
+      completed_at: null,
+    };
+
+    const taskStore = makeTaskStore({
+      getDependents: vi.fn().mockResolvedValue([dependentTask]),
+      get: vi.fn().mockImplementation(async (id: string) => {
+        if (id === 'task-fail-a') {
+          return {
+            id, team_slug: 'team-msg', status: 'failed', prompt: 'a',
+            blocked_by: [], priority: 0, retry_count: 0, max_retries: 0,
+            created_at: now, updated_at: now, completed_at: now,
+          } as Task;
+        }
+        if (id === 'task-cancel-b') {
+          return {
+            id, team_slug: 'team-msg', status: 'cancelled', prompt: 'b',
+            blocked_by: [], priority: 0, retry_count: 0, max_retries: 0,
+            created_at: now, updated_at: now, completed_at: now,
+          } as Task;
+        }
+        if (id === 'task-ok-c') {
+          return {
+            id, team_slug: 'team-msg', status: 'completed', prompt: 'c',
+            blocked_by: [], priority: 0, retry_count: 0, max_retries: 0,
+            created_at: now, updated_at: now, completed_at: now,
+          } as Task;
+        }
+        throw new NotFoundError('task', id);
+      }),
+    });
+
+    const escalationRouter = makeEscalationRouter();
+
+    const deps = makeDeps({
+      dispatcher: dispatcher as unknown as Dispatcher,
+      taskStore,
+      escalationRouter,
+    });
+    const orch = newOrchestrator(deps);
+    await orch.start();
+
+    await dispatcher.onTaskTerminalFailedCallback!('task-fail-a');
+
+    expect(escalationRouter.handleEscalation).toHaveBeenCalledTimes(1);
+    const msg = vi.mocked(escalationRouter.handleEscalation).mock.calls[0]![1] as EscalationMsg;
+    // Message should identify the failed/cancelled blockers (not the completed one)
+    expect(msg.reason).toContain('task-fail-a');
+    expect(msg.reason).toContain('task-cancel-b');
+    expect(msg.reason).not.toContain('task-ok-c');
+
+    await orch.stop();
+  });
+
+  it('logs error when escalation router throws but does not crash', async () => {
+    const dispatcher = makeDispatcher();
+    const now = new Date();
+    const logger = makeLogger();
+    const loggerSpy = vi.spyOn(logger, 'error');
+
+    const dependentTask: Task = {
+      id: 'task-dep-err',
+      team_slug: 'team-err',
+      agent_aid: 'aid-err-001',
+      status: 'pending',
+      prompt: 'Depends on failed blocker',
+      blocked_by: ['task-fail-err'],
+      priority: 0,
+      retry_count: 0,
+      max_retries: 0,
+      created_at: now,
+      updated_at: now,
+      completed_at: null,
+    };
+
+    const taskStore = makeTaskStore({
+      getDependents: vi.fn().mockResolvedValue([dependentTask]),
+      get: vi.fn().mockImplementation(async (id: string) => {
+        if (id === 'task-fail-err') {
+          return {
+            id, team_slug: 'team-err', status: 'failed', prompt: 'err',
+            blocked_by: [], priority: 0, retry_count: 0, max_retries: 0,
+            created_at: now, updated_at: now, completed_at: now,
+          } as Task;
+        }
+        throw new NotFoundError('task', id);
+      }),
+    });
+
+    const escalationRouter = makeEscalationRouter({
+      handleEscalation: vi.fn().mockRejectedValue(new Error('escalation failed')),
+    });
+
+    const deps = makeDeps({
+      dispatcher: dispatcher as unknown as Dispatcher,
+      taskStore,
+      escalationRouter,
+      logger,
+    });
+    const orch = newOrchestrator(deps);
+    await orch.start();
+
+    // Should NOT throw even though escalation router rejects
+    await dispatcher.onTaskTerminalFailedCallback!('task-fail-err');
+
+    // Error should have been logged
+    expect(loggerSpy).toHaveBeenCalledWith(
+      'auto-escalation failed for permanently blocked task',
+      expect.objectContaining({
+        dependent_task_id: 'task-dep-err',
+        error: 'escalation failed',
+      }),
+    );
+
+    await orch.stop();
   });
 });

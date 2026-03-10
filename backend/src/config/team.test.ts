@@ -347,7 +347,7 @@ describe('createTeamDirectory', () => {
   it('does not create workspace subdirectories (agents/, skills/, CLAUDE.md)', () => {
     createTeamDirectory(dir, 'my-team');
 
-    // Workspace files belong in .run/teams/<slug>/, not data/teams/<slug>/.
+    // Workspace files belong in .run/workspace/teams/<slug>/, not data/teams/<slug>/.
     expect(existsSync(join(dir, 'teams', 'my-team', 'agents'))).toBe(false);
     expect(existsSync(join(dir, 'teams', 'my-team', 'skills'))).toBe(false);
     expect(existsSync(join(dir, 'teams', 'my-team', 'CLAUDE.md'))).toBe(false);

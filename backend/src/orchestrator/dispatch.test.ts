@@ -32,6 +32,10 @@ import {
   MsgTypeEscalation,
   MsgTypeToolCall,
   MsgTypeStatusUpdate,
+  MsgTypeAgentReady,
+  MsgTypeLogEvent,
+  MsgTypeOrgChartUpdate,
+  PROTOCOL_VERSION,
 } from '../ws/messages.js';
 import { NotFoundError } from '../domain/errors.js';
 
@@ -115,6 +119,19 @@ function makeTaskStore(overrides?: Partial<TaskStore>): TaskStore {
     async getSubtree(_rootID: string): Promise<Task[]> {
       return [];
     },
+    async getDependents(_blockerID: string): Promise<Task[]> {
+      return [];
+    },
+    async getBlockedBy(_taskId: string): Promise<string[]> {
+      return [];
+    },
+    async unblockTask(_taskId: string, _completedDependencyId: string): Promise<boolean> {
+      return true;
+    },
+    async retryTask(_taskId: string): Promise<boolean> {
+      return false;
+    },
+    async validateDependencies(_taskId: string, _blockedByIds: string[]): Promise<void> {},
     ...overrides,
   };
 }
@@ -261,6 +278,28 @@ describe('createAndDispatch', () => {
 
     expect(t1.id).not.toBe(t2.id);
   });
+
+  it('creates task with DAG fields defaulted and sends blocked_by directly', async () => {
+    const taskStore = makeTaskStore();
+    const wsHub = makeWSHub();
+    const dispatcher = newDispatcher(taskStore, wsHub, makeLogger());
+
+    const task = await dispatcher.createAndDispatch('team-a', 'aid-001', 'prompt', '');
+
+    // Task has DAG defaults
+    expect(task.blocked_by).toEqual([]);
+    expect(task.priority).toBe(0);
+    expect(task.retry_count).toBe(0);
+    expect(task.max_retries).toBe(0);
+
+    // WS message uses blocked_by directly (not the deprecated wrapper)
+    expect(wsHub.sent).toHaveLength(1);
+    const envelope = JSON.parse(wsHub.sent[0]!.msg) as {
+      type: string;
+      data: { blocked_by: string[] };
+    };
+    expect(envelope.data.blocked_by).toEqual([]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -356,6 +395,70 @@ describe('handleResult — failed', () => {
     };
 
     await expect(dispatcher.handleResult(resultMsg)).rejects.toThrow(NotFoundError);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleResult — race guard for already-cancelled tasks
+// ---------------------------------------------------------------------------
+
+describe('handleResult — cancelled race guard', () => {
+  it('skips update if task is already cancelled', async () => {
+    const taskStore = makeTaskStore();
+    const wsHub = makeWSHub();
+    const dispatcher = newDispatcher(taskStore, wsHub, makeLogger());
+
+    // Create and dispatch a task, then manually set it to cancelled
+    const created = await dispatcher.createAndDispatch('team-a', 'aid-001', 'prompt', '');
+    const cancelledTask = { ...created, status: 'cancelled' as const, completed_at: new Date() };
+    await taskStore.update(cancelledTask);
+
+    const resultMsg: TaskResultMsg = {
+      task_id: created.id,
+      agent_aid: 'aid-001',
+      status: 'completed',
+      result: 'late result',
+      duration: 1_000_000_000,
+    };
+
+    // Should not throw and should not update the task
+    await dispatcher.handleResult(resultMsg);
+
+    // Task should still be cancelled (not updated to completed)
+    const task = await taskStore.get(created.id);
+    expect(task.status).toBe('cancelled');
+  });
+
+  it('logs warning when skipping cancelled task result', async () => {
+    const taskStore = makeTaskStore();
+    const wsHub = makeWSHub();
+    const logger = makeSpyLogger();
+    const dispatcher = newDispatcher(taskStore, wsHub, logger);
+
+    const created = await dispatcher.createAndDispatch('team-a', 'aid-001', 'prompt', '');
+    const cancelledTask = { ...created, status: 'cancelled' as const, completed_at: new Date() };
+    await taskStore.update(cancelledTask);
+
+    const resultMsg: TaskResultMsg = {
+      task_id: created.id,
+      agent_aid: 'aid-001',
+      status: 'completed',
+      result: 'late',
+      duration: 0,
+    };
+
+    await dispatcher.handleResult(resultMsg);
+
+    const warnCalls = logger.calls['warn']!;
+    expect(warnCalls.length).toBeGreaterThanOrEqual(1);
+    const matchingCall = warnCalls.find(
+      ([msg]) => msg === 'task result received for already-cancelled task, skipping',
+    );
+    expect(matchingCall).toBeDefined();
+    expect(matchingCall![1]).toMatchObject({
+      task_id: created.id,
+      result_status: 'completed',
+    });
   });
 });
 
@@ -686,23 +789,28 @@ describe('handleWSMessage — log-only message types', () => {
     expect(hasReady).toBe(true);
   });
 
-  it('logs warn for escalation message', async () => {
+  it('logs warn for escalation message when no router configured', async () => {
     const taskStore = makeTaskStore();
     const wsHub = makeWSHub();
     const logger = makeSpyLogger();
     const dispatcher = newDispatcher(taskStore, wsHub, logger);
 
     const rawMsg = encodeWire(MsgTypeEscalation, {
+      correlation_id: 'esc-corr-1',
       task_id: 'task-esc',
       agent_aid: 'aid-001',
+      source_team: 'tid-src',
+      destination_team: 'tid-dest',
+      escalation_level: 1,
       reason: 'cannot proceed',
+      context: {},
     });
 
     dispatcher.handleWSMessage('tid-001', rawMsg);
     await flushMicrotasks();
 
     const warnCalls = logger.calls['warn']!;
-    const hasEscalation = warnCalls.some(([msg]) => msg === 'escalation received');
+    const hasEscalation = warnCalls.some(([msg]) => msg === 'escalation received but no escalation router configured');
     expect(hasEscalation).toBe(true);
   });
 
@@ -723,6 +831,68 @@ describe('handleWSMessage — log-only message types', () => {
     const infoCalls = logger.calls['info']!;
     const hasUpdate = infoCalls.some(([msg]) => msg === 'status update received');
     expect(hasUpdate).toBe(true);
+  });
+
+  it('logs info for agent_ready message', async () => {
+    const taskStore = makeTaskStore();
+    const wsHub = makeWSHub();
+    const logger = makeSpyLogger();
+    const dispatcher = newDispatcher(taskStore, wsHub, logger);
+
+    const rawMsg = encodeWire(MsgTypeAgentReady, {
+      aid: 'aid-new-001',
+    });
+
+    dispatcher.handleWSMessage('tid-001', rawMsg);
+    await flushMicrotasks();
+
+    const infoCalls = logger.calls['info']!;
+    const hasReady = infoCalls.some(([msg]) => msg === 'agent ready');
+    expect(hasReady).toBe(true);
+  });
+
+  it('logs info for log_event message', async () => {
+    const taskStore = makeTaskStore();
+    const wsHub = makeWSHub();
+    const logger = makeSpyLogger();
+    const dispatcher = newDispatcher(taskStore, wsHub, logger);
+
+    const rawMsg = encodeWire(MsgTypeLogEvent, {
+      level: 'info',
+      source_aid: 'aid-worker-1',
+      message: 'task started',
+      metadata: {},
+      timestamp: '2026-03-08T16:00:00.000Z',
+    });
+
+    dispatcher.handleWSMessage('tid-001', rawMsg);
+    await flushMicrotasks();
+
+    const infoCalls = logger.calls['info']!;
+    const hasLog = infoCalls.some(([msg]) => msg === 'container log event');
+    expect(hasLog).toBe(true);
+  });
+
+  it('logs info for org_chart_update message', async () => {
+    const taskStore = makeTaskStore();
+    const wsHub = makeWSHub();
+    const logger = makeSpyLogger();
+    const dispatcher = newDispatcher(taskStore, wsHub, logger);
+
+    const rawMsg = encodeWire(MsgTypeOrgChartUpdate, {
+      action: 'agent_added',
+      team_slug: 'backend-team',
+      agent_aid: 'aid-new-dev',
+      agent_name: 'new-dev',
+      timestamp: '2026-03-08T16:00:00.000Z',
+    });
+
+    dispatcher.handleWSMessage('tid-001', rawMsg);
+    await flushMicrotasks();
+
+    const infoCalls = logger.calls['info']!;
+    const hasOrgUpdate = infoCalls.some(([msg]) => msg === 'org chart update');
+    expect(hasOrgUpdate).toBe(true);
   });
 });
 
@@ -789,6 +959,134 @@ describe('sendContainerInit', () => {
 });
 
 // ---------------------------------------------------------------------------
+// sendContainerInit — includes protocol_version
+// ---------------------------------------------------------------------------
+
+describe('sendContainerInit — protocol_version', () => {
+  it('includes protocol_version field in the container_init message', async () => {
+    const taskStore = makeTaskStore();
+    const wsHub = makeWSHub();
+    const dispatcher = newDispatcher(taskStore, wsHub, makeLogger());
+
+    wsHub.sent.length = 0;
+
+    const agents: AgentInitConfig[] = [
+      {
+        aid: 'aid-001',
+        name: 'Agent One',
+        provider: { type: 'oauth', oauth_token: 'tok' },
+        model_tier: 'sonnet',
+      },
+    ];
+
+    await dispatcher.sendContainerInit('tid-test', true, agents, {}, '/workspace');
+
+    expect(wsHub.sent).toHaveLength(1);
+    const envelope = JSON.parse(wsHub.sent[0]!.msg) as {
+      type: string;
+      data: { protocol_version?: string };
+    };
+    expect(envelope.type).toBe(MsgTypeContainerInit);
+    expect(envelope.data.protocol_version).toBe(PROTOCOL_VERSION);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleWSMessage — ready message protocol version mismatch
+// ---------------------------------------------------------------------------
+
+describe('handleWSMessage — ready protocol version', () => {
+  it('logs warning when container reports mismatched protocol version', async () => {
+    const taskStore = makeTaskStore();
+    const wsHub = makeWSHub();
+    const logger = makeSpyLogger();
+    const dispatcher = newDispatcher(taskStore, wsHub, logger);
+
+    const rawMsg = encodeWire(MsgTypeReady, {
+      team_id: 'tid-mismatch',
+      agent_count: 2,
+      protocol_version: '0.9',
+    });
+
+    dispatcher.handleWSMessage('tid-mismatch', rawMsg);
+    await flushMicrotasks();
+
+    const warnCalls = logger.calls['warn']!;
+    const hasMismatch = warnCalls.some(([msg]) => msg === 'protocol version mismatch');
+    expect(hasMismatch).toBe(true);
+
+    // Verify the warning includes expected and received versions
+    const mismatchCall = warnCalls.find(([msg]) => msg === 'protocol version mismatch');
+    expect(mismatchCall).toBeDefined();
+    expect(mismatchCall![1]).toEqual(expect.objectContaining({
+      team_id: 'tid-mismatch',
+      expected: PROTOCOL_VERSION,
+      received: '0.9',
+    }));
+  });
+
+  it('does not log warning when protocol versions match', async () => {
+    const taskStore = makeTaskStore();
+    const wsHub = makeWSHub();
+    const logger = makeSpyLogger();
+    const dispatcher = newDispatcher(taskStore, wsHub, logger);
+
+    const rawMsg = encodeWire(MsgTypeReady, {
+      team_id: 'tid-match',
+      agent_count: 1,
+      protocol_version: PROTOCOL_VERSION,
+    });
+
+    dispatcher.handleWSMessage('tid-match', rawMsg);
+    await flushMicrotasks();
+
+    const warnCalls = logger.calls['warn']!;
+    const hasMismatch = warnCalls.some(([msg]) => msg === 'protocol version mismatch');
+    expect(hasMismatch).toBe(false);
+  });
+
+  it('does not log warning when protocol_version is omitted (backward compat)', async () => {
+    const taskStore = makeTaskStore();
+    const wsHub = makeWSHub();
+    const logger = makeSpyLogger();
+    const dispatcher = newDispatcher(taskStore, wsHub, logger);
+
+    const rawMsg = encodeWire(MsgTypeReady, {
+      team_id: 'tid-old',
+      agent_count: 1,
+    });
+
+    dispatcher.handleWSMessage('tid-old', rawMsg);
+    await flushMicrotasks();
+
+    const warnCalls = logger.calls['warn']!;
+    const hasMismatch = warnCalls.some(([msg]) => msg === 'protocol version mismatch');
+    expect(hasMismatch).toBe(false);
+  });
+
+  it('does not hard-reject on version mismatch (still logs container ready)', async () => {
+    const taskStore = makeTaskStore();
+    const wsHub = makeWSHub();
+    const logger = makeSpyLogger();
+    const dispatcher = newDispatcher(taskStore, wsHub, logger);
+
+    const rawMsg = encodeWire(MsgTypeReady, {
+      team_id: 'tid-old-ver',
+      agent_count: 3,
+      protocol_version: '0.5',
+    });
+
+    dispatcher.handleWSMessage('tid-old-ver', rawMsg);
+    await flushMicrotasks();
+
+    // Should still log "container ready" even with mismatch
+    const infoCalls = logger.calls['info']!;
+    const hasReady = infoCalls.some(([msg]) => msg === 'container ready');
+    expect(hasReady).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // newDispatcher factory
 // ---------------------------------------------------------------------------
 
@@ -803,5 +1101,577 @@ describe('newDispatcher', () => {
     expect(typeof dispatcher.handleResult).toBe('function');
     expect(typeof dispatcher.handleWSMessage).toBe('function');
     expect(typeof dispatcher.sendContainerInit).toBe('function');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// onTaskCompleted callback — fires on completed, not on failed/cancelled
+// ---------------------------------------------------------------------------
+
+describe('handleResult — onTaskCompleted callback', () => {
+  it('fires onTaskCompleted callback when task completes successfully', async () => {
+    const taskStore = makeTaskStore();
+    const wsHub = makeWSHub();
+    const dispatcher = newDispatcher(taskStore, wsHub, makeLogger());
+
+    const completedTaskIds: string[] = [];
+    dispatcher.setOnTaskCompleted(async (taskId: string) => {
+      completedTaskIds.push(taskId);
+    });
+
+    const created = await dispatcher.createAndDispatch('team-a', 'aid-001', 'prompt', '');
+
+    const resultMsg: TaskResultMsg = {
+      task_id: created.id,
+      agent_aid: 'aid-001',
+      status: 'completed',
+      result: 'done',
+      duration: 1_000_000_000,
+    };
+
+    await dispatcher.handleResult(resultMsg);
+
+    expect(completedTaskIds).toHaveLength(1);
+    expect(completedTaskIds[0]).toBe(created.id);
+  });
+
+  it('does NOT fire onTaskCompleted callback when task fails', async () => {
+    const taskStore = makeTaskStore();
+    const wsHub = makeWSHub();
+    const dispatcher = newDispatcher(taskStore, wsHub, makeLogger());
+
+    const completedTaskIds: string[] = [];
+    dispatcher.setOnTaskCompleted(async (taskId: string) => {
+      completedTaskIds.push(taskId);
+    });
+
+    const created = await dispatcher.createAndDispatch('team-a', 'aid-001', 'prompt', '');
+
+    const resultMsg: TaskResultMsg = {
+      task_id: created.id,
+      agent_aid: 'aid-001',
+      status: 'failed',
+      error: 'something went wrong',
+      duration: 500_000_000,
+    };
+
+    await dispatcher.handleResult(resultMsg);
+
+    expect(completedTaskIds).toHaveLength(0);
+  });
+
+  it('does NOT fire onTaskCompleted callback when task is already cancelled', async () => {
+    const taskStore = makeTaskStore();
+    const wsHub = makeWSHub();
+    const dispatcher = newDispatcher(taskStore, wsHub, makeLogger());
+
+    const completedTaskIds: string[] = [];
+    dispatcher.setOnTaskCompleted(async (taskId: string) => {
+      completedTaskIds.push(taskId);
+    });
+
+    // Create and dispatch a task, then manually set it to cancelled
+    const created = await dispatcher.createAndDispatch('team-a', 'aid-001', 'prompt', '');
+    const cancelledTask = { ...created, status: 'cancelled' as const, completed_at: new Date() };
+    await taskStore.update(cancelledTask);
+
+    const resultMsg: TaskResultMsg = {
+      task_id: created.id,
+      agent_aid: 'aid-001',
+      status: 'completed',
+      result: 'late result',
+      duration: 1_000_000_000,
+    };
+
+    // Should skip (cancelled race guard) — callback should NOT fire
+    await dispatcher.handleResult(resultMsg);
+
+    expect(completedTaskIds).toHaveLength(0);
+  });
+
+  it('catches and logs callback errors without crashing the Dispatcher', async () => {
+    const taskStore = makeTaskStore();
+    const wsHub = makeWSHub();
+    const logger = makeSpyLogger();
+    const dispatcher = newDispatcher(taskStore, wsHub, logger);
+
+    dispatcher.setOnTaskCompleted(async (_taskId: string) => {
+      throw new Error('callback exploded');
+    });
+
+    const created = await dispatcher.createAndDispatch('team-a', 'aid-001', 'prompt', '');
+
+    const resultMsg: TaskResultMsg = {
+      task_id: created.id,
+      agent_aid: 'aid-001',
+      status: 'completed',
+      result: 'done',
+      duration: 1_000_000_000,
+    };
+
+    // Should not throw — error is caught and logged
+    await dispatcher.handleResult(resultMsg);
+
+    // Task should still be completed in the store
+    const stored = await taskStore.get(created.id);
+    expect(stored.status).toBe('completed');
+
+    // Error should be logged
+    const errorCalls = logger.calls['error']!;
+    const callbackError = errorCalls.find(
+      ([msg]) => msg === 'onTaskCompleted callback failed',
+    );
+    expect(callbackError).toBeDefined();
+    expect(callbackError![1]).toMatchObject({
+      task_id: created.id,
+      error: 'callback exploded',
+    });
+  });
+
+  it('does not fire callback when no callback is registered', async () => {
+    const taskStore = makeTaskStore();
+    const wsHub = makeWSHub();
+    const dispatcher = newDispatcher(taskStore, wsHub, makeLogger());
+    // No callback registered
+
+    const created = await dispatcher.createAndDispatch('team-a', 'aid-001', 'prompt', '');
+
+    const resultMsg: TaskResultMsg = {
+      task_id: created.id,
+      agent_aid: 'aid-001',
+      status: 'completed',
+      result: 'done',
+      duration: 1_000_000_000,
+    };
+
+    // Should not throw
+    await dispatcher.handleResult(resultMsg);
+
+    const stored = await taskStore.get(created.id);
+    expect(stored.status).toBe('completed');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// onTaskRetryNeeded callback — retry on failure when retries remaining
+// ---------------------------------------------------------------------------
+
+describe('handleResult — onTaskRetryNeeded callback', () => {
+  it('retries on failure when retry_count < max_retries', async () => {
+    const taskStore = makeTaskStore();
+    const wsHub = makeWSHub();
+    const dispatcher = newDispatcher(taskStore, wsHub, makeLogger());
+
+    const retriedTaskIds: string[] = [];
+    dispatcher.setOnTaskRetryNeeded(async (taskId: string) => {
+      retriedTaskIds.push(taskId);
+    });
+
+    // Create a task with max_retries = 2, retry_count = 0
+    const created = await dispatcher.createAndDispatch('team-a', 'aid-001', 'prompt', '');
+    // Manually update the task to have max_retries = 2
+    const taskWithRetries: Task = {
+      ...(await taskStore.get(created.id)),
+      max_retries: 2,
+      retry_count: 0,
+    };
+    await taskStore.update(taskWithRetries);
+
+    const resultMsg: TaskResultMsg = {
+      task_id: created.id,
+      agent_aid: 'aid-001',
+      status: 'failed',
+      error: 'something went wrong',
+      duration: 1_000_000_000,
+    };
+
+    await dispatcher.handleResult(resultMsg);
+
+    // Task should be reset to pending, not failed
+    const stored = await taskStore.get(created.id);
+    expect(stored.status).toBe('pending');
+    expect(stored.retry_count).toBe(1);
+    expect(stored.completed_at).toBeNull();
+
+    // Callback should have been called
+    expect(retriedTaskIds).toHaveLength(1);
+    expect(retriedTaskIds[0]).toBe(created.id);
+  });
+
+  it('does NOT retry when retry_count >= max_retries', async () => {
+    const taskStore = makeTaskStore();
+    const wsHub = makeWSHub();
+    const dispatcher = newDispatcher(taskStore, wsHub, makeLogger());
+
+    const retriedTaskIds: string[] = [];
+    dispatcher.setOnTaskRetryNeeded(async (taskId: string) => {
+      retriedTaskIds.push(taskId);
+    });
+
+    // Create a task that is already at max retries
+    const created = await dispatcher.createAndDispatch('team-a', 'aid-001', 'prompt', '');
+    const taskAtMax: Task = {
+      ...(await taskStore.get(created.id)),
+      max_retries: 2,
+      retry_count: 2,
+    };
+    await taskStore.update(taskAtMax);
+
+    const resultMsg: TaskResultMsg = {
+      task_id: created.id,
+      agent_aid: 'aid-001',
+      status: 'failed',
+      error: 'something went wrong',
+      duration: 1_000_000_000,
+    };
+
+    await dispatcher.handleResult(resultMsg);
+
+    // Task should be marked as failed, not retried
+    const stored = await taskStore.get(created.id);
+    expect(stored.status).toBe('failed');
+    expect(stored.error).toBe('something went wrong');
+    expect(stored.completed_at).not.toBeNull();
+
+    // Callback should NOT have been called
+    expect(retriedTaskIds).toHaveLength(0);
+  });
+
+  it('increments retry_count on each retry', async () => {
+    const taskStore = makeTaskStore();
+    const wsHub = makeWSHub();
+    const dispatcher = newDispatcher(taskStore, wsHub, makeLogger());
+
+    const retriedTaskIds: string[] = [];
+    dispatcher.setOnTaskRetryNeeded(async (taskId: string) => {
+      retriedTaskIds.push(taskId);
+    });
+
+    // Create a task with max_retries = 3
+    const created = await dispatcher.createAndDispatch('team-a', 'aid-001', 'prompt', '');
+    const taskWithRetries: Task = {
+      ...(await taskStore.get(created.id)),
+      max_retries: 3,
+      retry_count: 0,
+    };
+    await taskStore.update(taskWithRetries);
+
+    const failMsg: TaskResultMsg = {
+      task_id: created.id,
+      agent_aid: 'aid-001',
+      status: 'failed',
+      error: 'fail-1',
+      duration: 1_000_000_000,
+    };
+
+    // First failure — retry_count goes from 0 to 1
+    await dispatcher.handleResult(failMsg);
+    let stored = await taskStore.get(created.id);
+    expect(stored.retry_count).toBe(1);
+    expect(stored.status).toBe('pending');
+
+    // Second failure — retry_count goes from 1 to 2
+    await dispatcher.handleResult({ ...failMsg, error: 'fail-2' });
+    stored = await taskStore.get(created.id);
+    expect(stored.retry_count).toBe(2);
+    expect(stored.status).toBe('pending');
+
+    // Third failure — retry_count goes from 2 to 3, now at max (3 >= 3), so it should fail
+    await dispatcher.handleResult({ ...failMsg, error: 'fail-3' });
+    stored = await taskStore.get(created.id);
+    expect(stored.retry_count).toBe(3);
+    expect(stored.status).toBe('pending');
+
+    // Fourth failure — retry_count 3 >= max_retries 3, so it should be marked failed
+    await dispatcher.handleResult({ ...failMsg, error: 'final-fail' });
+    stored = await taskStore.get(created.id);
+    expect(stored.retry_count).toBe(3);
+    expect(stored.status).toBe('failed');
+    expect(stored.error).toBe('final-fail');
+
+    // 3 retries happened (not 4)
+    expect(retriedTaskIds).toHaveLength(3);
+  });
+
+  it('catches and logs callback rejection without crashing', async () => {
+    const taskStore = makeTaskStore();
+    const wsHub = makeWSHub();
+    const logger = makeSpyLogger();
+    const dispatcher = newDispatcher(taskStore, wsHub, logger);
+
+    dispatcher.setOnTaskRetryNeeded(async (_taskId: string) => {
+      throw new Error('retry callback exploded');
+    });
+
+    const created = await dispatcher.createAndDispatch('team-a', 'aid-001', 'prompt', '');
+    const taskWithRetries: Task = {
+      ...(await taskStore.get(created.id)),
+      max_retries: 2,
+      retry_count: 0,
+    };
+    await taskStore.update(taskWithRetries);
+
+    const resultMsg: TaskResultMsg = {
+      task_id: created.id,
+      agent_aid: 'aid-001',
+      status: 'failed',
+      error: 'something went wrong',
+      duration: 1_000_000_000,
+    };
+
+    // Should NOT throw even though the callback rejects
+    await dispatcher.handleResult(resultMsg);
+
+    // Task should still be in pending status (retry was attempted)
+    const stored = await taskStore.get(created.id);
+    expect(stored.status).toBe('pending');
+    expect(stored.retry_count).toBe(1);
+
+    // Error should be logged
+    const errorCalls = logger.calls['error']!;
+    const callbackError = errorCalls.find(
+      ([msg]) => msg === 'onTaskRetryNeeded callback failed',
+    );
+    expect(callbackError).toBeDefined();
+    expect(callbackError![1]).toMatchObject({
+      task_id: created.id,
+      error: 'retry callback exploded',
+    });
+  });
+
+  it('does not retry when no callback is registered (fails normally)', async () => {
+    const taskStore = makeTaskStore();
+    const wsHub = makeWSHub();
+    const dispatcher = newDispatcher(taskStore, wsHub, makeLogger());
+    // No callback registered
+
+    const created = await dispatcher.createAndDispatch('team-a', 'aid-001', 'prompt', '');
+    const taskWithRetries: Task = {
+      ...(await taskStore.get(created.id)),
+      max_retries: 2,
+      retry_count: 0,
+    };
+    await taskStore.update(taskWithRetries);
+
+    const resultMsg: TaskResultMsg = {
+      task_id: created.id,
+      agent_aid: 'aid-001',
+      status: 'failed',
+      error: 'something went wrong',
+      duration: 1_000_000_000,
+    };
+
+    await dispatcher.handleResult(resultMsg);
+
+    // Without a callback, retry still happens (task reset to pending) but no re-dispatch
+    const stored = await taskStore.get(created.id);
+    expect(stored.status).toBe('pending');
+    expect(stored.retry_count).toBe(1);
+  });
+
+  it('does NOT fire onTaskCompleted callback on retry', async () => {
+    const taskStore = makeTaskStore();
+    const wsHub = makeWSHub();
+    const dispatcher = newDispatcher(taskStore, wsHub, makeLogger());
+
+    const completedTaskIds: string[] = [];
+    dispatcher.setOnTaskCompleted(async (taskId: string) => {
+      completedTaskIds.push(taskId);
+    });
+
+    const retriedTaskIds: string[] = [];
+    dispatcher.setOnTaskRetryNeeded(async (taskId: string) => {
+      retriedTaskIds.push(taskId);
+    });
+
+    const created = await dispatcher.createAndDispatch('team-a', 'aid-001', 'prompt', '');
+    const taskWithRetries: Task = {
+      ...(await taskStore.get(created.id)),
+      max_retries: 2,
+      retry_count: 0,
+    };
+    await taskStore.update(taskWithRetries);
+
+    const resultMsg: TaskResultMsg = {
+      task_id: created.id,
+      agent_aid: 'aid-001',
+      status: 'failed',
+      error: 'something went wrong',
+      duration: 1_000_000_000,
+    };
+
+    await dispatcher.handleResult(resultMsg);
+
+    // onTaskRetryNeeded fires, onTaskCompleted does NOT
+    expect(retriedTaskIds).toHaveLength(1);
+    expect(completedTaskIds).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// onTaskTerminalFailed callback — fires on terminal failed/cancelled
+// ---------------------------------------------------------------------------
+
+describe('handleResult — onTaskTerminalFailed callback', () => {
+  it('fires onTaskTerminalFailed callback when task fails with retries exhausted', async () => {
+    const taskStore = makeTaskStore();
+    const wsHub = makeWSHub();
+    const dispatcher = newDispatcher(taskStore, wsHub, makeLogger());
+
+    const terminalFailedIds: string[] = [];
+    dispatcher.setOnTaskTerminalFailed(async (taskId: string) => {
+      terminalFailedIds.push(taskId);
+    });
+
+    // Create a task with max_retries = 0 (no retries)
+    const created = await dispatcher.createAndDispatch('team-a', 'aid-001', 'prompt', '');
+
+    const resultMsg: TaskResultMsg = {
+      task_id: created.id,
+      agent_aid: 'aid-001',
+      status: 'failed',
+      error: 'something went wrong',
+      duration: 1_000_000_000,
+    };
+
+    await dispatcher.handleResult(resultMsg);
+
+    // Task should be failed
+    const stored = await taskStore.get(created.id);
+    expect(stored.status).toBe('failed');
+
+    // Terminal failed callback should fire
+    expect(terminalFailedIds).toHaveLength(1);
+    expect(terminalFailedIds[0]).toBe(created.id);
+  });
+
+  it('does NOT fire onTaskTerminalFailed when task is retried (not terminal)', async () => {
+    const taskStore = makeTaskStore();
+    const wsHub = makeWSHub();
+    const dispatcher = newDispatcher(taskStore, wsHub, makeLogger());
+
+    const terminalFailedIds: string[] = [];
+    dispatcher.setOnTaskTerminalFailed(async (taskId: string) => {
+      terminalFailedIds.push(taskId);
+    });
+
+    const created = await dispatcher.createAndDispatch('team-a', 'aid-001', 'prompt', '');
+    const taskWithRetries: Task = {
+      ...(await taskStore.get(created.id)),
+      max_retries: 2,
+      retry_count: 0,
+    };
+    await taskStore.update(taskWithRetries);
+
+    const resultMsg: TaskResultMsg = {
+      task_id: created.id,
+      agent_aid: 'aid-001',
+      status: 'failed',
+      error: 'retryable',
+      duration: 1_000_000_000,
+    };
+
+    await dispatcher.handleResult(resultMsg);
+
+    // Task should be pending (retried), not failed
+    const stored = await taskStore.get(created.id);
+    expect(stored.status).toBe('pending');
+
+    // Terminal failed callback should NOT fire
+    expect(terminalFailedIds).toHaveLength(0);
+  });
+
+  it('fires onTaskTerminalFailed for already-cancelled task (race guard)', async () => {
+    const taskStore = makeTaskStore();
+    const wsHub = makeWSHub();
+    const dispatcher = newDispatcher(taskStore, wsHub, makeLogger());
+
+    const terminalFailedIds: string[] = [];
+    dispatcher.setOnTaskTerminalFailed(async (taskId: string) => {
+      terminalFailedIds.push(taskId);
+    });
+
+    // Create, then manually cancel
+    const created = await dispatcher.createAndDispatch('team-a', 'aid-001', 'prompt', '');
+    const cancelledTask = { ...created, status: 'cancelled' as const, completed_at: new Date() };
+    await taskStore.update(cancelledTask);
+
+    const resultMsg: TaskResultMsg = {
+      task_id: created.id,
+      agent_aid: 'aid-001',
+      status: 'completed',
+      result: 'late result',
+      duration: 1_000_000_000,
+    };
+
+    await dispatcher.handleResult(resultMsg);
+
+    // Terminal failed callback SHOULD fire for the cancelled task
+    expect(terminalFailedIds).toHaveLength(1);
+    expect(terminalFailedIds[0]).toBe(created.id);
+  });
+
+  it('does NOT fire onTaskTerminalFailed when task completes successfully', async () => {
+    const taskStore = makeTaskStore();
+    const wsHub = makeWSHub();
+    const dispatcher = newDispatcher(taskStore, wsHub, makeLogger());
+
+    const terminalFailedIds: string[] = [];
+    dispatcher.setOnTaskTerminalFailed(async (taskId: string) => {
+      terminalFailedIds.push(taskId);
+    });
+
+    const created = await dispatcher.createAndDispatch('team-a', 'aid-001', 'prompt', '');
+
+    const resultMsg: TaskResultMsg = {
+      task_id: created.id,
+      agent_aid: 'aid-001',
+      status: 'completed',
+      result: 'done',
+      duration: 1_000_000_000,
+    };
+
+    await dispatcher.handleResult(resultMsg);
+
+    expect(terminalFailedIds).toHaveLength(0);
+  });
+
+  it('catches and logs callback rejection without crashing', async () => {
+    const taskStore = makeTaskStore();
+    const wsHub = makeWSHub();
+    const logger = makeSpyLogger();
+    const dispatcher = newDispatcher(taskStore, wsHub, logger);
+
+    dispatcher.setOnTaskTerminalFailed(async (_taskId: string) => {
+      throw new Error('terminal callback exploded');
+    });
+
+    const created = await dispatcher.createAndDispatch('team-a', 'aid-001', 'prompt', '');
+
+    const resultMsg: TaskResultMsg = {
+      task_id: created.id,
+      agent_aid: 'aid-001',
+      status: 'failed',
+      error: 'something went wrong',
+      duration: 1_000_000_000,
+    };
+
+    // Should not throw
+    await dispatcher.handleResult(resultMsg);
+
+    // Task should still be failed in the store
+    const stored = await taskStore.get(created.id);
+    expect(stored.status).toBe('failed');
+
+    // Error should be logged
+    const errorCalls = logger.calls['error']!;
+    const callbackError = errorCalls.find(
+      ([msg]) => msg === 'onTaskTerminalFailed callback failed',
+    );
+    expect(callbackError).toBeDefined();
+    expect(callbackError![1]).toMatchObject({
+      task_id: created.id,
+      error: 'terminal callback exploded',
+    });
   });
 });

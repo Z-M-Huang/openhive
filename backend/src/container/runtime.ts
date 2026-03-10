@@ -249,6 +249,7 @@ export class RuntimeImpl implements ContainerRuntime {
       HostConfig: {
         NetworkMode: networkMode,
         Memory: memLimit,
+        Binds: config.binds,
         RestartPolicy: {
           Name: 'on-failure',
         },
@@ -457,9 +458,9 @@ export function mapDockerState(status: string): ContainerState {
     case 'dead':
       return 'stopped';
     case 'removing':
-      return 'stopping';
+      return 'removing';
     default:
-      return 'error';
+      return 'failed';
   }
 }
 

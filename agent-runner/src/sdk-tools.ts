@@ -11,6 +11,7 @@ export interface JSONSchemaProperty {
   type?: string;
   description?: string;
   enum?: string[];
+  items?: { type: string };
 }
 
 /** JSON Schema object definition for tool parameters */
@@ -51,6 +52,7 @@ const MUTATING_TOOLS = new Set([
   'escalate',
   'cancel_task',
   'create_skill',
+  'save_memory',
 ]);
 
 /** Tools that perform read/query operations (10s timeout) */
@@ -65,6 +67,7 @@ const QUERY_TOOLS = new Set([
   'get_task_status',
   'list_tasks',
   'load_skill',
+  'recall_memory',
 ]);
 
 /**
@@ -252,6 +255,9 @@ export const SDK_TOOLS: ToolDefinition[] = [
         agent_aid: { type: 'string', description: 'Target agent AID' },
         prompt: { type: 'string', description: 'Task prompt' },
         task_id: { type: 'string', description: 'Task identifier (optional, auto-generated if omitted)' },
+        blocked_by: { type: 'array', items: { type: 'string' }, description: 'Task IDs that must complete before this task can start (optional, default [])' },
+        priority: { type: 'number', description: 'Task priority — higher values are more urgent (optional, default 0)' },
+        max_retries: { type: 'number', description: 'Maximum retry attempts on failure (optional, default 0 = no retry)' },
       },
       required: ['agent_aid', 'prompt'],
     },
@@ -265,6 +271,9 @@ export const SDK_TOOLS: ToolDefinition[] = [
         agent_aid: { type: 'string', description: 'Target agent AID' },
         prompt: { type: 'string', description: 'Task prompt' },
         timeout_seconds: { type: 'number', description: 'Maximum seconds to wait (default 300, max 600)' },
+        blocked_by: { type: 'array', items: { type: 'string' }, description: 'Task IDs that must complete before this task can start (optional, default [])' },
+        priority: { type: 'number', description: 'Task priority — higher values are more urgent (optional, default 0)' },
+        max_retries: { type: 'number', description: 'Maximum retry attempts on failure (optional, default 0 = no retry)' },
       },
       required: ['agent_aid', 'prompt'],
     },
@@ -278,6 +287,9 @@ export const SDK_TOOLS: ToolDefinition[] = [
         agent_aid: { type: 'string', description: 'Target agent AID' },
         prompt: { type: 'string', description: 'Subtask prompt' },
         parent_task_id: { type: 'string', description: 'Parent task ID to link this subtask to' },
+        blocked_by: { type: 'array', items: { type: 'string' }, description: 'Task IDs that must complete before this subtask can start (optional, default [])' },
+        priority: { type: 'number', description: 'Task priority — higher values are more urgent (optional, default 0)' },
+        max_retries: { type: 'number', description: 'Maximum retry attempts on failure (optional, default 0 = no retry)' },
       },
       required: ['agent_aid', 'prompt'],
     },
@@ -344,13 +356,13 @@ export const SDK_TOOLS: ToolDefinition[] = [
   },
   {
     name: 'consolidate_results',
-    description: 'Retrieve and consolidate results from all subtasks of a parent task',
+    description: 'Retrieve results for multiple tasks by ID',
     parameters: {
       type: 'object',
       properties: {
-        task_id: { type: 'string', description: 'Parent task ID whose subtask results to consolidate' },
+        task_ids: { type: 'array', items: { type: 'string' }, description: 'Array of task IDs to retrieve results for' },
       },
-      required: ['task_id'],
+      required: ['task_ids'],
     },
   },
 
@@ -381,6 +393,33 @@ export const SDK_TOOLS: ToolDefinition[] = [
         team_slug: { type: 'string', description: 'Team slug whose workspace contains the skill (use "master" for root assistant)' },
       },
       required: ['skill_name', 'team_slug'],
+    },
+  },
+
+  // --- Memory tools ---
+  {
+    name: 'save_memory',
+    description: 'Save a memory entry for the calling agent. If a memory with the same key already exists, it is updated (upsert).',
+    parameters: {
+      type: 'object',
+      properties: {
+        key: { type: 'string', description: 'Memory key (e.g. "user_preferences", "learned_patterns")' },
+        content: { type: 'string', description: 'Memory content to save' },
+        memory_type: { type: 'string', description: 'Memory type: "curated" or "daily" (default "curated")', enum: ['curated', 'daily'] },
+      },
+      required: ['key', 'content'],
+    },
+  },
+  {
+    name: 'recall_memory',
+    description: 'Search the agent\'s memories by keyword query. Returns matching memory entries sorted by most recently updated.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Search query (keyword-based substring match)' },
+        limit: { type: 'number', description: 'Maximum number of results to return (default 100)' },
+      },
+      required: ['query'],
     },
   },
 ];

@@ -17,12 +17,14 @@ import type { WebSocket } from 'ws';
 import type {
   ConfigLoader,
   FastifyUpgradeHandler,
-  GoOrchestrator,
+  Orchestrator,
   HeartbeatMonitor,
   KeyManager,
   LogStore,
   OrgChart,
   TaskStore,
+  TriggerScheduler,
+  TaskCoordinator,
 } from '../domain/interfaces.js';
 import type { DBLogger, MiddlewareLogger } from './middleware.js';
 import {
@@ -69,11 +71,13 @@ export interface ServerDeps {
   taskStore?: TaskStore;
   configLoader?: ConfigLoader;
   orgChart?: OrgChart;
-  goOrchestrator?: GoOrchestrator;
+  orchestrator?: Orchestrator;
   heartbeatMonitor?: HeartbeatMonitor;
   portalWS?: PortalWSHandler;
   dbLogger?: DroppedLogCounter;
   logWriter?: DBLogger;
+  triggerScheduler?: TriggerScheduler;
+  taskCoordinator?: TaskCoordinator;
 }
 
 /** API server instance returned by createServer. */
@@ -168,16 +172,16 @@ export function createServer(
       getTeamHandler(deps.orgChart, hbm, logger),
     );
   }
-  if (deps.goOrchestrator !== undefined) {
+  if (deps.orchestrator !== undefined) {
     fastify.post(
       '/api/v1/teams',
       { schema: CREATE_TEAM_SCHEMA },
-      createTeamHandler(deps.goOrchestrator, logger),
+      createTeamHandler(deps.orchestrator, logger),
     );
     fastify.delete(
       '/api/v1/teams/:slug',
       { schema: SLUG_PARAM_SCHEMA },
-      deleteTeamHandler(deps.goOrchestrator, logger),
+      deleteTeamHandler(deps.orchestrator, logger),
     );
   }
 
@@ -194,11 +198,52 @@ export function createServer(
       getTaskHandler(deps.taskStore, logger),
     );
   }
-  if (deps.taskStore !== undefined && deps.goOrchestrator !== undefined) {
+  if (deps.taskStore !== undefined && deps.orchestrator !== undefined) {
     fastify.post(
       '/api/v1/tasks/:id/cancel',
       { schema: TASK_ID_PARAM_SCHEMA },
-      cancelTaskHandler(deps.goOrchestrator, deps.taskStore, logger),
+      cancelTaskHandler(deps.orchestrator, deps.taskStore, logger),
+    );
+  }
+
+  // Webhook trigger endpoint (conditional on triggerScheduler + taskCoordinator)
+  if (deps.triggerScheduler !== undefined && deps.taskCoordinator !== undefined) {
+    const trigSched = deps.triggerScheduler;
+    const taskCoord = deps.taskCoordinator;
+    fastify.post(
+      '/api/v1/hooks/:path',
+      async (request: FastifyRequest<{ Params: { path: string } }>, reply: FastifyReply) => {
+        const hookPath = request.params.path;
+        const trigger = trigSched.getWebhookTrigger(hookPath);
+        if (trigger === undefined) {
+          return reply.status(404).send({ error: 'webhook not found' });
+        }
+
+        // Dispatch the trigger's pre-configured prompt as a task (CSC-12: NOT the POST body)
+        const now = new Date();
+        const taskId = crypto.randomUUID();
+        const task = {
+          id: taskId,
+          team_slug: trigger.team_slug,
+          agent_aid: trigger.agent_aid,
+          status: 'pending' as const,
+          prompt: trigger.prompt,
+          blocked_by: [] as string[],
+          priority: 0,
+          retry_count: 0,
+          max_retries: 0,
+          created_at: now,
+          updated_at: now,
+          completed_at: null,
+        };
+
+        await taskCoord.dispatchTask(task);
+
+        return reply.status(200).send({
+          trigger_id: trigger.id,
+          task_id: task.id,
+        });
+      },
     );
   }
 

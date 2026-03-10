@@ -94,12 +94,14 @@ export const requestIdPlugin = fp(async (fastify: FastifyInstance) => {
  * Sets security headers on all responses:
  *   X-Content-Type-Options: nosniff
  *   X-Frame-Options: DENY
+ *   X-XSS-Protection: 0
  *   Content-Security-Policy: (WebSocket + Tailwind variant)
  */
 export const securityHeadersPlugin = fp(async (fastify: FastifyInstance) => {
   fastify.addHook('onSend', (_request: FastifyRequest, reply: FastifyReply, _payload, done) => {
     reply.header('X-Content-Type-Options', 'nosniff');
     reply.header('X-Frame-Options', 'DENY');
+    reply.header('X-XSS-Protection', '0');
     reply.header('Content-Security-Policy', CSP_WITH_WS);
     done();
   });

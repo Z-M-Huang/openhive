@@ -46,7 +46,6 @@ export interface Team {
   leader_aid: string;
   children?: string[];
   agents?: Agent[];
-  skills?: Skill[];
   mcp_servers?: MCPServer[];
   env_vars?: Record<string, string>;
   container_config?: ContainerConfig;
@@ -66,6 +65,10 @@ export interface Agent {
   max_turns?: number;
   timeout_minutes?: number;
   leads_team?: string;
+  /** Proactive check interval in minutes. 0 = disabled, min 5. Default 30. */
+  proactive_interval_minutes?: number;
+  /** Whether the agent can self-evolve its own definition. Informational for v0. */
+  self_evolve?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -96,6 +99,18 @@ export interface Skill {
 }
 
 // ---------------------------------------------------------------------------
+// SkillInfo (registry metadata)
+// ---------------------------------------------------------------------------
+
+/** Metadata about a skill available in an external registry. */
+export interface SkillInfo {
+  name: string;
+  description: string;
+  registry_url: string;
+  source_url: string;
+}
+
+// ---------------------------------------------------------------------------
 // Task
 // ---------------------------------------------------------------------------
 
@@ -110,6 +125,16 @@ export interface Task {
   prompt: string;
   result?: string;
   error?: string;
+  /** ID of the task that blocks this one (empty = not blocked). @deprecated Use blocked_by array instead. */
+  blocked_by_task_id?: string;
+  /** Task IDs that must complete before this task can start. Empty array if no dependencies. */
+  blocked_by: string[];
+  /** Priority level (higher = more important, default 0). */
+  priority: number;
+  /** Number of times this task has been retried. */
+  retry_count: number;
+  /** Maximum number of retries allowed (0 = no retries). */
+  max_retries: number;
   created_at: Date;
   updated_at: Date;
   completed_at: Date | null;
@@ -185,6 +210,81 @@ export interface LogEntry {
 }
 
 // ---------------------------------------------------------------------------
+// Escalation
+// ---------------------------------------------------------------------------
+
+/** Status of an escalation request. */
+export type EscalationStatus = 'pending' | 'resolved' | 'rejected' | 'timed_out';
+
+/** Represents an escalation from an agent to its supervisor. */
+export interface Escalation {
+  id: string;
+  correlation_id: string;
+  task_id: string;
+  from_aid: string;
+  to_aid: string;
+  source_team: string;
+  destination_team: string;
+  escalation_level: number;
+  reason: string;
+  context?: string;
+  status: EscalationStatus;
+  resolution?: string;
+  created_at: Date;
+  updated_at: Date;
+  resolved_at: Date | null;
+}
+
+// ---------------------------------------------------------------------------
+// AgentMemory
+// ---------------------------------------------------------------------------
+
+/** Represents a persistent memory entry for an agent. */
+export interface AgentMemory {
+  id: string;
+  agent_aid: string;
+  key: string;
+  value: string;
+  metadata?: string;
+  /** Team slug this memory belongs to (empty = global). */
+  team_slug?: string;
+  /** Soft-delete timestamp (null = active). */
+  deleted_at?: Date;
+  created_at: Date;
+  updated_at: Date;
+}
+
+// ---------------------------------------------------------------------------
+// Trigger
+// ---------------------------------------------------------------------------
+
+/** Represents an automated trigger configuration. */
+export interface Trigger {
+  id: string;
+  name: string;
+  team_slug: string;
+  agent_aid: string;
+  /** Cron expression (e.g. "0 0/5 * * *"). */
+  schedule: string;
+  prompt: string;
+  enabled: boolean;
+  /** Trigger type: 'cron' (default), 'webhook', 'channel_event', or 'task_completion'. */
+  type?: 'cron' | 'webhook' | 'channel_event' | 'task_completion';
+  /** Webhook path for webhook triggers (validated with validateSlug). */
+  webhook_path?: string;
+  /** Channel name for channel_event triggers. */
+  channel?: string;
+  /** Regex pattern for channel_event triggers (matched against message content). */
+  pattern?: string;
+  /** Source team slug for task_completion triggers (fires when a task in this team completes). */
+  source_task_team?: string;
+  last_run_at: Date | null;
+  next_run_at: Date | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
+// ---------------------------------------------------------------------------
 // MCPServer
 // ---------------------------------------------------------------------------
 
@@ -210,6 +310,8 @@ export interface ContainerConfig {
   name?: string;
   /** Set at runtime, not in config files. */
   image_name?: string;
+  /** Docker volume bind mounts (host:container[:mode]). Set at runtime. */
+  binds?: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -354,6 +456,8 @@ export interface ChannelMessagePayload {
   kind: 'channel_message';
   jid: string;
   content: string;
+  /** Channel name (e.g. 'discord', 'whatsapp'). Used by channel_event triggers to filter. */
+  channel?: string;
 }
 
 /**
@@ -446,6 +550,20 @@ export interface MasterConfig {
   assistant: AssistantConfig;
   agents?: Agent[];
   channels: ChannelsConfig;
+  /** External skill registry URLs (e.g. ["https://clawhub.ai/skills"]). */
+  skill_registries?: string[];
+}
+
+/** Configurable system limits (see Design Rules CON-01..CON-03). */
+export interface SystemLimits {
+  /** Maximum team nesting depth (CON-01, default 5). */
+  max_depth: number;
+  /** Maximum total teams across all depths (CON-02, default 20). */
+  max_teams: number;
+  /** Maximum agents per team (CON-03, default 10). */
+  max_agents_per_team: number;
+  /** Maximum concurrent running tasks (default 50). */
+  max_concurrent_tasks: number;
 }
 
 /** Holds system-wide settings. */
@@ -460,6 +578,7 @@ export interface SystemConfig {
   event_bus_workers: number;
   portal_ws_max_connections: number;
   message_archive: ArchiveConfig;
+  limits: SystemLimits;
 }
 
 /** Holds log / message archive settings. */

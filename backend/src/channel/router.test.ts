@@ -97,6 +97,11 @@ function makeTaskStore(session?: ChatSession): TaskStore {
     listByTeam: vi.fn().mockResolvedValue([]),
     listByStatus: vi.fn().mockResolvedValue([]),
     getSubtree: vi.fn().mockResolvedValue([]),
+    getDependents: vi.fn().mockResolvedValue([]),
+    getBlockedBy: vi.fn().mockResolvedValue([]),
+    unblockTask: vi.fn().mockResolvedValue(true),
+    retryTask: vi.fn().mockResolvedValue(false),
+    validateDependencies: vi.fn().mockResolvedValue(undefined),
   };
 }
 

@@ -38,7 +38,7 @@
  *
  *   mapDockerState:
  *     - maps all Docker status strings correctly
- *     - maps unknown strings to 'error'
+ *     - maps unknown strings to 'failed'
  *
  *   ensureNetwork:
  *     - returns existing network ID when found
@@ -441,6 +441,21 @@ describe('RuntimeImpl.createContainer', () => {
     await runtime.createContainer({ name: 'test-team' });
     expect(client.createContainerCalls[0].Env).toEqual([]);
   });
+
+  it('passes binds to HostConfig.Binds when provided', async () => {
+    const { runtime, client } = makeRuntime();
+    await runtime.createContainer({
+      name: 'test-team',
+      binds: ['/host/workspace:/app/workspace'],
+    });
+    expect(client.createContainerCalls[0].HostConfig?.Binds).toEqual(['/host/workspace:/app/workspace']);
+  });
+
+  it('omits Binds when binds is not provided', async () => {
+    const { runtime, client } = makeRuntime();
+    await runtime.createContainer({ name: 'test-team' });
+    expect(client.createContainerCalls[0].HostConfig?.Binds).toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -703,10 +718,10 @@ describe('mapDockerState', () => {
     ['paused', 'stopped'],
     ['exited', 'stopped'],
     ['dead', 'stopped'],
-    ['removing', 'stopping'],
-    ['unknown', 'error'],
-    ['', 'error'],
-    ['RUNNING', 'error'], // case-sensitive
+    ['removing', 'removing'],
+    ['unknown', 'failed'],
+    ['', 'failed'],
+    ['RUNNING', 'failed'], // case-sensitive
   ];
 
   for (const [dockerStatus, expectedDomainState] of cases) {

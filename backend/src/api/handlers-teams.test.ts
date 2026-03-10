@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Fastify from 'fastify';
 import type { FastifyInstance } from 'fastify';
 
-import type { GoOrchestrator, HeartbeatMonitor, OrgChart } from '../domain/interfaces.js';
+import type { Orchestrator, HeartbeatMonitor, OrgChart } from '../domain/interfaces.js';
 import type { HeartbeatStatus, Team } from '../domain/types.js';
 import { NotFoundError } from '../domain/errors.js';
 import { buildTeamResponse, registerTeamRoutes } from './handlers-teams.js';
@@ -57,7 +57,7 @@ function makeMockOrgChart(): OrgChart & {
   };
 }
 
-function makeMockOrch(): GoOrchestrator & {
+function makeMockOrch(): Orchestrator & {
   createTeam: ReturnType<typeof vi.fn>;
   deleteTeam: ReturnType<typeof vi.fn>;
 } {
@@ -77,7 +77,7 @@ function makeMockOrch(): GoOrchestrator & {
     getAllStatuses: vi.fn(),
     start: vi.fn(),
     stop: vi.fn(),
-  } as unknown as GoOrchestrator & {
+  } as unknown as Orchestrator & {
     createTeam: ReturnType<typeof vi.fn>;
     deleteTeam: ReturnType<typeof vi.fn>;
   };
@@ -102,7 +102,7 @@ function makeLogger() {
 
 async function buildApp(
   orgChart: OrgChart,
-  orch: GoOrchestrator,
+  orch: Orchestrator,
   hbm: HeartbeatMonitor | null,
 ): Promise<FastifyInstance> {
   const app = Fastify({

@@ -9,20 +9,20 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { mkdir, writeFile, rm, unlink } from 'node:fs/promises';
+import { mkdir, writeFile, readFile, rm, unlink } from 'node:fs/promises';
 import { join as pathJoin } from 'node:path';
 import { stringify as stringifyYaml } from 'yaml';
-import type { ConfigLoader, OrgChart, EventBus, KeyManager, TaskStore, ContainerManager, WSHub } from '../domain/interfaces.js';
-import type { JsonValue, Agent, Team, ContainerConfig } from '../domain/types.js';
+import type { ConfigLoader, OrgChart, EventBus, KeyManager, TaskStore, ContainerManager, WSHub, SkillRegistry } from '../domain/interfaces.js';
+import type { JsonValue, Agent, Team, ContainerConfig, SystemLimits } from '../domain/types.js';
 import { ValidationError, ConflictError, NotFoundError } from '../domain/errors.js';
 import { validateSlug, validateAID, isReservedSlug, slugifyName } from '../domain/validation.js';
 import { validateModelTier } from '../domain/enums.js';
 import type { ToolFunc, ToolCallContext } from './toolhandler.js';
 import type { ToolRegistry } from '../domain/interfaces.js';
-import { scaffoldTeamWorkspace, validateWorkspacePath } from './orchestrator.js';
+import { scaffoldTeamWorkspace, validateWorkspacePath, resolveTeamWorkspacePath } from './orchestrator.js';
 import { SkillLoader, validateSkillName } from './skills.js';
 import { encodeMessage, MsgTypeAgentAdded } from '../ws/index.js';
-import type { AgentInitConfig } from '../ws/messages.js';
+import type { AgentInitConfig, ProviderConfig } from '../ws/messages.js';
 
 // ---------------------------------------------------------------------------
 // TeamToolsDeps
@@ -44,6 +44,10 @@ export interface TeamToolsDeps {
   containerManager: ContainerManager | null;
   /** WebSocket hub for sending messages to team containers. Null in tests. */
   wsHub: WSHub | null;
+  /** System limits for enforcing team/agent caps. Null falls back to defaults. */
+  limits: SystemLimits | null;
+  /** Skill registry for install_skill. Null disables install_skill. */
+  skillRegistry: SkillRegistry | null;
   logger: {
     info(msg: string, data?: Record<string, unknown>): void;
     warn(msg: string, data?: Record<string, unknown>): void;
@@ -85,6 +89,10 @@ export function registerTeamTools(handler: ToolRegistry, deps: TeamToolsDeps): v
   handler.register('get_member_status', makeGetMemberStatus(deps));
   handler.register('create_skill', makeCreateSkill(deps));
   handler.register('load_skill', makeLoadSkill(deps));
+  handler.register('refine_skill', makeRefineSkill(deps));
+  if (deps.skillRegistry !== null) {
+    handler.register('install_skill', makeInstallSkill(deps));
+  }
 }
 
 // Re-export slugifyName from domain/validation for backward compatibility.
@@ -240,20 +248,37 @@ function makeCreateAgent(deps: TeamToolsDeps): ToolFunc {
     }
 
     // Generate a unique AID: aid-{slug}-{8-char uuid}
-    const nameSlug = slugifyName(name);
+    // Strip hyphens from the slug so the AID always has exactly two segments
+    // after the "aid-" prefix, matching the validateAID pattern /^aid-[a-z0-9]+-[a-z0-9]+$/.
+    const nameSlug = slugifyName(name).replace(/-/g, '');
     const aid = `aid-${nameSlug}-${shortID()}`;
+
+    // Parse self_evolve (optional boolean, informational for v0)
+    const selfEvolveRaw = args['self_evolve'];
+    const selfEvolve = typeof selfEvolveRaw === 'boolean' ? selfEvolveRaw : undefined;
 
     const agent: Agent = {
       aid,
       name,
       ...(provider !== '' ? { provider } : {}),
       ...(modelTier !== '' ? { model_tier: modelTier } : {}),
+      ...(selfEvolve !== undefined ? { self_evolve: selfEvolve } : {}),
     };
 
     if (teamSlug === 'master') {
       // Add to master config agents list
       const master = await deps.configLoader.loadMaster();
       const existingAgents = master.agents ?? [];
+
+      // Enforce system limits (CON-03: max agents per team)
+      const maxAgents = deps.limits?.max_agents_per_team ?? 10;
+      if (existingAgents.length >= maxAgents) {
+        throw new ValidationError(
+          'team_slug',
+          `maximum agents per team reached (${maxAgents})`,
+        );
+      }
+
       // Guard against duplicate AID (should not happen with UUID, but be safe)
       for (const existing of existingAgents) {
         if (existing.aid === aid) {
@@ -267,6 +292,16 @@ function makeCreateAgent(deps: TeamToolsDeps): ToolFunc {
       validateSlug(teamSlug);
       const team = await deps.configLoader.loadTeam(teamSlug);
       const existingAgents = team.agents ?? [];
+
+      // Enforce system limits (CON-03: max agents per team)
+      const maxAgents = deps.limits?.max_agents_per_team ?? 10;
+      if (existingAgents.length >= maxAgents) {
+        throw new ValidationError(
+          'team_slug',
+          `maximum agents per team reached (${maxAgents})`,
+        );
+      }
+
       for (const existing of existingAgents) {
         if (existing.aid === aid) {
           throw new ConflictError('agent', 'duplicate AID');
@@ -280,14 +315,19 @@ function makeCreateAgent(deps: TeamToolsDeps): ToolFunc {
     // Best-effort: failures are logged and do not block agent creation.
     try {
       const wsSlug = teamSlug === 'master' ? 'main' : teamSlug;
-      const agentsDir = pathJoin(deps.runDir, 'teams', wsSlug, '.claude', 'agents');
+      const wsDir = resolveTeamWorkspacePath(deps.runDir, wsSlug);
+      const agentsDir = pathJoin(wsDir, '.claude', 'agents');
       await mkdir(agentsDir, { recursive: true });
-      const frontmatter = stringifyYaml({
+      const frontmatterObj: Record<string, unknown> = {
         name,
         description,
         model: modelTier !== '' ? modelTier : 'sonnet',
         tools: [] as string[],
-      });
+      };
+      if (selfEvolve !== undefined) {
+        frontmatterObj['self_evolve'] = selfEvolve;
+      }
+      const frontmatter = stringifyYaml(frontmatterObj);
       const body = [
         `# ${name}`,
         '',
@@ -321,17 +361,38 @@ function makeCreateAgent(deps: TeamToolsDeps): ToolFunc {
     // doesn't receive agent_added messages.
     if (teamSlug !== 'master' && deps.wsHub !== null) {
       try {
-        const team = deps.orgChart.getTeamBySlug(teamSlug);
+        deps.orgChart.getTeamBySlug(teamSlug); // Validates team exists
+
+        // Resolve provider config from preset name (fall back to OAuth default)
+        let providerCfg: ProviderConfig = { type: 'oauth' };
+        if (provider !== '') {
+          try {
+            const providers = await deps.configLoader.loadProviders();
+            const preset = providers[provider];
+            if (preset !== undefined) {
+              if (preset.type === 'anthropic_direct') {
+                providerCfg = { type: 'anthropic_direct', api_key: preset.api_key, api_url: preset.base_url };
+              } else if (preset.type === 'oauth') {
+                providerCfg = { type: 'oauth', oauth_token: preset.oauth_token };
+              } else {
+                providerCfg = { type: preset.type, api_key: preset.api_key, api_url: preset.base_url };
+              }
+            }
+          } catch {
+            // Provider lookup failed — fall back to default OAuth
+          }
+        }
+
         const agentInit: AgentInitConfig = {
           aid,
           name,
-          provider: { type: 'oauth' },
+          provider: providerCfg,
           model_tier: modelTier || 'sonnet',
           role: 'worker',
         };
         const msg = encodeMessage(MsgTypeAgentAdded, { agent: agentInit });
-        await deps.wsHub.sendToTeam(team.tid, msg);
-        deps.logger.info('sent agent_added to team container', { aid, team_slug: teamSlug, tid: team.tid });
+        await deps.wsHub.sendToTeam(teamSlug, msg);
+        deps.logger.info('sent agent_added to team container', { aid, team_slug: teamSlug });
       } catch (err) {
         // Container may not be connected yet — agent file exists and will be
         // picked up on container restart.
@@ -423,6 +484,36 @@ function makeCreateTeam(deps: TeamToolsDeps): ToolFunc {
     for (const existing of existingSlugs) {
       if (existing === slug) {
         throw new ConflictError('team', `team ${slug} already exists`);
+      }
+    }
+
+    // Enforce system limits (CON-02: max total teams)
+    const maxTeams = deps.limits?.max_teams ?? 20;
+    if (existingSlugs.length >= maxTeams) {
+      throw new ValidationError(
+        'slug',
+        `maximum team limit reached (${maxTeams})`,
+      );
+    }
+
+    // Validate parent_slug exists and enforce nesting depth limit (CON-01: max_depth)
+    if (parentSlug !== undefined) {
+      // Only validate existence when explicitly provided by the caller.
+      // When inferred from context, the team is guaranteed to exist (it's the calling team).
+      if (explicitParent !== undefined) {
+        try {
+          deps.orgChart.getTeamBySlug(parentSlug);
+        } catch {
+          throw new ValidationError('parent_slug', `parent team '${parentSlug}' does not exist`);
+        }
+      }
+      const maxDepth = deps.limits?.max_depth ?? 5;
+      const depth = computeNestingDepth(deps.orgChart, parentSlug);
+      if (depth + 1 > maxDepth) {
+        throw new ValidationError(
+          'slug',
+          `maximum nesting depth reached (${maxDepth})`,
+        );
       }
     }
 
@@ -635,7 +726,8 @@ function makeDeleteTeam(deps: TeamToolsDeps): ToolFunc {
           try {
             const wsSlug = leaderParentSlug === 'main' ? 'main' : (leaderParentSlug ?? 'main');
             const agentFileName = `${slugifyName(leaderAgent.name)}.md`;
-            const filePath = pathJoin(deps.runDir, 'teams', wsSlug, '.claude', 'agents', agentFileName);
+            const wsDir = resolveTeamWorkspacePath(deps.runDir, wsSlug);
+            const filePath = pathJoin(wsDir, '.claude', 'agents', agentFileName);
             await unlink(filePath);
           } catch (err) {
             if (isNodeError(err) && err.code === 'ENOENT') {
@@ -761,7 +853,8 @@ function makeDeleteAgent(deps: TeamToolsDeps): ToolFunc {
       try {
         const wsSlug = teamSlug === 'master' ? 'main' : teamSlug;
         const agentFileName = `${slugifyName(removedAgent.name)}.md`;
-        const filePath = pathJoin(deps.runDir, 'teams', wsSlug, '.claude', 'agents', agentFileName);
+        const wsDir = resolveTeamWorkspacePath(deps.runDir, wsSlug);
+        const filePath = pathJoin(wsDir, '.claude', 'agents', agentFileName);
         await unlink(filePath);
       } catch (err) {
         if (isNodeError(err) && err.code === 'ENOENT') {
@@ -860,19 +953,32 @@ function makeUpdateTeam(deps: TeamToolsDeps): ToolFunc {
       throw new ValidationError('value', 'value is required');
     }
 
+    // The MCP bridge may serialize objects as JSON strings. Parse if needed.
+    let parsedValue: string | number | boolean | JsonValue[] | { [key: string]: JsonValue } = value;
+    if (typeof parsedValue === 'string') {
+      try {
+        const parsed: unknown = JSON.parse(parsedValue);
+        if (typeof parsed === 'object' && parsed !== null) {
+          parsedValue = parsed as JsonValue[] | { [key: string]: JsonValue };
+        }
+      } catch {
+        // Not valid JSON — fall through to field-specific validation
+      }
+    }
+
     const team = await deps.configLoader.loadTeam(slug);
 
     switch (field) {
       case 'env_vars': {
         // value must be Record<string, string>
         if (
-          typeof value !== 'object' ||
-          Array.isArray(value) ||
-          value === null
+          typeof parsedValue !== 'object' ||
+          Array.isArray(parsedValue) ||
+          parsedValue === null
         ) {
           throw new ValidationError('value', 'env_vars must be a string map');
         }
-        const envRecord = value as Record<string, JsonValue>;
+        const envRecord = parsedValue as Record<string, JsonValue>;
         const envVars: Record<string, string> = {};
         for (const [k, v] of Object.entries(envRecord)) {
           if (typeof v !== 'string') {
@@ -887,13 +993,13 @@ function makeUpdateTeam(deps: TeamToolsDeps): ToolFunc {
       case 'container_config': {
         // value must be a ContainerConfig-shaped object
         if (
-          typeof value !== 'object' ||
-          Array.isArray(value) ||
-          value === null
+          typeof parsedValue !== 'object' ||
+          Array.isArray(parsedValue) ||
+          parsedValue === null
         ) {
           throw new ValidationError('value', 'container_config must be a ContainerConfig object');
         }
-        const cc = value as Record<string, JsonValue>;
+        const cc = parsedValue as Record<string, JsonValue>;
         const containerConfig: ContainerConfig = {};
         if (cc['max_memory'] !== undefined) {
           if (typeof cc['max_memory'] !== 'string') {
@@ -1076,9 +1182,14 @@ function makeCreateSkill(deps: TeamToolsDeps): ToolFunc {
     // Resolve workspace directory: "master" maps to "main"
     const wsSlug = teamSlug === 'master' ? 'main' : teamSlug;
 
-    // validateWorkspacePath enforces path containment and rejects symlinks.
-    // Throws ValidationError on path traversal or symlink attack.
-    const workspaceDir = validateWorkspacePath(deps.runDir, wsSlug);
+    let workspaceDir: string;
+    if (wsSlug === 'main') {
+      // Main workspace is the root workspace, not under workspace/teams/.
+      workspaceDir = resolveTeamWorkspacePath(deps.runDir, 'main');
+    } else {
+      // validateWorkspacePath enforces path containment and rejects symlinks.
+      workspaceDir = validateWorkspacePath(deps.runDir, wsSlug);
+    }
 
     await writeSkillFile(workspaceDir, { name, description, argumentHint, allowedTools, body });
 
@@ -1110,7 +1221,13 @@ function makeLoadSkill(deps: TeamToolsDeps): ToolFunc {
 
     // Resolve workspace directory: "master" maps to "main"
     const wsSlug = teamSlug === 'master' ? 'main' : teamSlug;
-    const workspaceDir = validateWorkspacePath(deps.runDir, wsSlug);
+
+    let workspaceDir: string;
+    if (wsSlug === 'main') {
+      workspaceDir = resolveTeamWorkspacePath(deps.runDir, 'main');
+    } else {
+      workspaceDir = validateWorkspacePath(deps.runDir, wsSlug);
+    }
 
     const loader = new SkillLoader(workspaceDir, deps.logger);
     const skill = loader.loadSkill(skillName);
@@ -1121,4 +1238,192 @@ function makeLoadSkill(deps: TeamToolsDeps): ToolFunc {
       body: skill.system_prompt_addition ?? '',
     };
   };
+}
+
+// ---------------------------------------------------------------------------
+// refine_skill
+// ---------------------------------------------------------------------------
+
+/**
+ * Reads an existing skill, allows update, writes back.
+ * Hot-reload (500ms debounce) picks up changes automatically.
+ *
+ * Args:
+ *   name:          string (required) — skill name
+ *   team_slug:     string (required) — team slug, or "master" for root
+ *   body:          string (required) — updated skill body
+ *   description?:  string           — updated description
+ *
+ * Returns: { name, status: "refined" }
+ */
+function makeRefineSkill(deps: TeamToolsDeps): ToolFunc {
+  return async (args: Record<string, JsonValue>): Promise<JsonValue> => {
+    const name = typeof args['name'] === 'string' ? args['name'] : '';
+    const teamSlug = typeof args['team_slug'] === 'string' ? args['team_slug'] : '';
+    const body = typeof args['body'] === 'string' ? args['body'] : '';
+    const description = typeof args['description'] === 'string' ? args['description'] : undefined;
+
+    if (name === '') {
+      throw new ValidationError('name', 'name is required');
+    }
+    if (teamSlug === '') {
+      throw new ValidationError('team_slug', 'team_slug is required');
+    }
+    if (body === '') {
+      throw new ValidationError('body', 'body is required');
+    }
+
+    validateSkillName(name);
+
+    if (teamSlug !== 'master') {
+      validateSlug(teamSlug);
+    }
+
+    const wsSlug = teamSlug === 'master' ? 'main' : teamSlug;
+
+    let workspaceDir: string;
+    if (wsSlug === 'main') {
+      workspaceDir = resolveTeamWorkspacePath(deps.runDir, 'main');
+    } else {
+      workspaceDir = validateWorkspacePath(deps.runDir, wsSlug);
+    }
+
+    // Verify the skill exists and read existing metadata
+    const skillFilePath = pathJoin(workspaceDir, '.claude', 'skills', name, 'SKILL.md');
+    let existingContent: string;
+    try {
+      existingContent = await readFile(skillFilePath, 'utf-8');
+    } catch {
+      throw new NotFoundError('skill', name);
+    }
+
+    // Parse existing frontmatter to preserve metadata not provided in this call
+    let existingArgumentHint: string | undefined;
+    let existingAllowedTools: string[] | undefined;
+    let existingDescription: string | undefined;
+    const fmMatch = existingContent.match(/^---\s*\n([\s\S]*?)\n---/);
+    if (fmMatch !== null) {
+      const fm = fmMatch[1]!;
+      const descMatch = fm.match(/^description:\s*["']?([^\n"']+)["']?\s*$/m);
+      if (descMatch !== null) existingDescription = descMatch[1]!.trim();
+      const hintMatch = fm.match(/^argument-hint:\s*["']?([^\n"']+)["']?\s*$/m);
+      if (hintMatch !== null) existingArgumentHint = hintMatch[1]!.trim();
+      const toolsMatch = fm.match(/^allowed-tools:\s*\n((?:\s*-\s*.+\n?)*)/m);
+      if (toolsMatch !== null) {
+        existingAllowedTools = toolsMatch[1]!
+          .split('\n')
+          .map((line) => line.replace(/^\s*-\s*/, '').trim())
+          .filter((t) => t !== '');
+      }
+    }
+
+    // Merge: caller-provided values override existing; existing preserved otherwise
+    await writeSkillFile(workspaceDir, {
+      name,
+      description: description ?? existingDescription,
+      argumentHint: existingArgumentHint,
+      allowedTools: existingAllowedTools,
+      body,
+    });
+
+    deps.logger.info('skill refined', { name, team_slug: teamSlug });
+
+    return { name, status: 'refined' };
+  };
+}
+
+// ---------------------------------------------------------------------------
+// install_skill
+// ---------------------------------------------------------------------------
+
+/**
+ * Installs a skill from an external registry or direct URL into a team workspace.
+ *
+ * Args:
+ *   team_slug: string (required) — target team
+ *   name?:     string           — skill name (for registry lookup)
+ *   url?:      string           — direct URL to SKILL.md
+ *   registry_url?: string       — registry URL override
+ *
+ * Returns: { name, status: "installed" }
+ */
+function makeInstallSkill(deps: TeamToolsDeps): ToolFunc {
+  return async (args: Record<string, JsonValue>): Promise<JsonValue> => {
+    const teamSlug = typeof args['team_slug'] === 'string' ? args['team_slug'] : '';
+    const name = typeof args['name'] === 'string' ? args['name'] : undefined;
+    const url = typeof args['url'] === 'string' ? args['url'] : undefined;
+    const registryUrl = typeof args['registry_url'] === 'string' ? args['registry_url'] : undefined;
+
+    if (teamSlug === '') {
+      throw new ValidationError('team_slug', 'team_slug is required');
+    }
+    if ((name === undefined || name === '') && (url === undefined || url === '')) {
+      throw new ValidationError('name', 'either name or url must be provided');
+    }
+
+    if (deps.skillRegistry === null) {
+      throw new ValidationError('skill_registry', 'skill registry is not configured');
+    }
+
+    if (teamSlug !== 'master') {
+      validateSlug(teamSlug);
+    }
+
+    const wsSlug = teamSlug === 'master' ? 'main' : teamSlug;
+
+    let workspaceDir: string;
+    if (wsSlug === 'main') {
+      workspaceDir = resolveTeamWorkspacePath(deps.runDir, 'main');
+    } else {
+      workspaceDir = validateWorkspacePath(deps.runDir, wsSlug);
+    }
+
+    const installedName = await deps.skillRegistry.install(
+      { name, registryUrl, url },
+      workspaceDir,
+    );
+
+    deps.logger.info('skill installed', {
+      name: installedName,
+      team_slug: teamSlug,
+      url: url ?? `registry/${name ?? ''}`,
+    });
+
+    return { name: installedName, status: 'installed' };
+  };
+}
+
+// ---------------------------------------------------------------------------
+// computeNestingDepth — count depth of team hierarchy from a parent slug
+// ---------------------------------------------------------------------------
+
+/**
+ * Computes the nesting depth of a team by walking parent_slug links
+ * upward through the OrgChart. Returns the number of ancestors.
+ *
+ * Root-level teams (parent_slug undefined) have depth 1.
+ * A child of root has depth 2, and so on.
+ *
+ * Guards against cycles with a maximum iteration count.
+ */
+function computeNestingDepth(orgChart: OrgChart, parentSlug: string): number {
+  let depth = 0;
+  let currentSlug = parentSlug;
+  const maxIterations = 20; // safety guard against cycles
+
+  for (let i = 0; i < maxIterations; i++) {
+    try {
+      const team = orgChart.getTeamBySlug(currentSlug);
+      depth++;
+      if (team.parent_slug === undefined || team.parent_slug === '') {
+        break;
+      }
+      currentSlug = team.parent_slug;
+    } catch {
+      // Team not found — we've reached the root
+      break;
+    }
+  }
+
+  return depth;
 }

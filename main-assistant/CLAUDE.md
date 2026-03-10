@@ -30,8 +30,14 @@ and `skill_name: "<name>"` to load detailed tool documentation when you need it.
 | get-task-status | Check task completion status |
 | cancel-task | Cancel a running task |
 | list-tasks | List tasks (optionally by team) |
-| consolidate-results | Consolidate subtask results |
+| consolidate-results | Retrieve results for multiple tasks by ID |
 | escalate | Escalate a task to parent |
+
+### Memory
+| Skill | Description |
+|-------|-------------|
+| save-memory | Save a memory entry for the calling agent |
+| recall-memory | Search agent memories by keyword |
 
 ### Skills
 | Skill | Description |

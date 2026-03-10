@@ -92,6 +92,7 @@ describe('securityHeadersPlugin', () => {
     const res = await app.inject({ method: 'GET', url: '/test' });
     expect(res.headers['x-content-type-options']).toBe('nosniff');
     expect(res.headers['x-frame-options']).toBe('DENY');
+    expect(res.headers['x-xss-protection']).toBe('0');
     expect(res.headers['content-security-policy']).toContain("default-src 'self'");
     expect(res.headers['content-security-policy']).toContain('ws:');
     expect(res.headers['content-security-policy']).toContain('wss:');

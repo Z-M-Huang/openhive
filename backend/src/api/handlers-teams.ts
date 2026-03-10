@@ -10,7 +10,7 @@
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 
-import type { GoOrchestrator, HeartbeatMonitor, OrgChart } from '../domain/interfaces.js';
+import type { Orchestrator, HeartbeatMonitor, OrgChart } from '../domain/interfaces.js';
 import type { Agent, HeartbeatStatus, Team } from '../domain/types.js';
 import { isReservedSlug, validateSlug } from '../domain/validation.js';
 import type { MiddlewareLogger } from './middleware.js';
@@ -156,7 +156,7 @@ export function getTeamHandler(
  * Creates a new team after domain validation.
  * Body schema is validated by Fastify before this handler is invoked.
  */
-export function createTeamHandler(orch: GoOrchestrator, logger: MiddlewareLogger) {
+export function createTeamHandler(orch: Orchestrator, logger: MiddlewareLogger) {
   return async (
     request: FastifyRequest<{ Body: CreateTeamRequest }>,
     reply: FastifyReply,
@@ -196,7 +196,7 @@ export function createTeamHandler(orch: GoOrchestrator, logger: MiddlewareLogger
  * Deletes a team by slug. Returns 204 on success, 404 if not found.
  * Slug param is validated by the Fastify param schema before this handler runs.
  */
-export function deleteTeamHandler(orch: GoOrchestrator, logger: MiddlewareLogger) {
+export function deleteTeamHandler(orch: Orchestrator, logger: MiddlewareLogger) {
   return async (
     request: FastifyRequest<{ Params: SlugParams }>,
     reply: FastifyReply,
@@ -223,7 +223,7 @@ export function deleteTeamHandler(orch: GoOrchestrator, logger: MiddlewareLogger
 export function registerTeamRoutes(
   fastify: FastifyInstance,
   orgChart: OrgChart,
-  orch: GoOrchestrator,
+  orch: Orchestrator,
   hbm: HeartbeatMonitor | null,
   logger: MiddlewareLogger,
 ): void {

@@ -5,7 +5,7 @@
  *   - Construct minimal mock implementations of each interface.
  *   - Verify at compile time that the mock satisfies the interface (TypeScript strict).
  *   - Verify at runtime that the mock object has the correct method names and arities.
- *   - Verify that GoOrchestrator extends TeamProvisioner, TaskCoordinator, HealthManager.
+ *   - Verify that Orchestrator extends TeamProvisioner, TaskCoordinator, HealthManager.
  *   - Verify that FastifyUpgradeHandler and TransactionCallback types are usable.
  *   - Verify that the index barrel re-exports all domain symbols.
  *
@@ -36,10 +36,15 @@ import type {
   TeamProvisioner,
   TaskCoordinator,
   HealthManager,
-  GoOrchestrator,
+  Orchestrator,
   FastifyUpgradeHandler,
   TransactionCallback,
   TxHandle,
+  WorkspaceLock,
+  SkillRegistry,
+  EscalationRouter,
+  EscalationFields,
+  EscalationResponseFields,
 } from './interfaces.js';
 
 import type {
@@ -58,6 +63,8 @@ import type {
   ChatSession,
   Event,
   JsonValue,
+  Escalation,
+  SkillInfo,
 } from './types.js';
 
 import type { EventType, TaskStatus, ContainerState } from './enums.js';
@@ -127,7 +134,7 @@ describe('ConfigLoader interface', () => {
         system: {
           listen_address: ':8080',
           data_dir: 'data',
-          workspace_root: '.run/teams',
+          workspace_root: '.run/workspace',
           log_level: 'info',
           log_archive: { enabled: false, max_entries: 0, keep_copies: 0, archive_dir: '' },
           max_message_length: 4096,
@@ -812,6 +819,19 @@ describe('TaskStore interface', () => {
     async getSubtree(_rootID: string): Promise<Task[]> {
       return [task];
     },
+    async getDependents(_blockerID: string): Promise<Task[]> {
+      return [];
+    },
+    async getBlockedBy(_taskId: string): Promise<string[]> {
+      return [];
+    },
+    async unblockTask(_taskId: string, _completedDependencyId: string): Promise<boolean> {
+      return true;
+    },
+    async retryTask(_taskId: string): Promise<boolean> {
+      return false;
+    },
+    async validateDependencies(_taskId: string, _blockedByIds: string[]): Promise<void> {},
   };
 
   it('has all required methods', () => {
@@ -822,6 +842,11 @@ describe('TaskStore interface', () => {
     expect(typeof mock.listByTeam).toBe('function');
     expect(typeof mock.listByStatus).toBe('function');
     expect(typeof mock.getSubtree).toBe('function');
+    expect(typeof mock.getDependents).toBe('function');
+    expect(typeof mock.getBlockedBy).toBe('function');
+    expect(typeof mock.unblockTask).toBe('function');
+    expect(typeof mock.retryTask).toBe('function');
+    expect(typeof mock.validateDependencies).toBe('function');
   });
 
   it('get returns a Task', async () => {
@@ -1095,7 +1120,7 @@ describe('TaskCoordinator interface', () => {
       _result: string,
       _errMsg: string,
     ): Promise<void> {},
-    async cancelTask(_taskID: string): Promise<void> {},
+    async cancelTask(_taskID: string, _cascade?: boolean): Promise<string[]> { return []; },
     async getTaskStatus(_taskID: string): Promise<Task> {
       return task;
     },
@@ -1175,20 +1200,20 @@ describe('HealthManager interface', () => {
 });
 
 // ---------------------------------------------------------------------------
-// GoOrchestrator — composite interface
+// Orchestrator — composite interface
 // ---------------------------------------------------------------------------
 
-describe('GoOrchestrator interface', () => {
+describe('Orchestrator interface', () => {
   const team = makeTeam();
   const task = makeTask();
   const status = makeHeartbeatStatus();
 
   /**
-   * GoOrchestrator extends TeamProvisioner, TaskCoordinator, and HealthManager.
+   * Orchestrator extends TeamProvisioner, TaskCoordinator, and HealthManager.
    * A mock must implement all methods from all three parent interfaces plus
    * start() and stop().
    */
-  const mock: GoOrchestrator = {
+  const mock: Orchestrator = {
     // TeamProvisioner
     async createTeam(_slug: string, _leaderAID: string): Promise<Team> {
       return team;
@@ -1206,7 +1231,7 @@ describe('GoOrchestrator interface', () => {
     // TaskCoordinator
     async dispatchTask(_task: Task): Promise<void> {},
     async handleTaskResult(_taskID: string, _result: string, _errMsg: string): Promise<void> {},
-    async cancelTask(_taskID: string): Promise<void> {},
+    async cancelTask(_taskID: string, _cascade?: boolean): Promise<string[]> { return []; },
     async getTaskStatus(_taskID: string): Promise<Task> {
       return task;
     },
@@ -1225,7 +1250,7 @@ describe('GoOrchestrator interface', () => {
     getAllStatuses(): Record<string, HeartbeatStatus> {
       return { 'tid-001': status };
     },
-    // GoOrchestrator own methods
+    // Orchestrator own methods
     async start(): Promise<void> {},
     async stop(): Promise<void> {},
   };
@@ -1263,7 +1288,7 @@ describe('GoOrchestrator interface', () => {
   });
 
   it('can be used as TeamProvisioner', async () => {
-    // GoOrchestrator is assignable to TeamProvisioner
+    // Orchestrator is assignable to TeamProvisioner
     const tp: TeamProvisioner = mock;
     const t = await tp.createTeam('engineering', 'aid-lead-001');
     expect(t.slug).toBe('engineering');
@@ -1278,6 +1303,138 @@ describe('GoOrchestrator interface', () => {
     const hm: HealthManager = mock;
     const s = hm.getHealthStatus('engineering');
     expect(s.is_healthy).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WorkspaceLock
+// ---------------------------------------------------------------------------
+
+describe('WorkspaceLock interface', () => {
+  const mock: WorkspaceLock = {
+    async acquire(_workspacePath: string, _agentAID: string, _timeoutMs: number): Promise<() => void> {
+      return () => {};
+    },
+    isLocked(_workspacePath: string): boolean {
+      return false;
+    },
+  };
+
+  it('has all required methods', () => {
+    expect(typeof mock.acquire).toBe('function');
+    expect(typeof mock.isLocked).toBe('function');
+  });
+
+  it('acquire returns a release function', async () => {
+    const release = await mock.acquire('/workspace/team-a', 'aid-001', 5000);
+    expect(typeof release).toBe('function');
+    release(); // should not throw
+  });
+
+  it('isLocked returns a boolean', () => {
+    expect(typeof mock.isLocked('/workspace/team-a')).toBe('boolean');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SkillRegistry
+// ---------------------------------------------------------------------------
+
+describe('SkillRegistry interface', () => {
+  const skillInfo: SkillInfo = {
+    name: 'code-review',
+    description: 'Reviews code for quality',
+    registry_url: 'https://skills.example.com',
+    source_url: 'https://skills.example.com/code-review/SKILL.md',
+  };
+
+  const mock: SkillRegistry = {
+    async install(
+      _params: { name?: string; registryUrl?: string; url?: string },
+      _workspacePath: string,
+    ): Promise<string> {
+      return 'code-review';
+    },
+    async search(_query: string): Promise<SkillInfo[]> {
+      return [skillInfo];
+    },
+    listRegistries(): string[] {
+      return ['https://skills.example.com'];
+    },
+  };
+
+  it('has all required methods', () => {
+    expect(typeof mock.install).toBe('function');
+    expect(typeof mock.search).toBe('function');
+    expect(typeof mock.listRegistries).toBe('function');
+  });
+
+  it('install returns the installed skill name', async () => {
+    const name = await mock.install({ url: 'https://example.com/SKILL.md' }, '/workspace');
+    expect(name).toBe('code-review');
+  });
+
+  it('search returns SkillInfo array', async () => {
+    const results = await mock.search('review');
+    expect(results).toHaveLength(1);
+    expect(results[0].name).toBe('code-review');
+  });
+
+  it('listRegistries returns string array', () => {
+    const registries = mock.listRegistries();
+    expect(registries).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// EscalationRouter
+// ---------------------------------------------------------------------------
+
+describe('EscalationRouter interface', () => {
+  const escalationFields: EscalationFields = {
+    correlation_id: 'corr-001',
+    task_id: 'task-001',
+    agent_aid: 'aid-001',
+    source_team: 'team-a',
+    destination_team: 'main',
+    escalation_level: 1,
+    reason: 'need_guidance',
+  };
+
+  const responseFields: EscalationResponseFields = {
+    correlation_id: 'corr-001',
+    task_id: 'task-001',
+    agent_aid: 'aid-lead-001',
+    source_team: 'main',
+    destination_team: 'team-a',
+    resolution: 'Proceed with option B',
+  };
+
+  const mock: EscalationRouter = {
+    async handleEscalation(_sourceTeamID: string, _escalation: EscalationFields): Promise<void> {},
+    async handleEscalationResponse(_response: EscalationResponseFields): Promise<void> {},
+    async getEscalationChain(_correlationId: string): Promise<Escalation[]> {
+      return [];
+    },
+  };
+
+  it('has all required methods', () => {
+    expect(typeof mock.handleEscalation).toBe('function');
+    expect(typeof mock.handleEscalationResponse).toBe('function');
+    expect(typeof mock.getEscalationChain).toBe('function');
+  });
+
+  it('handleEscalation accepts sourceTeamID and escalation fields', async () => {
+    await expect(mock.handleEscalation('tid-team-a', escalationFields)).resolves.toBeUndefined();
+  });
+
+  it('handleEscalationResponse accepts response fields', async () => {
+    await expect(mock.handleEscalationResponse(responseFields)).resolves.toBeUndefined();
+  });
+
+  it('getEscalationChain returns Escalation array', async () => {
+    const chain = await mock.getEscalationChain('corr-001');
+    expect(Array.isArray(chain)).toBe(true);
   });
 });
 

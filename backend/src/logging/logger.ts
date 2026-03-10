@@ -63,14 +63,16 @@ export class DBLogger {
   private readonly minLevelIndex: number;
   private readonly redactor: Redactor;
   private readonly pino: PinoLogger;
+  private readonly defaultComponent: string;
   private batch: LogEntry[];
   private timer: ReturnType<typeof setInterval> | null;
   private dropped: number;
   private stopped: boolean;
 
-  constructor(store: LogStore, minLevel: LogLevel) {
+  constructor(store: LogStore, minLevel: LogLevel, defaultComponent: string = '') {
     this.store = store;
     this.minLevelIndex = levelIndex(minLevel);
+    this.defaultComponent = defaultComponent;
     this.redactor = newRedactor();
     this.batch = [];
     this.dropped = 0;
@@ -216,7 +218,7 @@ export class DBLogger {
     return {
       id: 0,
       level,
-      component: typeof data?.['component'] === 'string' ? data['component'] : '',
+      component: typeof data?.['component'] === 'string' ? data['component'] : this.defaultComponent,
       action: typeof data?.['action'] === 'string' ? data['action'] : '',
       message: msg,
       params: data !== undefined ? (data as unknown as import('../domain/types.js').JsonValue) : undefined,
@@ -333,6 +335,6 @@ export class DBLogger {
  * Creates a new DBLogger with the given LogStore and minimum log level.
  * The batch writer timer starts immediately.
  */
-export function newDBLogger(store: LogStore, minLevel: LogLevel): DBLogger {
-  return new DBLogger(store, minLevel);
+export function newDBLogger(store: LogStore, minLevel: LogLevel, defaultComponent: string = ''): DBLogger {
+  return new DBLogger(store, minLevel, defaultComponent);
 }

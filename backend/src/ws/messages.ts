@@ -22,24 +22,25 @@ import type { JsonValue } from '../domain/types.js';
 // Message type constants
 // ---------------------------------------------------------------------------
 
-/** Backend-to-Container message types */
+/** Backend-to-Container (root-to-container) message types */
 export const MsgTypeContainerInit = 'container_init' as const;
 export const MsgTypeTaskDispatch = 'task_dispatch' as const;
 export const MsgTypeShutdown = 'shutdown' as const;
 export const MsgTypeToolResult = 'tool_result' as const;
-
-/** Backend-to-Container: hot-reload an agent into a running container */
 export const MsgTypeAgentAdded = 'agent_added' as const;
+export const MsgTypeEscalationResponse = 'escalation_response' as const;
+export const MsgTypeTaskCancel = 'task_cancel' as const;
 
-/** Container-to-Backend message types */
+/** Container-to-Backend (container-to-root) message types */
 export const MsgTypeReady = 'ready' as const;
 export const MsgTypeHeartbeat = 'heartbeat' as const;
 export const MsgTypeTaskResult = 'task_result' as const;
 export const MsgTypeEscalation = 'escalation' as const;
+export const MsgTypeLogEvent = 'log_event' as const;
 export const MsgTypeToolCall = 'tool_call' as const;
 export const MsgTypeStatusUpdate = 'status_update' as const;
-/** Container-to-Backend: ack that an agent_added was processed */
 export const MsgTypeAgentReady = 'agent_ready' as const;
+export const MsgTypeOrgChartUpdate = 'org_chart_update' as const;
 
 // ---------------------------------------------------------------------------
 // WS error code constants
@@ -52,6 +53,15 @@ export const WSErrorEncryptionLocked = 'ENCRYPTION_LOCKED' as const;
 export const WSErrorRateLimited = 'RATE_LIMITED' as const;
 export const WSErrorAccessDenied = 'ACCESS_DENIED' as const;
 export const WSErrorInternal = 'INTERNAL_ERROR' as const;
+export const WSErrorDepthLimitExceeded = 'DEPTH_LIMIT_EXCEEDED' as const;
+export const WSErrorCycleDetected = 'CYCLE_DETECTED' as const;
+
+// ---------------------------------------------------------------------------
+// Protocol version
+// ---------------------------------------------------------------------------
+
+/** Wire protocol version. Included in container_init and ready messages. */
+export const PROTOCOL_VERSION = '1.0' as const;
 
 /** Union of all WS error code strings. */
 export type WSErrorCode =
@@ -61,7 +71,9 @@ export type WSErrorCode =
   | typeof WSErrorEncryptionLocked
   | typeof WSErrorRateLimited
   | typeof WSErrorAccessDenied
-  | typeof WSErrorInternal;
+  | typeof WSErrorInternal
+  | typeof WSErrorDepthLimitExceeded
+  | typeof WSErrorCycleDetected;
 
 // ---------------------------------------------------------------------------
 // Backend-to-Container message data interfaces
@@ -105,6 +117,7 @@ export interface ContainerInitMsg {
   secrets?: Record<string, string>;
   mcp_servers?: MCPServerConfig[];
   workspace_root?: string;
+  protocol_version?: string;
 }
 
 /** Instructs a container to execute a task. */
@@ -114,6 +127,12 @@ export interface TaskDispatchMsg {
   prompt: string;
   session_id?: string;
   work_dir?: string;
+  /** Task IDs that must complete before this task can start. Empty array if no dependencies. */
+  blocked_by: string[];
+  /** Priority level (higher = more important). Optional for backward compatibility. */
+  priority?: number;
+  /** Maximum number of retries allowed (0 = no retries). Optional for backward compatibility. */
+  max_retries?: number;
 }
 
 /** Instructs a container to shut down gracefully. */
@@ -130,6 +149,24 @@ export interface ToolResultMsg {
   error_message?: string;
 }
 
+/** Carries a response to an escalation back down the hierarchy. */
+export interface EscalationResponseMsg {
+  correlation_id: string;
+  task_id: string;
+  agent_aid: string;
+  source_team: string;
+  destination_team: string;
+  resolution: string;
+  context: Record<string, JsonValue>;
+}
+
+/** Instructs a container to cancel a specific task. */
+export interface TaskCancelMsg {
+  task_id: string;
+  cascade: boolean;
+  reason?: string;
+}
+
 // ---------------------------------------------------------------------------
 // Container-to-Backend message data interfaces
 // ---------------------------------------------------------------------------
@@ -138,6 +175,7 @@ export interface ToolResultMsg {
 export interface ReadyMsg {
   team_id: string;
   agent_count: number;
+  protocol_version?: string;
 }
 
 /** Represents one agent's health in a heartbeat. */
@@ -171,10 +209,14 @@ export interface TaskResultMsg {
 
 /** Requests that a task be escalated to a supervisor. */
 export interface EscalationMsg {
+  correlation_id: string;
   task_id: string;
   agent_aid: string;
+  source_team: string;
+  destination_team: string;
+  escalation_level: number;
   reason: string;
-  context?: string;
+  context: Record<string, JsonValue>;
 }
 
 /** Sent by a container when an agent invokes an SDK tool. */
@@ -206,6 +248,29 @@ export interface AgentReadyMsg {
   aid: string;
 }
 
+/**
+ * Non-root container log transport. Containers stream structured log
+ * entries to root for centralized DB storage.
+ */
+export interface LogEventMsg {
+  level: 'debug' | 'info' | 'warn' | 'error';
+  source_aid: string;
+  message: string;
+  metadata: Record<string, JsonValue>;
+  timestamp: string;
+}
+
+/**
+ * Reports an agent creation or deletion for org chart synchronization.
+ */
+export interface OrgChartUpdateMsg {
+  action: 'agent_added' | 'agent_removed';
+  team_slug: string;
+  agent_aid: string;
+  agent_name: string;
+  timestamp: string;
+}
+
 // ---------------------------------------------------------------------------
 // WSMessage — discriminated union envelope
 // ---------------------------------------------------------------------------
@@ -214,31 +279,35 @@ export interface AgentReadyMsg {
  * WebSocket envelope for Backend-to-Container direction.
  * The 'type' field is the discriminator that narrows 'data' at compile time.
  */
-export type GoToContainerMessage =
+export type RootToContainerMessage =
   | { type: typeof MsgTypeContainerInit; data: ContainerInitMsg }
   | { type: typeof MsgTypeTaskDispatch; data: TaskDispatchMsg }
   | { type: typeof MsgTypeShutdown; data: ShutdownMsg }
   | { type: typeof MsgTypeToolResult; data: ToolResultMsg }
-  | { type: typeof MsgTypeAgentAdded; data: AgentAddedMsg };
+  | { type: typeof MsgTypeAgentAdded; data: AgentAddedMsg }
+  | { type: typeof MsgTypeEscalationResponse; data: EscalationResponseMsg }
+  | { type: typeof MsgTypeTaskCancel; data: TaskCancelMsg };
 
 /**
  * WebSocket envelope for Container-to-Backend direction.
  * The 'type' field is the discriminator that narrows 'data' at compile time.
  */
-export type ContainerToGoMessage =
+export type ContainerToRootMessage =
   | { type: typeof MsgTypeReady; data: ReadyMsg }
   | { type: typeof MsgTypeHeartbeat; data: HeartbeatMsg }
   | { type: typeof MsgTypeTaskResult; data: TaskResultMsg }
   | { type: typeof MsgTypeEscalation; data: EscalationMsg }
+  | { type: typeof MsgTypeLogEvent; data: LogEventMsg }
   | { type: typeof MsgTypeToolCall; data: ToolCallMsg }
   | { type: typeof MsgTypeStatusUpdate; data: StatusUpdateMsg }
-  | { type: typeof MsgTypeAgentReady; data: AgentReadyMsg };
+  | { type: typeof MsgTypeAgentReady; data: AgentReadyMsg }
+  | { type: typeof MsgTypeOrgChartUpdate; data: OrgChartUpdateMsg };
 
 /**
  * Union of all WebSocket messages in both directions.
  * Use parseWSMessage() to obtain a correctly-typed WSMessage from a raw string.
  */
-export type WSMessage = GoToContainerMessage | ContainerToGoMessage;
+export type WSMessage = RootToContainerMessage | ContainerToRootMessage;
 
 // ---------------------------------------------------------------------------
 // All known message type strings (used in parseWSMessage)
@@ -250,13 +319,17 @@ const KNOWN_MSG_TYPES = new Set<string>([
   MsgTypeShutdown,
   MsgTypeToolResult,
   MsgTypeAgentAdded,
+  MsgTypeEscalationResponse,
+  MsgTypeTaskCancel,
   MsgTypeReady,
   MsgTypeHeartbeat,
   MsgTypeTaskResult,
   MsgTypeEscalation,
+  MsgTypeLogEvent,
   MsgTypeToolCall,
   MsgTypeStatusUpdate,
   MsgTypeAgentReady,
+  MsgTypeOrgChartUpdate,
 ]);
 
 // ---------------------------------------------------------------------------

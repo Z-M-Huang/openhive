@@ -26,8 +26,7 @@ import type { DB } from './db.js';
 import { tasks } from './schema.js';
 import type * as schema from './schema.js';
 
-import { NotFoundError } from '../domain/errors.js';
-import { TASK_STATUSES } from '../domain/enums.js';
+import { NotFoundError, ValidationError } from '../domain/errors.js';
 import type { Task } from '../domain/types.js';
 import type { TaskStatus } from '../domain/enums.js';
 import type { TaskStore } from '../domain/interfaces.js';
@@ -57,6 +56,11 @@ interface TaskCTERow {
   prompt: string;
   result: string;
   error: string;
+  blocked_by_task_id: string;
+  blocked_by: string;
+  priority: number;
+  retry_count: number;
+  max_retries: number;
   created_at: number;
   updated_at: number;
   completed_at: number | null;
@@ -67,12 +71,26 @@ interface TaskCTERow {
 // ---------------------------------------------------------------------------
 
 /**
- * taskStatusToInt converts a TypeScript TaskStatus string to the integer value
- * stored in the database:
- *   pending=0, running=1, completed=2, failed=3, cancelled=4
+ * Explicit status-to-integer mapping for database persistence.
+ * New statuses are appended with new integers — never reorder existing values.
+ * Mapping: pending=0, running=1, completed=2, failed=3, cancelled=4, escalated=6
+ * Note: 5 is intentionally unused (was 'assigned', removed as dead code).
  */
+const STATUS_TO_INT: Record<TaskStatus, number> = {
+  pending: 0,
+  running: 1,
+  completed: 2,
+  failed: 3,
+  cancelled: 4,
+  escalated: 6,
+};
+
+const INT_TO_STATUS: Record<number, TaskStatus> = Object.fromEntries(
+  Object.entries(STATUS_TO_INT).map(([k, v]) => [v, k as TaskStatus]),
+) as Record<number, TaskStatus>;
+
 function taskStatusToInt(status: TaskStatus): number {
-  return TASK_STATUSES.indexOf(status);
+  return STATUS_TO_INT[status];
 }
 
 /**
@@ -81,11 +99,25 @@ function taskStatusToInt(status: TaskStatus): number {
  * values (should never happen in a healthy database).
  */
 function intToTaskStatus(n: number): TaskStatus {
-  const status = TASK_STATUSES[n];
-  if (status === undefined) {
-    return 'pending';
+  return INT_TO_STATUS[n] ?? 'pending';
+}
+
+/**
+ * safeParseBlockedBy parses a JSON string into a string[] of task IDs.
+ * Returns an empty array if the input is not valid JSON or not an array.
+ */
+function safeParseBlockedBy(raw: string): string[] {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      return parsed.filter((v): v is string => typeof v === 'string');
+    }
+    console.warn(`blocked_by is not an array: ${raw}`);
+    return [];
+  } catch {
+    console.warn(`Invalid JSON in blocked_by column: ${raw}`);
+    return [];
   }
-  return status;
 }
 
 /**
@@ -104,6 +136,11 @@ function taskRowToDomain(row: typeof tasks.$inferSelect): Task {
     prompt: row.prompt,
     result: row.result !== '' ? row.result : undefined,
     error: row.error !== '' ? row.error : undefined,
+    blocked_by_task_id: row.blocked_by_task_id !== '' ? row.blocked_by_task_id : undefined,
+    blocked_by: safeParseBlockedBy(row.blocked_by),
+    priority: row.priority,
+    retry_count: row.retry_count,
+    max_retries: row.max_retries,
     created_at: row.created_at,
     updated_at: row.updated_at,
     completed_at: row.completed_at ?? null,
@@ -126,6 +163,11 @@ function taskToRow(task: Task): typeof tasks.$inferInsert {
     prompt: task.prompt,
     result: task.result ?? '',
     error: task.error ?? '',
+    blocked_by_task_id: task.blocked_by_task_id ?? '',
+    blocked_by: JSON.stringify(task.blocked_by),
+    priority: task.priority,
+    retry_count: task.retry_count,
+    max_retries: task.max_retries,
     created_at: task.created_at,
     updated_at: task.updated_at,
     completed_at: task.completed_at ?? null,
@@ -148,6 +190,11 @@ function cteRowToDomain(row: TaskCTERow): Task {
     prompt: row.prompt,
     result: row.result !== '' ? row.result : undefined,
     error: row.error !== '' ? row.error : undefined,
+    blocked_by_task_id: row.blocked_by_task_id !== '' ? row.blocked_by_task_id : undefined,
+    blocked_by: safeParseBlockedBy(row.blocked_by),
+    priority: row.priority,
+    retry_count: row.retry_count,
+    max_retries: row.max_retries,
     created_at: new Date(row.created_at),
     updated_at: new Date(row.updated_at),
     completed_at: row.completed_at !== null ? new Date(row.completed_at) : null,
@@ -227,6 +274,11 @@ export class TaskStoreImpl implements TaskStore {
         prompt: task.prompt,
         result: task.result ?? '',
         error: task.error ?? '',
+        blocked_by_task_id: task.blocked_by_task_id ?? '',
+        blocked_by: JSON.stringify(task.blocked_by),
+        priority: task.priority,
+        retry_count: task.retry_count,
+        max_retries: task.max_retries,
         updated_at: task.updated_at,
         completed_at: task.completed_at ?? null,
       })
@@ -353,18 +405,21 @@ export class TaskStoreImpl implements TaskStore {
     const query = `
       WITH RECURSIVE subtree(
         id, parent_id, team_slug, agent_aid, jid,
-        status, prompt, result, error,
+        status, prompt, result, error, blocked_by_task_id,
+        blocked_by, priority, retry_count, max_retries,
         created_at, updated_at, completed_at, depth
       ) AS (
         SELECT
           id, parent_id, team_slug, agent_aid, jid,
-          status, prompt, result, error,
+          status, prompt, result, error, blocked_by_task_id,
+          blocked_by, priority, retry_count, max_retries,
           created_at, updated_at, completed_at, 0
         FROM tasks WHERE id = ?
         UNION ALL
         SELECT
           t.id, t.parent_id, t.team_slug, t.agent_aid, t.jid,
-          t.status, t.prompt, t.result, t.error,
+          t.status, t.prompt, t.result, t.error, t.blocked_by_task_id,
+          t.blocked_by, t.priority, t.retry_count, t.max_retries,
           t.created_at, t.updated_at, t.completed_at, s.depth + 1
         FROM tasks t
         INNER JOIN subtree s ON t.parent_id = s.id
@@ -372,7 +427,8 @@ export class TaskStoreImpl implements TaskStore {
       )
       SELECT
         id, parent_id, team_slug, agent_aid, jid,
-        status, prompt, result, error,
+        status, prompt, result, error, blocked_by_task_id,
+        blocked_by, priority, retry_count, max_retries,
         created_at, updated_at, completed_at
       FROM subtree
     `;
@@ -382,6 +438,165 @@ export class TaskStoreImpl implements TaskStore {
     const rows = stmt.all(rootID, depth) as TaskCTERow[];
     return Promise.resolve(rows.map(cteRowToDomain));
   }
+
+  // -------------------------------------------------------------------------
+  // getDependents
+  // -------------------------------------------------------------------------
+
+  /**
+   * getDependents returns all pending tasks whose blocked_by JSON array
+   * contains the given blocker task ID. Uses SQLite json_each() to search
+   * within the JSON array column.
+   */
+  async getDependents(blockerID: string): Promise<Task[]> {
+    const query = `
+      SELECT t.*
+      FROM tasks t, json_each(t.blocked_by) je
+      WHERE je.value = ? AND t.status = 0 AND json_valid(t.blocked_by)
+    `;
+    const stmt = this.db._writerConn.prepare(query);
+    const rows = stmt.all(blockerID) as TaskCTERow[];
+    return rows.map(cteRowToDomain);
+  }
+
+  // -------------------------------------------------------------------------
+  // getBlockedBy
+  // -------------------------------------------------------------------------
+
+  /** Returns the blocked_by array for a specific task. */
+  async getBlockedBy(taskId: string): Promise<string[]> {
+    const task = await this.get(taskId);
+    return task.blocked_by;
+  }
+
+  // -------------------------------------------------------------------------
+  // unblockTask
+  // -------------------------------------------------------------------------
+
+  /**
+   * Removes completedDependencyId from a task's blocked_by array and persists.
+   * Returns true if the task is now fully unblocked (empty blocked_by).
+   */
+  async unblockTask(taskId: string, completedDependencyId: string): Promise<boolean> {
+    const task = await this.get(taskId);
+    const updated = task.blocked_by.filter((id) => id !== completedDependencyId);
+    await this.update({ ...task, blocked_by: updated, updated_at: new Date() });
+    return updated.length === 0;
+  }
+
+  // -------------------------------------------------------------------------
+  // retryTask
+  // -------------------------------------------------------------------------
+
+  /**
+   * Retries a failed task if retry_count < max_retries.
+   * Increments retry_count and resets status to 'pending'.
+   * Returns true if retry was applied, false if limit reached or wrong status.
+   */
+  async retryTask(taskId: string): Promise<boolean> {
+    const task = await this.get(taskId);
+    if (task.status !== 'failed') {
+      return false;
+    }
+    if (task.retry_count >= task.max_retries) {
+      return false;
+    }
+    await this.update({
+      ...task,
+      status: 'pending',
+      retry_count: task.retry_count + 1,
+      updated_at: new Date(),
+    });
+    return true;
+  }
+
+  // -------------------------------------------------------------------------
+  // validateDependencies
+  // -------------------------------------------------------------------------
+
+  /**
+   * Validates that adding blockedByIds as dependencies of taskId would not
+   * create a cycle. Throws ValidationError if a cycle would result.
+   */
+  async validateDependencies(taskId: string, blockedByIds: string[]): Promise<void> {
+    const cycle = await wouldCreateCycle(this, taskId, blockedByIds);
+    if (cycle) {
+      throw new ValidationError('blocked_by', `adding dependencies [${blockedByIds.join(', ')}] to task ${taskId} would create a cycle`);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// wouldCreateCycle — standalone DAG cycle detection via iterative BFS
+// ---------------------------------------------------------------------------
+
+/** Maximum number of visited nodes before assuming a cycle (DoS protection). */
+const MAX_VISITED_NODES = 1000;
+
+/**
+ * wouldCreateCycle checks whether adding blockerIDs as dependencies of taskID
+ * would create a cycle in the task dependency DAG. Uses iterative BFS starting
+ * from the blocker tasks and walking their blocked_by chains. If we find
+ * taskID reachable from any blocker via blocked_by edges, a cycle exists.
+ *
+ * This is a standalone function (not on the TaskStore interface) as specified
+ * by the architecture decision CSC-9.
+ *
+ * @param taskStore - TaskStore instance for looking up tasks
+ * @param taskID    - The task that would gain the new dependencies
+ * @param blockerIDs - The task IDs that taskID would depend on
+ * @returns true if a cycle would be created, false otherwise
+ */
+export async function wouldCreateCycle(
+  taskStore: TaskStore,
+  taskID: string,
+  blockerIDs: string[],
+): Promise<boolean> {
+  // Self-reference is always a cycle
+  for (const id of blockerIDs) {
+    if (id === taskID) {
+      return true;
+    }
+  }
+
+  // BFS: walk blocked_by edges from each blocker, looking for taskID
+  const visited = new Set<string>();
+  visited.add(taskID); // Mark taskID as visited to detect back-edges
+  const queue: string[] = [...blockerIDs];
+
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+
+    if (visited.has(current)) {
+      continue;
+    }
+    visited.add(current);
+
+    // Safety cap: if we've visited too many nodes, assume cycle for safety
+    if (visited.size > MAX_VISITED_NODES) {
+      return true;
+    }
+
+    // Look up the current task's blocked_by
+    let task;
+    try {
+      task = await taskStore.get(current);
+    } catch {
+      // Task doesn't exist — skip (can't follow this edge)
+      continue;
+    }
+
+    for (const depID of task.blocked_by) {
+      if (depID === taskID) {
+        return true; // Cycle found
+      }
+      if (!visited.has(depID)) {
+        queue.push(depID);
+      }
+    }
+  }
+
+  return false;
 }
 
 // ---------------------------------------------------------------------------

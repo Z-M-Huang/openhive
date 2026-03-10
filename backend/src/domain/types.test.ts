@@ -21,6 +21,7 @@ import type {
   Agent,
   Provider,
   Skill,
+  SkillInfo,
   Task,
   TaskResult,
   Message,
@@ -48,6 +49,7 @@ import type {
   AssistantConfig,
   ChannelsConfig,
   ChannelConfig,
+  Trigger,
 } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -158,7 +160,6 @@ describe('Team', () => {
 
   it('accepts a fully-populated team', () => {
     const agent: Agent = { aid: 'aid-001', name: 'Dev' };
-    const skill: Skill = { name: 'code-review' };
     const mcp: MCPServer = { name: 'github', command: 'uvx', args: ['mcp-server-github'] };
     const config: ContainerConfig = { max_memory: '2g', max_old_space: 1536 };
 
@@ -169,7 +170,6 @@ describe('Team', () => {
       leader_aid: 'aid-lead-001',
       children: ['tid-003'],
       agents: [agent],
-      skills: [skill],
       mcp_servers: [mcp],
       env_vars: { NODE_ENV: 'production' },
       container_config: config,
@@ -747,7 +747,7 @@ describe('SystemConfig', () => {
     const cfg: SystemConfig = {
       listen_address: ':8080',
       data_dir: 'data',
-      workspace_root: '.run/teams',
+      workspace_root: '.run/workspace',
       log_level: 'info',
       log_archive: archive,
       max_message_length: 4096,
@@ -772,7 +772,7 @@ describe('MasterConfig', () => {
     const system: SystemConfig = {
       listen_address: ':8080',
       data_dir: 'data',
-      workspace_root: '.run/teams',
+      workspace_root: '.run/workspace',
       log_level: 'info',
       log_archive: archive,
       max_message_length: 2048,
@@ -808,7 +808,7 @@ describe('MasterConfig', () => {
     const system: SystemConfig = {
       listen_address: ':8080',
       data_dir: 'data',
-      workspace_root: '.run/teams',
+      workspace_root: '.run/workspace',
       log_level: 'info',
       log_archive: archive,
       max_message_length: 2048,
@@ -837,5 +837,70 @@ describe('MasterConfig', () => {
     };
     expect(master.agents).toHaveLength(1);
     expect(master.agents?.[0]?.leads_team).toBe('engineering');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SkillInfo
+// ---------------------------------------------------------------------------
+
+describe('SkillInfo', () => {
+  it('accepts all required fields', () => {
+    const info: SkillInfo = {
+      name: 'code-review',
+      description: 'Reviews code for quality issues',
+      registry_url: 'https://skills.example.com',
+      source_url: 'https://skills.example.com/code-review/SKILL.md',
+    };
+    expect(info.name).toBe('code-review');
+    expect(info.source_url).toContain('SKILL.md');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Trigger type extensions
+// ---------------------------------------------------------------------------
+
+describe('Trigger type field', () => {
+  function makeTrigger(type: Trigger['type']): Trigger {
+    return {
+      id: 'trg-001',
+      name: 'test-trigger',
+      team_slug: 'engineering',
+      agent_aid: 'aid-001',
+      schedule: '0 */5 * * *',
+      prompt: 'Check status',
+      enabled: true,
+      type,
+      last_run_at: null,
+      next_run_at: null,
+      created_at: new Date(),
+      updated_at: new Date(),
+    };
+  }
+
+  it('accepts cron type', () => {
+    const t = makeTrigger('cron');
+    expect(t.type).toBe('cron');
+  });
+
+  it('accepts webhook type', () => {
+    const t = makeTrigger('webhook');
+    expect(t.type).toBe('webhook');
+  });
+
+  it('accepts channel_event type', () => {
+    const t = makeTrigger('channel_event');
+    expect(t.type).toBe('channel_event');
+  });
+
+  it('accepts task_completion type', () => {
+    const t = makeTrigger('task_completion');
+    expect(t.type).toBe('task_completion');
+  });
+
+  it('accepts undefined type (defaults to cron)', () => {
+    const t = makeTrigger(undefined);
+    expect(t.type).toBeUndefined();
   });
 });

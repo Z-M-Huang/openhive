@@ -13,8 +13,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ToolHandler, newToolHandler } from './toolhandler.js';
 import type { ToolHandlerLogger } from './toolhandler.js';
-import { AccessDeniedError, NotFoundError } from '../domain/errors.js';
-import type { OrgChart } from '../domain/interfaces.js';
+import { AccessDeniedError, NotFoundError, RateLimitedError } from '../domain/errors.js';
+import type { OrgChart, RateLimiter } from '../domain/interfaces.js';
 import type { Agent, Team, JsonValue, MasterConfig } from '../domain/types.js';
 
 // ---------------------------------------------------------------------------
@@ -494,5 +494,176 @@ describe('ToolHandler', () => {
       'tool call failed',
       expect.objectContaining({ call_id: 'call-25', tool_name: 'boom' }),
     );
+  });
+
+  // -------------------------------------------------------------------------
+  // Test 8: rate limiter integration
+  // -------------------------------------------------------------------------
+
+  describe('rate limiting', () => {
+    function makeRateLimiter(overrides?: Partial<RateLimiter>): RateLimiter {
+      return {
+        checkRate: vi.fn(() => true),
+        recordAction: vi.fn(),
+        handleProviderRateLimit: vi.fn(),
+        isProviderBackedOff: vi.fn(() => false),
+        ...overrides,
+      };
+    }
+
+    it('throws RateLimitedError when checkRate returns false for a rate-limited tool', async () => {
+      const limiter = makeRateLimiter({ checkRate: vi.fn(() => false) });
+      handler.setRateLimiter(limiter);
+      handler.register('create_team', echoTool);
+
+      await expect(
+        handler.handleToolCallWithContext('main', 'call-rl-1', 'create_team', 'aid-1', { slug: 'x' }),
+      ).rejects.toBeInstanceOf(RateLimitedError);
+    });
+
+    it('skips rate limiting when agentAID is empty (admin/internal call)', async () => {
+      const limiter = makeRateLimiter({ checkRate: vi.fn(() => false) });
+      handler.setRateLimiter(limiter);
+      handler.register('create_team', echoTool);
+
+      // agentAID is empty — should NOT check rate limit, should succeed
+      const result = await handler.handleToolCallWithContext(
+        'main',
+        'call-rl-2',
+        'create_team',
+        '',
+        { slug: 'y' },
+      );
+      expect(result).toEqual({ slug: 'y' });
+      expect(limiter.checkRate).not.toHaveBeenCalled();
+    });
+
+    it('calls recordAction only after successful tool invocation', async () => {
+      const limiter = makeRateLimiter();
+      handler.setRateLimiter(limiter);
+      handler.register('dispatch_task', echoTool);
+
+      await handler.handleToolCallWithContext(
+        'main',
+        'call-rl-3',
+        'dispatch_task',
+        'aid-1',
+        { prompt: 'do work' },
+      );
+
+      expect(limiter.recordAction).toHaveBeenCalledWith('aid-1', 'dispatch_task');
+    });
+
+    it('does not call recordAction when tool handler throws', async () => {
+      const limiter = makeRateLimiter();
+      handler.setRateLimiter(limiter);
+      handler.register('dispatch_task', () => Promise.reject(new Error('tool failed')));
+
+      try {
+        await handler.handleToolCallWithContext(
+          'main',
+          'call-rl-4',
+          'dispatch_task',
+          'aid-1',
+          {},
+        );
+      } catch {
+        // expected
+      }
+
+      expect(limiter.recordAction).not.toHaveBeenCalled();
+    });
+
+    it('checks rate BEFORE tool invocation (tool function not called when rate limited)', async () => {
+      const toolFn = vi.fn(echoTool);
+      const limiter = makeRateLimiter({ checkRate: vi.fn(() => false) });
+      handler.setRateLimiter(limiter);
+      handler.register('escalate', toolFn);
+
+      try {
+        await handler.handleToolCallWithContext('main', 'call-rl-5', 'escalate', 'aid-1', {});
+      } catch {
+        // expected RateLimitedError
+      }
+
+      // The tool function must NOT have been called
+      expect(toolFn).not.toHaveBeenCalled();
+      // checkRate must have been called
+      expect(limiter.checkRate).toHaveBeenCalledWith('aid-1', 'escalate');
+    });
+
+    it('does not rate-limit tools outside the rate-limited set', async () => {
+      const limiter = makeRateLimiter({ checkRate: vi.fn(() => false) });
+      handler.setRateLimiter(limiter);
+      handler.register('get_config', echoTool);
+
+      // get_config is NOT in the rate-limited set — should succeed even when checkRate returns false
+      const result = await handler.handleToolCallWithContext(
+        'main',
+        'call-rl-6',
+        'get_config',
+        'aid-1',
+        {},
+      );
+      expect(result).toEqual({});
+      expect(limiter.checkRate).not.toHaveBeenCalled();
+    });
+
+    it('rate limits all four rate-limited tools', async () => {
+      const limiter = makeRateLimiter({ checkRate: vi.fn(() => false) });
+      handler.setRateLimiter(limiter);
+
+      const rateLimitedTools = ['create_team', 'dispatch_task', 'dispatch_subtask', 'escalate'];
+      for (const toolName of rateLimitedTools) {
+        handler.register(toolName, echoTool);
+      }
+
+      for (const toolName of rateLimitedTools) {
+        await expect(
+          handler.handleToolCallWithContext('main', `call-rl-all-${toolName}`, toolName, 'aid-1', {}),
+        ).rejects.toBeInstanceOf(RateLimitedError);
+      }
+    });
+
+    it('skips rate limiting when rateLimiter is not set', async () => {
+      // No setRateLimiter() call — handler.rateLimiter is null
+      handler.register('create_team', echoTool);
+
+      const result = await handler.handleToolCallWithContext(
+        'main',
+        'call-rl-7',
+        'create_team',
+        'aid-1',
+        { slug: 'z' },
+      );
+      expect(result).toEqual({ slug: 'z' });
+    });
+
+    it('logs a warning when rate limited', async () => {
+      const limiter = makeRateLimiter({ checkRate: vi.fn(() => false) });
+      handler.setRateLimiter(limiter);
+      handler.register('dispatch_subtask', echoTool);
+
+      try {
+        await handler.handleToolCallWithContext(
+          'main',
+          'call-rl-8',
+          'dispatch_subtask',
+          'aid-2',
+          {},
+        );
+      } catch {
+        // expected
+      }
+
+      expect(logger.warn).toHaveBeenCalledWith(
+        'tool call rate limited',
+        expect.objectContaining({
+          call_id: 'call-rl-8',
+          tool_name: 'dispatch_subtask',
+          agent_aid: 'aid-2',
+        }),
+      );
+    });
   });
 });

@@ -6,7 +6,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import type { TaskStore, WSHub, ContainerManager, OrgChart } from '../domain/interfaces.js';
+import type { TaskStore, WSHub, ContainerManager, OrgChart, TaskCoordinator } from '../domain/interfaces.js';
 import type { JsonValue, Task } from '../domain/types.js';
 import { ValidationError, NotFoundError } from '../domain/errors.js';
 import { validateAID, validateSlug } from '../domain/validation.js';
@@ -16,10 +16,10 @@ import type { ToolRegistry } from '../domain/interfaces.js';
 import type { TaskWaiter } from './task-waiter.js';
 import {
   MsgTypeTaskDispatch,
-  MsgTypeShutdown,
   encodeMessage,
 } from '../ws/index.js';
-import type { TaskDispatchMsg, ShutdownMsg } from '../ws/index.js';
+import type { TaskDispatchMsg } from '../ws/index.js';
+import { wouldCreateCycle } from '../store/task-store.js';
 
 // ---------------------------------------------------------------------------
 // TaskToolsDeps
@@ -34,6 +34,7 @@ export interface TaskToolsDeps {
   containerManager: ContainerManager | null;
   orgChart: OrgChart;
   taskWaiter: TaskWaiter | null;
+  taskCoordinator: TaskCoordinator | null;
   logger: {
     info(msg: string, data?: Record<string, unknown>): void;
     warn(msg: string, data?: Record<string, unknown>): void;
@@ -68,6 +69,69 @@ export function registerTaskTools(handler: ToolRegistry, deps: TaskToolsDeps): v
 // dispatchTask — shared logic for both dispatch_task and dispatch_subtask
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// UUID format regex for blocked_by validation
+// ---------------------------------------------------------------------------
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Maximum number of blocked_by dependencies allowed per task. */
+const MAX_BLOCKED_BY = 50;
+
+/**
+ * Options for DAG-related fields on task dispatch.
+ */
+interface DispatchDAGOpts {
+  blocked_by: string[];
+  priority: number;
+  max_retries: number;
+}
+
+/**
+ * Validates blocked_by array entries: non-empty strings, UUID format,
+ * max 50 elements, and all referenced tasks must exist in the store.
+ */
+async function validateBlockedBy(
+  blockedBy: string[],
+  taskStore: TaskStore,
+): Promise<void> {
+  if (blockedBy.length > MAX_BLOCKED_BY) {
+    throw new ValidationError(
+      'blocked_by',
+      `blocked_by exceeds maximum of ${MAX_BLOCKED_BY} elements (got ${blockedBy.length})`,
+    );
+  }
+
+  const invalidFormat: string[] = [];
+  for (const id of blockedBy) {
+    if (id === '' || !UUID_RE.test(id)) {
+      invalidFormat.push(id);
+    }
+  }
+  if (invalidFormat.length > 0) {
+    throw new ValidationError(
+      'blocked_by',
+      `blocked_by contains invalid task IDs (must be UUID format): ${invalidFormat.join(', ')}`,
+    );
+  }
+
+  // Verify all referenced tasks exist
+  const missing: string[] = [];
+  for (const id of blockedBy) {
+    try {
+      await taskStore.get(id);
+    } catch {
+      missing.push(id);
+    }
+  }
+  if (missing.length > 0) {
+    throw new ValidationError(
+      'blocked_by',
+      `blocked_by references non-existent tasks: ${missing.join(', ')}`,
+    );
+  }
+}
+
 /**
  * Core dispatch logic shared between dispatch_task and dispatch_subtask.
  * Creates the task record, sends it to the container via WebSocket, and
@@ -78,11 +142,17 @@ async function dispatchTaskCore(
   agentAID: string,
   prompt: string,
   parentTaskID: string,
+  dagOpts: DispatchDAGOpts = { blocked_by: [], priority: 0, max_retries: 0 },
 ): Promise<JsonValue> {
   validateAID(agentAID);
 
   if (prompt === '') {
     throw new ValidationError('prompt', 'prompt is required');
+  }
+
+  // Validate blocked_by array
+  if (dagOpts.blocked_by.length > 0) {
+    await validateBlockedBy(dagOpts.blocked_by, deps.taskStore);
   }
 
   // Verify agent exists in OrgChart
@@ -117,18 +187,45 @@ async function dispatchTaskCore(
     agent_aid: targetAgent.aid,
     status: 'pending',
     prompt,
+    blocked_by: dagOpts.blocked_by,
+    priority: dagOpts.priority,
+    retry_count: 0,
+    max_retries: dagOpts.max_retries,
     created_at: now,
     updated_at: now,
     completed_at: null,
   };
 
+  // DAG cycle detection — prevent dependency deadlocks
+  if (dagOpts.blocked_by.length > 0) {
+    const cyclic = await wouldCreateCycle(deps.taskStore, task.id, dagOpts.blocked_by);
+    if (cyclic) {
+      throw new ValidationError('blocked_by', 'dependency cycle detected');
+    }
+  }
+
   await deps.taskStore.create(task);
 
-  // Dispatch to container via WebSocket
+  // If blocked_by is non-empty, keep task in 'pending' — the orchestrator's
+  // handleTaskCompleted will dispatch when all blockers resolve (wiki DAG model).
+  if (dagOpts.blocked_by.length > 0) {
+    deps.logger.info('task created with dependencies, waiting for blockers', {
+      task_id: task.id,
+      team: targetTeam.slug,
+      agent: agentAID,
+      blocked_by: dagOpts.blocked_by,
+    });
+    return { task_id: task.id, status: task.status } as unknown as JsonValue;
+  }
+
+  // No dependencies — dispatch to container via WebSocket immediately.
   const dispatchPayload: TaskDispatchMsg = {
     task_id: task.id,
     agent_aid: agentAID,
     prompt,
+    blocked_by: task.blocked_by,
+    ...(task.priority !== 0 ? { priority: task.priority } : {}),
+    ...(task.max_retries !== 0 ? { max_retries: task.max_retries } : {}),
   };
 
   const encoded = encodeMessage(MsgTypeTaskDispatch, dispatchPayload);
@@ -164,6 +261,40 @@ async function dispatchTaskCore(
 }
 
 // ---------------------------------------------------------------------------
+// extractDAGOpts — extracts blocked_by, priority, max_retries from tool args
+// ---------------------------------------------------------------------------
+
+/**
+ * Extracts DAG-related options (blocked_by, priority, max_retries) from
+ * tool call arguments with type coercion and defaults.
+ */
+function extractDAGOpts(args: Record<string, JsonValue>): DispatchDAGOpts {
+  let blockedBy: string[] = [];
+  let rawBlockedBy = args['blocked_by'];
+
+  // The MCP bridge may serialize arrays as JSON strings. Parse if needed.
+  if (typeof rawBlockedBy === 'string') {
+    try {
+      const parsed: unknown = JSON.parse(rawBlockedBy);
+      if (Array.isArray(parsed)) {
+        rawBlockedBy = parsed as JsonValue;
+      }
+    } catch {
+      // Not valid JSON — ignored
+    }
+  }
+
+  if (Array.isArray(rawBlockedBy)) {
+    blockedBy = rawBlockedBy.filter((v): v is string => typeof v === 'string');
+  }
+
+  const priority = typeof args['priority'] === 'number' ? args['priority'] : 0;
+  const maxRetries = typeof args['max_retries'] === 'number' ? args['max_retries'] : 0;
+
+  return { blocked_by: blockedBy, priority, max_retries: maxRetries };
+}
+
+// ---------------------------------------------------------------------------
 // dispatch_task
 // ---------------------------------------------------------------------------
 
@@ -171,8 +302,11 @@ async function dispatchTaskCore(
  * Dispatches a task to an agent without a parent task.
  *
  * Args:
- *   agent_aid: string (required) — AID of the target agent
- *   prompt:    string (required) — task prompt
+ *   agent_aid:   string   (required) — AID of the target agent
+ *   prompt:      string   (required) — task prompt
+ *   blocked_by:  string[] (optional) — task IDs that must complete first
+ *   priority:    number   (optional) — priority level (default 0)
+ *   max_retries: number   (optional) — max retries (default 0)
  *
  * Returns: { task_id, status }
  */
@@ -185,7 +319,8 @@ function makeDispatchTask(deps: TaskToolsDeps): ToolFunc {
       throw new ValidationError('agent_aid', 'agent_aid is required');
     }
 
-    return dispatchTaskCore(deps, agentAID, prompt, '');
+    const dagOpts = extractDAGOpts(args);
+    return dispatchTaskCore(deps, agentAID, prompt, '', dagOpts);
   };
 }
 
@@ -240,6 +375,13 @@ function makeDispatchTaskAndWait(deps: TaskToolsDeps): ToolFunc {
 
     validateAID(agentAID);
 
+    const dagOpts = extractDAGOpts(args);
+
+    // Validate blocked_by array
+    if (dagOpts.blocked_by.length > 0) {
+      await validateBlockedBy(dagOpts.blocked_by, deps.taskStore);
+    }
+
     // Verify agent exists and belongs to a team.
     let targetTeam;
     try {
@@ -266,10 +408,22 @@ function makeDispatchTaskAndWait(deps: TaskToolsDeps): ToolFunc {
       agent_aid: agentAID,
       status: 'pending',
       prompt,
+      blocked_by: dagOpts.blocked_by,
+      priority: dagOpts.priority,
+      retry_count: 0,
+      max_retries: dagOpts.max_retries,
       created_at: now,
       updated_at: now,
       completed_at: null,
     };
+
+    // DAG cycle detection — prevent dependency deadlocks
+    if (dagOpts.blocked_by.length > 0) {
+      const cyclic = await wouldCreateCycle(deps.taskStore, task.id, dagOpts.blocked_by);
+      if (cyclic) {
+        throw new ValidationError('blocked_by', 'dependency cycle detected');
+      }
+    }
 
     // Step 1: Register waiter BEFORE dispatch (race condition prevention).
     const waiterPromise = deps.taskWaiter.waitForTask(task.id, timeoutMs);
@@ -299,40 +453,54 @@ function makeDispatchTaskAndWait(deps: TaskToolsDeps): ToolFunc {
       // Task was just created, so get() shouldn't fail. If it does, waiter will timeout.
     }
 
-    // Step 4: Dispatch to container.
-    const dispatchPayload: TaskDispatchMsg = {
-      task_id: task.id,
-      agent_aid: agentAID,
-      prompt,
-    };
-    const encoded = encodeMessage(MsgTypeTaskDispatch, dispatchPayload);
-
-    try {
-      await deps.wsHub.sendToTeam(targetTeam.slug, encoded);
-      // Promote to running.
-      task.status = 'running';
-      task.updated_at = new Date();
-      try {
-        await deps.taskStore.update(task);
-      } catch (updateErr) {
-        deps.logger.error('dispatch_task_and_wait: failed to update task status', {
-          task_id: task.id,
-          error: updateErr instanceof Error ? updateErr.message : String(updateErr),
-        });
-      }
-    } catch (sendErr) {
-      // Dispatch failed — notify waiter with failure.
-      deps.logger.warn('dispatch_task_and_wait: failed to dispatch to container', {
+    // Step 4: If blocked_by is non-empty, keep task in 'pending' — the
+    // orchestrator's handleTaskCompleted will dispatch when all blockers resolve.
+    if (dagOpts.blocked_by.length > 0) {
+      deps.logger.info('dispatch_task_and_wait: task blocked, waiting for dependencies', {
         task_id: task.id,
-        team: targetTeam.slug,
-        error: sendErr instanceof Error ? sendErr.message : String(sendErr),
+        blocked_by: dagOpts.blocked_by,
       });
-      deps.taskWaiter.notifyComplete(
-        task.id,
-        'failed',
-        undefined,
-        `dispatch failed: ${sendErr instanceof Error ? sendErr.message : String(sendErr)}`,
-      );
+      // Don't dispatch yet — waiter will be notified when dependencies resolve
+      // and the task eventually completes.
+    } else {
+      // No dependencies — dispatch to container immediately.
+      const dispatchPayload: TaskDispatchMsg = {
+        task_id: task.id,
+        agent_aid: agentAID,
+        prompt,
+        blocked_by: task.blocked_by,
+        ...(task.priority !== 0 ? { priority: task.priority } : {}),
+        ...(task.max_retries !== 0 ? { max_retries: task.max_retries } : {}),
+      };
+      const encoded = encodeMessage(MsgTypeTaskDispatch, dispatchPayload);
+
+      try {
+        await deps.wsHub.sendToTeam(targetTeam.slug, encoded);
+        // Promote to running.
+        task.status = 'running';
+        task.updated_at = new Date();
+        try {
+          await deps.taskStore.update(task);
+        } catch (updateErr) {
+          deps.logger.error('dispatch_task_and_wait: failed to update task status', {
+            task_id: task.id,
+            error: updateErr instanceof Error ? updateErr.message : String(updateErr),
+          });
+        }
+      } catch (sendErr) {
+        // Dispatch failed — notify waiter with failure.
+        deps.logger.warn('dispatch_task_and_wait: failed to dispatch to container', {
+          task_id: task.id,
+          team: targetTeam.slug,
+          error: sendErr instanceof Error ? sendErr.message : String(sendErr),
+        });
+        deps.taskWaiter.notifyComplete(
+          task.id,
+          'failed',
+          undefined,
+          `dispatch failed: ${sendErr instanceof Error ? sendErr.message : String(sendErr)}`,
+        );
+      }
     }
 
     // Step 5: Block until result or timeout.
@@ -380,7 +548,8 @@ function makeDispatchSubtask(deps: TaskToolsDeps): ToolFunc {
       throw new ValidationError('agent_aid', 'agent_aid is required');
     }
 
-    return dispatchTaskCore(deps, agentAID, prompt, parentTaskID);
+    const dagOpts = extractDAGOpts(args);
+    return dispatchTaskCore(deps, agentAID, prompt, parentTaskID, dagOpts);
   };
 }
 
@@ -414,25 +583,47 @@ function makeGetTaskStatus(deps: TaskToolsDeps): ToolFunc {
 // ---------------------------------------------------------------------------
 
 /**
- * Cancels a pending or running task. Sends a shutdown signal to the container
- * if the task has a team_slug.
+ * Cancels a pending or running task with optional cascade to subtasks.
+ * Delegates to TaskCoordinator.cancelTask() for shared implementation.
  *
  * Args:
- *   task_id: string (required)
+ *   task_id:  string  (required) — ID of the task to cancel
+ *   cascade:  boolean (optional, default true) — whether to cancel subtasks
  *
- * Returns: { task_id, status: "cancelled" }
+ * Returns: { task_id, cancelled_ids, status: "cancelled" }
  */
 function makeCancelTask(deps: TaskToolsDeps): ToolFunc {
   return async (args: Record<string, JsonValue>): Promise<JsonValue> => {
     const taskID = typeof args['task_id'] === 'string' ? args['task_id'] : '';
+    const cascade = typeof args['cascade'] === 'boolean' ? args['cascade'] : true;
 
     if (taskID === '') {
       throw new ValidationError('task_id', 'task_id is required');
     }
 
+    if (deps.taskCoordinator != null) {
+      // Delegate to shared implementation (orchestrator).
+      const cancelledIDs = await deps.taskCoordinator.cancelTask(taskID, cascade);
+      deps.logger.info('task cancelled via coordinator', {
+        task_id: taskID,
+        cascade,
+        cancelled_ids: cancelledIDs,
+      });
+      return {
+        task_id: taskID,
+        cancelled_ids: cancelledIDs,
+        status: 'cancelled',
+      } as unknown as JsonValue;
+    }
+
+    // Fallback: direct cancellation when no coordinator is wired.
     const task = await deps.taskStore.get(taskID);
 
-    if (task.status === 'completed' || task.status === 'failed') {
+    if (
+      task.status === 'completed' ||
+      task.status === 'failed' ||
+      task.status === 'cancelled'
+    ) {
       throw new ValidationError(
         'task_id',
         `task ${taskID} is already ${task.status}`,
@@ -451,27 +642,9 @@ function makeCancelTask(deps: TaskToolsDeps): ToolFunc {
       deps.taskWaiter.notifyComplete(taskID, 'cancelled', undefined, 'task cancelled');
     }
 
-    // Send shutdown signal to the container if the task is assigned to a team
-    if (task.team_slug !== '') {
-      const cancelPayload: ShutdownMsg = {
-        reason: `task ${taskID} cancelled`,
-        timeout: 5,
-      };
-      try {
-        const encoded = encodeMessage(MsgTypeShutdown, cancelPayload);
-        await deps.wsHub.sendToTeam(task.team_slug, encoded);
-      } catch (sendErr) {
-        deps.logger.warn('failed to send cancel to container', {
-          task_id: taskID,
-          team: task.team_slug,
-          error: sendErr instanceof Error ? sendErr.message : String(sendErr),
-        });
-      }
-    }
-
     deps.logger.info('task cancelled', { task_id: taskID });
 
-    return { task_id: taskID, status: 'cancelled' } as unknown as JsonValue;
+    return { task_id: taskID, cancelled_ids: [taskID], status: 'cancelled' } as unknown as JsonValue;
   };
 }
 

@@ -25,6 +25,11 @@ import type {
   ChatSession,
   Event,
   JsonValue,
+  Escalation,
+  EscalationStatus,
+  AgentMemory,
+  Trigger,
+  SkillInfo,
 } from './types.js';
 
 import type { EventType, TaskStatus, ContainerState } from './enums.js';
@@ -338,6 +343,16 @@ export interface TaskStore {
   listByTeam(teamSlug: string): Promise<Task[]>;
   listByStatus(status: TaskStatus): Promise<Task[]>;
   getSubtree(rootID: string): Promise<Task[]>;
+  /** Returns all pending tasks whose blocked_by array contains the given blocker ID. */
+  getDependents(blockerID: string): Promise<Task[]>;
+  /** Returns the blocked_by array for a specific task. */
+  getBlockedBy(taskId: string): Promise<string[]>;
+  /** Removes completedDependencyId from a task's blocked_by array. Returns true if the task is now fully unblocked. */
+  unblockTask(taskId: string, completedDependencyId: string): Promise<boolean>;
+  /** Retries a failed task if retry_count < max_retries. Returns true if retry was applied. */
+  retryTask(taskId: string): Promise<boolean>;
+  /** Validates that adding blockedByIds as dependencies would not create a cycle. Throws on cycle. */
+  validateDependencies(taskId: string, blockedByIds: string[]): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -407,6 +422,74 @@ export interface Transactor {
 }
 
 // ---------------------------------------------------------------------------
+// EscalationStore
+// ---------------------------------------------------------------------------
+
+/**
+ * Provides persistence for escalation requests.
+ * All methods throw on database error.
+ */
+export interface EscalationStore {
+  create(escalation: Escalation): Promise<void>;
+  get(id: string): Promise<Escalation>;
+  update(escalation: Escalation): Promise<void>;
+  listByAgent(aid: string): Promise<Escalation[]>;
+  listByCorrelation(correlationId: string): Promise<Escalation[]>;
+  listByStatus(status: EscalationStatus): Promise<Escalation[]>;
+  listByTask(taskId: string): Promise<Escalation[]>;
+}
+
+// ---------------------------------------------------------------------------
+// MemoryStore
+// ---------------------------------------------------------------------------
+
+/**
+ * Provides persistence for agent memory entries.
+ * All methods throw on database error.
+ */
+export interface MemoryStore {
+  create(memory: AgentMemory): Promise<void>;
+  get(id: string): Promise<AgentMemory>;
+  getByAgentAndKey(agentAid: string, key: string): Promise<AgentMemory>;
+  update(memory: AgentMemory): Promise<void>;
+  delete(id: string): Promise<void>;
+  deleteAllByAgent(agentAid: string): Promise<number>;
+  listByAgent(agentAid: string): Promise<AgentMemory[]>;
+  /** Search memories by keyword, agent, or team with optional limit. */
+  search(query: {
+    agent_aid?: string;
+    team_slug?: string;
+    keyword?: string;
+    since?: Date;
+    limit?: number;
+  }): Promise<AgentMemory[]>;
+  /** Soft-delete all memories for an agent (sets deleted_at). */
+  softDeleteByAgent(agentAid: string): Promise<number>;
+  /** Soft-delete all memories for a team (sets deleted_at). */
+  softDeleteByTeam(teamSlug: string): Promise<number>;
+  /** Hard-delete records soft-deleted more than olderThanDays ago. */
+  purgeDeleted(olderThanDays: number): Promise<number>;
+}
+
+// ---------------------------------------------------------------------------
+// TriggerStore
+// ---------------------------------------------------------------------------
+
+/**
+ * Provides persistence for automated trigger configurations.
+ * All methods throw on database error.
+ */
+export interface TriggerStore {
+  create(trigger: Trigger): Promise<void>;
+  get(id: string): Promise<Trigger>;
+  update(trigger: Trigger): Promise<void>;
+  delete(id: string): Promise<void>;
+  listByTeam(teamSlug: string): Promise<Trigger[]>;
+  listEnabled(): Promise<Trigger[]>;
+  listDue(now: Date): Promise<Trigger[]>;
+}
+
+// ---------------------------------------------------------------------------
 // TeamProvisioner
 // ---------------------------------------------------------------------------
 
@@ -434,7 +517,7 @@ export interface TeamProvisioner {
 export interface TaskCoordinator {
   dispatchTask(task: Task): Promise<void>;
   handleTaskResult(taskID: string, result: string, errMsg: string): Promise<void>;
-  cancelTask(taskID: string): Promise<void>;
+  cancelTask(taskID: string, cascade?: boolean): Promise<string[]>;
   getTaskStatus(taskID: string): Promise<Task>;
   createSubtasks(parentID: string, prompts: string[], teamSlug: string): Promise<Task[]>;
 }
@@ -457,7 +540,27 @@ export interface HealthManager {
 }
 
 // ---------------------------------------------------------------------------
-// GoOrchestrator
+// RateLimiter
+// ---------------------------------------------------------------------------
+
+/**
+ * Guards tool invocations against runaway agents by enforcing per-action
+ * rate limits. checkRate returns false when the limit is exceeded.
+ * recordAction logs a successful invocation for future checks.
+ *
+ * Actions without a configured limit are allowed unconditionally.
+ */
+export interface RateLimiter {
+  checkRate(agentAID: string, action: string): boolean;
+  recordAction(agentAID: string, action: string): void;
+  /** Handle provider 429 responses. Applies circuit breaker backoff for the given provider. */
+  handleProviderRateLimit(providerName: string, retryAfterMs: number): void;
+  /** Check if a provider is currently in backoff. Synchronous. */
+  isProviderBackedOff(providerName: string): boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Orchestrator
 // ---------------------------------------------------------------------------
 
 /**
@@ -467,7 +570,160 @@ export interface HealthManager {
  * start() begins the orchestrator's background loops.
  * stop() gracefully shuts down all background loops.
  */
-export interface GoOrchestrator extends TeamProvisioner, TaskCoordinator, HealthManager {
+export interface Orchestrator extends TeamProvisioner, TaskCoordinator, HealthManager {
   start(): Promise<void>;
   stop(): Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
+// TriggerScheduler
+// ---------------------------------------------------------------------------
+
+/**
+ * Manages scheduled triggers (cron, webhooks, event listeners).
+ *
+ * start() initializes all configured triggers on orchestrator startup.
+ * stop() tears down all running triggers on shutdown.
+ * addTrigger/removeTrigger support runtime modifications.
+ * listActive returns current trigger state including next fire time.
+ */
+export interface TriggerScheduler {
+  /** Start all configured triggers. Called on orchestrator startup. */
+  start(triggers: Trigger[]): Promise<void>;
+  /** Stop all running triggers. Called on orchestrator shutdown. */
+  stop(): Promise<void>;
+  /** Add a trigger at runtime (e.g., from team creation). */
+  addTrigger(trigger: Trigger): Promise<void>;
+  /** Remove a trigger at runtime (e.g., from team deletion). */
+  removeTrigger(name: string): Promise<void>;
+  /** List active triggers with their current state. */
+  listActive(): TriggerStatus[];
+  /** Look up an active webhook trigger by its webhook_path. Returns undefined if not found or disabled. */
+  getWebhookTrigger(path: string): Trigger | undefined;
+}
+
+/**
+ * Represents the runtime status of an active trigger.
+ */
+export interface TriggerStatus {
+  name: string;
+  enabled: boolean;
+  last_run_at: Date | null;
+  next_run_at: Date | null;
+}
+
+// ---------------------------------------------------------------------------
+// ProactiveLoop
+// ---------------------------------------------------------------------------
+
+/**
+ * Manages per-agent proactive check intervals. Orchestrator-driven: reads
+ * PROACTIVE.md and dispatches tasks to agents on their configured interval.
+ *
+ * triggerNow allows manual triggering for debugging.
+ * wasSkipped checks if the last scheduled check was skipped (agent busy).
+ */
+export interface ProactiveLoop {
+  /** Start proactive loops for all agents that have proactive intervals. */
+  start(agents: Agent[]): Promise<void>;
+  /** Stop all proactive loops. */
+  stop(): Promise<void>;
+  /** Trigger an immediate proactive check for a specific agent. */
+  triggerNow(agentAID: string): Promise<void>;
+  /** Check if an agent's proactive check was skipped (agent busy). */
+  wasSkipped(agentAID: string): boolean;
+}
+
+// ---------------------------------------------------------------------------
+// WorkspaceLock
+// ---------------------------------------------------------------------------
+
+/**
+ * Controls concurrent access to workspace directories. Multiple agents in the
+ * same container share a filesystem — without locking, concurrent writes could
+ * corrupt data. Uses async-mutex internally.
+ *
+ * acquire() returns a release function. The caller MUST call the release
+ * function when done (use try/finally). Throws TimeoutError if the lock
+ * cannot be acquired within timeoutMs.
+ *
+ * isLocked() is synchronous (in-memory check).
+ */
+export interface WorkspaceLock {
+  /** Acquire an exclusive lock on a workspace subtree. Returns a release function. */
+  acquire(workspacePath: string, agentAID: string, timeoutMs: number): Promise<() => void>;
+  /** Check if a workspace subtree is currently locked. */
+  isLocked(workspacePath: string): boolean;
+}
+
+// ---------------------------------------------------------------------------
+// SkillRegistry
+// ---------------------------------------------------------------------------
+
+/**
+ * Loads skills from external registries or direct URLs. install() downloads a
+ * skill and copies it into the team's workspace. search() queries configured
+ * registries for available skills. Skills are Markdown files with YAML
+ * frontmatter — no executable code.
+ */
+export interface SkillRegistry {
+  /** Install a skill from a registry or direct URL into a team workspace. Returns the installed skill name. */
+  install(params: { name?: string; registryUrl?: string; url?: string }, workspacePath: string): Promise<string>;
+  /** Search available skills across configured registries. */
+  search(query: string): Promise<SkillInfo[]>;
+  /** List configured registry URLs. */
+  listRegistries(): string[];
+}
+
+// ---------------------------------------------------------------------------
+// EscalationRouter
+// ---------------------------------------------------------------------------
+
+/**
+ * Routes escalation messages through the team hierarchy. The Orchestrator
+ * delegates escalation handling to this interface (composition, not inheritance).
+ *
+ * handleEscalation looks up the org chart to find the supervisor and routes
+ * the message up. handleEscalationResponse routes the resolution back down.
+ * getEscalationChain returns all escalations in a chain for debugging/logging.
+ *
+ * Note: Method signatures match the concrete class in orchestrator/escalation-router.ts,
+ * which takes sourceTeamID as a separate parameter for routing context.
+ */
+export interface EscalationRouter {
+  /** Route an escalation message up the team hierarchy. */
+  handleEscalation(sourceTeamID: string, escalation: EscalationFields): Promise<void>;
+  /** Route an escalation response down to the originating team. */
+  handleEscalationResponse(response: EscalationResponseFields): Promise<void>;
+  /** Retrieve the full escalation chain by correlation ID. */
+  getEscalationChain(correlationId: string): Promise<Escalation[]>;
+}
+
+/**
+ * Fields carried in an escalation message (domain-level abstraction).
+ * Maps 1:1 to EscalationMsg in ws/messages.ts, but avoids importing the WS layer.
+ */
+export interface EscalationFields {
+  correlation_id: string;
+  task_id: string;
+  agent_aid: string;
+  source_team: string;
+  destination_team: string;
+  escalation_level: number;
+  reason: string;
+  context?: Record<string, JsonValue>;
+}
+
+/**
+ * Fields carried in an escalation response (domain-level abstraction).
+ * Maps 1:1 to EscalationResponseMsg in ws/messages.ts, but avoids importing the WS layer.
+ */
+export interface EscalationResponseFields {
+  correlation_id: string;
+  task_id: string;
+  agent_aid: string;
+  source_team: string;
+  destination_team: string;
+  resolution: string;
+  context?: Record<string, JsonValue>;
 }

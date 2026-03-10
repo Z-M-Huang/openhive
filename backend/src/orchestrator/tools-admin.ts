@@ -8,8 +8,8 @@
 
 import type { ConfigLoader, KeyManager, WSHub } from '../domain/interfaces.js';
 import type { JsonValue, MasterConfig } from '../domain/types.js';
-import { ValidationError } from '../domain/errors.js';
-import type { ToolFunc } from './toolhandler.js';
+import { AccessDeniedError, ValidationError } from '../domain/errors.js';
+import type { ToolFunc, ToolCallContext } from './toolhandler.js';
 import type { ToolRegistry } from '../domain/interfaces.js';
 
 // ---------------------------------------------------------------------------
@@ -34,12 +34,40 @@ export interface AdminToolsDeps {
  * Registers all admin SDK custom tool handlers on the ToolHandler.
  */
 export function registerAdminTools(handler: ToolRegistry, deps: AdminToolsDeps): void {
-  handler.register('get_config', makeGetConfig(deps.configLoader));
-  handler.register('update_config', makeUpdateConfig(deps.configLoader));
-  handler.register('get_system_status', makeGetSystemStatus(deps));
-  handler.register('list_channels', makeListChannels(deps.wsHub));
-  handler.register('enable_channel', makeEnableChannel(deps.configLoader));
-  handler.register('disable_channel', makeDisableChannel(deps.configLoader));
+  handler.register('get_config', withAdminGuard('get_config', makeGetConfig(deps.configLoader)));
+  handler.register('update_config', withAdminGuard('update_config', makeUpdateConfig(deps.configLoader)));
+  handler.register('get_system_status', withAdminGuard('get_system_status', makeGetSystemStatus(deps)));
+  handler.register('list_channels', withAdminGuard('list_channels', makeListChannels(deps.wsHub)));
+  handler.register('enable_channel', withAdminGuard('enable_channel', makeEnableChannel(deps.configLoader)));
+  handler.register('disable_channel', withAdminGuard('disable_channel', makeDisableChannel(deps.configLoader)));
+}
+
+// ---------------------------------------------------------------------------
+// Admin guard
+// ---------------------------------------------------------------------------
+
+/**
+ * Asserts that the tool call originates from the main team context.
+ * Admin tools must only be callable by the main assistant.
+ * Throws AccessDeniedError if context is missing or teamSlug is not 'main'.
+ */
+function assertAdminContext(context: ToolCallContext | undefined, toolName: string): void {
+  if (context === undefined || context.teamSlug !== 'main') {
+    throw new AccessDeniedError(
+      'tool',
+      `${toolName} is restricted to the main assistant`,
+    );
+  }
+}
+
+/**
+ * Wraps a ToolFunc with an admin guard that requires main team context.
+ */
+function withAdminGuard(toolName: string, fn: ToolFunc): ToolFunc {
+  return async (args: Record<string, JsonValue>, context?: ToolCallContext): Promise<JsonValue> => {
+    assertAdminContext(context, toolName);
+    return fn(args, context);
+  };
 }
 
 // ---------------------------------------------------------------------------

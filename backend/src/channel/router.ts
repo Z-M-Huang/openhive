@@ -238,6 +238,10 @@ export class Router implements MessageRouter {
       jid,
       status: 'pending',
       prompt: formatted,
+      blocked_by: [],
+      priority: 0,
+      retry_count: 0,
+      max_retries: 0,
       created_at: now,
       updated_at: now,
       completed_at: null,
@@ -281,6 +285,7 @@ export class Router implements MessageRouter {
       agent_aid: session.agent_aid ?? this.mainAssistantAID,
       prompt: formatted,
       session_id: session.session_id,
+      blocked_by: [],
     };
 
     try {
@@ -508,6 +513,7 @@ export class Router implements MessageRouter {
             agent_aid: session.agent_aid ?? this.mainAssistantAID,
             prompt: task.prompt,
             session_id: session.session_id,
+            blocked_by: task.blocked_by,
           };
 
           try {

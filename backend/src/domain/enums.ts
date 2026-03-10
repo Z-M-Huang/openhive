@@ -16,10 +16,10 @@
 // ---------------------------------------------------------------------------
 
 /** Lifecycle state of a task. */
-export type TaskStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+export type TaskStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | 'escalated';
 
 /** All valid TaskStatus values, in canonical order. */
-export const TASK_STATUSES = ['pending', 'running', 'completed', 'failed', 'cancelled'] as const;
+export const TASK_STATUSES = ['pending', 'running', 'completed', 'failed', 'cancelled', 'escalated'] as const;
 
 /**
  * Validates whether the given string is a valid TaskStatus.
@@ -158,21 +158,27 @@ export function parseLogLevel(value: string): LogLevel {
 
 /** State of a Docker container. */
 export type ContainerState =
+  | 'creating'
   | 'created'
   | 'starting'
   | 'running'
   | 'stopping'
   | 'stopped'
-  | 'error';
+  | 'removing'
+  | 'removed'
+  | 'failed';
 
 /** All valid ContainerState values, in canonical order. */
 export const CONTAINER_STATES = [
+  'creating',
   'created',
   'starting',
   'running',
   'stopping',
   'stopped',
-  'error',
+  'removing',
+  'removed',
+  'failed',
 ] as const;
 
 /**

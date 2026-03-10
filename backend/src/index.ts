@@ -19,6 +19,7 @@
 
 import process from 'node:process';
 import * as path from 'node:path';
+import { readFileSync, mkdirSync, existsSync } from 'node:fs';
 import { Mutex } from 'async-mutex';
 
 // ── Domain ────────────────────────────────────────────────────────────────────
@@ -35,6 +36,9 @@ import { newSessionStore } from './store/session-store.js';
 import type { SessionStoreImpl } from './store/session-store.js';
 import { newMessageStore } from './store/message-store.js';
 import type { MessageStoreImpl } from './store/message-store.js';
+import { newEscalationStore, EscalationStoreImpl } from './store/escalation-store.js';
+import { newMemoryStore, MemoryStoreImpl } from './store/memory-store.js';
+import { newTriggerStore, TriggerStoreImpl } from './store/trigger-store.js';
 
 // ── Logging ───────────────────────────────────────────────────────────────────
 import { newDBLogger, DBLogger } from './logging/logger.js';
@@ -57,9 +61,16 @@ import { newToolHandler, ToolHandler } from './orchestrator/toolhandler.js';
 import { registerAdminTools } from './orchestrator/tools-admin.js';
 import { registerTeamTools } from './orchestrator/tools-team.js';
 import { registerTaskTools } from './orchestrator/tools-task.js';
-import { newOrchestrator, Orchestrator } from './orchestrator/orchestrator.js';
+import { newOrchestrator, OrchestratorImpl } from './orchestrator/orchestrator.js';
 import { newChildProcessManager, ChildProcessManager } from './orchestrator/childproc.js';
 import { TaskWaiter } from './orchestrator/task-waiter.js';
+import { newEscalationRouter, EscalationRouter } from './orchestrator/escalation-router.js';
+import { registerMemoryTools } from './orchestrator/tools-memory.js';
+import { registerCoordinationTools } from './orchestrator/tools-coordination.js';
+import { SlidingWindowRateLimiter } from './orchestrator/rate-limiter.js';
+import { newTriggerScheduler, TriggerSchedulerImpl } from './orchestrator/trigger-scheduler.js';
+import { newProactiveLoop, ProactiveLoopImpl } from './orchestrator/proactive-loop.js';
+import { SkillRegistryImpl } from './orchestrator/skill-registry.js';
 
 // ── Container ─────────────────────────────────────────────────────────────────
 import { newDockerRuntime } from './container/runtime.js';
@@ -135,6 +146,12 @@ export class App {
   private logStore: LogStoreImpl | null = null;
   private sessionStore: SessionStoreImpl | null = null;
   private messageStore: MessageStoreImpl | null = null;
+  private escalationStore: EscalationStoreImpl | null = null;
+  private memoryStore: MemoryStoreImpl | null = null;
+  private triggerStore: TriggerStoreImpl | null = null;
+  private escalationRouter: EscalationRouter | null = null;
+  private triggerScheduler: TriggerSchedulerImpl | null = null;
+  private proactiveLoop: ProactiveLoopImpl | null = null;
 
   // ── Logging ───────────────────────────────────────────────────────────────
   private dbLogger: DBLogger | null = null;
@@ -157,7 +174,7 @@ export class App {
   private containerManager: ManagerImpl | null = null;
   private toolHandler: ToolHandler | null = null;
   private taskWaiter: TaskWaiter | null = null;
-  private orchestrator: Orchestrator | null = null;
+  private orchestrator: OrchestratorImpl | null = null;
 
   // ── Channel & Router ──────────────────────────────────────────────────────
   private router: Router | null = null;
@@ -196,7 +213,9 @@ export class App {
     // ── (1) Resolve runDir and dataDir from env ───────────────────────────────
     this.runDir = process.env['OPENHIVE_RUN_DIR'] ?? DEFAULT_RUN_DIR;
     this.dataDir = process.env['OPENHIVE_DATA_DIR'] ?? DEFAULT_DATA_DIR;
-    const dbPath = path.join(this.runDir, 'openhive.db');
+    const dbPath = path.join(this.runDir, 'workspace', 'openhive.db');
+    // Ensure workspace directory exists before opening DB (SQLite requires it).
+    mkdirSync(path.join(this.runDir, 'workspace'), { recursive: true });
 
     // ── (2) KeyManager — created first, needed by config ──────────────────────
     // Use direct instantiation (sync) rather than the async factory newKeyManager().
@@ -211,16 +230,19 @@ export class App {
     this.logStore = newLogStore(this.db);
     this.sessionStore = newSessionStore(this.db);
     this.messageStore = newMessageStore(this.db);
+    this.escalationStore = newEscalationStore(this.db);
+    this.memoryStore = newMemoryStore(this.db);
+    this.triggerStore = newTriggerStore(this.db);
 
     // ── (5) DBLogger ──────────────────────────────────────────────────────────
     const resolvedLevel: LogLevel = validateLogLevel(logLevel) ? logLevel : 'info';
-    this.dbLogger = newDBLogger(this.logStore, resolvedLevel);
+    this.dbLogger = newDBLogger(this.logStore, resolvedLevel, 'system');
 
     // ── (6) ConfigLoader ──────────────────────────────────────────────────────
-    // Pass dataDir directly as teamsDir — ConfigLoaderImpl appends 'teams/' internally.
-    // Previously, path.join(this.dataDir, 'teams') caused double nesting: data/teams/teams/.
-    const teamsDir = this.dataDir;
-    this.configLoader = newConfigLoader(this.dataDir, teamsDir);
+    // Team configs live in the workspace directory (not data/).
+    // ConfigLoaderImpl appends 'teams/' internally: workspace/teams/<slug>/team.yaml.
+    const workspaceDir = path.join(this.runDir, 'workspace');
+    this.configLoader = newConfigLoader(this.dataDir, workspaceDir);
     this.configLoader.setKeyManager(keyManager);
 
     // ── (7) Unlock KeyManager from env ────────────────────────────────────────
@@ -298,22 +320,50 @@ export class App {
       skillsSourceDir: path.join(this.resolveMainAssistantDir(), '.claude', 'skills'),
       containerManager: this.containerManager,
       wsHub: this.wsHub,
+      limits: master.system.limits ?? null,
+      skillRegistry: (master.skill_registries ?? []).length > 0
+        ? new SkillRegistryImpl({ registryUrls: master.skill_registries!, logger: this.dbLogger })
+        : null,
       logger: this.dbLogger,
     });
     this.taskWaiter = new TaskWaiter(this.dbLogger);
-    registerTaskTools(this.toolHandler, {
+    // taskCoordinator is null initially; set after orchestrator creation (step 18).
+    const taskToolsDeps = {
       taskStore: this.taskStore,
       wsHub: this.wsHub,
       containerManager: this.containerManager,
       orgChart: this.orgChart,
       taskWaiter: this.taskWaiter,
+      taskCoordinator: null as import('./domain/interfaces.js').TaskCoordinator | null,
+      logger: this.dbLogger,
+    };
+    registerTaskTools(this.toolHandler, taskToolsDeps);
+    registerMemoryTools(this.toolHandler, {
+      memoryStore: this.memoryStore,
+      workspaceRoot: path.join(this.runDir, 'workspace'),
       logger: this.dbLogger,
     });
     this.toolHandler.setOrgChart(this.orgChart);
+    this.toolHandler.setRateLimiter(new SlidingWindowRateLimiter());
     this.dispatcher.setToolHandler(this.toolHandler);
     this.dispatcher.setTaskWaiter(this.taskWaiter);
 
-    // ── (18) GoOrchestrator ───────────────────────────────────────────────────
+    // ── (17b) EscalationRouter ──────────────────────────────────────────────
+    this.escalationRouter = newEscalationRouter(
+      this.orgChart,
+      this.escalationStore,
+      this.taskStore,
+      this.wsHub,
+      this.dbLogger,
+    );
+    this.dispatcher.setEscalationRouter(this.escalationRouter);
+    registerCoordinationTools(this.toolHandler, {
+      taskStore: this.taskStore,
+      escalationRouter: this.escalationRouter,
+      logger: this.dbLogger,
+    });
+
+    // ── (18) Orchestrator ─────────────────────────────────────────────────────
     this.orchestrator = newOrchestrator({
       taskStore: this.taskStore,
       wsHub: this.wsHub,
@@ -323,9 +373,14 @@ export class App {
       heartbeatMonitor: this.heartbeatMonitor,
       eventBus: this.eventBus,
       dispatcher: this.dispatcher,
+      taskWaiter: this.taskWaiter,
+      escalationRouter: this.escalationRouter,
       logger: this.dbLogger,
       runDir: this.runDir,
     });
+
+    // Wire TaskCoordinator into task tools deps (deferred: orch created after tools registered).
+    taskToolsDeps.taskCoordinator = this.orchestrator;
 
     // ── (19) Wire dispatcher task-result callback ─────────────────────────────
     // Set after orchestrator is created so the callback is ready.
@@ -346,7 +401,8 @@ export class App {
           // Resolve agents and secrets for this team, then send container_init.
           const agents = await this.resolveAgentInitConfigs(teamID, configLoader, orgChart);
           const secrets: Record<string, string> = {};
-          const workspaceRoot = path.join(this.runDir, 'teams', teamID);
+          const { resolveTeamWorkspacePath } = await import('./orchestrator/orchestrator.js');
+          const workspaceRoot = resolveTeamWorkspacePath(this.runDir, teamID);
           const isMain = teamID === mainTID;
           await dispatcher.sendContainerInit(teamID, isMain, agents, secrets, workspaceRoot);
         } catch (err) {
@@ -471,7 +527,7 @@ export class App {
         taskStore: this.taskStore,
         configLoader: this.configLoader,
         orgChart: this.orgChart,
-        goOrchestrator: this.orchestrator,
+        orchestrator: this.orchestrator,
         heartbeatMonitor: this.heartbeatMonitor,
         portalWS: this.portalWS,
         dbLogger: this.dbLogger,
@@ -484,7 +540,7 @@ export class App {
     const nodeScriptRaw = process.env['OPENHIVE_NODE_SCRIPT'] ?? 'agent-runner/dist/index.js';
     const nodeScript = path.isAbsolute(nodeScriptRaw) ? nodeScriptRaw : path.resolve(nodeScriptRaw);
 
-    const mainWorkspaceDir = path.join(this.runDir, 'teams', mainTID);
+    const mainWorkspaceDir = path.join(this.runDir, 'workspace');
     this.childProc = newChildProcessManager(
       {
         command: 'node',
@@ -505,22 +561,24 @@ export class App {
     );
 
     // ── (30) Scaffold main assistant workspace ────────────────────────────────
+    // Main workspace is at .run/workspace/ (the root workspace).
     // Copy from static main-assistant/ directory (git-tracked, baked into Docker image).
     // On clean start: full copy. On existing install: only copy missing files.
-    const teamsRootDir = path.join(this.runDir, 'teams');
+    const mainWorkspace = path.join(this.runDir, 'workspace');
     try {
-      const { existsSync } = await import('node:fs');
-      const { scaffoldTeamWorkspace } = await import('./orchestrator/orchestrator.js');
       const { copyMainAssistantWorkspace } = await import('./orchestrator/orchestrator.js');
-      const mainSlug = this.resolveMainTeamID(master);
-      const isCleanStart = !existsSync(teamsRootDir);
+      const isCleanStart = !existsSync(path.join(mainWorkspace, '.claude', 'agents'));
 
-      if (isCleanStart || !existsSync(path.join(teamsRootDir, mainSlug))) {
-        // Scaffold directory structure first (creates dirs + settings.json).
-        await scaffoldTeamWorkspace(this.runDir, mainSlug);
+      if (isCleanStart) {
+        // Create root workspace directory structure (main workspace is NOT a team
+        // under workspace/teams/ — it IS the workspace root).
+        mkdirSync(path.join(mainWorkspace, '.claude', 'agents'), { recursive: true, mode: 0o755 });
+        mkdirSync(path.join(mainWorkspace, '.claude', 'skills'), { recursive: true, mode: 0o755 });
+        mkdirSync(path.join(mainWorkspace, 'work', 'tasks'), { recursive: true, mode: 0o755 });
+        mkdirSync(path.join(mainWorkspace, 'teams'), { recursive: true, mode: 0o755 });
         this.dbLogger?.info('main workspace scaffolded', {
           clean_start: isCleanStart,
-          main_workspace: path.join(teamsRootDir, mainSlug),
+          main_workspace: mainWorkspace,
         });
       }
 
@@ -529,7 +587,7 @@ export class App {
       const mainAssistantSrc = this.resolveMainAssistantDir();
       await copyMainAssistantWorkspace(
         mainAssistantSrc,
-        path.join(teamsRootDir, mainSlug),
+        mainWorkspace,
         isCleanStart,
       );
       this.dbLogger?.info('main assistant workspace synced from static dir', {
@@ -616,6 +674,53 @@ export class App {
       // Start child process (main container orchestrator)
       await this.childProc?.start();
 
+      // Start trigger scheduler and proactive loop
+      if (this.triggerStore && this.dispatcher && this.dbLogger) {
+        this.triggerScheduler = newTriggerScheduler({
+          triggerStore: this.triggerStore,
+          dispatchTask: async (teamSlug, agentAid, prompt) => {
+            const task = await this.dispatcher!.createAndDispatch(teamSlug, agentAid, prompt, '');
+            return task.id;
+          },
+          logger: this.dbLogger,
+          eventBus: this.eventBus,
+          taskStore: this.taskStore,
+        });
+        const triggers = await this.triggerStore.listEnabled();
+        await this.triggerScheduler.start(triggers);
+      }
+      if (this.dispatcher && this.orgChart && this.taskStore && this.dbLogger) {
+        this.proactiveLoop = newProactiveLoop({
+          runDir: this.runDir,
+          dispatchTask: async (teamSlug, agentAid, prompt) => {
+            const task = await this.dispatcher!.createAndDispatch(teamSlug, agentAid, prompt, '');
+            return task.id;
+          },
+          isAgentBusy: async (agentAid) => {
+            const tasks = await this.taskStore!.listByStatus('running');
+            return tasks.some((t) => t.agent_aid === agentAid);
+          },
+          getTeamSlugForAgent: (agentAid) => {
+            try {
+              const team = this.orgChart!.getTeamForAgent(agentAid);
+              return team.slug;
+            } catch {
+              return null;
+            }
+          },
+          logger: this.dbLogger,
+        });
+        // Initialize with current agents from org chart
+        const allAgents: import('./domain/types.js').Agent[] = [];
+        const orgChartTeams = this.orgChart.getOrgChart();
+        for (const team of Object.values(orgChartTeams)) {
+          if (team.agents) {
+            allAgents.push(...team.agents);
+          }
+        }
+        await this.proactiveLoop.start(allAgents);
+      }
+
       this.dbLogger?.info('openhive backend started', {
         component: 'app',
         action: 'start',
@@ -645,6 +750,18 @@ export class App {
     });
 
     // Reverse order of Start / Build
+
+    // Stop proactive loop and trigger scheduler
+    try {
+      await this.proactiveLoop?.stop();
+    } catch (err) {
+      this.dbLogger?.error('proactive loop stop error', { error: String(err) });
+    }
+    try {
+      await this.triggerScheduler?.stop();
+    } catch (err) {
+      this.dbLogger?.error('trigger scheduler stop error', { error: String(err) });
+    }
 
     // Stop child process
     try {
@@ -890,12 +1007,15 @@ export class App {
     try {
       const runtime = newDockerRuntime(TEAM_IMAGE_NAME, this.dbLogger!);
       const wsURL = this.resolveWSURL(master);
+      const hostRunDir = this.resolveHostRunDir();
       return newContainerManager(
         runtime,
         this.wsHub!,
         this.configLoader,
         this.dbLogger!,
         wsURL,
+        undefined, // idleTimeoutMs — use default
+        hostRunDir,
       );
     } catch {
       this.dbLogger?.warn('Docker unavailable — container management disabled', {
@@ -904,6 +1024,60 @@ export class App {
       });
       return null;
     }
+  }
+
+  /**
+   * Resolves the host-absolute path for the run directory.
+   * Used by ContainerManager to construct volume bind mounts for sibling
+   * containers (Docker resolves bind paths on the host filesystem).
+   *
+   * Resolution order:
+   *   1. OPENHIVE_HOST_RUN_DIR env var (explicit override)
+   *   2. Auto-detect from /proc/1/mountinfo (maps container /app/run → host path)
+   *   3. undefined (workspace mounts disabled with warning)
+   */
+  private resolveHostRunDir(): string | undefined {
+    const envHostRunDir = process.env['OPENHIVE_HOST_RUN_DIR'];
+    if (envHostRunDir !== undefined && envHostRunDir !== '') {
+      this.dbLogger?.info('host run dir from env', {
+        component: 'app',
+        action: 'resolve_host_run_dir',
+        host_run_dir: envHostRunDir,
+      });
+      return envHostRunDir;
+    }
+
+    // Auto-detect from mountinfo: find the mount that provides /app/run
+    try {
+      const mountinfo = readFileSync('/proc/1/mountinfo', 'utf-8');
+      for (const line of mountinfo.split('\n')) {
+        const parts = line.split(' ');
+        // parts[4] = mount point inside container
+        if (parts[4] === '/app/run') {
+          // parts[3] = root of mount within the filesystem (subpath)
+          // The host source is in the optional fields after the separator '-'
+          const sepIdx = parts.indexOf('-');
+          if (sepIdx >= 0 && parts.length > sepIdx + 2) {
+            // parts[sepIdx+2] = mount source (host path for bind mounts)
+            const hostPath = parts[sepIdx + 2];
+            this.dbLogger?.info('host run dir auto-detected from mountinfo', {
+              component: 'app',
+              action: 'resolve_host_run_dir',
+              host_run_dir: hostPath,
+            });
+            return hostPath;
+          }
+        }
+      }
+    } catch {
+      // /proc/1/mountinfo not available (e.g. not in a container)
+    }
+
+    this.dbLogger?.warn('host run dir not resolved — child container workspace mounts disabled', {
+      component: 'app',
+      action: 'resolve_host_run_dir',
+    });
+    return undefined;
   }
 
   /**
@@ -1064,7 +1238,7 @@ export class App {
       system: {
         listen_address: ':8080',
         data_dir: this.dataDir,
-        workspace_root: path.join(this.runDir, 'teams'),
+        workspace_root: path.join(this.runDir, 'workspace'),
         log_level: 'info',
         log_archive: { enabled: false, max_entries: 10000, keep_copies: 5, archive_dir: path.join(this.runDir, 'archives', 'logs') },
         max_message_length: 10000,
@@ -1072,6 +1246,7 @@ export class App {
         event_bus_workers: 4,
         portal_ws_max_connections: 10,
         message_archive: { enabled: false, max_entries: 10000, keep_copies: 5, archive_dir: path.join(this.runDir, 'archives', 'messages') },
+        limits: { max_depth: 5, max_teams: 20, max_agents_per_team: 10, max_concurrent_tasks: 50 },
       },
       assistant: {
         name: 'main-assistant',

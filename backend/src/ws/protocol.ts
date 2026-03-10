@@ -24,13 +24,17 @@ import {
   MsgTypeShutdown,
   MsgTypeToolResult,
   MsgTypeAgentAdded,
+  MsgTypeEscalationResponse,
+  MsgTypeTaskCancel,
   MsgTypeReady,
   MsgTypeHeartbeat,
   MsgTypeTaskResult,
   MsgTypeEscalation,
+  MsgTypeLogEvent,
   MsgTypeToolCall,
   MsgTypeStatusUpdate,
   MsgTypeAgentReady,
+  MsgTypeOrgChartUpdate,
   WSErrorNotFound,
   WSErrorValidation,
   WSErrorConflict,
@@ -45,12 +49,17 @@ import type {
   TaskDispatchMsg,
   ShutdownMsg,
   ToolResultMsg,
+  EscalationResponseMsg,
+  TaskCancelMsg,
   ReadyMsg,
   HeartbeatMsg,
   TaskResultMsg,
   EscalationMsg,
+  LogEventMsg,
   ToolCallMsg,
   StatusUpdateMsg,
+  AgentReadyMsg,
+  OrgChartUpdateMsg,
   WSMessage,
   WSErrorCode,
 } from './messages.js';
@@ -59,24 +68,28 @@ import type {
 // Direction sets — backend-to-container / container-to-backend
 // ---------------------------------------------------------------------------
 
-/** Message types that the backend sends to containers (backend-to-container only). */
+/** Message types that the backend sends to containers (root-to-container only). */
 const backendToContainerTypes = new Set<string>([
   MsgTypeContainerInit,
   MsgTypeTaskDispatch,
   MsgTypeShutdown,
   MsgTypeToolResult,
   MsgTypeAgentAdded,
+  MsgTypeEscalationResponse,
+  MsgTypeTaskCancel,
 ]);
 
-/** Message types that containers send to the backend (container-to-backend only). */
+/** Message types that containers send to the backend (container-to-root only). */
 const containerToBackendTypes = new Set<string>([
   MsgTypeReady,
   MsgTypeHeartbeat,
   MsgTypeTaskResult,
   MsgTypeEscalation,
+  MsgTypeLogEvent,
   MsgTypeToolCall,
   MsgTypeStatusUpdate,
   MsgTypeAgentReady,
+  MsgTypeOrgChartUpdate,
 ]);
 
 // ---------------------------------------------------------------------------
@@ -220,6 +233,10 @@ export function parseMessage(data: Buffer | string): [string, WSMessage['data']]
     }
 
     case MsgTypeEscalation: {
+      const correlationId = getString(msgData, 'correlation_id');
+      if (!correlationId) {
+        throw new ValidationError('correlation_id', 'correlation_id is required');
+      }
       const taskId = getString(msgData, 'task_id');
       if (!taskId) {
         throw new ValidationError('task_id', 'task_id is required');
@@ -247,6 +264,67 @@ export function parseMessage(data: Buffer | string): [string, WSMessage['data']]
         throw new ValidationError('agent_aid', 'agent_aid is required');
       }
       const payload = msgData as unknown as StatusUpdateMsg;
+      return [type, payload];
+    }
+
+    case MsgTypeAgentReady: {
+      const aid = getString(msgData, 'aid');
+      if (!aid) {
+        throw new ValidationError('aid', 'aid is required');
+      }
+      const payload = msgData as unknown as AgentReadyMsg;
+      return [type, payload];
+    }
+
+    case MsgTypeEscalationResponse: {
+      const correlationId = getString(msgData, 'correlation_id');
+      if (!correlationId) {
+        throw new ValidationError('correlation_id', 'correlation_id is required');
+      }
+      const taskId = getString(msgData, 'task_id');
+      if (!taskId) {
+        throw new ValidationError('task_id', 'task_id is required');
+      }
+      const payload = msgData as unknown as EscalationResponseMsg;
+      return [type, payload];
+    }
+
+    case MsgTypeTaskCancel: {
+      const taskId = getString(msgData, 'task_id');
+      if (!taskId) {
+        throw new ValidationError('task_id', 'task_id is required');
+      }
+      const payload = msgData as unknown as TaskCancelMsg;
+      return [type, payload];
+    }
+
+    case MsgTypeLogEvent: {
+      const sourceAid = getString(msgData, 'source_aid');
+      if (!sourceAid) {
+        throw new ValidationError('source_aid', 'source_aid is required');
+      }
+      const message = getString(msgData, 'message');
+      if (!message) {
+        throw new ValidationError('message', 'message is required');
+      }
+      const payload = msgData as unknown as LogEventMsg;
+      return [type, payload];
+    }
+
+    case MsgTypeOrgChartUpdate: {
+      const action = getString(msgData, 'action');
+      if (!action) {
+        throw new ValidationError('action', 'action is required');
+      }
+      const teamSlug = getString(msgData, 'team_slug');
+      if (!teamSlug) {
+        throw new ValidationError('team_slug', 'team_slug is required');
+      }
+      const agentAid = getString(msgData, 'agent_aid');
+      if (!agentAid) {
+        throw new ValidationError('agent_aid', 'agent_aid is required');
+      }
+      const payload = msgData as unknown as OrgChartUpdateMsg;
       return [type, payload];
     }
 
@@ -357,20 +435,16 @@ export function sanitizeErrorMessage(err: Error): string {
  * @throws Error if the payload cannot be serialized.
  */
 export function encodeMessage(msgType: string, payload: WSMessage['data']): string {
-  let dataStr: string;
+  const envelope = {
+    type: msgType,
+    data: payload,
+  };
+
   try {
-    dataStr = JSON.stringify(payload);
+    return JSON.stringify(envelope);
   } catch (err) {
     throw new Error(
       `failed to marshal payload: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
-
-  // Parse back to get the raw data object, then wrap in envelope and stringify.
-  const envelope = {
-    type: msgType,
-    data: JSON.parse(dataStr) as WSMessage['data'],
-  };
-
-  return JSON.stringify(envelope);
 }

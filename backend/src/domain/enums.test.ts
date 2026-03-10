@@ -47,7 +47,7 @@ import {
 // ---------------------------------------------------------------------------
 
 describe('TaskStatus', () => {
-  const validValues = ['pending', 'running', 'completed', 'failed', 'cancelled'];
+  const validValues = ['pending', 'running', 'completed', 'failed', 'cancelled', 'escalated'];
 
   it('TASK_STATUSES contains exactly the expected values', () => {
     expect([...TASK_STATUSES]).toEqual(validValues);
@@ -74,6 +74,7 @@ describe('TaskStatus', () => {
     expect(parseTaskStatus('completed')).toBe('completed');
     expect(parseTaskStatus('failed')).toBe('failed');
     expect(parseTaskStatus('cancelled')).toBe('cancelled');
+    expect(parseTaskStatus('escalated')).toBe('escalated');
   });
 
   it('parseTaskStatus throws for invalid input', () => {
@@ -275,14 +276,14 @@ describe('LogLevel', () => {
 // ---------------------------------------------------------------------------
 
 describe('ContainerState', () => {
-  const validValues = ['created', 'starting', 'running', 'stopping', 'stopped', 'error'];
+  const validValues = ['creating', 'created', 'starting', 'running', 'stopping', 'stopped', 'removing', 'removed', 'failed'];
 
   it('CONTAINER_STATES contains exactly the expected values', () => {
     expect([...CONTAINER_STATES]).toEqual(validValues);
   });
 
-  it('CONTAINER_STATES has exactly 6 values', () => {
-    expect(CONTAINER_STATES.length).toBe(6);
+  it('CONTAINER_STATES has exactly 9 values', () => {
+    expect(CONTAINER_STATES.length).toBe(9);
   });
 
   it('validateContainerState returns true for all valid values', () => {
@@ -297,15 +298,19 @@ describe('ContainerState', () => {
     expect(validateContainerState('RUNNING')).toBe(false);
     expect(validateContainerState('exited')).toBe(false);
     expect(validateContainerState('paused')).toBe(false);
+    expect(validateContainerState('error')).toBe(false);
   });
 
   it('parseContainerState returns correct type for all valid values', () => {
+    expect(parseContainerState('creating')).toBe('creating');
     expect(parseContainerState('created')).toBe('created');
     expect(parseContainerState('starting')).toBe('starting');
     expect(parseContainerState('running')).toBe('running');
     expect(parseContainerState('stopping')).toBe('stopping');
     expect(parseContainerState('stopped')).toBe('stopped');
-    expect(parseContainerState('error')).toBe('error');
+    expect(parseContainerState('removing')).toBe('removing');
+    expect(parseContainerState('removed')).toBe('removed');
+    expect(parseContainerState('failed')).toBe('failed');
   });
 
   it('parseContainerState throws for invalid input', () => {
@@ -313,6 +318,7 @@ describe('ContainerState', () => {
     expect(() => parseContainerState('idle')).toThrow('invalid container state: "idle"');
     expect(() => parseContainerState('RUNNING')).toThrow('invalid container state: "RUNNING"');
     expect(() => parseContainerState('exited')).toThrow('invalid container state: "exited"');
+    expect(() => parseContainerState('error')).toThrow('invalid container state: "error"');
   });
 
   it('all ContainerState values round-trip through parse', () => {
@@ -450,10 +456,12 @@ describe('All 7 enum types coverage check', () => {
   });
 
   it('all validate functions are strict (no type coercion)', () => {
-    // Even though 'error' is a valid value for both ContainerState and AgentStatusType,
-    // each validate function only checks its own list
-    expect(validateContainerState('error')).toBe(true);
+    // 'error' is valid for AgentStatusType but NOT for ContainerState (renamed to 'failed')
+    expect(validateContainerState('error')).toBe(false);
     expect(validateAgentStatusType('error')).toBe(true);
+    // 'failed' is valid for ContainerState but NOT for AgentStatusType
+    expect(validateContainerState('failed')).toBe(true);
+    expect(validateAgentStatusType('failed')).toBe(false);
     // 'running' is valid for ContainerState but NOT for AgentStatusType
     expect(validateContainerState('running')).toBe(true);
     expect(validateAgentStatusType('running')).toBe(false);

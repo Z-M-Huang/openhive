@@ -1,7 +1,7 @@
 /**
  * Tests for backend/src/store/schema.ts
  *
- * Verifies that all four Drizzle ORM table definitions are correct:
+ * Verifies that all seven Drizzle ORM table definitions are correct:
  *   1. Table names are correct
  *   2. Column names match expected values
  *   3. Primary keys are set correctly
@@ -9,12 +9,21 @@
  *   5. All indexes are present with correct names
  *   6. log_entries.id is integer with autoIncrement
  *   7. completed_at is nullable
+ *   8. New tables: escalations, agent_memories, triggers
  */
 
 import { describe, it, expect } from 'vitest';
 import { getTableConfig } from 'drizzle-orm/sqlite-core';
 import { getTableName } from 'drizzle-orm';
-import { tasks, messages, log_entries, chat_sessions } from './schema.js';
+import {
+  tasks,
+  messages,
+  log_entries,
+  chat_sessions,
+  escalations,
+  agent_memories,
+  triggers,
+} from './schema.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -63,11 +72,11 @@ describe('tasks table', () => {
     expect(getTableName(tasks)).toBe('tasks');
   });
 
-  it('has exactly 12 columns matching Go TaskModel', () => {
-    expect(cfg.columns).toHaveLength(12);
+  it('has exactly 17 columns', () => {
+    expect(cfg.columns).toHaveLength(17);
   });
 
-  it('has all expected column names matching Go GORM column tags', () => {
+  it('has all expected column names', () => {
     const expectedColumns = [
       'id',
       'parent_id',
@@ -78,6 +87,11 @@ describe('tasks table', () => {
       'prompt',
       'result',
       'error',
+      'blocked_by_task_id',
+      'blocked_by',
+      'priority',
+      'retry_count',
+      'max_retries',
       'created_at',
       'updated_at',
       'completed_at',
@@ -146,8 +160,43 @@ describe('tasks table', () => {
     expect(cols['completed_at'].notNull).toBe(false);
   });
 
-  it('has exactly 5 indexes matching Go GORM index tags', () => {
-    expect(cfg.indexes).toHaveLength(5);
+  it('blocked_by_task_id is text and indexed', () => {
+    expect(cols['blocked_by_task_id'].columnType).toBe('SQLiteText');
+    expect(idxNames.has('idx_tasks_blocked_by_task_id')).toBe(true);
+    expect(idxCols['idx_tasks_blocked_by_task_id']).toEqual(['blocked_by_task_id']);
+  });
+
+  it('blocked_by is text with default "[]" (JSON array for task DAG)', () => {
+    expect(cols['blocked_by'].columnType).toBe('SQLiteText');
+    expect(cols['blocked_by'].notNull).toBe(true);
+    expect(cols['blocked_by'].default).toBe('[]');
+  });
+
+  it('priority is integer with default 0', () => {
+    expect(cols['priority'].columnType).toBe('SQLiteInteger');
+    expect(cols['priority'].notNull).toBe(true);
+    expect(cols['priority'].default).toBe(0);
+  });
+
+  it('priority is indexed', () => {
+    expect(idxNames.has('idx_tasks_priority')).toBe(true);
+    expect(idxCols['idx_tasks_priority']).toEqual(['priority']);
+  });
+
+  it('retry_count is integer with default 0', () => {
+    expect(cols['retry_count'].columnType).toBe('SQLiteInteger');
+    expect(cols['retry_count'].notNull).toBe(true);
+    expect(cols['retry_count'].default).toBe(0);
+  });
+
+  it('max_retries is integer with default 0', () => {
+    expect(cols['max_retries'].columnType).toBe('SQLiteInteger');
+    expect(cols['max_retries'].notNull).toBe(true);
+    expect(cols['max_retries'].default).toBe(0);
+  });
+
+  it('has exactly 7 indexes', () => {
+    expect(cfg.indexes).toHaveLength(7);
   });
 
   it('all expected index names are present', () => {
@@ -156,6 +205,8 @@ describe('tasks table', () => {
     expect(idxNames.has('idx_tasks_agent_aid')).toBe(true);
     expect(idxNames.has('idx_tasks_jid')).toBe(true);
     expect(idxNames.has('idx_tasks_status')).toBe(true);
+    expect(idxNames.has('idx_tasks_blocked_by_task_id')).toBe(true);
+    expect(idxNames.has('idx_tasks_priority')).toBe(true);
   });
 });
 
@@ -399,6 +450,255 @@ describe('chat_sessions table', () => {
 
   it('has no indexes (Go ChatSessionModel has no index tags)', () => {
     expect(cfg.indexes).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// escalations table
+// ---------------------------------------------------------------------------
+
+describe('escalations table', () => {
+  const cfg = getTableConfig(escalations);
+  const cols = columnsByName(cfg);
+  const idxNames = indexNames(cfg);
+  const idxCols = indexColumns(cfg);
+
+  it('table name is "escalations"', () => {
+    expect(cfg.name).toBe('escalations');
+    expect(getTableName(escalations)).toBe('escalations');
+  });
+
+  it('has exactly 15 columns', () => {
+    expect(cfg.columns).toHaveLength(15);
+  });
+
+  it('has all expected column names', () => {
+    const expectedColumns = [
+      'id',
+      'correlation_id',
+      'task_id',
+      'from_aid',
+      'to_aid',
+      'source_team',
+      'destination_team',
+      'escalation_level',
+      'reason',
+      'context',
+      'status',
+      'resolution',
+      'created_at',
+      'updated_at',
+      'resolved_at',
+    ];
+    const actualNames = cfg.columns.map((c) => c.name);
+    expect(actualNames).toEqual(expectedColumns);
+  });
+
+  it('id is text primary key', () => {
+    expect(cols['id'].primary).toBe(true);
+    expect(cols['id'].columnType).toBe('SQLiteText');
+  });
+
+  it('correlation_id is text with index', () => {
+    expect(cols['correlation_id'].columnType).toBe('SQLiteText');
+    expect(idxNames.has('idx_escalations_correlation_id')).toBe(true);
+  });
+
+  it('escalation_level is integer', () => {
+    expect(cols['escalation_level'].columnType).toBe('SQLiteInteger');
+  });
+
+  it('status is integer (stores escalation status enum)', () => {
+    expect(cols['status'].columnType).toBe('SQLiteInteger');
+    expect(idxNames.has('idx_escalations_status')).toBe(true);
+  });
+
+  it('resolved_at is nullable timestamp', () => {
+    expect(cols['resolved_at'].columnType).toBe('SQLiteTimestamp');
+    expect(cols['resolved_at'].notNull).toBe(false);
+  });
+
+  it('has exactly 6 indexes', () => {
+    expect(cfg.indexes).toHaveLength(6);
+  });
+
+  it('all expected index names are present', () => {
+    expect(idxNames.has('idx_escalations_correlation_id')).toBe(true);
+    expect(idxNames.has('idx_escalations_task_id')).toBe(true);
+    expect(idxNames.has('idx_escalations_from_aid')).toBe(true);
+    expect(idxNames.has('idx_escalations_to_aid')).toBe(true);
+    expect(idxNames.has('idx_escalations_status')).toBe(true);
+    expect(idxNames.has('idx_escalations_created_id')).toBe(true);
+  });
+
+  it('indexes reference correct columns', () => {
+    expect(idxCols['idx_escalations_correlation_id']).toEqual(['correlation_id']);
+    expect(idxCols['idx_escalations_task_id']).toEqual(['task_id']);
+    expect(idxCols['idx_escalations_from_aid']).toEqual(['from_aid']);
+    expect(idxCols['idx_escalations_to_aid']).toEqual(['to_aid']);
+    expect(idxCols['idx_escalations_status']).toEqual(['status']);
+    expect(idxCols['idx_escalations_created_id']).toEqual(['created_at']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// agent_memories table
+// ---------------------------------------------------------------------------
+
+describe('agent_memories table', () => {
+  const cfg = getTableConfig(agent_memories);
+  const cols = columnsByName(cfg);
+  const idxNames = indexNames(cfg);
+  const idxCols = indexColumns(cfg);
+
+  it('table name is "agent_memories"', () => {
+    expect(cfg.name).toBe('agent_memories');
+    expect(getTableName(agent_memories)).toBe('agent_memories');
+  });
+
+  it('has exactly 9 columns', () => {
+    expect(cfg.columns).toHaveLength(9);
+  });
+
+  it('has all expected column names', () => {
+    const expectedColumns = [
+      'id',
+      'agent_aid',
+      'key',
+      'value',
+      'metadata',
+      'team_slug',
+      'deleted_at',
+      'created_at',
+      'updated_at',
+    ];
+    const actualNames = cfg.columns.map((c) => c.name);
+    expect(actualNames).toEqual(expectedColumns);
+  });
+
+  it('id is text primary key', () => {
+    expect(cols['id'].primary).toBe(true);
+    expect(cols['id'].columnType).toBe('SQLiteText');
+  });
+
+  it('team_slug is text with notNull and default empty string', () => {
+    expect(cols['team_slug'].columnType).toBe('SQLiteText');
+    expect(cols['team_slug'].notNull).toBe(true);
+    expect(cols['team_slug'].default).toBe('');
+  });
+
+  it('deleted_at is nullable timestamp', () => {
+    expect(cols['deleted_at'].columnType).toBe('SQLiteTimestamp');
+    expect(cols['deleted_at'].dataType).toBe('date');
+    expect(cols['deleted_at'].notNull).toBe(false);
+  });
+
+  it('has exactly 4 indexes including composite and team_slug', () => {
+    expect(cfg.indexes).toHaveLength(4);
+  });
+
+  it('all expected index names are present', () => {
+    expect(idxNames.has('idx_agent_memories_agent_aid')).toBe(true);
+    expect(idxNames.has('idx_agent_memories_key')).toBe(true);
+    expect(idxNames.has('idx_agent_memories_agent_key')).toBe(true);
+    expect(idxNames.has('idx_agent_memories_team_slug')).toBe(true);
+  });
+
+  it('composite index covers agent_aid and key', () => {
+    expect(idxCols['idx_agent_memories_agent_key']).toEqual(['agent_aid', 'key']);
+  });
+
+  it('team_slug index references correct column', () => {
+    expect(idxCols['idx_agent_memories_team_slug']).toEqual(['team_slug']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// triggers table
+// ---------------------------------------------------------------------------
+
+describe('triggers table', () => {
+  const cfg = getTableConfig(triggers);
+  const cols = columnsByName(cfg);
+  const idxNames = indexNames(cfg);
+  const idxCols = indexColumns(cfg);
+
+  it('table name is "triggers"', () => {
+    expect(cfg.name).toBe('triggers');
+    expect(getTableName(triggers)).toBe('triggers');
+  });
+
+  it('has exactly 13 columns', () => {
+    expect(cfg.columns).toHaveLength(13);
+  });
+
+  it('has all expected column names', () => {
+    const expectedColumns = [
+      'id',
+      'name',
+      'team_slug',
+      'agent_aid',
+      'schedule',
+      'prompt',
+      'enabled',
+      'type',
+      'webhook_path',
+      'last_run_at',
+      'next_run_at',
+      'created_at',
+      'updated_at',
+    ];
+    const actualNames = cfg.columns.map((c) => c.name);
+    expect(actualNames).toEqual(expectedColumns);
+  });
+
+  it('id is text primary key', () => {
+    expect(cols['id'].primary).toBe(true);
+    expect(cols['id'].columnType).toBe('SQLiteText');
+  });
+
+  it('enabled is integer with default 1', () => {
+    expect(cols['enabled'].columnType).toBe('SQLiteInteger');
+    expect(cols['enabled'].default).toBe(1);
+  });
+
+  it('last_run_at and next_run_at are nullable timestamps', () => {
+    expect(cols['last_run_at'].columnType).toBe('SQLiteTimestamp');
+    expect(cols['last_run_at'].notNull).toBe(false);
+    expect(cols['next_run_at'].columnType).toBe('SQLiteTimestamp');
+    expect(cols['next_run_at'].notNull).toBe(false);
+  });
+
+  it('type is text with default "cron"', () => {
+    expect(cols['type'].columnType).toBe('SQLiteText');
+    expect(cols['type'].notNull).toBe(true);
+    expect(cols['type'].default).toBe('cron');
+  });
+
+  it('webhook_path is text with default empty string', () => {
+    expect(cols['webhook_path'].columnType).toBe('SQLiteText');
+    expect(cols['webhook_path'].notNull).toBe(true);
+    expect(cols['webhook_path'].default).toBe('');
+  });
+
+  it('has exactly 5 indexes', () => {
+    expect(cfg.indexes).toHaveLength(5);
+  });
+
+  it('all expected index names are present', () => {
+    expect(idxNames.has('idx_triggers_team_slug')).toBe(true);
+    expect(idxNames.has('idx_triggers_agent_aid')).toBe(true);
+    expect(idxNames.has('idx_triggers_enabled')).toBe(true);
+    expect(idxNames.has('idx_triggers_next_run_at')).toBe(true);
+    expect(idxNames.has('idx_triggers_webhook_path')).toBe(true);
+  });
+
+  it('indexes reference correct columns', () => {
+    expect(idxCols['idx_triggers_team_slug']).toEqual(['team_slug']);
+    expect(idxCols['idx_triggers_agent_aid']).toEqual(['agent_aid']);
+    expect(idxCols['idx_triggers_enabled']).toEqual(['enabled']);
+    expect(idxCols['idx_triggers_next_run_at']).toEqual(['next_run_at']);
+    expect(idxCols['idx_triggers_webhook_path']).toEqual(['webhook_path']);
   });
 });
 

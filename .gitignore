@@ -1,5 +1,5 @@
 .vcp
-.claude
+.claude/settings.local.json
 
 # Go
 openhive

@@ -23,7 +23,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { registerAdminTools, type AdminToolsDeps } from './tools-admin.js';
 import { ToolHandler } from './toolhandler.js';
-import { ValidationError } from '../domain/errors.js';
+import { AccessDeniedError, ValidationError } from '../domain/errors.js';
 import type { ConfigLoader, KeyManager, WSHub } from '../domain/interfaces.js';
 import type { MasterConfig, JsonValue } from '../domain/types.js';
 
@@ -36,7 +36,7 @@ function makeMasterConfig(): MasterConfig {
     system: {
       listen_address: ':8080',
       data_dir: '/data',
-      workspace_root: '/teams',
+      workspace_root: '/workspace',
       log_level: 'info',
       log_archive: { enabled: false, max_entries: 1000, keep_copies: 3, archive_dir: '' },
       max_message_length: 4096,
@@ -146,6 +146,37 @@ describe('registerAdminTools', () => {
     expect(tools).toContain('list_channels');
     expect(tools).toContain('enable_channel');
     expect(tools).toContain('disable_channel');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Admin guard — non-main teams are rejected
+// ---------------------------------------------------------------------------
+
+describe('admin guard', () => {
+  const adminTools = [
+    'get_config',
+    'update_config',
+    'get_system_status',
+    'list_channels',
+    'enable_channel',
+    'disable_channel',
+  ];
+
+  for (const toolName of adminTools) {
+    it(`rejects ${toolName} from non-main team`, async () => {
+      await expect(
+        handler.handleToolCallWithContext('weather-team', 'call-guard', toolName, 'aid-test-001', {}),
+      ).rejects.toThrow(AccessDeniedError);
+    });
+  }
+
+  it('allows admin tools from main team context', async () => {
+    // handleToolCall defaults to 'main' context — should succeed
+    const result = await handler.handleToolCall('call-ok', 'get_system_status', {});
+    expect(result).toBeDefined();
+    const status = result as Record<string, JsonValue>;
+    expect(status['uptime']).toBeDefined();
   });
 });
 

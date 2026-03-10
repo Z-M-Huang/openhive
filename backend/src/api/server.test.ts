@@ -15,7 +15,8 @@ import type { FastifyInstance } from 'fastify';
 import { createServer } from './server.js';
 import type { ServerDeps } from './server.js';
 import type { MiddlewareLogger } from './middleware.js';
-import type { KeyManager, ConfigLoader, OrgChart, GoOrchestrator, TaskStore, LogStore } from '../domain/interfaces.js';
+import type { KeyManager, ConfigLoader, OrgChart, Orchestrator, TaskStore, LogStore, TriggerScheduler, TaskCoordinator } from '../domain/interfaces.js';
+import type { Trigger } from '../domain/types.js';
 import type { MasterConfig } from '../domain/types.js';
 
 // ---------------------------------------------------------------------------
@@ -82,7 +83,7 @@ const mockOrgChart: OrgChart = {
   rebuildFromConfig: vi.fn(),
 };
 
-const mockOrch: GoOrchestrator = {
+const mockOrch: Orchestrator = {
   createTeam: vi.fn().mockResolvedValue({ slug: 'test', tid: 'tid-1', leader_aid: 'aid-1', agents: [] }),
   deleteTeam: vi.fn().mockResolvedValue(undefined),
   getTeam: vi.fn().mockRejectedValue(new Error('not found')),
@@ -108,6 +109,11 @@ const mockTaskStore: TaskStore = {
   listByTeam: vi.fn().mockResolvedValue([]),
   listByStatus: vi.fn().mockResolvedValue([]),
   getSubtree: vi.fn().mockResolvedValue([]),
+  getDependents: vi.fn().mockResolvedValue([]),
+  getBlockedBy: vi.fn().mockResolvedValue([]),
+  unblockTask: vi.fn().mockResolvedValue(true),
+  retryTask: vi.fn().mockResolvedValue(false),
+  validateDependencies: vi.fn().mockResolvedValue(undefined),
 };
 
 const mockLogStore: LogStore = {
@@ -129,7 +135,7 @@ describe('createServer', () => {
     const deps: ServerDeps = {
       configLoader: mockConfigLoader,
       orgChart: mockOrgChart,
-      goOrchestrator: mockOrch,
+      orchestrator: mockOrch,
       taskStore: mockTaskStore,
       logStore: mockLogStore,
     };
@@ -215,5 +221,99 @@ describe('createServer', () => {
     } finally {
       rmSync(spaDir, { recursive: true });
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Webhook trigger endpoint
+// ---------------------------------------------------------------------------
+
+describe('webhook trigger endpoint', () => {
+  let hookApp: FastifyInstance;
+  let mockTriggerScheduler: TriggerScheduler;
+  let mockTaskCoordinator: TaskCoordinator;
+
+  const webhookTrigger: Trigger = {
+    id: 'trig-webhook-1',
+    name: 'deploy-hook',
+    team_slug: 'deploy-team',
+    agent_aid: 'aid-deployer-001',
+    schedule: '',
+    prompt: 'run deploy script',
+    enabled: true,
+    type: 'webhook',
+    webhook_path: 'deploy',
+    last_run_at: null,
+    next_run_at: null,
+    created_at: new Date(1_000_000),
+    updated_at: new Date(1_000_000),
+  };
+
+  beforeAll(async () => {
+    mockTriggerScheduler = {
+      start: vi.fn().mockResolvedValue(undefined),
+      stop: vi.fn().mockResolvedValue(undefined),
+      addTrigger: vi.fn().mockResolvedValue(undefined),
+      removeTrigger: vi.fn().mockResolvedValue(undefined),
+      listActive: vi.fn().mockReturnValue([]),
+      getWebhookTrigger: vi.fn().mockImplementation((path: string) => {
+        if (path === 'deploy') return webhookTrigger;
+        return undefined;
+      }),
+    };
+
+    mockTaskCoordinator = {
+      dispatchTask: vi.fn().mockResolvedValue(undefined),
+      handleTaskResult: vi.fn().mockResolvedValue(undefined),
+      cancelTask: vi.fn().mockResolvedValue([]),
+      getTaskStatus: vi.fn().mockRejectedValue(new Error('not found')),
+      createSubtasks: vi.fn().mockResolvedValue([]),
+    };
+
+    const deps: ServerDeps = {
+      triggerScheduler: mockTriggerScheduler,
+      taskCoordinator: mockTaskCoordinator,
+    };
+    const instance = createServer(':0', noopLogger, mockKm, null, null, null, [], deps);
+    hookApp = instance.app;
+    await hookApp.ready();
+  }, 30000);
+
+  afterAll(async () => {
+    await hookApp.close();
+  });
+
+  it('fires webhook trigger and returns 200 with trigger_id and task_id', async () => {
+    const res = await hookApp.inject({
+      method: 'POST',
+      url: '/api/v1/hooks/deploy',
+      payload: { ignored: 'data' },
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body) as { trigger_id: string; task_id: string };
+    expect(body.trigger_id).toBe('trig-webhook-1');
+    expect(body.task_id).toBeDefined();
+    expect(body.task_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+
+    // Verify dispatchTask was called with the trigger's pre-configured prompt (CSC-12)
+    expect(mockTaskCoordinator.dispatchTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        prompt: 'run deploy script',
+        team_slug: 'deploy-team',
+        agent_aid: 'aid-deployer-001',
+        status: 'pending',
+      }),
+    );
+  });
+
+  it('returns 404 for unknown webhook path', async () => {
+    const res = await hookApp.inject({
+      method: 'POST',
+      url: '/api/v1/hooks/nonexistent',
+    });
+    expect(res.statusCode).toBe(404);
+    const body = JSON.parse(res.body) as { error: string };
+    expect(body.error).toBe('webhook not found');
   });
 });

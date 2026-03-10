@@ -37,6 +37,12 @@ export function defaultMasterConfig(): MasterConfig {
         keep_copies: 0,
         archive_dir: '',
       },
+      limits: {
+        max_depth: 5,
+        max_teams: 20,
+        max_agents_per_team: 10,
+        max_concurrent_tasks: 50,
+      },
     },
     assistant: {
       name: 'OpenHive Assistant',

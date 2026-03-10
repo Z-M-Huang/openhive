@@ -212,7 +212,7 @@ describe('checkHealth', () => {
     expect(event).toBeDefined();
     if (event!.payload.kind === 'container_state_changed') {
       expect(event!.payload.team_id).toBe('tid-stale2');
-      expect(event!.payload.state).toBe('error');
+      expect(event!.payload.state).toBe('failed');
     }
   });
 });

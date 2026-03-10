@@ -38,7 +38,7 @@ export interface SkillLoaderLogger {
  *   <workspaceBase>/.claude/skills/<name>/SKILL.md
  *
  * The workspaceBase is the root of a team's workspace directory
- * (e.g. .run/teams/<slug>/).
+ * (e.g. .run/workspace/teams/<slug>/ or .run/workspace/ for main).
  */
 export class SkillLoader {
   private readonly workspaceBase: string;

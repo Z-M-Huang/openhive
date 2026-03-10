@@ -77,4 +77,13 @@ describe('defaultMasterConfig', () => {
 
     expect(cfg.agents).toBeUndefined();
   });
+
+  it('returns default system limits', () => {
+    const cfg = defaultMasterConfig();
+
+    expect(cfg.system.limits.max_depth).toBe(5);
+    expect(cfg.system.limits.max_teams).toBe(20);
+    expect(cfg.system.limits.max_agents_per_team).toBe(10);
+    expect(cfg.system.limits.max_concurrent_tasks).toBe(50);
+  });
 });

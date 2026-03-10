@@ -31,7 +31,7 @@ import * as schema from './schema.js';
 // ---------------------------------------------------------------------------
 
 /**
- * Raw SQL DDL for all four tables.
+ * Raw SQL DDL for all seven tables.
  * These statements match the Drizzle schema definitions in schema.ts exactly.
  * Using CREATE TABLE IF NOT EXISTS avoids dependency on external migration
  * files while still being idempotent on repeated initialization.
@@ -43,24 +43,30 @@ import * as schema from './schema.js';
  */
 const SCHEMA_DDL = `
 CREATE TABLE IF NOT EXISTS tasks (
-  id           TEXT    NOT NULL PRIMARY KEY,
-  parent_id    TEXT    NOT NULL DEFAULT '',
-  team_slug    TEXT    NOT NULL DEFAULT '',
-  agent_aid    TEXT    NOT NULL DEFAULT '',
-  jid          TEXT    NOT NULL DEFAULT '',
-  status       INTEGER NOT NULL DEFAULT 0,
-  prompt       TEXT    NOT NULL DEFAULT '',
-  result       TEXT    NOT NULL DEFAULT '',
-  error        TEXT    NOT NULL DEFAULT '',
-  created_at   INTEGER NOT NULL,
-  updated_at   INTEGER NOT NULL,
-  completed_at INTEGER
+  id                 TEXT    NOT NULL PRIMARY KEY,
+  parent_id          TEXT    NOT NULL DEFAULT '',
+  team_slug          TEXT    NOT NULL DEFAULT '',
+  agent_aid          TEXT    NOT NULL DEFAULT '',
+  jid                TEXT    NOT NULL DEFAULT '',
+  status             INTEGER NOT NULL DEFAULT 0,
+  prompt             TEXT    NOT NULL DEFAULT '',
+  result             TEXT    NOT NULL DEFAULT '',
+  error              TEXT    NOT NULL DEFAULT '',
+  blocked_by_task_id TEXT    NOT NULL DEFAULT '',
+  blocked_by         TEXT    NOT NULL DEFAULT '[]',
+  priority           INTEGER NOT NULL DEFAULT 0,
+  retry_count        INTEGER NOT NULL DEFAULT 0,
+  max_retries        INTEGER NOT NULL DEFAULT 0,
+  created_at         INTEGER NOT NULL,
+  updated_at         INTEGER NOT NULL,
+  completed_at       INTEGER
 );
-CREATE INDEX IF NOT EXISTS idx_tasks_parent_id  ON tasks (parent_id);
-CREATE INDEX IF NOT EXISTS idx_tasks_team_slug  ON tasks (team_slug);
-CREATE INDEX IF NOT EXISTS idx_tasks_agent_aid  ON tasks (agent_aid);
-CREATE INDEX IF NOT EXISTS idx_tasks_jid        ON tasks (jid);
-CREATE INDEX IF NOT EXISTS idx_tasks_status     ON tasks (status);
+CREATE INDEX IF NOT EXISTS idx_tasks_parent_id          ON tasks (parent_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_team_slug          ON tasks (team_slug);
+CREATE INDEX IF NOT EXISTS idx_tasks_agent_aid          ON tasks (agent_aid);
+CREATE INDEX IF NOT EXISTS idx_tasks_jid                ON tasks (jid);
+CREATE INDEX IF NOT EXISTS idx_tasks_status             ON tasks (status);
+CREATE INDEX IF NOT EXISTS idx_tasks_priority           ON tasks (priority);
 
 CREATE TABLE IF NOT EXISTS messages (
   id        TEXT    NOT NULL PRIMARY KEY,
@@ -102,6 +108,67 @@ CREATE TABLE IF NOT EXISTS chat_sessions (
   session_id           TEXT    NOT NULL DEFAULT '',
   agent_aid            TEXT    NOT NULL DEFAULT ''
 );
+
+CREATE TABLE IF NOT EXISTS escalations (
+  id               TEXT    NOT NULL PRIMARY KEY,
+  correlation_id   TEXT    NOT NULL DEFAULT '',
+  task_id          TEXT    NOT NULL DEFAULT '',
+  from_aid         TEXT    NOT NULL DEFAULT '',
+  to_aid           TEXT    NOT NULL DEFAULT '',
+  source_team      TEXT    NOT NULL DEFAULT '',
+  destination_team TEXT    NOT NULL DEFAULT '',
+  escalation_level INTEGER NOT NULL DEFAULT 1,
+  reason           TEXT    NOT NULL DEFAULT '',
+  context          TEXT    NOT NULL DEFAULT '',
+  status           INTEGER NOT NULL DEFAULT 0,
+  resolution       TEXT    NOT NULL DEFAULT '',
+  created_at       INTEGER NOT NULL,
+  updated_at       INTEGER NOT NULL,
+  resolved_at      INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_escalations_correlation_id ON escalations (correlation_id);
+CREATE INDEX IF NOT EXISTS idx_escalations_task_id        ON escalations (task_id);
+CREATE INDEX IF NOT EXISTS idx_escalations_from_aid       ON escalations (from_aid);
+CREATE INDEX IF NOT EXISTS idx_escalations_to_aid         ON escalations (to_aid);
+CREATE INDEX IF NOT EXISTS idx_escalations_status         ON escalations (status);
+CREATE INDEX IF NOT EXISTS idx_escalations_created_id     ON escalations (created_at);
+
+CREATE TABLE IF NOT EXISTS agent_memories (
+  id         TEXT    NOT NULL PRIMARY KEY,
+  agent_aid  TEXT    NOT NULL DEFAULT '',
+  key        TEXT    NOT NULL DEFAULT '',
+  value      TEXT    NOT NULL DEFAULT '',
+  metadata   TEXT    NOT NULL DEFAULT '',
+  team_slug  TEXT    NOT NULL DEFAULT '',
+  deleted_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_agent_memories_agent_aid  ON agent_memories (agent_aid);
+CREATE INDEX IF NOT EXISTS idx_agent_memories_key        ON agent_memories (key);
+CREATE INDEX IF NOT EXISTS idx_agent_memories_agent_key  ON agent_memories (agent_aid, key);
+CREATE INDEX IF NOT EXISTS idx_agent_memories_team_slug  ON agent_memories (team_slug);
+
+CREATE TABLE IF NOT EXISTS triggers (
+  id           TEXT    NOT NULL PRIMARY KEY,
+  name         TEXT    NOT NULL DEFAULT '',
+  team_slug    TEXT    NOT NULL DEFAULT '',
+  agent_aid    TEXT    NOT NULL DEFAULT '',
+  schedule     TEXT    NOT NULL DEFAULT '',
+  prompt       TEXT    NOT NULL DEFAULT '',
+  enabled      INTEGER NOT NULL DEFAULT 1,
+  type         TEXT    NOT NULL DEFAULT 'cron',
+  webhook_path TEXT    NOT NULL DEFAULT '',
+  last_run_at  INTEGER,
+  next_run_at  INTEGER,
+  created_at   INTEGER NOT NULL,
+  updated_at   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_triggers_team_slug    ON triggers (team_slug);
+CREATE INDEX IF NOT EXISTS idx_triggers_agent_aid    ON triggers (agent_aid);
+CREATE INDEX IF NOT EXISTS idx_triggers_enabled      ON triggers (enabled);
+CREATE INDEX IF NOT EXISTS idx_triggers_next_run_at  ON triggers (next_run_at);
+CREATE INDEX IF NOT EXISTS idx_triggers_webhook_path ON triggers (webhook_path) WHERE webhook_path != '';
 `;
 
 // ---------------------------------------------------------------------------
@@ -190,10 +257,107 @@ function setPragmas(conn: Database.Database): void {
 
 /**
  * runSchemaMigration runs all CREATE TABLE IF NOT EXISTS statements on the
- * writer connection. This is idempotent and safe to call on every startup.
+ * writer connection, then applies incremental ALTER TABLE migrations for
+ * columns added after the initial schema. This is idempotent and safe to
+ * call on every startup.
  */
 function runSchemaMigration(conn: Database.Database): void {
   conn.exec(SCHEMA_DDL);
+  runIncrementalMigrations(conn);
+}
+
+/**
+ * Applies incremental schema migrations (ALTER TABLE) for columns added
+ * after the initial schema. Each migration checks if the column already
+ * exists before attempting to add it, making the function idempotent.
+ *
+ * Migrations:
+ *   1. tasks.blocked_by_task_id — added for task dependency blocking
+ *   2. tasks.blocked_by, priority, retry_count, max_retries — task DAG system
+ *   3. agent_memories.team_slug, deleted_at — team scoping + soft delete
+ */
+function runIncrementalMigrations(conn: Database.Database): void {
+  const columns = conn.prepare("PRAGMA table_info('tasks')").all() as Array<{
+    name: string;
+  }>;
+  const columnNames = new Set(columns.map((c) => c.name));
+
+  // Migration 1: blocked_by_task_id (legacy single-task dependency)
+  if (!columnNames.has('blocked_by_task_id')) {
+    conn.exec(
+      "ALTER TABLE tasks ADD COLUMN blocked_by_task_id TEXT NOT NULL DEFAULT ''",
+    );
+  }
+  // Always ensure index exists — handles both fresh DBs (column in SCHEMA_DDL but
+  // index deferred here) and migrations (column just added above).
+  conn.exec(
+    'CREATE INDEX IF NOT EXISTS idx_tasks_blocked_by_task_id ON tasks (blocked_by_task_id)',
+  );
+
+  // Migration 2: Task DAG columns — blocked_by (JSON array), priority,
+  // retry_count, max_retries
+  if (!columnNames.has('blocked_by')) {
+    conn.exec(
+      "ALTER TABLE tasks ADD COLUMN blocked_by TEXT NOT NULL DEFAULT '[]'",
+    );
+    conn.exec(
+      'ALTER TABLE tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 0',
+    );
+    conn.exec(
+      'ALTER TABLE tasks ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0',
+    );
+    conn.exec(
+      'ALTER TABLE tasks ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 0',
+    );
+
+    // Migrate existing blocked_by_task_id data into the new blocked_by JSON
+    // array. Only rows with a non-empty blocked_by_task_id get migrated.
+    conn.exec(
+      "UPDATE tasks SET blocked_by = json_array(blocked_by_task_id) WHERE blocked_by_task_id != ''",
+    );
+  }
+  // Always ensure priority index exists.
+  conn.exec(
+    'CREATE INDEX IF NOT EXISTS idx_tasks_priority ON tasks (priority)',
+  );
+
+  // Migration 3: agent_memories.team_slug and deleted_at — team scoping + soft delete
+  const memColumns = conn
+    .prepare("PRAGMA table_info('agent_memories')")
+    .all() as Array<{ name: string }>;
+  const memColumnNames = new Set(memColumns.map((c) => c.name));
+
+  if (!memColumnNames.has('team_slug')) {
+    conn.exec(
+      "ALTER TABLE agent_memories ADD COLUMN team_slug TEXT NOT NULL DEFAULT ''",
+    );
+    conn.exec(
+      'ALTER TABLE agent_memories ADD COLUMN deleted_at INTEGER',
+    );
+  }
+  // Always ensure team_slug index exists.
+  conn.exec(
+    'CREATE INDEX IF NOT EXISTS idx_agent_memories_team_slug ON agent_memories (team_slug)',
+  );
+
+  // Migration 4: triggers.type and webhook_path — webhook trigger support
+  const trigColumns = conn
+    .prepare("PRAGMA table_info('triggers')")
+    .all() as Array<{ name: string }>;
+  const trigColumnNames = new Set(trigColumns.map((c) => c.name));
+
+  if (!trigColumnNames.has('type')) {
+    conn.exec(
+      "ALTER TABLE triggers ADD COLUMN type TEXT NOT NULL DEFAULT 'cron'",
+    );
+    conn.exec(
+      "ALTER TABLE triggers ADD COLUMN webhook_path TEXT NOT NULL DEFAULT ''",
+    );
+  }
+  // Always ensure webhook_path partial index exists.
+  conn.exec(
+    "CREATE INDEX IF NOT EXISTS idx_triggers_webhook_path ON triggers (webhook_path) WHERE webhook_path != ''",
+  );
 }
 
 // ---------------------------------------------------------------------------

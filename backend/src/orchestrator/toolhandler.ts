@@ -7,9 +7,9 @@
  * Validates agent ownership via OrgChart when set.
  */
 
-import type { SDKToolHandler, ToolRegistry, OrgChart } from '../domain/interfaces.js';
+import type { SDKToolHandler, ToolRegistry, OrgChart, RateLimiter } from '../domain/interfaces.js';
 import type { JsonValue } from '../domain/types.js';
-import { AccessDeniedError, NotFoundError } from '../domain/errors.js';
+import { AccessDeniedError, NotFoundError, RateLimitedError } from '../domain/errors.js';
 
 // ---------------------------------------------------------------------------
 // Logger interface
@@ -54,15 +54,28 @@ export type ToolFunc = (args: Record<string, JsonValue>, context?: ToolCallConte
  * handler functions with per-team authorization and optional agent
  * ownership validation via OrgChart.
  */
+/**
+ * Tools subject to per-agent rate limiting.
+ * Only these tool names are checked/recorded by the rate limiter.
+ */
+const RATE_LIMITED_TOOLS: ReadonlySet<string> = new Set([
+  'create_team',
+  'dispatch_task',
+  'dispatch_subtask',
+  'escalate',
+]);
+
 export class ToolHandler implements SDKToolHandler, ToolRegistry {
   private readonly handlers: Map<string, ToolFunc>;
   private readonly logger: ToolHandlerLogger;
   private orgChart: OrgChart | null;
+  private rateLimiter: RateLimiter | null;
 
   constructor(logger: ToolHandlerLogger) {
     this.handlers = new Map();
     this.logger = logger;
     this.orgChart = null;
+    this.rateLimiter = null;
   }
 
   // -------------------------------------------------------------------------
@@ -75,6 +88,18 @@ export class ToolHandler implements SDKToolHandler, ToolRegistry {
    */
   setOrgChart(orgChart: OrgChart): void {
     this.orgChart = orgChart;
+  }
+
+  // -------------------------------------------------------------------------
+  // setRateLimiter
+  // -------------------------------------------------------------------------
+
+  /**
+   * Sets the RateLimiter used to guard tool invocations.
+   * Must be called before rate limiting takes effect.
+   */
+  setRateLimiter(rateLimiter: RateLimiter): void {
+    this.rateLimiter = rateLimiter;
   }
 
   // -------------------------------------------------------------------------
@@ -196,6 +221,19 @@ export class ToolHandler implements SDKToolHandler, ToolRegistry {
       }
     }
 
+    // Rule 3: rate limit check (before tool invocation).
+    if (this.rateLimiter !== null && agentAID !== '' && RATE_LIMITED_TOOLS.has(toolName)) {
+      if (!this.rateLimiter.checkRate(agentAID, toolName)) {
+        this.logger.warn('tool call rate limited', {
+          call_id: callID,
+          tool_name: toolName,
+          team_id: teamID,
+          agent_aid: agentAID,
+        });
+        throw new RateLimitedError(60);
+      }
+    }
+
     // Rule 4: tool must be registered.
     const fn = this.handlers.get(toolName);
     if (fn === undefined) {
@@ -216,6 +254,11 @@ export class ToolHandler implements SDKToolHandler, ToolRegistry {
         error: err instanceof Error ? err.message : String(err),
       });
       throw err;
+    }
+
+    // Record the action for rate limiting (only on success).
+    if (this.rateLimiter !== null && agentAID !== '') {
+      this.rateLimiter.recordAction(agentAID, toolName);
     }
 
     this.logger.info('tool call completed', {

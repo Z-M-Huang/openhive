@@ -41,6 +41,12 @@ import {
   MsgTypeEscalation,
   MsgTypeToolCall,
   MsgTypeStatusUpdate,
+  MsgTypeAgentAdded,
+  MsgTypeAgentReady,
+  MsgTypeEscalationResponse,
+  MsgTypeTaskCancel,
+  MsgTypeLogEvent,
+  MsgTypeOrgChartUpdate,
   WSErrorNotFound,
   WSErrorValidation,
   WSErrorConflict,
@@ -48,6 +54,8 @@ import {
   WSErrorRateLimited,
   WSErrorAccessDenied,
   WSErrorInternal,
+  WSErrorDepthLimitExceeded,
+  WSErrorCycleDetected,
 } from './messages.js';
 
 import type {
@@ -55,12 +63,17 @@ import type {
   TaskDispatchMsg,
   ShutdownMsg,
   ToolResultMsg,
+  EscalationResponseMsg,
+  TaskCancelMsg,
   ReadyMsg,
   HeartbeatMsg,
   TaskResultMsg,
   EscalationMsg,
+  LogEventMsg,
   ToolCallMsg,
   StatusUpdateMsg,
+  AgentReadyMsg,
+  OrgChartUpdateMsg,
 } from './messages.js';
 
 // ---------------------------------------------------------------------------
@@ -156,14 +169,20 @@ describe('parseMessage — correctly parses all 10 message types', () => {
 
   it('parses escalation', () => {
     const data: EscalationMsg = {
+      correlation_id: 'esc-corr-1',
       task_id: 'task-3',
       agent_aid: 'aid-3',
+      source_team: 'tid-team-a',
+      destination_team: 'tid-team-b',
+      escalation_level: 1,
       reason: 'stuck',
+      context: { detail: 'some context' },
     };
     const raw = JSON.stringify({ type: MsgTypeEscalation, data });
     const [msgType, payload] = parseMessage(raw);
     expect(msgType).toBe('escalation');
     const msg = payload as EscalationMsg;
+    expect(msg.correlation_id).toBe('esc-corr-1');
     expect(msg.task_id).toBe('task-3');
     expect(msg.reason).toBe('stuck');
   });
@@ -191,6 +210,83 @@ describe('parseMessage — correctly parses all 10 message types', () => {
     const msg = payload as StatusUpdateMsg;
     expect(msg.agent_aid).toBe('aid-7');
     expect(msg.status).toBe('busy');
+  });
+
+  it('parses agent_ready', () => {
+    const data: AgentReadyMsg = { aid: 'aid-new-001' };
+    const raw = JSON.stringify({ type: MsgTypeAgentReady, data });
+    const [msgType, payload] = parseMessage(raw);
+    expect(msgType).toBe('agent_ready');
+    const msg = payload as AgentReadyMsg;
+    expect(msg.aid).toBe('aid-new-001');
+  });
+
+  it('parses escalation_response', () => {
+    const data: EscalationResponseMsg = {
+      correlation_id: 'esc-resp-1',
+      task_id: 'task-5',
+      agent_aid: 'aid-lead',
+      source_team: 'tid-parent',
+      destination_team: 'tid-child',
+      resolution: 'use approach B',
+      context: { confidence: 'high' },
+    };
+    const raw = JSON.stringify({ type: MsgTypeEscalationResponse, data });
+    const [msgType, payload] = parseMessage(raw);
+    expect(msgType).toBe('escalation_response');
+    const msg = payload as EscalationResponseMsg;
+    expect(msg.correlation_id).toBe('esc-resp-1');
+    expect(msg.task_id).toBe('task-5');
+    expect(msg.resolution).toBe('use approach B');
+  });
+
+  it('parses task_cancel', () => {
+    const data: TaskCancelMsg = {
+      task_id: 'task-cancel-1',
+      cascade: true,
+      reason: 'no longer needed',
+    };
+    const raw = JSON.stringify({ type: MsgTypeTaskCancel, data });
+    const [msgType, payload] = parseMessage(raw);
+    expect(msgType).toBe('task_cancel');
+    const msg = payload as TaskCancelMsg;
+    expect(msg.task_id).toBe('task-cancel-1');
+    expect(msg.cascade).toBe(true);
+    expect(msg.reason).toBe('no longer needed');
+  });
+
+  it('parses log_event', () => {
+    const data: LogEventMsg = {
+      level: 'info',
+      source_aid: 'aid-worker-1',
+      message: 'task started',
+      metadata: { task_id: 'task-10' },
+      timestamp: '2026-03-08T15:00:00.000Z',
+    };
+    const raw = JSON.stringify({ type: MsgTypeLogEvent, data });
+    const [msgType, payload] = parseMessage(raw);
+    expect(msgType).toBe('log_event');
+    const msg = payload as LogEventMsg;
+    expect(msg.source_aid).toBe('aid-worker-1');
+    expect(msg.message).toBe('task started');
+    expect(msg.level).toBe('info');
+  });
+
+  it('parses org_chart_update', () => {
+    const data: OrgChartUpdateMsg = {
+      action: 'agent_added',
+      team_slug: 'backend-team',
+      agent_aid: 'aid-new-dev',
+      agent_name: 'new-dev',
+      timestamp: '2026-03-08T15:00:00.000Z',
+    };
+    const raw = JSON.stringify({ type: MsgTypeOrgChartUpdate, data });
+    const [msgType, payload] = parseMessage(raw);
+    expect(msgType).toBe('org_chart_update');
+    const msg = payload as OrgChartUpdateMsg;
+    expect(msg.action).toBe('agent_added');
+    expect(msg.team_slug).toBe('backend-team');
+    expect(msg.agent_aid).toBe('aid-new-dev');
   });
 
   it('accepts Buffer input as well as string input', () => {
@@ -239,8 +335,14 @@ describe('parseMessage — rejects messages with missing required fields', () =>
     expect(() => parseMessage(raw)).toThrow('task_id is required');
   });
 
+  it('rejects escalation with missing correlation_id', () => {
+    const raw = JSON.stringify({ type: 'escalation', data: { task_id: 'task-1', agent_aid: 'aid-1', reason: 'stuck' } });
+    expect(() => parseMessage(raw)).toThrow(ValidationError);
+    expect(() => parseMessage(raw)).toThrow('correlation_id is required');
+  });
+
   it('rejects escalation with missing task_id', () => {
-    const raw = JSON.stringify({ type: 'escalation', data: { agent_aid: 'aid-1', reason: 'stuck' } });
+    const raw = JSON.stringify({ type: 'escalation', data: { correlation_id: 'c-1', agent_aid: 'aid-1', reason: 'stuck' } });
     expect(() => parseMessage(raw)).toThrow(ValidationError);
     expect(() => parseMessage(raw)).toThrow('task_id is required');
   });
@@ -259,6 +361,60 @@ describe('parseMessage — rejects messages with missing required fields', () =>
 
   it('rejects status_update with missing agent_aid', () => {
     const raw = JSON.stringify({ type: 'status_update', data: { status: 'busy' } });
+    expect(() => parseMessage(raw)).toThrow(ValidationError);
+    expect(() => parseMessage(raw)).toThrow('agent_aid is required');
+  });
+
+  it('rejects agent_ready with missing aid', () => {
+    const raw = JSON.stringify({ type: 'agent_ready', data: {} });
+    expect(() => parseMessage(raw)).toThrow(ValidationError);
+    expect(() => parseMessage(raw)).toThrow('aid is required');
+  });
+
+  it('rejects escalation_response with missing correlation_id', () => {
+    const raw = JSON.stringify({ type: 'escalation_response', data: { task_id: 'task-1' } });
+    expect(() => parseMessage(raw)).toThrow(ValidationError);
+    expect(() => parseMessage(raw)).toThrow('correlation_id is required');
+  });
+
+  it('rejects escalation_response with missing task_id', () => {
+    const raw = JSON.stringify({ type: 'escalation_response', data: { correlation_id: 'c-1' } });
+    expect(() => parseMessage(raw)).toThrow(ValidationError);
+    expect(() => parseMessage(raw)).toThrow('task_id is required');
+  });
+
+  it('rejects task_cancel with missing task_id', () => {
+    const raw = JSON.stringify({ type: 'task_cancel', data: { cascade: true } });
+    expect(() => parseMessage(raw)).toThrow(ValidationError);
+    expect(() => parseMessage(raw)).toThrow('task_id is required');
+  });
+
+  it('rejects log_event with missing source_aid', () => {
+    const raw = JSON.stringify({ type: 'log_event', data: { message: 'hi', level: 'info' } });
+    expect(() => parseMessage(raw)).toThrow(ValidationError);
+    expect(() => parseMessage(raw)).toThrow('source_aid is required');
+  });
+
+  it('rejects log_event with missing message', () => {
+    const raw = JSON.stringify({ type: 'log_event', data: { source_aid: 'aid-1', level: 'info' } });
+    expect(() => parseMessage(raw)).toThrow(ValidationError);
+    expect(() => parseMessage(raw)).toThrow('message is required');
+  });
+
+  it('rejects org_chart_update with missing action', () => {
+    const raw = JSON.stringify({ type: 'org_chart_update', data: { team_slug: 'team-a', agent_aid: 'aid-1' } });
+    expect(() => parseMessage(raw)).toThrow(ValidationError);
+    expect(() => parseMessage(raw)).toThrow('action is required');
+  });
+
+  it('rejects org_chart_update with missing team_slug', () => {
+    const raw = JSON.stringify({ type: 'org_chart_update', data: { action: 'agent_added', agent_aid: 'aid-1' } });
+    expect(() => parseMessage(raw)).toThrow(ValidationError);
+    expect(() => parseMessage(raw)).toThrow('team_slug is required');
+  });
+
+  it('rejects org_chart_update with missing agent_aid', () => {
+    const raw = JSON.stringify({ type: 'org_chart_update', data: { action: 'agent_added', team_slug: 'team-a' } });
     expect(() => parseMessage(raw)).toThrow(ValidationError);
     expect(() => parseMessage(raw)).toThrow('agent_aid is required');
   });
@@ -333,6 +489,18 @@ describe('validateDirection — enforces message direction', () => {
     expect(() => validateDirection(MsgTypeStatusUpdate, true)).not.toThrow();
   });
 
+  it('allows container to send agent_ready', () => {
+    expect(() => validateDirection(MsgTypeAgentReady, true)).not.toThrow();
+  });
+
+  it('allows container to send log_event', () => {
+    expect(() => validateDirection(MsgTypeLogEvent, true)).not.toThrow();
+  });
+
+  it('allows container to send org_chart_update', () => {
+    expect(() => validateDirection(MsgTypeOrgChartUpdate, true)).not.toThrow();
+  });
+
   // Backend sending backend-to-container types is valid
   it('allows backend to send container_init', () => {
     expect(() => validateDirection(MsgTypeContainerInit, false)).not.toThrow();
@@ -348,6 +516,18 @@ describe('validateDirection — enforces message direction', () => {
 
   it('allows backend to send tool_result', () => {
     expect(() => validateDirection(MsgTypeToolResult, false)).not.toThrow();
+  });
+
+  it('allows backend to send agent_added', () => {
+    expect(() => validateDirection(MsgTypeAgentAdded, false)).not.toThrow();
+  });
+
+  it('allows backend to send escalation_response', () => {
+    expect(() => validateDirection(MsgTypeEscalationResponse, false)).not.toThrow();
+  });
+
+  it('allows backend to send task_cancel', () => {
+    expect(() => validateDirection(MsgTypeTaskCancel, false)).not.toThrow();
   });
 
   // Container sending backend-to-container types is forbidden

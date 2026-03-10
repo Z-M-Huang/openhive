@@ -231,6 +231,7 @@ class FakeConfigLoader implements Partial<ConfigLoader> {
 function makeManager(opts?: {
   configLoader?: FakeConfigLoader | null;
   idleTimeoutMs?: number;
+  hostRunDir?: string;
 }): {
   manager: ManagerImpl;
   runtime: FakeContainerRuntime;
@@ -253,6 +254,7 @@ function makeManager(opts?: {
     logger,
     wsURL: 'ws://localhost:8080',
     idleTimeoutMs: opts?.idleTimeoutMs ?? 60_000,
+    hostRunDir: opts?.hostRunDir,
   };
 
   const manager = new ManagerImpl(cfg);
@@ -435,6 +437,21 @@ describe('ManagerImpl.provisionTeam', () => {
     const { manager, wsHub } = makeManager();
     await manager.provisionTeam('token-verify-team', {});
     expect(wsHub.generatedTokens[0].teamID).toBe('token-verify-team');
+  });
+
+  it('passes workspace bind mount when hostRunDir is set', async () => {
+    const { manager, runtime } = makeManager({ hostRunDir: '/host/openhive/.run' });
+    await manager.provisionTeam('alpha-team', {});
+    expect(runtime.createCalls[0].config.binds).toEqual([
+      '/host/openhive/.run/workspace/teams/alpha-team:/app/workspace',
+    ]);
+  });
+
+  it('omits binds and warns when hostRunDir is not set', async () => {
+    const { manager, runtime, logger } = makeManager();
+    await manager.provisionTeam('alpha-team', {});
+    expect(runtime.createCalls[0].config.binds).toBeUndefined();
+    expect(logger.warns.some((w) => w.msg.includes('hostRunDir not set'))).toBe(true);
   });
 });
 

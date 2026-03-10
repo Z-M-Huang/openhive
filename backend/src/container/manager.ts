@@ -110,6 +110,13 @@ export interface ManagerConfig {
    * When 0 or negative, DEFAULT_IDLE_TIMEOUT_MS is used.
    */
   idleTimeoutMs?: number;
+  /**
+   * Host-absolute path to the run directory. Used to construct volume bind
+   * mounts for sibling containers (Docker resolves bind paths on the host,
+   * not inside the root container). When undefined, workspace mounts are
+   * skipped and a warning is logged on each provision.
+   */
+  hostRunDir?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -137,6 +144,7 @@ export class ManagerImpl implements ContainerManager {
   private readonly logger: ManagerLogger;
   private readonly wsURL: string;
   private readonly defaultIdleTimeoutMs: number;
+  private readonly hostRunDir: string | undefined;
 
   /**
    * Per-team Mutex map. Lazily populated by getTeamMutex().
@@ -160,6 +168,7 @@ export class ManagerImpl implements ContainerManager {
       cfg.idleTimeoutMs !== undefined && cfg.idleTimeoutMs > 0
         ? cfg.idleTimeoutMs
         : DEFAULT_IDLE_TIMEOUT_MS;
+    this.hostRunDir = cfg.hostRunDir;
   }
 
   // -------------------------------------------------------------------------
@@ -531,10 +540,22 @@ export class ManagerImpl implements ContainerManager {
       }
     }
 
+    // Build volume binds for workspace mount
+    const binds: string[] = [];
+    if (this.hostRunDir !== undefined) {
+      const hostWorkspace = `${this.hostRunDir}/workspace/teams/${teamSlug}`;
+      binds.push(`${hostWorkspace}:/app/workspace`);
+    } else {
+      this.logger.warn('hostRunDir not set — child container will not have workspace mounted', {
+        team_slug: teamSlug,
+      });
+    }
+
     const containerID = await this.runtime.createContainer({
       name: containerCfg.name,
       env,
       max_memory: containerCfg.max_memory,
+      binds: binds.length > 0 ? binds : undefined,
     });
 
     try {
@@ -765,6 +786,7 @@ export function newContainerManager(
   logger: ManagerLogger,
   wsURL: string,
   idleTimeoutMs?: number,
+  hostRunDir?: string,
 ): ManagerImpl {
   return new ManagerImpl({
     runtime,
@@ -773,5 +795,6 @@ export function newContainerManager(
     logger,
     wsURL,
     idleTimeoutMs,
+    hostRunDir,
   });
 }

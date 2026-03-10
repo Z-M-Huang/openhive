@@ -15,12 +15,14 @@
 
 import type { TaskStore, WSHub, HeartbeatMonitor, SDKToolHandler } from '../domain/interfaces.js';
 import type { TaskWaiter } from './task-waiter.js';
+import type { EscalationRouter } from './escalation-router.js';
 import type { Task } from '../domain/types.js';
 import type { JsonValue } from '../domain/types.js';
 import type {
   TaskResultMsg,
   AgentInitConfig,
   ToolResultMsg,
+  EscalationMsg,
 } from '../ws/messages.js';
 import {
   MsgTypeTaskDispatch,
@@ -32,7 +34,11 @@ import {
   MsgTypeEscalation,
   MsgTypeToolCall,
   MsgTypeStatusUpdate,
+  MsgTypeAgentReady,
+  MsgTypeLogEvent,
+  MsgTypeOrgChartUpdate,
   WSErrorValidation,
+  PROTOCOL_VERSION,
 } from '../ws/messages.js';
 import { parseMessage, validateDirection, mapDomainErrorToWSError, encodeMessage } from '../ws/protocol.js';
 import { convertAgentStatuses } from './heartbeat.js';
@@ -85,6 +91,10 @@ export class Dispatcher {
   private taskResultCallback: ((result: TaskResultMsg) => void) | null = null;
   private heartbeatMonitor: HeartbeatMonitor | null = null;
   private taskWaiter: TaskWaiter | null = null;
+  private escalationRouter: EscalationRouter | null = null;
+  private onTaskCompleted: ((taskId: string) => Promise<void>) | null = null;
+  private onTaskRetryNeeded: ((taskId: string) => Promise<void>) | null = null;
+  private onTaskTerminalFailed: ((taskId: string) => Promise<void>) | null = null;
 
   constructor(taskStore: TaskStore, wsHub: WSHub, logger: DispatcherLogger) {
     this.taskStore = taskStore;
@@ -139,6 +149,58 @@ export class Dispatcher {
   }
 
   // -------------------------------------------------------------------------
+  // setEscalationRouter
+  // -------------------------------------------------------------------------
+
+  /**
+   * Sets the escalation router for handling escalation and
+   * escalation_response messages.
+   */
+  setEscalationRouter(router: EscalationRouter): void {
+    this.escalationRouter = router;
+  }
+
+  // -------------------------------------------------------------------------
+  // setOnTaskCompleted
+  // -------------------------------------------------------------------------
+
+  /**
+   * Sets a callback invoked when a task completes successfully.
+   * Used by the orchestrator to auto-unblock dependent tasks.
+   * Only fires for 'completed' status, not 'failed' or 'cancelled'.
+   */
+  setOnTaskCompleted(callback: (taskId: string) => Promise<void>): void {
+    this.onTaskCompleted = callback;
+  }
+
+  // -------------------------------------------------------------------------
+  // setOnTaskRetryNeeded
+  // -------------------------------------------------------------------------
+
+  /**
+   * Sets a callback invoked when a failed task is eligible for retry
+   * (retry_count < max_retries). The Dispatcher resets the task to 'pending'
+   * and increments retry_count before firing the callback.
+   * Used by the orchestrator to re-dispatch the task.
+   */
+  setOnTaskRetryNeeded(callback: (taskId: string) => Promise<void>): void {
+    this.onTaskRetryNeeded = callback;
+  }
+
+  // -------------------------------------------------------------------------
+  // setOnTaskTerminalFailed
+  // -------------------------------------------------------------------------
+
+  /**
+   * Sets a callback invoked when a task reaches a terminal failed state
+   * (retry exhausted → 'failed') or is already 'cancelled'.
+   * Used by the orchestrator to auto-escalate permanently blocked dependents.
+   */
+  setOnTaskTerminalFailed(callback: (taskId: string) => Promise<void>): void {
+    this.onTaskTerminalFailed = callback;
+  }
+
+  // -------------------------------------------------------------------------
   // createAndDispatch
   // -------------------------------------------------------------------------
 
@@ -171,6 +233,10 @@ export class Dispatcher {
       agent_aid: agentAID,
       status: 'pending',
       prompt,
+      blocked_by: [],
+      priority: 0,
+      retry_count: 0,
+      max_retries: 0,
       created_at: now,
       updated_at: now,
       completed_at: null,
@@ -183,6 +249,7 @@ export class Dispatcher {
       task_id: task.id,
       agent_aid: agentAID,
       prompt,
+      blocked_by: task.blocked_by,
     };
 
     const encoded = encodeMessage(MsgTypeTaskDispatch, dispatchMsg);
@@ -241,6 +308,28 @@ export class Dispatcher {
   async handleResult(result: TaskResultMsg): Promise<void> {
     const task = await this.taskStore.get(result.task_id);
 
+    // Race guard: skip if task was already cancelled (e.g., cancel cascade).
+    if (task.status === 'cancelled') {
+      this.logger.warn('task result received for already-cancelled task, skipping', {
+        task_id: result.task_id,
+        result_status: result.status,
+      });
+
+      // Fire onTaskTerminalFailed for the cancelled task so the orchestrator
+      // can check whether dependents are permanently blocked.
+      if (this.onTaskTerminalFailed !== null) {
+        try {
+          await this.onTaskTerminalFailed(result.task_id);
+        } catch (err) {
+          this.logger.error('onTaskTerminalFailed callback failed', {
+            task_id: result.task_id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+      return;
+    }
+
     const now = new Date();
     let updated: Task;
 
@@ -253,6 +342,38 @@ export class Dispatcher {
         completed_at: now,
       };
     } else if (result.status === 'failed') {
+      // Check retry eligibility before marking as failed.
+      if (task.retry_count < task.max_retries) {
+        const retried: Task = {
+          ...task,
+          retry_count: task.retry_count + 1,
+          status: 'pending',
+          updated_at: now,
+        };
+        await this.taskStore.update(retried);
+
+        // Fire onTaskRetryNeeded callback. Failures are logged but do NOT
+        // crash the Dispatcher — the task remains in 'pending' status so it
+        // can be retried on a future cycle.
+        if (this.onTaskRetryNeeded !== null) {
+          try {
+            await this.onTaskRetryNeeded(result.task_id);
+          } catch (err) {
+            this.logger.error('onTaskRetryNeeded callback failed', {
+              task_id: result.task_id,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+
+        this.logger.info('task scheduled for retry', {
+          task_id: result.task_id,
+          retry_count: retried.retry_count,
+          max_retries: task.max_retries,
+        });
+        return;
+      }
+
       updated = {
         ...task,
         status: 'failed',
@@ -265,6 +386,35 @@ export class Dispatcher {
     }
 
     await this.taskStore.update(updated);
+
+    // Fire onTaskCompleted callback for completed tasks only.
+    // This triggers auto-unblock of dependent tasks in the orchestrator.
+    // Callback errors are logged but do NOT crash the Dispatcher or prevent
+    // the completion result from being processed.
+    if (result.status === 'completed' && this.onTaskCompleted !== null) {
+      try {
+        await this.onTaskCompleted(result.task_id);
+      } catch (err) {
+        this.logger.error('onTaskCompleted callback failed', {
+          task_id: result.task_id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    // Fire onTaskTerminalFailed callback for terminal failed tasks
+    // (retry exhausted). This triggers auto-escalation of permanently
+    // blocked dependents in the orchestrator.
+    if (result.status === 'failed' && this.onTaskTerminalFailed !== null) {
+      try {
+        await this.onTaskTerminalFailed(result.task_id);
+      } catch (err) {
+        this.logger.error('onTaskTerminalFailed callback failed', {
+          task_id: result.task_id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
 
     // Notify TaskWaiter so dispatch_task_and_wait unblocks.
     if (this.taskWaiter !== null) {
@@ -344,7 +494,14 @@ export class Dispatcher {
       }
 
       case MsgTypeReady: {
-        const ready = payload as { team_id: string; agent_count: number };
+        const ready = payload as { team_id: string; agent_count: number; protocol_version?: string };
+        if (ready.protocol_version && ready.protocol_version !== PROTOCOL_VERSION) {
+          this.logger.warn('protocol version mismatch', {
+            team_id: ready.team_id,
+            expected: PROTOCOL_VERSION,
+            received: ready.protocol_version,
+          });
+        }
         this.logger.info('container ready', {
           team_id: ready.team_id,
           agent_count: ready.agent_count,
@@ -453,22 +610,70 @@ export class Dispatcher {
       }
 
       case MsgTypeEscalation: {
-        const escalation = payload as {
-          task_id: string;
-          agent_aid: string;
-          reason: string;
-          context?: string;
-        };
-        this.logger.warn('escalation received', {
-          task_id: escalation.task_id,
-          agent: escalation.agent_aid,
-          reason: escalation.reason,
-        });
+        const escalation = payload as EscalationMsg;
+        if (this.escalationRouter !== null) {
+          this.escalationRouter.handleEscalation(teamID, escalation).catch((err: unknown) => {
+            this.logger.error('failed to handle escalation', {
+              task_id: escalation.task_id,
+              correlation_id: escalation.correlation_id,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          });
+        } else {
+          this.logger.warn('escalation received but no escalation router configured', {
+            task_id: escalation.task_id,
+            agent: escalation.agent_aid,
+            reason: escalation.reason,
+          });
+        }
         break;
       }
 
       case MsgTypeStatusUpdate: {
         this.logger.info('status update received', { team_id: teamID });
+        break;
+      }
+
+      case MsgTypeAgentReady: {
+        const agentReady = payload as { aid: string };
+        this.logger.info('agent ready', {
+          team_id: teamID,
+          aid: agentReady.aid,
+        });
+        break;
+      }
+
+      case MsgTypeLogEvent: {
+        const logEvent = payload as {
+          level: string;
+          source_aid: string;
+          message: string;
+          metadata: Record<string, unknown>;
+          timestamp: string;
+        };
+        this.logger.info('container log event', {
+          team_id: teamID,
+          level: logEvent.level,
+          source_aid: logEvent.source_aid,
+          message: logEvent.message,
+        });
+        break;
+      }
+
+      case MsgTypeOrgChartUpdate: {
+        const orgUpdate = payload as {
+          action: string;
+          team_slug: string;
+          agent_aid: string;
+          agent_name: string;
+        };
+        this.logger.info('org chart update', {
+          team_id: teamID,
+          action: orgUpdate.action,
+          team_slug: orgUpdate.team_slug,
+          agent_aid: orgUpdate.agent_aid,
+          agent_name: orgUpdate.agent_name,
+        });
         break;
       }
 
@@ -508,6 +713,7 @@ export class Dispatcher {
       agents,
       secrets,
       workspace_root: workspaceRoot,
+      protocol_version: PROTOCOL_VERSION,
     };
 
     const encoded = encodeMessage(MsgTypeContainerInit, initMsg);

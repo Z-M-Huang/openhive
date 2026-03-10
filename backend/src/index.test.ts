@@ -69,7 +69,7 @@ const mockConfigLoader = {
     system: {
       listen_address: ':8080',
       data_dir: 'data',
-      workspace_root: '.run/teams',
+      workspace_root: '.run/workspace',
       log_level: 'info',
       log_archive: { enabled: false, max_entries: 1000, keep_copies: 1, archive_dir: '.run/archives/logs' },
       message_archive: { enabled: false, max_entries: 1000, keep_copies: 1, archive_dir: '.run/archives/messages' },
@@ -85,7 +85,7 @@ const mockConfigLoader = {
     system: {
       listen_address: ':8080',
       data_dir: 'data',
-      workspace_root: '.run/teams',
+      workspace_root: '.run/workspace',
       log_level: 'info',
       log_archive: { enabled: false, max_entries: 1000, keep_copies: 1, archive_dir: '.run/archives/logs' },
       message_archive: { enabled: false, max_entries: 1000, keep_copies: 1, archive_dir: '.run/archives/messages' },
@@ -146,13 +146,51 @@ const mockWSHub = {
   close: vi.fn().mockResolvedValue(undefined),
 };
 
+const mockEscalationStore = {
+  create: vi.fn().mockResolvedValue(undefined),
+  get: vi.fn().mockResolvedValue(undefined),
+  update: vi.fn().mockResolvedValue(undefined),
+  listByTask: vi.fn().mockResolvedValue([]),
+  listByAgent: vi.fn().mockResolvedValue([]),
+};
+
+const mockMemoryStore = {
+  save: vi.fn().mockResolvedValue(undefined),
+  recall: vi.fn().mockResolvedValue([]),
+  delete: vi.fn().mockResolvedValue(undefined),
+};
+
+const mockTriggerStore = {
+  create: vi.fn().mockResolvedValue(undefined),
+  get: vi.fn().mockResolvedValue(undefined),
+  update: vi.fn().mockResolvedValue(undefined),
+  delete: vi.fn().mockResolvedValue(undefined),
+  listEnabled: vi.fn().mockResolvedValue([]),
+};
+
+const mockEscalationRouter = {
+  handleEscalation: vi.fn().mockResolvedValue(undefined),
+};
+
+const mockTriggerScheduler = {
+  start: vi.fn().mockResolvedValue(undefined),
+  stop: vi.fn().mockResolvedValue(undefined),
+};
+
+const mockProactiveLoop = {
+  start: vi.fn().mockResolvedValue(undefined),
+  stop: vi.fn().mockResolvedValue(undefined),
+};
+
 const mockDispatcher = {
   setHeartbeatMonitor: vi.fn(),
   setToolHandler: vi.fn(),
   setTaskResultCallback: vi.fn(),
   setTaskWaiter: vi.fn(),
+  setEscalationRouter: vi.fn(),
   handleWSMessage: vi.fn(),
   sendContainerInit: vi.fn().mockResolvedValue(undefined),
+  createAndDispatch: vi.fn().mockResolvedValue({ id: 'task-1' }),
 };
 
 const mockHeartbeatMonitor = {
@@ -169,6 +207,7 @@ const mockHeartbeatMonitor = {
 const mockToolHandler = {
   register: vi.fn(),
   setOrgChart: vi.fn(),
+  setRateLimiter: vi.fn(),
   handleToolCall: vi.fn(),
   handleToolCallWithContext: vi.fn(),
 };
@@ -261,6 +300,7 @@ const mockKeyManager = {
 // without touching the real disk. Default: teamsRootDir exists (existsSync returns true).
 vi.mock('node:fs', () => ({
   existsSync: vi.fn().mockReturnValue(true),
+  mkdirSync: vi.fn(),
 }));
 
 vi.mock('./store/db.js', () => ({ newDB: vi.fn(() => mockDB) }));
@@ -268,6 +308,9 @@ vi.mock('./store/task-store.js', () => ({ newTaskStore: vi.fn(() => mockTaskStor
 vi.mock('./store/log-store.js', () => ({ newLogStore: vi.fn(() => mockLogStore) }));
 vi.mock('./store/session-store.js', () => ({ newSessionStore: vi.fn(() => mockSessionStore) }));
 vi.mock('./store/message-store.js', () => ({ newMessageStore: vi.fn(() => mockMessageStore) }));
+vi.mock('./store/escalation-store.js', () => ({ newEscalationStore: vi.fn(() => mockEscalationStore), EscalationStoreImpl: class {} }));
+vi.mock('./store/memory-store.js', () => ({ newMemoryStore: vi.fn(() => mockMemoryStore), MemoryStoreImpl: class {} }));
+vi.mock('./store/trigger-store.js', () => ({ newTriggerStore: vi.fn(() => mockTriggerStore), TriggerStoreImpl: class {} }));
 vi.mock('./logging/logger.js', () => ({ newDBLogger: vi.fn(() => mockDBLogger), DBLogger: class {} }));
 vi.mock('./logging/archive.js', () => ({
   newArchiver: vi.fn(() => makeArchiver()),
@@ -286,14 +329,25 @@ vi.mock('./orchestrator/toolhandler.js', () => ({ newToolHandler: vi.fn(() => mo
 vi.mock('./orchestrator/tools-admin.js', () => ({ registerAdminTools: vi.fn() }));
 vi.mock('./orchestrator/tools-team.js', () => ({ registerTeamTools: vi.fn() }));
 vi.mock('./orchestrator/tools-task.js', () => ({ registerTaskTools: vi.fn() }));
+vi.mock('./orchestrator/tools-memory.js', () => ({ registerMemoryTools: vi.fn() }));
+vi.mock('./orchestrator/rate-limiter.js', () => ({
+  SlidingWindowRateLimiter: vi.fn(() => ({ checkRate: vi.fn(() => true), recordAction: vi.fn() })),
+}));
+vi.mock('./orchestrator/escalation-router.js', () => ({ newEscalationRouter: vi.fn(() => mockEscalationRouter), EscalationRouter: class {} }));
+vi.mock('./orchestrator/trigger-scheduler.js', () => ({ newTriggerScheduler: vi.fn(() => mockTriggerScheduler), TriggerSchedulerImpl: class {} }));
+vi.mock('./orchestrator/proactive-loop.js', () => ({ newProactiveLoop: vi.fn(() => mockProactiveLoop), ProactiveLoopImpl: class {} }));
 vi.mock('./orchestrator/task-waiter.js', () => ({
   TaskWaiter: vi.fn(() => ({ cancelAll: vi.fn(), notifyComplete: vi.fn() })),
 }));
 vi.mock('./orchestrator/orchestrator.js', () => ({
   newOrchestrator: vi.fn(() => mockOrchestrator),
-  Orchestrator: class {},
+  OrchestratorImpl: class {},
   scaffoldTeamWorkspace: vi.fn().mockResolvedValue(undefined),
   copyMainAssistantWorkspace: vi.fn().mockResolvedValue(undefined),
+  resolveTeamWorkspacePath: vi.fn().mockImplementation((_runDir: string, slug: string) => {
+    if (slug === 'main' || slug === 'master') return `${_runDir}/workspace`;
+    return `${_runDir}/workspace/teams/${slug}`;
+  }),
 }));
 vi.mock('./orchestrator/childproc.js', () => ({
   newChildProcessManager: vi.fn(() => mockChildProc),
@@ -330,12 +384,12 @@ import { newArchiver } from './logging/archive.js';
 import { newConfigLoader } from './config/loader.js';
 import { newDispatcher } from './orchestrator/dispatch.js';
 import { newHeartbeatMonitor } from './orchestrator/heartbeat.js';
-import { newOrchestrator, scaffoldTeamWorkspace, copyMainAssistantWorkspace } from './orchestrator/orchestrator.js';
+import { newOrchestrator, copyMainAssistantWorkspace } from './orchestrator/orchestrator.js';
 import { newChildProcessManager } from './orchestrator/childproc.js';
 import { newDockerRuntime } from './container/runtime.js';
 import { APIChannel } from './channel/api.js';
 import { CLIChannel } from './channel/cli.js';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 
 // ---------------------------------------------------------------------------
 // describe('App')
@@ -392,7 +446,7 @@ describe('App', () => {
   it('Build loads master config and applies specified log level', async () => {
     const app = new App();
     await app.build('debug');
-    expect(vi.mocked(newDBLogger)).toHaveBeenCalledWith(expect.anything(), 'debug');
+    expect(vi.mocked(newDBLogger)).toHaveBeenCalledWith(expect.anything(), 'debug', 'system');
   });
 
   it('Build registers API and CLI channel adapters', async () => {
@@ -409,13 +463,13 @@ describe('App', () => {
       await app.build();
 
       // newChildProcessManager must have been called with a config containing
-      // OPENHIVE_WORKSPACE in env and dir both pointing to .run/teams/main/.
+      // OPENHIVE_WORKSPACE in env and dir both pointing to .run/workspace.
       expect(vi.mocked(newChildProcessManager)).toHaveBeenCalledWith(
         expect.objectContaining({
           env: expect.objectContaining({
-            OPENHIVE_WORKSPACE: expect.stringContaining('teams'),
+            OPENHIVE_WORKSPACE: expect.stringContaining('workspace'),
           }),
-          dir: expect.stringContaining('teams'),
+          dir: expect.stringContaining('workspace'),
         }),
         expect.anything(),
       );
@@ -431,18 +485,19 @@ describe('App', () => {
     }
   });
 
-  it('Build passes dataDir directly as teamsDir to newConfigLoader — no double teams/teams/ nesting (AC1, AC2)', async () => {
-    // ConfigLoaderImpl appends 'teams/' internally; passing path.join(dataDir, 'teams')
-    // would produce data/teams/teams/<slug> (double nesting).  The fix passes dataDir
-    // directly so the loader resolves data/teams/<slug> correctly.
+  it('Build passes workspace dir as teamsDir to newConfigLoader — team configs in workspace, not data/ (AC1, AC2)', async () => {
+    // Team configs live in the workspace directory (.run/workspace/teams/<slug>/team.yaml),
+    // not in data/teams/. ConfigLoaderImpl appends 'teams/' internally.
     process.env['OPENHIVE_DATA_DIR'] = '/test/data';
+    process.env['OPENHIVE_RUN_DIR'] = '/test/run';
     try {
       const app = new App();
       await app.build();
-      // Both arguments to newConfigLoader must equal the raw dataDir — not dataDir + '/teams'.
-      expect(vi.mocked(newConfigLoader)).toHaveBeenCalledWith('/test/data', '/test/data');
+      // First arg is dataDir, second is workspace dir (runDir/workspace).
+      expect(vi.mocked(newConfigLoader)).toHaveBeenCalledWith('/test/data', '/test/run/workspace');
     } finally {
       delete process.env['OPENHIVE_DATA_DIR'];
+      delete process.env['OPENHIVE_RUN_DIR'];
     }
   });
 
@@ -710,6 +765,9 @@ describe('App', () => {
     await app.build();
     await app.start();
 
+    // Reset getOrgChart call count after start() (proactive loop calls it).
+    mockOrgChart.getOrgChart.mockClear();
+
     // Capture the onConnect callback registered during build.
     const onConnectCallback = (mockWSHub.setOnConnect as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as
       | ((teamID: string) => void)
@@ -724,7 +782,7 @@ describe('App', () => {
 
     // getTeamBySlug must have been called with the slug 'research'.
     expect(mockOrgChart.getTeamBySlug).toHaveBeenCalledWith('research');
-    // getOrgChart must NOT have been called (the TID loop is gone).
+    // getOrgChart must NOT have been called by onConnect (the TID loop is gone).
     expect(mockOrgChart.getOrgChart).not.toHaveBeenCalled();
   });
 
@@ -798,22 +856,20 @@ describe('App', () => {
 
   // ── Workspace scaffolding at startup (AC13) ────────────────────────────────
 
-  it('AC13: build() scaffolds main workspace when .run/teams/ does not exist (clean start)', async () => {
-    // Simulate clean start: .run/teams/ directory does not exist.
+  it('AC13: build() scaffolds main workspace when .claude/agents does not exist (clean start)', async () => {
+    // Simulate clean start: .run/workspace/.claude/agents does not exist.
     vi.mocked(existsSync).mockReturnValue(false);
 
     const app = new App();
     await app.build();
 
-    // scaffoldTeamWorkspace must have been called with runDir and 'main' slug.
-    expect(vi.mocked(scaffoldTeamWorkspace)).toHaveBeenCalledWith(
-      expect.any(String),
-      'main',
-    );
+    // mkdirSync must have been called to create workspace directories (inline scaffold).
+    // At least 5 calls: 1 for workspace dir (before DB) + 4 for subdirs.
+    expect(vi.mocked(mkdirSync)).toHaveBeenCalled();
     // copyMainAssistantWorkspace must have been called with force=true (clean start).
     expect(vi.mocked(copyMainAssistantWorkspace)).toHaveBeenCalledWith(
       expect.any(String),
-      expect.stringContaining('main'),
+      expect.stringContaining('workspace'),
       true,
     );
     // Log messages must be emitted.
@@ -824,42 +880,42 @@ describe('App', () => {
   });
 
   it('AC13: build() syncs static files on existing install without re-scaffolding', async () => {
-    // Simulate existing install: both .run/teams/ and .run/teams/main/ exist.
+    // Simulate existing install: .run/workspace/.claude/agents already exists.
     vi.mocked(existsSync).mockReturnValue(true);
 
     const app = new App();
     await app.build();
 
-    // scaffoldTeamWorkspace must NOT have been called.
-    expect(vi.mocked(scaffoldTeamWorkspace)).not.toHaveBeenCalled();
+    // mkdirSync is called once early (workspace dir for DB), but NOT for scaffold subdirs.
+    const mkdirCalls = vi.mocked(mkdirSync).mock.calls;
+    const scaffoldCalls = mkdirCalls.filter(
+      (call) => typeof call[0] === 'string' && call[0].includes('.claude'),
+    );
+    expect(scaffoldCalls).toHaveLength(0);
     // copyMainAssistantWorkspace must have been called with force=false (preserve user changes).
     expect(vi.mocked(copyMainAssistantWorkspace)).toHaveBeenCalledWith(
       expect.any(String),
-      expect.stringContaining('main'),
+      expect.stringContaining('workspace'),
       false,
     );
   });
 
-  it('AC13: build() re-scaffolds main workspace if .run/teams/ exists but main/ is missing', async () => {
-    // Simulate edge case: .run/teams/ exists but .run/teams/main/ is missing.
-    // existsSync is called twice: first for teamsRootDir, then for mainWorkspaceDir.
-    vi.mocked(existsSync)
-      .mockReturnValueOnce(true)   // teamsRootDir exists
-      .mockReturnValueOnce(false); // mainWorkspaceDir does NOT exist
+  it('AC13: build() scaffolds workspace on clean start with correct directory structure', async () => {
+    // Simulate clean start: .run/workspace/.claude/agents does not exist.
+    vi.mocked(existsSync).mockReturnValue(false);
 
     const app = new App();
     await app.build();
 
-    // scaffoldTeamWorkspace must have been called once to restore the missing main workspace.
-    expect(vi.mocked(scaffoldTeamWorkspace)).toHaveBeenCalledWith(
-      expect.any(String),
-      'main',
+    // mkdirSync must have been called to create standard workspace directories.
+    // At minimum: .claude/agents, .claude/skills, work/tasks, teams
+    expect(vi.mocked(mkdirSync)).toHaveBeenCalledWith(
+      expect.stringContaining('.claude'),
+      expect.objectContaining({ recursive: true }),
     );
-    // copyMainAssistantWorkspace must be called (isCleanStart=false since teamsRoot exists).
-    expect(vi.mocked(copyMainAssistantWorkspace)).toHaveBeenCalledWith(
-      expect.any(String),
-      expect.stringContaining('main'),
-      false,
+    expect(vi.mocked(mkdirSync)).toHaveBeenCalledWith(
+      expect.stringContaining('teams'),
+      expect.objectContaining({ recursive: true }),
     );
   });
 

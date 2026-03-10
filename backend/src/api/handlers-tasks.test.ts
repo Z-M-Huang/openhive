@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Fastify from 'fastify';
 import type { FastifyInstance } from 'fastify';
 
-import type { GoOrchestrator, TaskStore } from '../domain/interfaces.js';
+import type { Orchestrator, TaskStore } from '../domain/interfaces.js';
 import type { Task } from '../domain/types.js';
 import { NotFoundError } from '../domain/errors.js';
 import { buildTaskWithSubtree, registerTaskRoutes } from './handlers-tasks.js';
@@ -53,9 +53,15 @@ function makeMockTaskStore(): TaskStore & {
     }),
     create: vi.fn(),
     update: vi.fn(),
+    delete: vi.fn(),
     listByTeam: vi.fn().mockResolvedValue([sampleTask]),
     listByStatus: vi.fn().mockResolvedValue([sampleTask]),
     getSubtree: vi.fn().mockResolvedValue([sampleTask, sampleTask2]),
+    getDependents: vi.fn().mockResolvedValue([]),
+    getBlockedBy: vi.fn().mockResolvedValue([]),
+    unblockTask: vi.fn().mockResolvedValue(true),
+    retryTask: vi.fn().mockResolvedValue(false),
+    validateDependencies: vi.fn().mockResolvedValue(undefined),
   } as unknown as TaskStore & {
     get: ReturnType<typeof vi.fn>;
     listByTeam: ReturnType<typeof vi.fn>;
@@ -64,7 +70,7 @@ function makeMockTaskStore(): TaskStore & {
   };
 }
 
-function makeMockOrch(): GoOrchestrator & {
+function makeMockOrch(): Orchestrator & {
   cancelTask: ReturnType<typeof vi.fn>;
 } {
   return {
@@ -83,7 +89,7 @@ function makeMockOrch(): GoOrchestrator & {
     getAllStatuses: vi.fn(),
     start: vi.fn(),
     stop: vi.fn(),
-  } as unknown as GoOrchestrator & { cancelTask: ReturnType<typeof vi.fn> };
+  } as unknown as Orchestrator & { cancelTask: ReturnType<typeof vi.fn> };
 }
 
 function makeLogger() {
@@ -94,7 +100,7 @@ function makeLogger() {
 // are coerced from URL strings to numbers by AJV.
 async function buildApp(
   taskStore: TaskStore,
-  orch: GoOrchestrator,
+  orch: Orchestrator,
 ): Promise<FastifyInstance> {
   const app = Fastify({
     logger: false,

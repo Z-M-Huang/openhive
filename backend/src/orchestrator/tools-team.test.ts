@@ -56,9 +56,16 @@ import type { MasterConfig, Team, Agent, Task, JsonValue } from '../domain/types
 
 vi.mock('./orchestrator.js', () => ({
   scaffoldTeamWorkspace: vi.fn().mockResolvedValue(undefined),
-  // Return a safe resolved path: /run/openhive/teams/<slug>
+  // Return a safe resolved path: /run/openhive/workspace/teams/<slug>
   validateWorkspacePath: vi.fn().mockImplementation((_runDir: string, slug: string) => {
-    return `/run/openhive/teams/${slug}`;
+    return `/run/openhive/workspace/teams/${slug}`;
+  }),
+  // Resolve workspace path: main/master → workspace/, others → workspace/teams/<slug>/
+  resolveTeamWorkspacePath: vi.fn().mockImplementation((_runDir: string, slug: string) => {
+    if (slug === 'main' || slug === 'master') {
+      return `/run/openhive/workspace`;
+    }
+    return `/run/openhive/workspace/teams/${slug}`;
   }),
 }));
 
@@ -71,12 +78,13 @@ vi.mock('./orchestrator.js', () => ({
 vi.mock('node:fs/promises', () => ({
   mkdir: vi.fn().mockResolvedValue(undefined),
   writeFile: vi.fn().mockResolvedValue(undefined),
+  readFile: vi.fn().mockRejectedValue(new Error('ENOENT')),
   rm: vi.fn().mockResolvedValue(undefined),
   unlink: vi.fn().mockResolvedValue(undefined),
 }));
 
 import { scaffoldTeamWorkspace, validateWorkspacePath } from './orchestrator.js';
-import { mkdir as fsMkdir, writeFile as fsWriteFile, rm as fsRm, unlink as fsUnlink } from 'node:fs/promises';
+import { mkdir as fsMkdir, writeFile as fsWriteFile, readFile as fsReadFile, rm as fsRm, unlink as fsUnlink } from 'node:fs/promises';
 
 // ---------------------------------------------------------------------------
 // Helpers — factory functions for mock objects
@@ -87,7 +95,7 @@ function makeMasterConfig(agents: Agent[] = []): MasterConfig {
     system: {
       listen_address: ':8080',
       data_dir: '/data',
-      workspace_root: '/teams',
+      workspace_root: '/workspace',
       log_level: 'info',
       log_archive: { enabled: false, max_entries: 1000, keep_copies: 3, archive_dir: '' },
       max_message_length: 4096,
@@ -95,6 +103,7 @@ function makeMasterConfig(agents: Agent[] = []): MasterConfig {
       event_bus_workers: 4,
       portal_ws_max_connections: 100,
       message_archive: { enabled: false, max_entries: 1000, keep_copies: 3, archive_dir: '' },
+      limits: { max_depth: 5, max_teams: 20, max_agents_per_team: 10, max_concurrent_tasks: 50 },
     },
     assistant: {
       name: 'Hive',
@@ -233,6 +242,11 @@ function makeMockTaskStore(tasks: Task[] = []): TaskStore {
     listByTeam: vi.fn().mockResolvedValue(taskList),
     listByStatus: vi.fn().mockResolvedValue([]),
     getSubtree: vi.fn().mockResolvedValue([]),
+    getDependents: vi.fn().mockResolvedValue([]),
+    getBlockedBy: vi.fn().mockResolvedValue([]),
+    unblockTask: vi.fn().mockResolvedValue(true),
+    retryTask: vi.fn().mockResolvedValue(false),
+    validateDependencies: vi.fn().mockResolvedValue(undefined),
   };
 }
 
@@ -279,6 +293,8 @@ beforeEach(() => {
     runDir: '/run/openhive',
     containerManager: null,
     wsHub: null,
+    limits: null,
+    skillRegistry: null,
     logger: makeLogger(),
   };
   handler = new ToolHandler(makeLogger());
@@ -309,6 +325,7 @@ describe('registerTeamTools', () => {
     expect(tools).toContain('get_member_status');
     expect(tools).toContain('create_skill');
     expect(tools).toContain('load_skill');
+    expect(tools).toContain('refine_skill');
   });
 });
 
@@ -489,7 +506,7 @@ describe('create_agent', () => {
 
     // mkdir should be called with the .claude/agents/ directory
     expect(mockMkdir).toHaveBeenCalledWith(
-      expect.stringContaining('/run/openhive/teams/my-team/.claude/agents'),
+      expect.stringContaining('/run/openhive/workspace/teams/my-team/.claude/agents'),
       { recursive: true },
     );
 
@@ -516,7 +533,7 @@ describe('create_agent', () => {
 
     // The workspace directory should use 'main' not 'master'
     expect(mockMkdir).toHaveBeenCalledWith(
-      expect.stringContaining('/run/openhive/teams/main/.claude/agents'),
+      expect.stringContaining('/run/openhive/workspace/.claude/agents'),
       { recursive: true },
     );
   });
@@ -546,6 +563,52 @@ describe('create_agent', () => {
     const savedAgent = savedTeam.agents?.find((a) => a.name === 'Compat Worker');
     expect(savedAgent).toBeDefined();
     expect((savedAgent as Record<string, unknown>)['role_file']).toBeUndefined();
+  });
+
+  it('includes self_evolve in workspace frontmatter when provided', async () => {
+    const mockWriteFile = fsWriteFile as ReturnType<typeof vi.fn>;
+    mockWriteFile.mockClear();
+
+    const result = await handler.handleToolCall('c16b', 'create_agent', {
+      name: 'Evolving Agent',
+      description: 'an evolving agent',
+      team_slug: 'my-team',
+      self_evolve: true,
+    }) as Record<string, JsonValue>;
+
+    expect(result['status']).toBe('created');
+
+    // Workspace file should contain self_evolve in frontmatter
+    expect(mockWriteFile).toHaveBeenCalledOnce();
+    const writeArgs = mockWriteFile.mock.calls[0] as [string, string, { mode: number }];
+    const content = writeArgs[1];
+    expect(content).toContain('self_evolve: true');
+
+    // Agent in config should have self_evolve field
+    const saveCall = (configLoader.saveTeam as ReturnType<typeof vi.fn>).mock.calls.find(
+      (c: unknown[]) => c[0] === 'my-team',
+    );
+    expect(saveCall).toBeDefined();
+    const savedTeam = saveCall![1] as Team;
+    const savedAgent = savedTeam.agents?.find((a) => a.name === 'Evolving Agent');
+    expect(savedAgent).toBeDefined();
+    expect(savedAgent!.self_evolve).toBe(true);
+  });
+
+  it('omits self_evolve from frontmatter when not provided', async () => {
+    const mockWriteFile = fsWriteFile as ReturnType<typeof vi.fn>;
+    mockWriteFile.mockClear();
+
+    await handler.handleToolCall('c16c', 'create_agent', {
+      name: 'Normal Agent',
+      description: 'a normal agent',
+      team_slug: 'my-team',
+    });
+
+    expect(mockWriteFile).toHaveBeenCalledOnce();
+    const writeArgs = mockWriteFile.mock.calls[0] as [string, string, { mode: number }];
+    const content = writeArgs[1];
+    expect(content).not.toContain('self_evolve');
   });
 
   it('proceeds with agent creation even when workspace file write fails', async () => {
@@ -880,7 +943,7 @@ describe('delete_team', () => {
 
     expect(validateWorkspacePath).toHaveBeenCalledWith('/run/openhive', 'my-team');
     expect(fsRm).toHaveBeenCalledWith(
-      '/run/openhive/teams/my-team',
+      '/run/openhive/workspace/teams/my-team',
       { recursive: true },
     );
     // Config dir removal happens after workspace removal
@@ -985,6 +1048,22 @@ describe('update_team', () => {
       (c: unknown[]) => c[0] === 'my-team',
     )?.[1] as Team | undefined;
     expect(savedTeam?.env_vars).toEqual({ NODE_ENV: 'production', DEBUG: 'false' });
+  });
+
+  it('accepts env_vars value as a JSON-encoded string', async () => {
+    // MCP bridge may serialize objects as JSON strings
+    const result = await handler.handleToolCall('u-json', 'update_team', {
+      slug: 'my-team',
+      field: 'env_vars',
+      value: JSON.stringify({ NODE_ENV: 'test' }),
+    }) as Record<string, JsonValue>;
+
+    expect(result['status']).toBe('updated');
+
+    const savedTeam = (configLoader.saveTeam as ReturnType<typeof vi.fn>).mock.calls.find(
+      (c: unknown[]) => c[0] === 'my-team',
+    )?.[1] as Team | undefined;
+    expect(savedTeam?.env_vars).toEqual({ NODE_ENV: 'test' });
   });
 
   it('throws ValidationError when env_vars value is not a string map', async () => {
@@ -1245,7 +1324,7 @@ describe('create_skill', () => {
 
     // mkdir should be called with .claude/skills/web-search inside the workspace
     expect(mockMkdir).toHaveBeenCalledWith(
-      expect.stringContaining('/run/openhive/teams/my-team/.claude/skills/web-search'),
+      expect.stringContaining('/run/openhive/workspace/teams/my-team/.claude/skills/web-search'),
       { recursive: true },
     );
 
@@ -1269,7 +1348,7 @@ describe('create_skill', () => {
     });
 
     expect(mockMkdir).toHaveBeenCalledWith(
-      expect.stringContaining('/run/openhive/teams/main/.claude/skills/code-review'),
+      expect.stringContaining('/run/openhive/workspace/.claude/skills/code-review'),
       { recursive: true },
     );
   });
@@ -1500,7 +1579,7 @@ describe('delete_team leader cleanup', () => {
     await localHandler.handleToolCall('lc2', 'delete_team', { slug: 'research-team' });
 
     expect(fsUnlink).toHaveBeenCalledWith(
-      '/run/openhive/teams/main/.claude/agents/researcher.md',
+      '/run/openhive/workspace/.claude/agents/researcher.md',
     );
   });
 
@@ -1683,7 +1762,7 @@ describe('delete_agent .md file cleanup', () => {
     });
 
     expect(fsUnlink).toHaveBeenCalledWith(
-      '/run/openhive/teams/my-team/.claude/agents/lead-agent.md',
+      '/run/openhive/workspace/teams/my-team/.claude/agents/lead-agent.md',
     );
   });
 
@@ -1694,7 +1773,7 @@ describe('delete_agent .md file cleanup', () => {
     });
 
     expect(fsUnlink).toHaveBeenCalledWith(
-      '/run/openhive/teams/main/.claude/agents/lead-agent.md',
+      '/run/openhive/workspace/.claude/agents/lead-agent.md',
     );
   });
 
@@ -1778,5 +1857,235 @@ describe('create_agent .md body content', () => {
     // Should contain the agent name heading and guidelines
     expect(content).toContain('# Helper');
     expect(content).toContain('## Guidelines');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// System limits enforcement (CON-01, CON-02, CON-03)
+// ---------------------------------------------------------------------------
+
+describe('system limits enforcement', () => {
+  it('create_team rejects when max_teams is reached', async () => {
+    // Set up a low limit
+    const limitedDeps: TeamToolsDeps = {
+      ...deps,
+      limits: { max_depth: 5, max_teams: 1, max_agents_per_team: 10, max_concurrent_tasks: 50 },
+    };
+    const localHandler = new ToolHandler(makeLogger());
+    registerTeamTools(localHandler, limitedDeps);
+
+    // Existing team "my-team" is already in the store (from beforeEach) — that's 1 team.
+    // With max_teams=1 the next create_team should be rejected.
+    await expect(
+      localHandler.handleToolCall('lim1', 'create_team', {
+        slug: 'overflow-team',
+        leader_aid: 'aid-lead-00000001',
+      }),
+    ).rejects.toThrow(/maximum team limit reached/);
+  });
+
+  it('create_team rejects when nesting depth exceeds max_depth', async () => {
+    // depth scenario: main -> my-team (depth 1) -> new-child (depth 2)
+    // With max_depth=1, creating a child under my-team should fail.
+    const parentTeam = makeTeam('parent-team', 'aid-lead-00000001');
+    const localOrgChart = makeMockOrgChart(
+      { 'aid-lead-00000001': existingAgent },
+      { 'parent-team': parentTeam },
+    );
+    const localConfigLoader = makeMockConfigLoader(masterCfg, { 'parent-team': parentTeam });
+    const limitedDeps: TeamToolsDeps = {
+      ...deps,
+      configLoader: localConfigLoader,
+      orgChart: localOrgChart,
+      limits: { max_depth: 1, max_teams: 20, max_agents_per_team: 10, max_concurrent_tasks: 50 },
+    };
+    const localHandler = new ToolHandler(makeLogger());
+    registerTeamTools(localHandler, limitedDeps);
+
+    await expect(
+      localHandler.handleToolCall('lim2', 'create_team', {
+        slug: 'deep-child',
+        leader_aid: 'aid-lead-00000001',
+        parent_slug: 'parent-team',
+      }),
+    ).rejects.toThrow(/maximum nesting depth reached/);
+  });
+
+  it('create_agent rejects when max_agents_per_team is reached for master', async () => {
+    // master already has 1 agent (existingAgent from beforeEach)
+    // Set limit to 1 agent per team
+    const limitedDeps: TeamToolsDeps = {
+      ...deps,
+      limits: { max_depth: 5, max_teams: 20, max_agents_per_team: 1, max_concurrent_tasks: 50 },
+    };
+    const localHandler = new ToolHandler(makeLogger());
+    registerTeamTools(localHandler, limitedDeps);
+
+    await expect(
+      localHandler.handleToolCall('lim3', 'create_agent', {
+        name: 'Extra Agent',
+        description: 'Should be rejected',
+        team_slug: 'master',
+      }),
+    ).rejects.toThrow(/maximum agents per team reached/);
+  });
+
+  it('create_agent rejects when max_agents_per_team is reached for a team', async () => {
+    // my-team already has 1 agent (existingAgent from beforeEach)
+    // Set limit to 1 agent per team
+    const limitedDeps: TeamToolsDeps = {
+      ...deps,
+      limits: { max_depth: 5, max_teams: 20, max_agents_per_team: 1, max_concurrent_tasks: 50 },
+    };
+    const localHandler = new ToolHandler(makeLogger());
+    registerTeamTools(localHandler, limitedDeps);
+
+    await expect(
+      localHandler.handleToolCall('lim4', 'create_agent', {
+        name: 'Extra Team Agent',
+        description: 'Should be rejected',
+        team_slug: 'my-team',
+      }),
+    ).rejects.toThrow(/maximum agents per team reached/);
+  });
+
+  it('create_agent allows creation when under the limit', async () => {
+    // master has 1 agent, limit is 5 — should succeed
+    const limitedDeps: TeamToolsDeps = {
+      ...deps,
+      limits: { max_depth: 5, max_teams: 20, max_agents_per_team: 5, max_concurrent_tasks: 50 },
+    };
+    const localHandler = new ToolHandler(makeLogger());
+    registerTeamTools(localHandler, limitedDeps);
+
+    const result = await localHandler.handleToolCall('lim5', 'create_agent', {
+      name: 'Allowed Agent',
+      description: 'Should succeed',
+      team_slug: 'master',
+    }) as Record<string, JsonValue>;
+
+    expect(result['status']).toBe('created');
+    expect(result['aid']).toBeDefined();
+  });
+
+  it('uses default limits when deps.limits is null', async () => {
+    // With null limits, defaults are max_agents_per_team=10, max_teams=20
+    // master has 1 agent — should succeed easily with defaults
+    const result = await handler.handleToolCall('lim6', 'create_agent', {
+      name: 'Default Limit Agent',
+      description: 'Should succeed with defaults',
+      team_slug: 'master',
+    }) as Record<string, JsonValue>;
+
+    expect(result['status']).toBe('created');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// refine_skill
+// ---------------------------------------------------------------------------
+
+describe('refine_skill', () => {
+  it('preserves existing frontmatter metadata when refining', async () => {
+    const mockReadFile = fsReadFile as ReturnType<typeof vi.fn>;
+    const mockWriteFile = fsWriteFile as ReturnType<typeof vi.fn>;
+    mockReadFile.mockClear();
+    mockWriteFile.mockClear();
+
+    // Existing skill file with argument-hint and allowed-tools
+    const existingContent = `---
+name: web-search
+description: Search the internet
+argument-hint: "query string"
+allowed-tools:
+  - WebSearch
+  - WebFetch
+---
+
+Use DuckDuckGo to search.
+`;
+    mockReadFile.mockResolvedValueOnce(existingContent);
+
+    const result = await handler.handleToolCall('rs1', 'refine_skill', {
+      name: 'web-search',
+      team_slug: 'my-team',
+      body: 'Use Google to search instead.',
+    }) as Record<string, JsonValue>;
+
+    expect(result['status']).toBe('refined');
+
+    // writeFile should preserve argument-hint and allowed-tools from existing
+    expect(mockWriteFile).toHaveBeenCalledOnce();
+    const writeArgs = mockWriteFile.mock.calls[0] as [string, string, { mode: number }];
+    const content = writeArgs[1];
+    expect(content).toContain('argument-hint:');
+    expect(content).toContain('WebSearch');
+    expect(content).toContain('WebFetch');
+    expect(content).toContain('Use Google to search instead.');
+  });
+
+  it('uses provided description over existing one', async () => {
+    const mockReadFile = fsReadFile as ReturnType<typeof vi.fn>;
+    const mockWriteFile = fsWriteFile as ReturnType<typeof vi.fn>;
+    mockReadFile.mockClear();
+    mockWriteFile.mockClear();
+
+    const existingContent = `---
+name: my-skill
+description: Old description
+---
+
+Old body.
+`;
+    mockReadFile.mockResolvedValueOnce(existingContent);
+
+    const result = await handler.handleToolCall('rs2', 'refine_skill', {
+      name: 'my-skill',
+      team_slug: 'my-team',
+      body: 'New body.',
+      description: 'New description',
+    }) as Record<string, JsonValue>;
+
+    expect(result['status']).toBe('refined');
+
+    const writeArgs = mockWriteFile.mock.calls[0] as [string, string, { mode: number }];
+    const content = writeArgs[1];
+    expect(content).toContain('New description');
+    expect(content).not.toContain('Old description');
+  });
+
+  it('throws NotFoundError when skill does not exist', async () => {
+    const mockReadFile = fsReadFile as ReturnType<typeof vi.fn>;
+    mockReadFile.mockClear();
+    mockReadFile.mockRejectedValueOnce(new Error('ENOENT'));
+
+    await expect(
+      handler.handleToolCall('rs3', 'refine_skill', {
+        name: 'nonexistent',
+        team_slug: 'my-team',
+        body: 'Some body',
+      }),
+    ).rejects.toThrow(NotFoundError);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// install_skill
+// ---------------------------------------------------------------------------
+
+describe('install_skill', () => {
+  it('is not registered when skill registry is null', () => {
+    // Default deps have skillRegistry: null, so install_skill is not registered
+    const tools = handler.registeredTools();
+    expect(tools).not.toContain('install_skill');
+  });
+
+  it('throws NotFoundError when called without registry configured', async () => {
+    await expect(
+      handler.handleToolCall('is1', 'install_skill', {
+        team_slug: 'my-team',
+        name: 'some-skill',
+      }),
+    ).rejects.toThrow(NotFoundError);
   });
 });

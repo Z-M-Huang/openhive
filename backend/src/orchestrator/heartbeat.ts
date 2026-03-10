@@ -294,7 +294,7 @@ export class HeartbeatMonitorImpl implements HeartbeatMonitor {
               payload: {
                 kind: 'container_state_changed',
                 team_id: teamID,
-                state: 'error',
+                state: 'failed',
               },
             });
           }

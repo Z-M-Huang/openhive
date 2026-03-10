@@ -24,12 +24,22 @@
  *   20. registerTaskTools registers all expected tool names
  */
 
+import { randomUUID } from 'node:crypto';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { registerTaskTools, type TaskToolsDeps } from './tools-task.js';
 import { ToolHandler } from './toolhandler.js';
 import { ValidationError, NotFoundError } from '../domain/errors.js';
 import type { TaskStore, WSHub, ContainerManager, OrgChart } from '../domain/interfaces.js';
 import type { Task, Agent, Team, JsonValue } from '../domain/types.js';
+
+// Mock node:crypto to allow controlling randomUUID in cycle detection tests
+vi.mock('node:crypto', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('node:crypto')>();
+  return {
+    ...orig,
+    randomUUID: vi.fn(orig.randomUUID),
+  };
+});
 
 // ---------------------------------------------------------------------------
 // Helpers — factory functions for test data
@@ -55,6 +65,10 @@ function makeTask(id: string, override: Partial<Task> = {}): Task {
     agent_aid: 'aid-worker-00000001',
     status: 'pending',
     prompt: 'do something',
+    blocked_by: [],
+    priority: 0,
+    retry_count: 0,
+    max_retries: 0,
     created_at: new Date('2024-01-01T00:00:00Z'),
     updated_at: new Date('2024-01-01T00:00:00Z'),
     completed_at: null,
@@ -94,6 +108,11 @@ function makeMockTaskStore(tasks: Task[] = []): TaskStore {
       return Promise.resolve([...store.values()].filter((t) => t.status === status));
     }),
     getSubtree: vi.fn().mockResolvedValue([]),
+    getDependents: vi.fn().mockResolvedValue([]),
+    getBlockedBy: vi.fn().mockResolvedValue([]),
+    unblockTask: vi.fn().mockResolvedValue(true),
+    retryTask: vi.fn().mockResolvedValue(false),
+    validateDependencies: vi.fn().mockResolvedValue(undefined),
   };
 }
 
@@ -192,6 +211,7 @@ beforeEach(() => {
     containerManager,
     orgChart,
     taskWaiter: null,
+    taskCoordinator: null,
     logger: makeLogger(),
   };
   handler = new ToolHandler(makeLogger());
@@ -366,6 +386,278 @@ describe('dispatch_task', () => {
 });
 
 // ---------------------------------------------------------------------------
+// dispatch_task — DAG fields (blocked_by, priority, max_retries)
+// ---------------------------------------------------------------------------
+
+describe('dispatch_task — DAG fields', () => {
+  it('keeps task pending and skips WS dispatch when blocked_by is non-empty', async () => {
+    // Pre-create two blocker tasks so validation passes
+    const blocker1 = makeTask('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+    const blocker2 = makeTask('11111111-2222-3333-4444-555555555555');
+    taskStore = makeMockTaskStore([blocker1, blocker2]);
+    const localDeps: TaskToolsDeps = { ...deps, taskStore };
+    const localHandler = new ToolHandler(makeLogger());
+    registerTaskTools(localHandler, localDeps);
+
+    const result = await localHandler.handleToolCall('dag1', 'dispatch_task', {
+      agent_aid: 'aid-worker-00000001',
+      prompt: 'blocked task',
+      blocked_by: [
+        'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        '11111111-2222-3333-4444-555555555555',
+      ],
+    });
+
+    // Check task was created with blocked_by
+    const createdTask = (taskStore.create as ReturnType<typeof vi.fn>).mock.calls[0][0] as Task;
+    expect(createdTask.blocked_by).toEqual([
+      'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      '11111111-2222-3333-4444-555555555555',
+    ]);
+    expect(createdTask.status).toBe('pending');
+
+    // Task should NOT be dispatched via WS — stays pending until blockers resolve
+    expect(wsHub.sendToTeam).not.toHaveBeenCalled();
+
+    // Result should report pending status
+    const parsed = result as Record<string, unknown>;
+    expect(parsed['status']).toBe('pending');
+  });
+
+  it('passes priority and max_retries through to task and WS message', async () => {
+    await handler.handleToolCall('dag2', 'dispatch_task', {
+      agent_aid: 'aid-worker-00000001',
+      prompt: 'priority task',
+      priority: 5,
+      max_retries: 3,
+    });
+
+    const createdTask = (taskStore.create as ReturnType<typeof vi.fn>).mock.calls[0][0] as Task;
+    expect(createdTask.priority).toBe(5);
+    expect(createdTask.max_retries).toBe(3);
+    expect(createdTask.retry_count).toBe(0);
+
+    // Check WS message includes priority and max_retries
+    const [, encodedMsg] = (wsHub.sendToTeam as ReturnType<typeof vi.fn>).mock.calls[0] as [string, string];
+    const parsed = JSON.parse(encodedMsg) as { type: string; data: Record<string, JsonValue> };
+    expect(parsed['data']['priority']).toBe(5);
+    expect(parsed['data']['max_retries']).toBe(3);
+  });
+
+  it('omits priority and max_retries from WS message when they are 0 (default)', async () => {
+    await handler.handleToolCall('dag3', 'dispatch_task', {
+      agent_aid: 'aid-worker-00000001',
+      prompt: 'default priority task',
+    });
+
+    const [, encodedMsg] = (wsHub.sendToTeam as ReturnType<typeof vi.fn>).mock.calls[0] as [string, string];
+    const parsed = JSON.parse(encodedMsg) as { type: string; data: Record<string, JsonValue> };
+    expect(parsed['data']['priority']).toBeUndefined();
+    expect(parsed['data']['max_retries']).toBeUndefined();
+  });
+
+  it('defaults blocked_by to empty array when not provided', async () => {
+    await handler.handleToolCall('dag4', 'dispatch_task', {
+      agent_aid: 'aid-worker-00000001',
+      prompt: 'no deps task',
+    });
+
+    const createdTask = (taskStore.create as ReturnType<typeof vi.fn>).mock.calls[0][0] as Task;
+    expect(createdTask.blocked_by).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// dispatch_task — blocked_by validation
+// ---------------------------------------------------------------------------
+
+describe('dispatch_task — blocked_by validation', () => {
+  it('rejects empty strings in blocked_by', async () => {
+    await expect(
+      handler.handleToolCall('bv1', 'dispatch_task', {
+        agent_aid: 'aid-worker-00000001',
+        prompt: 'task',
+        blocked_by: [''],
+      }),
+    ).rejects.toThrow(ValidationError);
+    await expect(
+      handler.handleToolCall('bv1b', 'dispatch_task', {
+        agent_aid: 'aid-worker-00000001',
+        prompt: 'task',
+        blocked_by: [''],
+      }),
+    ).rejects.toThrow('invalid task IDs');
+  });
+
+  it('rejects non-UUID strings in blocked_by', async () => {
+    await expect(
+      handler.handleToolCall('bv2', 'dispatch_task', {
+        agent_aid: 'aid-worker-00000001',
+        prompt: 'task',
+        blocked_by: ['abc', '123'],
+      }),
+    ).rejects.toThrow(ValidationError);
+    await expect(
+      handler.handleToolCall('bv2b', 'dispatch_task', {
+        agent_aid: 'aid-worker-00000001',
+        prompt: 'task',
+        blocked_by: ['not-a-uuid'],
+      }),
+    ).rejects.toThrow('must be UUID format');
+  });
+
+  it('rejects blocked_by with more than 50 elements', async () => {
+    const tooMany = Array.from({ length: 51 }, (_, i) =>
+      `${String(i).padStart(8, '0')}-0000-0000-0000-000000000000`
+    );
+    await expect(
+      handler.handleToolCall('bv3', 'dispatch_task', {
+        agent_aid: 'aid-worker-00000001',
+        prompt: 'task',
+        blocked_by: tooMany,
+      }),
+    ).rejects.toThrow(ValidationError);
+    await expect(
+      handler.handleToolCall('bv3b', 'dispatch_task', {
+        agent_aid: 'aid-worker-00000001',
+        prompt: 'task',
+        blocked_by: tooMany,
+      }),
+    ).rejects.toThrow('exceeds maximum of 50');
+  });
+
+  it('rejects blocked_by IDs for tasks that do not exist in the store', async () => {
+    const nonExistentID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    await expect(
+      handler.handleToolCall('bv4', 'dispatch_task', {
+        agent_aid: 'aid-worker-00000001',
+        prompt: 'task',
+        blocked_by: [nonExistentID],
+      }),
+    ).rejects.toThrow(ValidationError);
+    await expect(
+      handler.handleToolCall('bv4b', 'dispatch_task', {
+        agent_aid: 'aid-worker-00000001',
+        prompt: 'task',
+        blocked_by: [nonExistentID],
+      }),
+    ).rejects.toThrow('non-existent tasks');
+  });
+
+  it('accepts valid UUID task IDs that exist in the store', async () => {
+    const existingTask = makeTask('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+    taskStore = makeMockTaskStore([existingTask]);
+    const localDeps: TaskToolsDeps = { ...deps, taskStore };
+    const localHandler = new ToolHandler(makeLogger());
+    registerTaskTools(localHandler, localDeps);
+
+    const result = await localHandler.handleToolCall('bv5', 'dispatch_task', {
+      agent_aid: 'aid-worker-00000001',
+      prompt: 'blocked task',
+      blocked_by: ['aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'],
+    }) as Record<string, JsonValue>;
+
+    expect(result['task_id']).toBeDefined();
+    expect(result['status']).toBe('pending');
+  });
+
+  it('filters non-string values from blocked_by array', async () => {
+    // Non-string values should be silently filtered out
+    await handler.handleToolCall('bv6', 'dispatch_task', {
+      agent_aid: 'aid-worker-00000001',
+      prompt: 'task with mixed array',
+      blocked_by: [42, null, true] as unknown as JsonValue[],
+    });
+
+    const createdTask = (taskStore.create as ReturnType<typeof vi.fn>).mock.calls[0][0] as Task;
+    expect(createdTask.blocked_by).toEqual([]);
+  });
+
+  it('throws ValidationError when blocked_by would create a dependency cycle', async () => {
+    // Control the new task's UUID so we can set up a blocker that references it.
+    const knownId = 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee';
+    const blockerID = 'dddddddd-dddd-dddd-dddd-dddddddddddd';
+
+    // Make randomUUID return our known ID
+    const mockedUUID = vi.mocked(randomUUID);
+    mockedUUID.mockReturnValue(knownId as ReturnType<typeof randomUUID>);
+
+    try {
+      // Blocker's blocked_by points back to the known new task ID -> cycle
+      const cycleStore = makeMockTaskStore([
+        makeTask(blockerID, { blocked_by: [knownId] }),
+      ]);
+      const cycleDeps: TaskToolsDeps = { ...deps, taskStore: cycleStore };
+      const cycleHandler = new ToolHandler(makeLogger());
+      registerTaskTools(cycleHandler, cycleDeps);
+
+      await expect(
+        cycleHandler.handleToolCall('bv-cycle', 'dispatch_task', {
+          agent_aid: 'aid-worker-00000001',
+          prompt: 'cyclic task',
+          blocked_by: [blockerID],
+        }),
+      ).rejects.toThrow(ValidationError);
+      await expect(
+        cycleHandler.handleToolCall('bv-cycle2', 'dispatch_task', {
+          agent_aid: 'aid-worker-00000001',
+          prompt: 'cyclic task',
+          blocked_by: [blockerID],
+        }),
+      ).rejects.toThrow('dependency cycle detected');
+    } finally {
+      mockedUUID.mockRestore();
+    }
+  });
+  it('accepts blocked_by as a JSON-encoded string array', async () => {
+    // SDK may serialize arrays as JSON strings when passing through MCP
+    const blockerTask = makeTask('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+    taskStore = makeMockTaskStore([blockerTask]);
+    const localDeps: TaskToolsDeps = { ...deps, taskStore };
+    const localHandler = new ToolHandler(makeLogger());
+    registerTaskTools(localHandler, localDeps);
+
+    await localHandler.handleToolCall('json-str', 'dispatch_task', {
+      agent_aid: 'aid-worker-00000001',
+      prompt: 'task with JSON string blocked_by',
+      blocked_by: JSON.stringify(['aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee']) as unknown as JsonValue,
+    });
+
+    const createdTask = (taskStore.create as ReturnType<typeof vi.fn>).mock.calls[0][0] as Task;
+    expect(createdTask.blocked_by).toEqual(['aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// dispatch_subtask — DAG fields
+// ---------------------------------------------------------------------------
+
+describe('dispatch_subtask — DAG fields', () => {
+  it('passes blocked_by, priority, max_retries to subtask', async () => {
+    const blockerTask = makeTask('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+    taskStore = makeMockTaskStore([blockerTask]);
+    const localDeps: TaskToolsDeps = { ...deps, taskStore };
+    const localHandler = new ToolHandler(makeLogger());
+    registerTaskTools(localHandler, localDeps);
+
+    await localHandler.handleToolCall('sdag1', 'dispatch_subtask', {
+      agent_aid: 'aid-worker-00000001',
+      prompt: 'subtask with DAG',
+      parent_task_id: 'parent-001',
+      blocked_by: ['aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'],
+      priority: 2,
+      max_retries: 1,
+    });
+
+    const createdTask = (taskStore.create as ReturnType<typeof vi.fn>).mock.calls[0][0] as Task;
+    expect(createdTask.blocked_by).toEqual(['aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee']);
+    expect(createdTask.priority).toBe(2);
+    expect(createdTask.max_retries).toBe(1);
+    expect(createdTask.parent_id).toBe('parent-001');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // dispatch_subtask
 // ---------------------------------------------------------------------------
 
@@ -476,25 +768,20 @@ describe('cancel_task', () => {
     expect(updatedTask.completed_at).toBeInstanceOf(Date);
   });
 
-  it('sends MsgTypeShutdown to the team container', async () => {
+  it('returns cancelled_ids in result (fallback path, no coordinator)', async () => {
     const runningTask = makeTask('task-003', { status: 'running', team_slug: 'dev-team' });
     taskStore = makeMockTaskStore([runningTask]);
-    const localDeps: TaskToolsDeps = { ...deps, taskStore };
+    const localDeps: TaskToolsDeps = { ...deps, taskStore, taskCoordinator: null };
     const localHandler = new ToolHandler(makeLogger());
     registerTaskTools(localHandler, localDeps);
 
-    await localHandler.handleToolCall('ca2', 'cancel_task', {
+    const result = await localHandler.handleToolCall('ca2', 'cancel_task', {
       task_id: 'task-003',
-    });
+    }) as Record<string, JsonValue>;
 
-    expect(wsHub.sendToTeam).toHaveBeenCalledOnce();
-    const [teamSlug, encodedMsg] = (wsHub.sendToTeam as ReturnType<typeof vi.fn>).mock.calls[0] as [string, string];
-    expect(teamSlug).toBe('dev-team');
-
-    const parsed = JSON.parse(encodedMsg) as { type: string; data: Record<string, JsonValue> };
-    expect(parsed['type']).toBe('shutdown');
-    expect(typeof parsed['data']['reason']).toBe('string');
-    expect(parsed['data']['reason']).toContain('task-003');
+    expect(result['task_id']).toBe('task-003');
+    expect(result['status']).toBe('cancelled');
+    expect(result['cancelled_ids']).toEqual(['task-003']);
   });
 
   it('throws ValidationError when task_id is missing', async () => {
@@ -536,15 +823,64 @@ describe('cancel_task', () => {
     ).rejects.toThrow('already failed');
   });
 
-  it('does not send WS message when team_slug is empty', async () => {
+  it('does not send WS message when team_slug is empty (fallback)', async () => {
     const noTeamTask = makeTask('task-006', { status: 'pending', team_slug: '' });
     taskStore = makeMockTaskStore([noTeamTask]);
-    const localDeps: TaskToolsDeps = { ...deps, taskStore };
+    const localDeps: TaskToolsDeps = { ...deps, taskStore, taskCoordinator: null };
     const localHandler = new ToolHandler(makeLogger());
     registerTaskTools(localHandler, localDeps);
 
     await localHandler.handleToolCall('ca9', 'cancel_task', { task_id: 'task-006' });
     expect(wsHub.sendToTeam).not.toHaveBeenCalled();
+  });
+
+  it('delegates to taskCoordinator.cancelTask when coordinator is set', async () => {
+    const mockCoordinator = {
+      dispatchTask: vi.fn(),
+      handleTaskResult: vi.fn(),
+      cancelTask: vi.fn().mockResolvedValue(['task-010', 'task-011']),
+      getTaskStatus: vi.fn(),
+      createSubtasks: vi.fn(),
+    };
+    const localDeps: TaskToolsDeps = {
+      ...deps,
+      taskCoordinator: mockCoordinator,
+    };
+    const localHandler = new ToolHandler(makeLogger());
+    registerTaskTools(localHandler, localDeps);
+
+    const result = await localHandler.handleToolCall('ca10', 'cancel_task', {
+      task_id: 'task-010',
+    }) as Record<string, JsonValue>;
+
+    expect(mockCoordinator.cancelTask).toHaveBeenCalledWith('task-010', true);
+    expect(result['task_id']).toBe('task-010');
+    expect(result['cancelled_ids']).toEqual(['task-010', 'task-011']);
+    expect(result['status']).toBe('cancelled');
+  });
+
+  it('passes cascade=false when specified', async () => {
+    const mockCoordinator = {
+      dispatchTask: vi.fn(),
+      handleTaskResult: vi.fn(),
+      cancelTask: vi.fn().mockResolvedValue(['task-012']),
+      getTaskStatus: vi.fn(),
+      createSubtasks: vi.fn(),
+    };
+    const localDeps: TaskToolsDeps = {
+      ...deps,
+      taskCoordinator: mockCoordinator,
+    };
+    const localHandler = new ToolHandler(makeLogger());
+    registerTaskTools(localHandler, localDeps);
+
+    const result = await localHandler.handleToolCall('ca11', 'cancel_task', {
+      task_id: 'task-012',
+      cascade: false,
+    }) as Record<string, JsonValue>;
+
+    expect(mockCoordinator.cancelTask).toHaveBeenCalledWith('task-012', false);
+    expect(result['cancelled_ids']).toEqual(['task-012']);
   });
 });
 

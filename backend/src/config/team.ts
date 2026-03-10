@@ -142,7 +142,6 @@ export function loadTeamFromFile(path: string, slug: string): Team {
     parent_slug: raw.parent_slug,
     children: raw.children,
     agents: raw.agents,
-    skills: raw.skills,
     mcp_servers: raw.mcp_servers,
     env_vars: raw.env_vars,
     container_config: raw.container_config,
@@ -200,14 +199,14 @@ export function saveTeamToFile(path: string, team: Team): void {
 // ---------------------------------------------------------------------------
 
 /**
- * Creates the config directory for a new team:
- *   <teamsDir>/teams/<slug>/
- *   <teamsDir>/teams/<slug>/team.yaml  (minimal, if not already present)
+ * Creates the team directory and minimal team.yaml:
+ *   <baseDir>/teams/<slug>/
+ *   <baseDir>/teams/<slug>/team.yaml  (minimal, if not already present)
  *
- * This function creates only the CONFIG directory (under data/teams/).
- * Workspace files (CLAUDE.md, .claude/agents/, .claude/skills/) belong
- * in .run/teams/<slug>/ and are created by scaffoldTeamWorkspace() in
- * the orchestrator module.
+ * When called with the workspace root as baseDir, creates the team config
+ * at .run/workspace/teams/<slug>/team.yaml. Workspace files (CLAUDE.md,
+ * .claude/agents/, .claude/skills/) are created by scaffoldTeamWorkspace()
+ * in the orchestrator module.
  *
  * Uses validateTeamPath to enforce security constraints before creating
  * anything on disk.

@@ -19,9 +19,9 @@
  *   - GetSubtree respects max depth limit
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { newInMemoryDB } from './db.js';
-import { newTaskStore } from './task-store.js';
+import { newTaskStore, wouldCreateCycle } from './task-store.js';
 import { NotFoundError } from '../domain/errors.js';
 import type { DB } from './db.js';
 import type { TaskStoreImpl } from './task-store.js';
@@ -62,6 +62,11 @@ function makeTask(overrides: Partial<Task> & { id: string }): Task {
     jid: overrides.jid,
     result: overrides.result,
     error: overrides.error,
+    blocked_by_task_id: overrides.blocked_by_task_id,
+    blocked_by: overrides.blocked_by ?? [],
+    priority: overrides.priority ?? 0,
+    retry_count: overrides.retry_count ?? 0,
+    max_retries: overrides.max_retries ?? 0,
   };
 }
 
@@ -475,5 +480,437 @@ describe('getSubtree', () => {
   it('returns full tree when maxDepth is larger than tree depth', async () => {
     const subtree = await store.getSubtreeWithDepth('root', 100);
     expect(subtree).toHaveLength(4);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// DAG columns round-trip (blocked_by, priority, retry_count, max_retries)
+// ---------------------------------------------------------------------------
+
+describe('DAG columns round-trip', () => {
+  it('creates a task with multi-dependency blocked_by and round-trips correctly', async () => {
+    const task = makeTask({
+      id: 'dag-1',
+      blocked_by: ['t1', 't2', 't3'],
+      priority: 5,
+      retry_count: 2,
+      max_retries: 3,
+    });
+    await store.create(task);
+
+    const retrieved = await store.get('dag-1');
+    expect(retrieved.blocked_by).toEqual(['t1', 't2', 't3']);
+    expect(retrieved.priority).toBe(5);
+    expect(retrieved.retry_count).toBe(2);
+    expect(retrieved.max_retries).toBe(3);
+  });
+
+  it('defaults blocked_by to empty array when stored as "[]"', async () => {
+    const task = makeTask({ id: 'dag-empty' });
+    await store.create(task);
+
+    const retrieved = await store.get('dag-empty');
+    expect(retrieved.blocked_by).toEqual([]);
+  });
+
+  it('defaults priority, retry_count, max_retries to 0', async () => {
+    const task = makeTask({ id: 'dag-defaults' });
+    await store.create(task);
+
+    const retrieved = await store.get('dag-defaults');
+    expect(retrieved.priority).toBe(0);
+    expect(retrieved.retry_count).toBe(0);
+    expect(retrieved.max_retries).toBe(0);
+  });
+
+  it('update persists DAG columns', async () => {
+    const task = makeTask({ id: 'dag-upd' });
+    await store.create(task);
+
+    const updated: Task = {
+      ...task,
+      blocked_by: ['blocker-a', 'blocker-b'],
+      priority: 10,
+      retry_count: 1,
+      max_retries: 5,
+      updated_at: new Date(2_000_000),
+    };
+    await store.update(updated);
+
+    const retrieved = await store.get('dag-upd');
+    expect(retrieved.blocked_by).toEqual(['blocker-a', 'blocker-b']);
+    expect(retrieved.priority).toBe(10);
+    expect(retrieved.retry_count).toBe(1);
+    expect(retrieved.max_retries).toBe(5);
+  });
+
+  it('CTE subtree returns DAG columns correctly', async () => {
+    await store.create(makeTask({
+      id: 'dag-root',
+      blocked_by: ['x'],
+      priority: 3,
+      retry_count: 1,
+      max_retries: 2,
+    }));
+    await store.create(makeTask({
+      id: 'dag-child',
+      parent_id: 'dag-root',
+      blocked_by: ['dag-root'],
+      priority: 7,
+      retry_count: 0,
+      max_retries: 1,
+    }));
+
+    const subtree = await store.getSubtree('dag-root');
+    expect(subtree).toHaveLength(2);
+
+    const root = subtree.find((t) => t.id === 'dag-root');
+    expect(root).toBeDefined();
+    expect(root!.blocked_by).toEqual(['x']);
+    expect(root!.priority).toBe(3);
+    expect(root!.retry_count).toBe(1);
+    expect(root!.max_retries).toBe(2);
+
+    const child = subtree.find((t) => t.id === 'dag-child');
+    expect(child).toBeDefined();
+    expect(child!.blocked_by).toEqual(['dag-root']);
+    expect(child!.priority).toBe(7);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// safeParseBlockedBy — invalid JSON handling
+// ---------------------------------------------------------------------------
+
+describe('safeParseBlockedBy — invalid JSON fallback', () => {
+  it('handles invalid JSON in blocked_by column gracefully', async () => {
+    // Insert a task with valid data first
+    const task = makeTask({ id: 'bad-json' });
+    await store.create(task);
+
+    // Directly corrupt the blocked_by column via raw SQL
+    db._writerConn.prepare(
+      `UPDATE tasks SET blocked_by = 'not-valid-json' WHERE id = ?`,
+    ).run('bad-json');
+
+    // The store should still return the task with an empty blocked_by array
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const retrieved = await store.get('bad-json');
+    expect(retrieved.blocked_by).toEqual([]);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Invalid JSON in blocked_by column'),
+    );
+    warnSpy.mockRestore();
+  });
+
+  it('handles non-array JSON in blocked_by column gracefully', async () => {
+    const task = makeTask({ id: 'non-array' });
+    await store.create(task);
+
+    // Set blocked_by to a valid JSON object (not an array)
+    db._writerConn.prepare(
+      `UPDATE tasks SET blocked_by = '{"key":"value"}' WHERE id = ?`,
+    ).run('non-array');
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const retrieved = await store.get('non-array');
+    expect(retrieved.blocked_by).toEqual([]);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('blocked_by is not an array'),
+    );
+    warnSpy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getDependents
+// ---------------------------------------------------------------------------
+
+describe('getDependents', () => {
+  it('returns pending tasks whose blocked_by contains the given ID', async () => {
+    // Create the blocker task
+    await store.create(makeTask({ id: 'blocker' }));
+
+    // Create dependent tasks that reference the blocker
+    await store.create(makeTask({
+      id: 'dep-1',
+      blocked_by: ['blocker'],
+      status: 'pending',
+    }));
+    await store.create(makeTask({
+      id: 'dep-2',
+      blocked_by: ['blocker', 'other'],
+      status: 'pending',
+    }));
+
+    // Create a task that does NOT reference the blocker
+    await store.create(makeTask({
+      id: 'unrelated',
+      blocked_by: ['other-blocker'],
+      status: 'pending',
+    }));
+
+    const dependents = await store.getDependents('blocker');
+    const ids = dependents.map((t) => t.id).sort();
+    expect(ids).toEqual(['dep-1', 'dep-2']);
+  });
+
+  it('filters to pending tasks only — completed/failed tasks not returned', async () => {
+    await store.create(makeTask({ id: 'blocker-2' }));
+
+    // Pending dependent — should be returned
+    await store.create(makeTask({
+      id: 'pending-dep',
+      blocked_by: ['blocker-2'],
+      status: 'pending',
+    }));
+
+    // Completed dependent — should NOT be returned
+    await store.create(makeTask({
+      id: 'completed-dep',
+      blocked_by: ['blocker-2'],
+      status: 'completed',
+    }));
+
+    // Failed dependent — should NOT be returned
+    await store.create(makeTask({
+      id: 'failed-dep',
+      blocked_by: ['blocker-2'],
+      status: 'failed',
+    }));
+
+    // Running dependent — should NOT be returned (status != pending)
+    await store.create(makeTask({
+      id: 'running-dep',
+      blocked_by: ['blocker-2'],
+      status: 'running',
+    }));
+
+    const dependents = await store.getDependents('blocker-2');
+    expect(dependents).toHaveLength(1);
+    expect(dependents[0]!.id).toBe('pending-dep');
+  });
+
+  it('returns empty array when no tasks depend on the given ID', async () => {
+    await store.create(makeTask({ id: 'lonely' }));
+    const dependents = await store.getDependents('lonely');
+    expect(dependents).toEqual([]);
+  });
+
+  it('returns empty array for non-existent blocker ID', async () => {
+    const dependents = await store.getDependents('does-not-exist');
+    expect(dependents).toEqual([]);
+  });
+
+  it('correctly maps domain fields from getDependents results', async () => {
+    await store.create(makeTask({
+      id: 'dep-mapped',
+      blocked_by: ['some-blocker'],
+      priority: 8,
+      retry_count: 1,
+      max_retries: 3,
+      team_slug: 'mapped-team',
+      prompt: 'mapped prompt',
+      status: 'pending',
+    }));
+
+    const dependents = await store.getDependents('some-blocker');
+    expect(dependents).toHaveLength(1);
+    expect(dependents[0]!.id).toBe('dep-mapped');
+    expect(dependents[0]!.blocked_by).toEqual(['some-blocker']);
+    expect(dependents[0]!.priority).toBe(8);
+    expect(dependents[0]!.retry_count).toBe(1);
+    expect(dependents[0]!.max_retries).toBe(3);
+    expect(dependents[0]!.team_slug).toBe('mapped-team');
+    expect(dependents[0]!.prompt).toBe('mapped prompt');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// wouldCreateCycle — DAG cycle detection via iterative BFS
+// ---------------------------------------------------------------------------
+
+describe('wouldCreateCycle', () => {
+  it('returns false when there is no cycle', async () => {
+    // A blocks B (B depends on A). Creating C with blocked_by=[B] has no cycle.
+    await store.create(makeTask({ id: 'a' }));
+    await store.create(makeTask({ id: 'b', blocked_by: ['a'] }));
+
+    const result = await wouldCreateCycle(store, 'c', ['b']);
+    expect(result).toBe(false);
+  });
+
+  it('detects self-reference (A blocks A)', async () => {
+    await store.create(makeTask({ id: 'a' }));
+
+    const result = await wouldCreateCycle(store, 'a', ['a']);
+    expect(result).toBe(true);
+  });
+
+  it('detects direct cycle (A blocks B, B blocks A)', async () => {
+    // Task A already has blocked_by: ['b'] — if B tries to depend on A, that's a cycle.
+    // But we're checking: would adding blocker IDs to a NEW/EXISTING task create a cycle?
+    // Scenario: A exists with blocked_by=['b']. Now we want to make B blocked_by=['a'].
+    // That means B waits for A, but A waits for B — direct cycle.
+    await store.create(makeTask({ id: 'a', blocked_by: ['b'] }));
+    await store.create(makeTask({ id: 'b' }));
+
+    // Would creating/updating task B with blocked_by=['a'] create a cycle?
+    // BFS: start from 'a' (blocker), check its blocked_by=['b'] — 'b' is our taskID => cycle!
+    const result = await wouldCreateCycle(store, 'b', ['a']);
+    expect(result).toBe(true);
+  });
+
+  it('detects transitive cycle (A blocks B, B blocks C, C blocks A)', async () => {
+    // A depends on B, B depends on C. Now if we try to make C depend on A, that's a cycle.
+    await store.create(makeTask({ id: 'a', blocked_by: ['b'] }));
+    await store.create(makeTask({ id: 'b', blocked_by: ['c'] }));
+    await store.create(makeTask({ id: 'c' }));
+
+    // Would making C blocked_by=['a'] create a cycle?
+    // BFS: start from 'a'. a.blocked_by=['b']. Check b. b.blocked_by=['c']. 'c' is our taskID => cycle!
+    const result = await wouldCreateCycle(store, 'c', ['a']);
+    expect(result).toBe(true);
+  });
+
+  it('returns true (safety) when visited node count exceeds 1000', async () => {
+    // Create a wide DAG with > 1000 nodes that the BFS must traverse.
+    // Each node blocked_by the previous one, forming a long chain.
+    // We need 1001 tasks in the chain to exceed the cap.
+    // For performance, we'll create them in a batch.
+    const chainLength = 1002;
+    for (let i = 0; i < chainLength; i++) {
+      const blockedBy = i > 0 ? [`chain-${i - 1}`] : [];
+      await store.create(makeTask({ id: `chain-${i}`, blocked_by: blockedBy }));
+    }
+
+    // Now try to add a dependency from the last chain node back to a new task.
+    // wouldCreateCycle('new-task', ['chain-1001']) — BFS traverses the chain.
+    // The chain has 1002 nodes. BFS will visit > 1000 and should return true.
+    const result = await wouldCreateCycle(store, 'new-task', [`chain-${chainLength - 1}`]);
+    expect(result).toBe(true);
+  });
+
+  it('returns false for non-existent blocker IDs (task.get throws)', async () => {
+    // If a blocker task doesn't exist, the BFS skips it gracefully.
+    const result = await wouldCreateCycle(store, 'some-task', ['non-existent']);
+    expect(result).toBe(false);
+  });
+
+  it('handles multiple blocker IDs correctly', async () => {
+    // Create a diamond: D depends on B and C, B depends on A, C depends on A.
+    // No cycle here.
+    await store.create(makeTask({ id: 'a' }));
+    await store.create(makeTask({ id: 'b', blocked_by: ['a'] }));
+    await store.create(makeTask({ id: 'c', blocked_by: ['a'] }));
+
+    const result = await wouldCreateCycle(store, 'd', ['b', 'c']);
+    expect(result).toBe(false);
+  });
+
+  it('detects cycle through one of multiple blocker paths', async () => {
+    // A depends on B. Now we want to add B blocked_by=['c', 'a'].
+    // The path through 'a' creates a cycle (a -> b -> a).
+    await store.create(makeTask({ id: 'a', blocked_by: ['b'] }));
+    await store.create(makeTask({ id: 'b' }));
+    await store.create(makeTask({ id: 'c' }));
+
+    const result = await wouldCreateCycle(store, 'b', ['c', 'a']);
+    expect(result).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getBlockedBy
+// ---------------------------------------------------------------------------
+
+describe('getBlockedBy', () => {
+  it('returns the blocked_by array for a task', async () => {
+    await store.create(makeTask({ id: 'task-gb-1', blocked_by: ['dep-a', 'dep-b'] }));
+    const result = await store.getBlockedBy('task-gb-1');
+    expect(result).toEqual(['dep-a', 'dep-b']);
+  });
+
+  it('returns empty array for tasks with no dependencies', async () => {
+    await store.create(makeTask({ id: 'task-gb-2' }));
+    const result = await store.getBlockedBy('task-gb-2');
+    expect(result).toEqual([]);
+  });
+
+  it('throws NotFoundError for non-existent task', async () => {
+    await expect(store.getBlockedBy('does-not-exist')).rejects.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// unblockTask
+// ---------------------------------------------------------------------------
+
+describe('unblockTask', () => {
+  it('removes a dependency and returns false if still blocked', async () => {
+    await store.create(makeTask({ id: 'task-ub-1', blocked_by: ['dep-a', 'dep-b'] }));
+    const fullyUnblocked = await store.unblockTask('task-ub-1', 'dep-a');
+    expect(fullyUnblocked).toBe(false);
+    const task = await store.get('task-ub-1');
+    expect(task.blocked_by).toEqual(['dep-b']);
+  });
+
+  it('returns true when last dependency is removed', async () => {
+    await store.create(makeTask({ id: 'task-ub-2', blocked_by: ['dep-a'] }));
+    const fullyUnblocked = await store.unblockTask('task-ub-2', 'dep-a');
+    expect(fullyUnblocked).toBe(true);
+    const task = await store.get('task-ub-2');
+    expect(task.blocked_by).toEqual([]);
+  });
+
+  it('is idempotent for non-existent dependency', async () => {
+    await store.create(makeTask({ id: 'task-ub-3', blocked_by: ['dep-a'] }));
+    const fullyUnblocked = await store.unblockTask('task-ub-3', 'dep-nonexistent');
+    expect(fullyUnblocked).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// retryTask
+// ---------------------------------------------------------------------------
+
+describe('retryTask', () => {
+  it('retries a failed task with remaining retries', async () => {
+    await store.create(makeTask({ id: 'task-rt-1', status: 'failed', retry_count: 0, max_retries: 3 }));
+    const retried = await store.retryTask('task-rt-1');
+    expect(retried).toBe(true);
+    const task = await store.get('task-rt-1');
+    expect(task.status).toBe('pending');
+    expect(task.retry_count).toBe(1);
+  });
+
+  it('returns false when retry limit reached', async () => {
+    await store.create(makeTask({ id: 'task-rt-2', status: 'failed', retry_count: 3, max_retries: 3 }));
+    const retried = await store.retryTask('task-rt-2');
+    expect(retried).toBe(false);
+  });
+
+  it('returns false for non-failed tasks', async () => {
+    await store.create(makeTask({ id: 'task-rt-3', status: 'running', retry_count: 0, max_retries: 3 }));
+    const retried = await store.retryTask('task-rt-3');
+    expect(retried).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// validateDependencies
+// ---------------------------------------------------------------------------
+
+describe('validateDependencies', () => {
+  it('does not throw for valid (acyclic) dependencies', async () => {
+    await store.create(makeTask({ id: 'vd-a' }));
+    await store.create(makeTask({ id: 'vd-b' }));
+    await expect(store.validateDependencies('vd-b', ['vd-a'])).resolves.toBeUndefined();
+  });
+
+  it('throws for cyclic dependencies', async () => {
+    await store.create(makeTask({ id: 'vd-c', blocked_by: ['vd-d'] }));
+    await store.create(makeTask({ id: 'vd-d' }));
+    await expect(store.validateDependencies('vd-d', ['vd-c'])).rejects.toThrow(/cycle/);
   });
 });

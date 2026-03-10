@@ -1,7 +1,7 @@
 /**
  * OpenHive Backend - Main Orchestrator
  *
- * Implements the GoOrchestrator interface, combining TeamProvisioner,
+ * Implements the Orchestrator interface, combining TeamProvisioner,
  * TaskCoordinator, and HealthManager responsibilities.
  *
  * Uses boolean started/stopped flags instead of sync.Once patterns.
@@ -17,7 +17,7 @@ import { mkdir, writeFile, rm, cp, unlink } from 'node:fs/promises';
 import { pipeline } from 'node:stream/promises';
 
 import type {
-  GoOrchestrator,
+  Orchestrator,
   TaskStore,
   WSHub,
   ContainerManager,
@@ -26,14 +26,16 @@ import type {
   HeartbeatMonitor,
   EventBus,
 } from '../domain/interfaces.js';
-import type { Task, Team, HeartbeatStatus, MasterConfig, Agent } from '../domain/types.js';
+import type { Task, Team, HeartbeatStatus, MasterConfig, Agent, JsonValue } from '../domain/types.js';
 import { NotFoundError, ValidationError, ConflictError } from '../domain/errors.js';
 import { validateSlug, validateAID, isReservedSlug, slugToDisplayName, slugifyName } from '../domain/validation.js';
-import { MsgTypeTaskDispatch, MsgTypeShutdown } from '../ws/messages.js';
-import type { TaskDispatchMsg, ShutdownMsg } from '../ws/messages.js';
+import { MsgTypeTaskDispatch, MsgTypeTaskCancel } from '../ws/messages.js';
+import type { TaskDispatchMsg, TaskCancelMsg, EscalationMsg } from '../ws/messages.js';
 import { encodeMessage } from '../ws/protocol.js';
 // Dispatcher is referenced in OrchestratorDeps for future use.
 import type { Dispatcher } from './dispatch.js';
+import type { TaskWaiter } from './task-waiter.js';
+import type { EscalationRouter } from './escalation-router.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -73,6 +75,8 @@ export interface OrchestratorDeps {
   heartbeatMonitor: HeartbeatMonitor | null;
   eventBus: EventBus | null;
   dispatcher: Dispatcher | null;
+  taskWaiter: TaskWaiter | null;
+  escalationRouter: EscalationRouter | null;
   logger: OrchestratorLogger;
   runDir: string;
 }
@@ -82,10 +86,10 @@ export interface OrchestratorDeps {
 // ---------------------------------------------------------------------------
 
 /**
- * Main orchestrator that implements GoOrchestrator.
+ * Main orchestrator that implements Orchestrator.
  * Combines TeamProvisioner, TaskCoordinator, and HealthManager.
  */
-export class Orchestrator implements GoOrchestrator {
+export class OrchestratorImpl implements Orchestrator {
   private readonly taskStore: TaskStore;
   private readonly wsHub: WSHub;
   private readonly containerManager: ContainerManager | null;
@@ -94,7 +98,9 @@ export class Orchestrator implements GoOrchestrator {
   private readonly heartbeatMonitor: HeartbeatMonitor | null;
   private readonly eventBus: EventBus | null;
   private readonly runDir: string;
-  // Kept for future use in dispatcher integration; present in deps but not yet used.
+  private readonly taskWaiter: TaskWaiter | null;
+  private readonly dispatcher: Dispatcher | null;
+  private readonly escalationRouter: EscalationRouter | null;
   private readonly logger: OrchestratorLogger;
 
   // Mutexes for concurrent-safe operations
@@ -116,7 +122,9 @@ export class Orchestrator implements GoOrchestrator {
     this.heartbeatMonitor = deps.heartbeatMonitor;
     this.eventBus = deps.eventBus;
     this.runDir = deps.runDir;
-    // deps.dispatcher is kept in OrchestratorDeps for future use; not stored yet.
+    this.taskWaiter = deps.taskWaiter ?? null;
+    this.dispatcher = deps.dispatcher ?? null;
+    this.escalationRouter = deps.escalationRouter ?? null;
     this.logger = deps.logger;
   }
 
@@ -146,6 +154,24 @@ export class Orchestrator implements GoOrchestrator {
       });
       this.heartbeatMonitor.startMonitoring();
       this.logger.info('heartbeat monitor started');
+    }
+
+    // Wire auto-unblock callback on the Dispatcher.
+    if (this.dispatcher !== null) {
+      this.dispatcher.setOnTaskCompleted(async (taskId: string) => {
+        await this.handleTaskCompleted(taskId);
+      });
+      this.logger.info('auto-unblock callback registered on dispatcher');
+
+      this.dispatcher.setOnTaskRetryNeeded(async (taskId: string) => {
+        await this.handleTaskRetry(taskId);
+      });
+      this.logger.info('retry callback registered on dispatcher');
+
+      this.dispatcher.setOnTaskTerminalFailed(async (taskId: string) => {
+        await this.handleBlockerTerminalFailed(taskId);
+      });
+      this.logger.info('terminal-failed callback registered on dispatcher');
     }
 
     // Start stale task reaper interval.
@@ -463,7 +489,8 @@ export class Orchestrator implements GoOrchestrator {
             try {
               const wsSlug = leaderParentSlug === 'main' ? 'main' : (leaderParentSlug ?? 'main');
               const agentFileName = `${slugifyName(leaderAgent.name)}.md`;
-              const filePath = joinPath(this.runDir, 'teams', wsSlug, '.claude', 'agents', agentFileName);
+              const wsDir = resolveTeamWorkspacePath(this.runDir, wsSlug);
+              const filePath = joinPath(wsDir, '.claude', 'agents', agentFileName);
               await unlink(filePath);
             } catch (err) {
               if (isNodeError(err) && err.code === 'ENOENT') {
@@ -633,6 +660,7 @@ export class Orchestrator implements GoOrchestrator {
         task_id: task.id,
         agent_aid: task.agent_aid!,
         prompt: task.prompt,
+        blocked_by: task.blocked_by_task_id ? [task.blocked_by_task_id] : [],
       };
       const encoded = encodeMessage(MsgTypeTaskDispatch, dispatchMsg);
 
@@ -853,9 +881,16 @@ export class Orchestrator implements GoOrchestrator {
   }
 
   /**
-   * Updates the task status to cancelled and sends a shutdown signal.
+   * Cancels a task and optionally all its subtasks (cascade).
+   *
+   * 1. Validates the root task is not terminal.
+   * 2. When cascade=true, fetches the full subtree from the task store.
+   * 3. Marks all non-terminal tasks as cancelled in DB sequentially.
+   * 4. Sends a TaskCancelMsg per affected team (after all DB updates).
+   * 5. Notifies TaskWaiter for each cancelled task.
+   * 6. Returns the array of all cancelled task IDs.
    */
-  async cancelTask(taskID: string): Promise<void> {
+  async cancelTask(taskID: string, cascade: boolean = true): Promise<string[]> {
     const task = await this.taskStore.get(taskID);
 
     if (
@@ -869,42 +904,90 @@ export class Orchestrator implements GoOrchestrator {
       );
     }
 
+    // Collect all tasks to cancel.
+    let tasksToCancel: Task[];
+    if (cascade) {
+      const subtree = await this.taskStore.getSubtree(taskID);
+      // Include root task + all non-terminal subtasks.
+      tasksToCancel = [task, ...subtree.filter((t) => t.id !== taskID)].filter(
+        (t) => t.status !== 'completed' && t.status !== 'failed' && t.status !== 'cancelled',
+      );
+    } else {
+      tasksToCancel = [task];
+    }
+
     const now = new Date();
-    const updated: Task = {
-      ...task,
-      status: 'cancelled',
-      updated_at: now,
-      completed_at: now,
-    };
+    const cancelledIDs: string[] = [];
 
-    await this.taskStore.update(updated);
-
-    // Send cancel signal to container.
-    if (task.team_slug && task.team_slug !== '') {
-      const cancelMsg: ShutdownMsg = {
-        reason: `task ${taskID} cancelled`,
-        timeout: 5,
+    // Mark all tasks as cancelled in DB before sending any messages.
+    for (const t of tasksToCancel) {
+      const updated: Task = {
+        ...t,
+        status: 'cancelled',
+        updated_at: now,
+        completed_at: now,
       };
-      try {
-        const encoded = encodeMessage(MsgTypeShutdown, cancelMsg);
-        await this.wsHub.sendToTeam(task.team_slug, encoded);
-      } catch (err: unknown) {
-        this.logger.warn('failed to send cancel to container', {
-          task_id: taskID,
-          team: task.team_slug,
-          error: err instanceof Error ? err.message : String(err),
-        });
+      await this.taskStore.update(updated);
+      cancelledIDs.push(t.id);
+    }
+
+    // Send TaskCancelMsg per affected team (deduplicated).
+    const teamSlugs = new Set<string>();
+    for (const t of tasksToCancel) {
+      if (t.team_slug && t.team_slug !== '') {
+        teamSlugs.add(t.team_slug);
+      }
+    }
+
+    for (const slug of teamSlugs) {
+      // Find all task IDs for this team that were cancelled.
+      const teamTaskIDs = tasksToCancel
+        .filter((t) => t.team_slug === slug)
+        .map((t) => t.id);
+
+      for (const tid of teamTaskIDs) {
+        const cancelMsg: TaskCancelMsg = {
+          task_id: tid,
+          cascade,
+          reason: `task ${taskID} cancelled`,
+        };
+        try {
+          const encoded = encodeMessage(MsgTypeTaskCancel, cancelMsg);
+          await this.wsHub.sendToTeam(slug, encoded);
+        } catch (err: unknown) {
+          this.logger.warn('failed to send cancel to container', {
+            task_id: tid,
+            team: slug,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
+
+    // Notify TaskWaiter for each cancelled task.
+    if (this.taskWaiter !== null) {
+      for (const tid of cancelledIDs) {
+        this.taskWaiter.notifyComplete(tid, 'cancelled', undefined, 'task cancelled');
       }
     }
 
     if (this.eventBus !== null) {
-      this.eventBus.publish({
-        type: 'task_cancelled',
-        payload: { kind: 'task_cancelled', task_id: taskID },
-      });
+      for (const tid of cancelledIDs) {
+        this.eventBus.publish({
+          type: 'task_cancelled',
+          payload: { kind: 'task_cancelled', task_id: tid },
+        });
+      }
     }
 
-    this.logger.info('task cancelled', { task_id: taskID });
+    this.logger.info('task cancelled', {
+      task_id: taskID,
+      cascade,
+      cancelled_count: cancelledIDs.length,
+      cancelled_ids: cancelledIDs,
+    });
+
+    return cancelledIDs;
   }
 
   /**
@@ -951,6 +1034,10 @@ export class Orchestrator implements GoOrchestrator {
         created_at: now,
         updated_at: now,
         completed_at: null,
+        blocked_by: [],
+        priority: 0,
+        retry_count: 0,
+        max_retries: 0,
       };
 
       try {
@@ -972,6 +1059,284 @@ export class Orchestrator implements GoOrchestrator {
       dispatched: tasks.length,
     });
     return tasks;
+  }
+
+  // -------------------------------------------------------------------------
+  // Private: handleTaskCompleted (auto-unblock dependents)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Called when a task completes successfully. Finds all dependent tasks
+   * (those with the completed task in their blocked_by array), removes the
+   * completed task from each dependent's blocked_by, and dispatches any
+   * task whose blocked_by becomes empty.
+   *
+   * Critical pattern: persist-first-dispatch-after-commit. All DB updates
+   * happen in a single transaction. Task dispatch happens ONLY after the
+   * transaction commits successfully. This prevents TOCTOU races.
+   */
+  private async handleTaskCompleted(taskId: string): Promise<void> {
+    const dependents = await this.taskStore.getDependents(taskId);
+
+    if (dependents.length === 0) {
+      return;
+    }
+
+    this.logger.info('unblocking dependents after task completion', {
+      completed_task_id: taskId,
+      dependent_count: dependents.length,
+    });
+
+    // Collect tasks to dispatch after the transaction commits.
+    const tasksToDispatch: Task[] = [];
+
+    // All DB mutations in one transaction — persist first.
+    for (const dep of dependents) {
+      const updatedBlockedBy = dep.blocked_by.filter((id) => id !== taskId);
+      const now = new Date();
+
+      if (updatedBlockedBy.length === 0) {
+        // All blockers resolved — mark as pending for dispatch.
+        const updated: Task = {
+          ...dep,
+          blocked_by: [],
+          status: 'pending',
+          updated_at: now,
+        };
+        await this.taskStore.update(updated);
+        tasksToDispatch.push(updated);
+
+        this.logger.info('dependent task fully unblocked', {
+          task_id: dep.id,
+          completed_blocker: taskId,
+        });
+      } else {
+        // Still has remaining blockers — just update blocked_by.
+        const updated: Task = {
+          ...dep,
+          blocked_by: updatedBlockedBy,
+          updated_at: now,
+        };
+        await this.taskStore.update(updated);
+
+        this.logger.debug('dependent task partially unblocked', {
+          task_id: dep.id,
+          completed_blocker: taskId,
+          remaining_blockers: updatedBlockedBy,
+        });
+      }
+    }
+
+    // Dispatch unblocked tasks AFTER all DB updates succeed.
+    for (const task of tasksToDispatch) {
+      try {
+        await this.dispatchTask(task);
+      } catch (err) {
+        this.logger.error('failed to dispatch unblocked task', {
+          task_id: task.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Private: handleTaskRetry (re-dispatch on retry)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Called by the Dispatcher's onTaskRetryNeeded callback when a failed task
+   * is eligible for retry (retry_count < max_retries). The Dispatcher has
+   * already incremented retry_count and reset status to 'pending'.
+   *
+   * This method fetches the task and re-dispatches it through the normal WS
+   * dispatch pipeline. Unlike dispatchTask(), it does NOT call taskStore.create
+   * because the task already exists in the database.
+   */
+  private async handleTaskRetry(taskId: string): Promise<void> {
+    const task = await this.taskStore.get(taskId);
+
+    this.logger.info('re-dispatching retried task', {
+      task_id: task.id,
+      team_slug: task.team_slug,
+      agent_aid: task.agent_aid,
+      retry_count: task.retry_count,
+      max_retries: task.max_retries,
+    });
+
+    // Resolve team for target agent via OrgChart for WS routing.
+    let teamSlug = task.team_slug;
+    if (task.agent_aid) {
+      try {
+        const team = this.orgChart.getTeamForAgent(task.agent_aid);
+        teamSlug = team.slug;
+      } catch {
+        // Fall back to stored team_slug if OrgChart lookup fails.
+        this.logger.warn('OrgChart lookup failed for retried task, using stored team_slug', {
+          task_id: task.id,
+          agent_aid: task.agent_aid,
+          team_slug: teamSlug,
+        });
+      }
+    }
+
+    // Ensure container is running before dispatch.
+    if (this.containerManager !== null) {
+      try {
+        await this.containerManager.ensureRunning(teamSlug);
+      } catch (err: unknown) {
+        this.logger.warn('failed to ensure container running for retry', {
+          task_id: task.id,
+          team: teamSlug,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        // Task is in pending status; can be picked up when container comes online.
+        return;
+      }
+    }
+
+    // Send dispatch message via WS.
+    const dispatchMsg: TaskDispatchMsg = {
+      task_id: task.id,
+      agent_aid: task.agent_aid ?? '',
+      prompt: task.prompt,
+      blocked_by: task.blocked_by,
+    };
+    const encoded = encodeMessage(MsgTypeTaskDispatch, dispatchMsg);
+
+    try {
+      await this.wsHub.sendToTeam(teamSlug, encoded);
+    } catch (err: unknown) {
+      this.logger.warn('failed to dispatch retried task to container', {
+        task_id: task.id,
+        team: teamSlug,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      // Task remains pending; can be retried when container reconnects.
+      return;
+    }
+
+    // Mark as running.
+    const updatedTask: Task = {
+      ...task,
+      status: 'running',
+      updated_at: new Date(),
+    };
+    try {
+      await this.taskStore.update(updatedTask);
+    } catch (err: unknown) {
+      this.logger.error('failed to update retried task status to running', {
+        task_id: task.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    this.logger.info('retried task dispatched', {
+      task_id: task.id,
+      team: teamSlug,
+      retry_count: task.retry_count,
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Private: handleBlockerTerminalFailed (auto-escalate permanently blocked)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Called when a task reaches terminal failed or cancelled state (retries
+   * exhausted). Checks all dependents of the failed task. For each dependent,
+   * evaluates whether ALL of its blockers are in a terminal state. If so and
+   * at least one blocker failed/cancelled, auto-escalates the dependent to
+   * its team lead via EscalationRouter.
+   *
+   * This prevents silent deadlocks where a dependent task waits forever for
+   * blockers that will never complete.
+   */
+  private async handleBlockerTerminalFailed(taskId: string): Promise<void> {
+    const dependents = await this.taskStore.getDependents(taskId);
+
+    if (dependents.length === 0) {
+      return;
+    }
+
+    this.logger.info('checking dependents after blocker terminal failure', {
+      failed_task_id: taskId,
+      dependent_count: dependents.length,
+    });
+
+    for (const dep of dependents) {
+      // Fetch all blocker tasks to check their statuses.
+      const blockerStatuses: Array<{ id: string; status: string }> = [];
+      for (const blockerId of dep.blocked_by) {
+        try {
+          const blocker = await this.taskStore.get(blockerId);
+          blockerStatuses.push({ id: blocker.id, status: blocker.status });
+        } catch {
+          // If the blocker task is not found, treat it as terminal (gone).
+          blockerStatuses.push({ id: blockerId, status: 'failed' });
+        }
+      }
+
+      const terminalStatuses = new Set(['completed', 'failed', 'cancelled']);
+      const allTerminal = blockerStatuses.every((b) => terminalStatuses.has(b.status));
+
+      if (!allTerminal) {
+        // Some blockers are still pending/running — wait for them.
+        this.logger.debug('dependent still has non-terminal blockers, skipping', {
+          dependent_task_id: dep.id,
+          blockers: blockerStatuses,
+        });
+        continue;
+      }
+
+      const failedBlockers = blockerStatuses.filter(
+        (b) => b.status === 'failed' || b.status === 'cancelled',
+      );
+
+      if (failedBlockers.length === 0) {
+        // All blockers completed successfully — normal unblock path handles this.
+        continue;
+      }
+
+      // All blockers are terminal and at least one failed/cancelled.
+      // Auto-escalate the dependent.
+      this.logger.warn('dependent task permanently blocked — auto-escalating', {
+        dependent_task_id: dep.id,
+        failed_blockers: failedBlockers.map((b) => b.id),
+        total_blockers: blockerStatuses.length,
+      });
+
+      if (this.escalationRouter === null) {
+        this.logger.error('cannot auto-escalate — no escalation router configured', {
+          dependent_task_id: dep.id,
+        });
+        continue;
+      }
+
+      const failedIds = failedBlockers.map((b) => b.id);
+      const escalationMsg: EscalationMsg = {
+        correlation_id: crypto.randomUUID(),
+        task_id: dep.id,
+        agent_aid: dep.agent_aid ?? '',
+        source_team: dep.team_slug,
+        destination_team: dep.team_slug,
+        escalation_level: 1,
+        reason: `Task ${dep.id} is permanently blocked — blockers [${failedIds.join(', ')}] have failed`,
+        context: {
+          auto_escalation: true,
+          failed_blockers: failedIds,
+        } as Record<string, JsonValue>,
+      };
+
+      try {
+        await this.escalationRouter.handleEscalation(dep.team_slug, escalationMsg);
+      } catch (err) {
+        this.logger.error('auto-escalation failed for permanently blocked task', {
+          dependent_task_id: dep.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -1140,12 +1505,33 @@ function isNodeError(err: unknown): err is NodeJS.ErrnoException {
 }
 
 // ---------------------------------------------------------------------------
+// resolveTeamWorkspacePath
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolves the workspace directory path for a given team slug.
+ *
+ *   - Main team (slug "main" or "master") → `<runDir>/workspace/`
+ *   - Other teams → `<runDir>/workspace/teams/<slug>/`
+ *
+ * The main workspace IS the root workspace — there is no
+ * `<runDir>/workspace/teams/main/`. Child teams are nested under
+ * `<runDir>/workspace/teams/`.
+ */
+export function resolveTeamWorkspacePath(runDir: string, slug: string): string {
+  if (slug === 'main' || slug === 'master') {
+    return joinPath(runDir, 'workspace');
+  }
+  return joinPath(runDir, 'workspace', 'teams', slug);
+}
+
+// ---------------------------------------------------------------------------
 // validateWorkspacePath
 // ---------------------------------------------------------------------------
 
 /**
  * Validates and resolves the workspace path for a team slug under
- * `<runDir>/teams/<slug>/`.
+ * `<runDir>/workspace/teams/<slug>/`.
  *
  * Security checks (in order):
  *   1. Resolve absolute paths for both teamsRoot and target.
@@ -1164,7 +1550,7 @@ function isNodeError(err: unknown): err is NodeJS.ErrnoException {
  */
 export function validateWorkspacePath(runDir: string, slug: string): string {
   // Step 1: Resolve absolute paths.
-  const teamsRoot = resolvePath(joinPath(runDir, 'teams'));
+  const teamsRoot = resolvePath(joinPath(runDir, 'workspace', 'teams'));
   const targetPath = resolvePath(joinPath(teamsRoot, slug));
 
   // Step 2: Containment check — target must be directly under teamsRoot.
@@ -1238,18 +1624,18 @@ export function validateWorkspacePath(runDir: string, slug: string): string {
 
 /**
  * Creates the standard workspace directory structure for a team under
- * `<runDir>/teams/<slug>/` and writes the initial CLAUDE.md and
+ * `<runDir>/workspace/teams/<slug>/` and writes the initial CLAUDE.md and
  * .claude/settings.json files.
  *
  * Directory structure created:
- *   <runDir>/teams/<slug>/
- *   <runDir>/teams/<slug>/.claude/agents/
- *   <runDir>/teams/<slug>/.claude/skills/
- *   <runDir>/teams/<slug>/work/tasks/
+ *   <runDir>/workspace/teams/<slug>/
+ *   <runDir>/workspace/teams/<slug>/.claude/agents/
+ *   <runDir>/workspace/teams/<slug>/.claude/skills/
+ *   <runDir>/workspace/teams/<slug>/work/tasks/
  *
  * Files written:
- *   <runDir>/teams/<slug>/CLAUDE.md  — team name heading
- *   <runDir>/teams/<slug>/.claude/settings.json  — {"allowedTools":[]}
+ *   <runDir>/workspace/teams/<slug>/CLAUDE.md  — team name heading
+ *   <runDir>/workspace/teams/<slug>/.claude/settings.json  — {"allowedTools":[]}
  *
  * Calls validateWorkspacePath first to enforce containment and symlink checks.
  * Idempotent — re-calling with the same slug is a no-op (mkdir recursive).
@@ -1375,7 +1761,7 @@ Use load_skill with team_slug="${slug}" to load any skill.
  * Used to populate the main assistant workspace from the git-tracked template.
  *
  * @param srcDir  - Path to the static main-assistant/ directory.
- * @param destDir - Path to the target workspace (e.g. .run/teams/main/).
+ * @param destDir - Path to the target workspace (e.g. .run/workspace/).
  * @param force   - If true, overwrites existing files. If false, only copies
  *                  files that don't already exist in the destination.
  *
@@ -1411,6 +1797,6 @@ export async function copyMainAssistantWorkspace(
 /**
  * Creates a new Orchestrator with the given dependencies.
  */
-export function newOrchestrator(deps: OrchestratorDeps): Orchestrator {
-  return new Orchestrator(deps);
+export function newOrchestrator(deps: OrchestratorDeps): OrchestratorImpl {
+  return new OrchestratorImpl(deps);
 }

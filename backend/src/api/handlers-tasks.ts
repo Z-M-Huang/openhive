@@ -9,7 +9,7 @@
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 
-import type { GoOrchestrator, TaskStore } from '../domain/interfaces.js';
+import type { Orchestrator, TaskStore } from '../domain/interfaces.js';
 import type { TaskStatus } from '../domain/enums.js';
 import type { Task } from '../domain/types.js';
 import type { MiddlewareLogger } from './middleware.js';
@@ -221,7 +221,7 @@ export function getTaskHandler(taskStore: TaskStore, logger: MiddlewareLogger) {
  * Returns updated task after cancellation.
  */
 export function cancelTaskHandler(
-  orch: GoOrchestrator,
+  orch: Orchestrator,
   taskStore: TaskStore,
   logger: MiddlewareLogger,
 ) {
@@ -271,7 +271,7 @@ export function cancelTaskHandler(
 export function registerTaskRoutes(
   fastify: FastifyInstance,
   taskStore: TaskStore,
-  orch: GoOrchestrator,
+  orch: Orchestrator,
   logger: MiddlewareLogger,
 ): void {
   fastify.get('/api/v1/tasks', { schema: GET_TASKS_QUERY_SCHEMA }, getTasksHandler(taskStore, logger));
