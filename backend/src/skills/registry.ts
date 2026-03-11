@@ -63,7 +63,7 @@ export class SkillRegistryImpl implements SkillRegistry {
       teamMap = new Map<string, SkillDefinition>();
       this.skills.set(teamSlug, teamMap);
     }
-    teamMap.set(skill.name, skill);
+    teamMap.set(skill.name, structuredClone(skill));
   }
 
   /**
@@ -103,12 +103,13 @@ export class SkillRegistryImpl implements SkillRegistry {
     const teamMap = this.skills.get(teamSlug);
     if (teamMap) {
       const skill = teamMap.get(skillName);
-      if (skill) return skill;
+      if (skill) return structuredClone(skill);
     }
     // Fall back to common skills
     const commonMap = this.skills.get(COMMON_TEAM_SLUG);
     if (commonMap) {
-      return commonMap.get(skillName);
+      const skill = commonMap.get(skillName);
+      if (skill) return structuredClone(skill);
     }
     return undefined;
   }

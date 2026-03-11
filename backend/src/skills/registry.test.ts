@@ -153,6 +153,32 @@ describe('SkillRegistryImpl', () => {
       expect(freshList.find(s => s.name === 'injected')).toBeUndefined();
     });
 
+    it('get() returns defensive copy (mutation does not leak to other teams)', () => {
+      // Register a common skill
+      const skill: SkillDefinition = {
+        name: 'shared',
+        description: 'Original',
+        body: '# Shared',
+        allowedTools: ['read_file'],
+      };
+      registry.register('__common__', skill);
+
+      // Team A gets the skill and mutates it
+      const fromA = registry.get('team-a', 'shared')!;
+      fromA.description = 'mutated by team-a';
+      fromA.allowedTools!.push('dangerous_tool');
+
+      // Team B should still see the original
+      const fromB = registry.get('team-b', 'shared');
+      expect(fromB?.description).toBe('Original');
+      expect(fromB?.allowedTools).toEqual(['read_file']);
+
+      // Even team A re-fetching should see the original
+      const fromA2 = registry.get('team-a', 'shared');
+      expect(fromA2?.description).toBe('Original');
+      expect(fromA2?.allowedTools).toEqual(['read_file']);
+    });
+
     it('listForTeam snapshot is immutable (object mutation)', () => {
       registry.register('my-team', createSkill('skill1', 'Original description'));
 
