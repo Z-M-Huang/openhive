@@ -23,7 +23,7 @@ import type { WSHub, WSMessage, TokenManager } from '../domain/interfaces.js';
  * the one-time token from the query string during the upgrade handshake
  * before accepting the connection.
  *
- * Upgrade path: /ws/container?token=<one-time-token>&tid=<team-id>
+ * Upgrade path: /ws/container?token=<one-time-token>&team=<team-id>
  *
  * @example
  * ```ts

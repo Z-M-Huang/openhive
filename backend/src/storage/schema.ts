@@ -15,7 +15,9 @@ import {
   text,
   integer,
   index,
+  check,
 } from 'drizzle-orm/sqlite-core';
+import { sql } from 'drizzle-orm';
 
 // ---------------------------------------------------------------------------
 // tasks
@@ -44,6 +46,7 @@ export const tasks = sqliteTable('tasks', {
   index('idx_tasks_team_slug').on(table.team_slug),
   index('idx_tasks_agent_aid').on(table.agent_aid),
   index('idx_tasks_status').on(table.status),
+  check('tasks_status_check', sql`status IN ('pending','active','completed','failed','escalated','cancelled')`),
 ]);
 
 // ---------------------------------------------------------------------------
@@ -210,6 +213,7 @@ export const integrations = sqliteTable('integrations', {
   created_at: integer('created_at').notNull(),
 }, (table) => [
   index('idx_integrations_team_id').on(table.team_id),
+  check('integrations_status_check', sql`status IN ('proposed','validated','tested','approved','active','failed','rolled_back')`),
 ]);
 
 // ---------------------------------------------------------------------------

@@ -10,7 +10,8 @@
  *
  * When both locations contain a skill with the same name, the workspace copy
  * takes precedence (team override). Common skills serve as defaults for all
- * teams and include: code-review, research, system-smoke, etc.
+ * teams and include: escalation, health-report, integration-usage,
+ * memory-management, system-smoke, and task-completion.
  *
  * ## SKILL.md Format
  *
@@ -125,7 +126,8 @@ export class SkillLoaderImpl implements SkillLoader {
    *
    * These skills are available to every team unless overridden by a
    * workspace-local copy. Common skills include built-in capabilities
-   * like code-review, research, and system-smoke.
+   * like escalation, health-report, integration-usage, memory-management,
+   * system-smoke, and task-completion.
    *
    * @returns Array of common skill definitions
    */

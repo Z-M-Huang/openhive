@@ -228,7 +228,7 @@ export function assertValidTransition(from: TaskStatus, to: TaskStatus): void {
 const AID_PATTERN = /^aid-[a-z0-9]+-[a-z0-9]+$/;
 const TID_PATTERN = /^tid-[a-z0-9]+-[a-z0-9]+$/;
 const SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-const MAX_SLUG_LENGTH = 64;
+const MAX_SLUG_LENGTH = 63;
 
 /** Reserved slugs that cannot be used for team names. */
 export const RESERVED_SLUGS: ReadonlySet<string> = new Set([
@@ -276,6 +276,9 @@ export function validateTID(tid: string): void {
 export function validateSlug(slug: string): void {
   if (!slug) {
     throw new Error('Slug must not be empty');
+  }
+  if (slug.length < 3) {
+    throw new Error(`Slug too short: "${slug}" (${slug.length} chars). Minimum length is 3`);
   }
   if (slug.length > MAX_SLUG_LENGTH) {
     throw new Error(

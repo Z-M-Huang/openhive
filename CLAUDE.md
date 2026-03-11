@@ -75,8 +75,8 @@ Defaults tuneable per deployment. Changing a default requires a new ADR.
 | Component | Technology | Notes |
 |-----------|-----------|-------|
 | Language | TypeScript 5.x | Strict mode enforced (`strict: true`, `noUnusedLocals`, `noImplicitReturns`) |
-| Dev runtime / Package manager | **Bun 1.3+** | All installs, scripts, and test execution via `bun` |
-| Production runtime | Node.js 22 LTS | `node:22-bookworm-slim` base image |
+| Runtime / Package manager | **Bun 1.3+** | All installs, scripts, test execution, and .ts script execution in production via `bun` |
+| Production runtime | Node.js 22 LTS + Bun 1.3+ | `node:22-bookworm-slim` base image; Bun runs .ts scripts at runtime |
 | Agent SDK | @anthropic-ai/claude-agent-sdk 0.2.x | One SDK instance per agent |
 | MCP SDK | @modelcontextprotocol/sdk 1.8.x | In-process MCP server for built-in tools |
 | Database | SQLite (better-sqlite3 9.x) + Drizzle ORM 0.41.x | WAL mode, single-writer (INV-04) |
@@ -285,7 +285,7 @@ Every container mounts its workspace at `/app/workspace` (fixed internal path). 
 
 ## WebSocket Protocol Summary
 
-Hub-and-spoke topology. One persistent bidirectional JSON channel per container. Wire format uses snake_case; codebase uses camelCase with conversion at boundary.
+Hub-and-spoke topology. One persistent bidirectional JSON channel per container. Wire protocol message types and their top-level fields use snake_case. Nested domain types (`AgentInitConfig`, `ResolvedProvider`) retain camelCase from `domain/interfaces.ts`; wire-specific snake_case conversion is deferred to L4 implementation.
 
 **Root-to-Container (7 types):** `container_init`, `task_dispatch`, `shutdown`, `tool_result`, `agent_added`, `escalation_response`, `task_cancel`
 

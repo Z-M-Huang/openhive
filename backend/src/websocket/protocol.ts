@@ -7,8 +7,10 @@
  *   9 container-to-root: ready, heartbeat, task_result, escalation, log_event,
  *                        tool_call, status_update, agent_ready, org_chart_update
  *
- * Wire protocol uses snake_case; codebase uses camelCase internally.
- * toWireFormat() / parseMessage() convert at the boundary.
+ * Wire protocol message types and their top-level fields use snake_case throughout.
+ * Nested domain types (AgentInitConfig, ResolvedProvider) retain camelCase field names
+ * from domain/interfaces.ts — wire-specific snake_case conversion is deferred to L4.
+ * toWireFormat() serializes directly; parseMessage() validates and deserializes.
  */
 
 import type {
@@ -21,6 +23,8 @@ import type {
   EscalationReason,
   WSErrorCode,
 } from '../domain/enums.js';
+
+import { ValidationError } from '../domain/errors.js';
 
 // Re-export for single import point
 export { mapDomainErrorToWSError } from '../domain/errors.js';
@@ -266,21 +270,70 @@ const CONTAINER_TO_ROOT_TYPES: ReadonlySet<string> = new Set<string>(
 // ---------------------------------------------------------------------------
 
 /**
- * Converts an internal WSMessage to wire format (JSON string with snake_case keys).
- * The WSMessage payloads already use snake_case field names matching the wire protocol,
- * so this serializes directly to JSON.
+ * Converts an internal WSMessage to wire format (JSON string).
+ * Protocol-level fields use snake_case. Nested domain types (AgentInitConfig,
+ * ResolvedProvider) retain camelCase from domain/interfaces.ts — wire-specific
+ * snake_case conversion for nested payloads is deferred to L4.
  */
-export function toWireFormat(_message: WSMessage): string {
-  throw new Error('Not implemented');
+export function toWireFormat(message: WSMessage): string {
+  return JSON.stringify({ type: message.type, data: message.data });
 }
 
 /**
  * Parses a raw wire-format JSON string into a typed WSMessage.
  * Validates the message structure and type discriminator.
- * Throws on invalid JSON or unknown message type.
+ * This is the PRIMARY TRUST BOUNDARY for all inter-container communication.
+ * Throws on invalid JSON, unknown message type, or size limit exceeded.
  */
-export function parseMessage(_raw: string): WSMessage {
-  throw new Error('Not implemented');
+export function parseMessage(raw: string): WSMessage {
+  // 1MB check BEFORE JSON.parse to prevent memory exhaustion attacks
+  if (Buffer.byteLength(raw, 'utf8') > 1_048_576) {
+    throw new ValidationError('Message exceeds maximum size');
+  }
+
+  // Parse JSON - throw sanitized error, never echo raw input
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new ValidationError('Invalid JSON message');
+  }
+
+  // Validate shape: must be a non-null object (not array, not primitive)
+  if (
+    typeof parsed !== 'object' ||
+    parsed === null ||
+    Array.isArray(parsed)
+  ) {
+    throw new ValidationError('Message must be a non-null object');
+  }
+
+  const message = parsed as Record<string, unknown>;
+
+  // Validate 'type' field exists and is a string
+  if (typeof message.type !== 'string') {
+    throw new ValidationError('Message type must be a string');
+  }
+
+  // Validate type is in whitelist
+  if (
+    !ROOT_TO_CONTAINER_TYPES.has(message.type) &&
+    !CONTAINER_TO_ROOT_TYPES.has(message.type)
+  ) {
+    throw new ValidationError('Unknown message type');
+  }
+
+  // Validate 'data' field exists and is a non-null object
+  if (
+    typeof message.data !== 'object' ||
+    message.data === null ||
+    Array.isArray(message.data)
+  ) {
+    throw new ValidationError('Message data must be a non-null object');
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return { type: message.type, data: message.data } as WSMessage;
 }
 
 // ---------------------------------------------------------------------------

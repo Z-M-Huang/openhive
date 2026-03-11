@@ -1,0 +1,22 @@
+# Agent Definition Template
+#
+# Variables:
+#   {{name}}         -- agent name
+#   {{role}}         -- agent role (main_assistant, team_lead, member)
+#   {{description}}  -- agent description
+#   {{model}}        -- model tier (haiku, sonnet, opus)
+#   {{tools}}        -- comma-separated tool names
+#   {{skills}}       -- comma-separated skill names
+#   {{system_prompt}} -- agent system prompt body (markdown)
+---
+name: {{name}}
+role: {{role}}
+description: {{description}}
+model: {{model}}
+tools:
+{{tools}}
+skills:
+{{skills}}
+---
+
+{{system_prompt}}

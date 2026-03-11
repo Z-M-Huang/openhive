@@ -71,6 +71,7 @@
 
 import type { MCPRegistry } from '../domain/index.js';
 import type { AgentRole } from '../domain/index.js';
+import { ConflictError } from '../domain/errors.js';
 
 // ---------------------------------------------------------------------------
 // Role-Based Access Control Matrix
@@ -196,6 +197,8 @@ export interface ToolEntry {
  * - Duplicate registration throws an error (tool names must be unique)
  */
 export class MCPRegistryImpl implements MCPRegistry {
+  private readonly tools = new Map<string, ToolEntry>();
+
   /**
    * Registers a tool with the MCP registry.
    *
@@ -236,11 +239,14 @@ export class MCPRegistryImpl implements MCPRegistry {
    * ```
    */
   registerTool(
-    _name: string,
-    _schema: Record<string, unknown>,
-    _handler: (args: Record<string, unknown>, agentAid: string) => Promise<Record<string, unknown>>,
+    name: string,
+    schema: Record<string, unknown>,
+    handler: (args: Record<string, unknown>, agentAid: string) => Promise<Record<string, unknown>>,
   ): void {
-    throw new Error('Not implemented');
+    if (this.tools.has(name)) {
+      throw new ConflictError(`Tool '${name}' is already registered`);
+    }
+    this.tools.set(name, { name, schema, handler });
   }
 
   /**
@@ -252,8 +258,8 @@ export class MCPRegistryImpl implements MCPRegistry {
    *
    * @param _name - Name of the tool to remove
    */
-  unregisterTool(_name: string): void {
-    throw new Error('Not implemented');
+  unregisterTool(name: string): void {
+    this.tools.delete(name);
   }
 
   /**
@@ -267,9 +273,13 @@ export class MCPRegistryImpl implements MCPRegistry {
    * @returns Tool entry with schema and handler, or `undefined` if not found
    */
   getTool(
-    _name: string,
+    name: string,
   ): { schema: Record<string, unknown>; handler: (args: Record<string, unknown>, agentAid: string) => Promise<Record<string, unknown>> } | undefined {
-    throw new Error('Not implemented');
+    const entry = this.tools.get(name);
+    if (!entry) {
+      return undefined;
+    }
+    return { schema: entry.schema, handler: entry.handler };
   }
 
   /**
@@ -285,7 +295,7 @@ export class MCPRegistryImpl implements MCPRegistry {
    * @returns Array of registered tools with name and schema
    */
   listTools(): Array<{ name: string; schema: Record<string, unknown> }> {
-    throw new Error('Not implemented');
+    return Array.from(this.tools.values()).map(e => ({ name: e.name, schema: e.schema }));
   }
 
   /**
@@ -313,9 +323,14 @@ export class MCPRegistryImpl implements MCPRegistry {
    * ```
    */
   getToolsForRole(
-    _role: AgentRole,
+    role: AgentRole,
   ): Array<{ name: string; schema: Record<string, unknown> }> {
-    throw new Error('Not implemented');
+    const roleTools = ROLE_TOOL_MATRIX[role];
+    if (!roleTools) {
+      return [];
+    }
+    // Return intersection of registered tools AND role-allowed tools
+    return this.listTools().filter(t => roleTools.has(t.name));
   }
 
   /**
@@ -340,8 +355,8 @@ export class MCPRegistryImpl implements MCPRegistry {
    * registry.isAllowed('update_task_status', 'member');      // → true
    * ```
    */
-  isAllowed(_toolName: string, _role: AgentRole): boolean {
-    throw new Error('Not implemented');
+  isAllowed(toolName: string, role: AgentRole): boolean {
+    return ROLE_TOOL_MATRIX[role]?.has(toolName) ?? false;
   }
 }
 

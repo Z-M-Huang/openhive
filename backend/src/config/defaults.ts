@@ -9,6 +9,9 @@
  * All values match Configuration-Schemas.md § "Compiled Defaults" exactly.
  */
 
+import type { TriggerConfig } from '../domain/triggers.js';
+import type { MCPServerConfig } from '../domain/interfaces.js';
+
 // ---------------------------------------------------------------------------
 // MasterConfig Type
 // ---------------------------------------------------------------------------
@@ -87,11 +90,58 @@ export interface AssistantConfig {
 
 export interface ChannelConfig {
   enabled: boolean;
+  token_env?: string;
+  prefix?: string;
+  channel_id?: string;
 }
 
 export interface ChannelsConfig {
   discord: ChannelConfig;
   slack: ChannelConfig;
+}
+
+export interface AgentRef {
+  aid: string;
+  name: string;
+  leads_team?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Team Config Types (YAML schema representation)
+// ---------------------------------------------------------------------------
+
+export interface TeamAgentConfig {
+  aid: string;
+  name: string;
+  provider?: string;
+  model_tier?: string;
+  skills?: string[];
+  max_turns?: number;
+  timeout_minutes?: number;
+  leads_team?: string;
+  proactive_interval_minutes?: number;
+}
+
+export interface TeamResourceLimits {
+  max_memory?: string;
+  max_cpus?: number;
+  max_old_space?: number;
+  idle_timeout?: string;
+}
+
+export interface TeamConfig {
+  slug: string;
+  parent_slug?: string;
+  leader_aid: string;
+  tid?: string;
+  description?: string;
+  agents?: TeamAgentConfig[];
+  mcp_servers?: MCPServerConfig[];
+  triggers?: TriggerConfig[];
+  proactive_interval_minutes?: number;
+  resource_limits?: TeamResourceLimits;
+  children?: string[];
+  env_vars?: Record<string, string>;
 }
 
 export interface MasterConfig {
@@ -102,6 +152,10 @@ export interface MasterConfig {
   limits: LimitsConfig;
   assistant: AssistantConfig;
   channels: ChannelsConfig;
+  triggers?: TriggerConfig[];
+  skill_registries?: string[];
+  agents?: AgentRef[];
+  providers?: string;
 }
 
 // ---------------------------------------------------------------------------

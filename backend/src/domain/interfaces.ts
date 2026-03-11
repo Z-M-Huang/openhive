@@ -23,6 +23,7 @@ import type {
   ChannelType,
   ContainerHealth,
   AgentStatus,
+  AgentRole,
   ProviderType,
   ModelTier,
   EscalationReason,
@@ -171,6 +172,10 @@ export interface SkillDefinition {
   argumentHint?: string;
   allowedTools?: string[];
   model?: ModelTier;
+  context?: 'fork';
+  agent?: string;
+  disableModelInvocation?: boolean;
+  userInvocable?: boolean;
   body: string;
 }
 
@@ -444,6 +449,8 @@ export interface MCPRegistry {
   unregisterTool(name: string): void;
   getTool(name: string): { schema: Record<string, unknown>; handler: (args: Record<string, unknown>, agentAid: string) => Promise<Record<string, unknown>> } | undefined;
   listTools(): Array<{ name: string; schema: Record<string, unknown> }>;
+  getToolsForRole(role: AgentRole): Array<{ name: string; schema: Record<string, unknown> }>;
+  isAllowed(toolName: string, role: AgentRole): boolean;
 }
 
 // ---------------------------------------------------------------------------

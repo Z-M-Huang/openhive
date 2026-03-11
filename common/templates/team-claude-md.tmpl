@@ -1,0 +1,35 @@
+<!--
+team-claude-md.tmpl - Mustache template for team CLAUDE.md files
+Variables:
+  {{team_name}}        - Team display name
+  {{team_slug}}        - Team slug identifier
+  {{team_description}} - Team purpose description
+  {{leader_aid}}      - AID of team lead
+  {{agent_list}}       - Pre-rendered markdown list of agents
+  {{tool_list}}        - Pre-rendered markdown list of available tools
+  {{skill_list}}       - Pre-rendered markdown list of skills
+-->
+
+# {{team_name}}
+
+{{team_description}}
+
+## Team Lead
+
+- **AID:** `{{leader_aid}}`
+
+## Team Members
+
+{{agent_list}}
+
+## Available Tools
+
+{{tool_list}}
+
+## Available Skills
+
+{{skill_list}}
+
+---
+
+*This file is auto-generated. Do not edit manually.*

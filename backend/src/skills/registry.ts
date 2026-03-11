@@ -25,6 +25,12 @@
  * @module skills/registry
  */
 
+/**
+ * Common team slug used to store shared skills available to all teams.
+ * Underscore prefix prevents collision with valid team slugs per regex ^[a-z0-9]+(-[a-z0-9]+)*$.
+ */
+const COMMON_TEAM_SLUG = '__common__';
+
 import type { SkillRegistry, SkillDefinition } from '../domain/index.js';
 
 /**
@@ -38,6 +44,8 @@ import type { SkillRegistry, SkillDefinition } from '../domain/index.js';
  * // INV-08: Team-scoped skill copies
  */
 export class SkillRegistryImpl implements SkillRegistry {
+  private readonly skills = new Map<string, Map<string, SkillDefinition>>();
+
   /**
    * Registers a skill definition for a specific team.
    *
@@ -45,12 +53,17 @@ export class SkillRegistryImpl implements SkillRegistry {
    * replaced. Team-registered skills shadow common skills of the same
    * name (INV-08: full file shadow, not merge).
    *
-   * @param _teamSlug - The team slug to register the skill under
-   * @param _skill - The skill definition to register
+   * @param teamSlug - The team slug to register the skill under
+   * @param skill - The skill definition to register
    */
-  register(_teamSlug: string, _skill: SkillDefinition): void {
+  register(teamSlug: string, skill: SkillDefinition): void {
     // INV-08: Team-scoped skill copies
-    throw new Error('Not implemented');
+    let teamMap = this.skills.get(teamSlug);
+    if (!teamMap) {
+      teamMap = new Map<string, SkillDefinition>();
+      this.skills.set(teamSlug, teamMap);
+    }
+    teamMap.set(skill.name, skill);
   }
 
   /**
@@ -59,12 +72,15 @@ export class SkillRegistryImpl implements SkillRegistry {
    * After removal, if a common skill with the same name exists, it
    * becomes visible again for the team (the shadow is lifted).
    *
-   * @param _teamSlug - The team slug to remove the skill from
-   * @param _skillName - The name of the skill to unregister
+   * @param teamSlug - The team slug to remove the skill from
+   * @param skillName - The name of the skill to unregister
    */
-  unregister(_teamSlug: string, _skillName: string): void {
+  unregister(teamSlug: string, skillName: string): void {
     // INV-08: Team-scoped skill copies
-    throw new Error('Not implemented');
+    const teamMap = this.skills.get(teamSlug);
+    if (teamMap) {
+      teamMap.delete(skillName);
+    }
   }
 
   /**
@@ -77,13 +93,24 @@ export class SkillRegistryImpl implements SkillRegistry {
    * Returns `undefined` if no skill with the given name is found
    * in either location.
    *
-   * @param _teamSlug - The team slug to resolve the skill for
-   * @param _skillName - The name of the skill to look up
+   * @param teamSlug - The team slug to resolve the skill for
+   * @param skillName - The name of the skill to look up
    * @returns The resolved skill definition, or `undefined` if not found
    */
-  get(_teamSlug: string, _skillName: string): SkillDefinition | undefined {
+  get(teamSlug: string, skillName: string): SkillDefinition | undefined {
     // INV-08: Team-scoped skill copies
-    throw new Error('Not implemented');
+    // First check team-specific skills
+    const teamMap = this.skills.get(teamSlug);
+    if (teamMap) {
+      const skill = teamMap.get(skillName);
+      if (skill) return skill;
+    }
+    // Fall back to common skills
+    const commonMap = this.skills.get(COMMON_TEAM_SLUG);
+    if (commonMap) {
+      return commonMap.get(skillName);
+    }
+    return undefined;
   }
 
   /**
@@ -96,11 +123,30 @@ export class SkillRegistryImpl implements SkillRegistry {
    * The returned array is a snapshot; modifications to it do not affect
    * the registry.
    *
-   * @param _teamSlug - The team slug to list skills for
+   * @param teamSlug - The team slug to list skills for
    * @returns Array of all skill definitions available to the team
    */
-  listForTeam(_teamSlug: string): SkillDefinition[] {
+  listForTeam(teamSlug: string): SkillDefinition[] {
     // INV-08: Team-scoped skill copies
-    throw new Error('Not implemented');
+    const merged = new Map<string, SkillDefinition>();
+
+    // Copy all common skills first
+    const commonMap = this.skills.get(COMMON_TEAM_SLUG);
+    if (commonMap) {
+      for (const [name, skill] of commonMap) {
+        merged.set(name, skill);
+      }
+    }
+
+    // Overlay team-specific skills (team wins on collision)
+    const teamMap = this.skills.get(teamSlug);
+    if (teamMap) {
+      for (const [name, skill] of teamMap) {
+        merged.set(name, skill);
+      }
+    }
+
+    // Return defensive copy
+    return Array.from(merged.values());
   }
 }
