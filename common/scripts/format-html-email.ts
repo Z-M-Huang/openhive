@@ -191,6 +191,12 @@ function wrapLists(html: string): string {
     const isUlItem = line.includes('data-list="ul"');
     const isLi = isOlItem || isUlItem;
 
+    // Close current list if type changes (ul->ol or ol->ul)
+    if (isLi && ((inUl && isOlItem) || (inOl && isUlItem))) {
+      if (inUl) { output.push('</ul>'); inUl = false; }
+      if (inOl) { output.push('</ol>'); inOl = false; }
+    }
+
     if (isLi && !inUl && !inOl) {
       // Start new list based on data attribute
       if (isOlItem) {
@@ -202,13 +208,8 @@ function wrapLists(html: string): string {
       }
     } else if (!isLi && (inUl || inOl)) {
       // Close list
-      if (inUl) {
-        output.push('</ul>');
-        inUl = false;
-      } else if (inOl) {
-        output.push('</ol>');
-        inOl = false;
-      }
+      if (inUl) { output.push('</ul>'); inUl = false; }
+      if (inOl) { output.push('</ol>'); inOl = false; }
     }
 
     // Strip data-list attribute from output

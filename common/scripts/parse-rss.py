@@ -136,28 +136,31 @@ def parse_entry(entry: ET.Element, namespaces: dict | None = None) -> dict[str, 
     return item
 
 
-def detect_namespaces(root: ET.Element) -> dict[str, str] | None:
-    """Detect namespaces used in the XML."""
+def detect_namespaces(xml_text: str, root: ET.Element) -> dict[str, str] | None:
+    """Detect namespaces used in the XML.
+
+    xml.etree.ElementTree strips xmlns:* declarations from element.attrib,
+    so we extract them from the raw XML text via regex instead.
+    """
     # Check for Atom namespace
     if root.tag.startswith("{") and "atom" in root.tag.lower():
         return None
 
-    # Check for xmlns declarations
+    # Extract xmlns:prefix="uri" declarations from raw XML
     ns = {}
-    for attr, value in root.attrib.items():
-        if attr.startswith("xmlns:"):
-            prefix = attr.split(":")[1]
-            ns[prefix] = value.replace("http://www.w3.org/2005/Atom", "atom")
+    for match in re.finditer(r'xmlns:(\w+)=["\']([^"\']+)["\']', xml_text):
+        prefix, uri = match.group(1), match.group(2)
+        ns[prefix] = uri
 
     return ns if ns else None
 
 
-def parse_rss(root: ET.Element) -> list[dict[str, Any]]:
+def parse_rss(root: ET.Element, xml_text: str) -> list[dict[str, Any]]:
     """Parse RSS feed."""
     channels = root.findall(".//channel")
     items: list[dict[str, Any]] = []
 
-    namespaces = detect_namespaces(root)
+    namespaces = detect_namespaces(xml_text, root)
 
     for channel in channels:
         # findall("item") gets direct children — covers both RSS 1.0 and 2.0
@@ -208,15 +211,15 @@ def parse_rss_feed(xml_content: str, limit: int | None = None) -> list[dict[str,
     root_tag = root.tag.lower()
 
     if "rss" in root_tag:
-        items = parse_rss(root)
+        items = parse_rss(root, xml_content)
     elif "feed" in root_tag or "atom" in root_tag:
         items = parse_atom(root)
     elif "rdf:rdf" in root_tag or "rdf" in root_tag:
         # RDF (RSS 1.0)
-        items = parse_rss(root)
+        items = parse_rss(root, xml_content)
     else:
         # Try RSS by default
-        items = parse_rss(root)
+        items = parse_rss(root, xml_content)
 
     # Apply limit if specified
     if limit is not None and limit > 0:

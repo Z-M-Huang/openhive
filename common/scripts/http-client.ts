@@ -20,7 +20,8 @@ const PRIVATE_IP_RANGES = [
   { prefix: '172.16.0.0', mask: 12 },
   { prefix: '192.168.0.0', mask: 16 },
   { prefix: '127.0.0.0', mask: 8 },
-  { prefix: '169.254.169.254', mask: 32 }, // AWS metadata
+  { prefix: '169.254.0.0', mask: 16 }, // Link-local (includes AWS metadata 169.254.169.254)
+  { prefix: '0.0.0.0', mask: 8 },      // "This" network
 ];
 
 interface CliArgs {
@@ -174,6 +175,17 @@ async function fetchWithTimeout(
   url: string,
   options: RequestInit & { timeout: number }
 ): Promise<Response> {
+  // Re-validate hostname immediately before fetch to narrow TOCTOU window.
+  // For HTTPS, we cannot pin to a resolved IP without breaking TLS certificate
+  // validation, so we re-resolve and re-check as a practical mitigation.
+  const fetchUrl = new URL(url);
+  const addresses = await resolveHostname(fetchUrl.hostname);
+  for (const ip of addresses) {
+    if (isPrivateIP(ip)) {
+      throw new Error(`Request blocked: hostname resolves to private IP (${ip})`);
+    }
+  }
+
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), options.timeout);
 
