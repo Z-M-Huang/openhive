@@ -104,7 +104,7 @@ Defaults tuneable per deployment. Changing a default requires a new ADR.
 - **Interface-first** -- every external dependency behind an interface in `src/domain/interfaces.ts`
 - **Test doubles** -- manual mock objects implementing interfaces via `vi.fn()`, no mock libraries
 - **File naming** -- kebab-case for all files (skills, agents, source)
-- **Slug format** -- `^[a-z0-9]+(-[a-z0-9]+)*$`, 3-50 chars
+- **Slug format** -- `^[a-z0-9]+(-[a-z0-9]+)*$`, 3-63 chars
 - **ID formats** -- `aid-name-hexchars`, `tid-name-hexchars`
 - **Reserved slugs** -- `main`, `admin`, `system`, `root`, `openhive`
 - **Test co-location** -- `foo.test.ts` next to `foo.ts`

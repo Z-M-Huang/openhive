@@ -149,3 +149,5 @@ async function main() {
 }
 
 export { renderTemplate, htmlEscape };
+
+main();

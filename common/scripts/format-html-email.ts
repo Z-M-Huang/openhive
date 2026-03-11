@@ -92,11 +92,11 @@ function formatHtmlEmail(markdown: string): string {
     }
     // Unordered list
     else if (line.match(/^[-*]\s+/)) {
-      processedLine = `<li style="${STYLES.li}">${processInline(line.slice(2))}</li>`;
+      processedLine = `<li data-list="ul" style="${STYLES.li}">${processInline(line.slice(2))}</li>`;
     }
     // Ordered list
     else if (line.match(/^\d+\.\s+/)) {
-      processedLine = `<li style="${STYLES.li}">${processInline(line.slice(line.indexOf('.') + 2))}</li>`;
+      processedLine = `<li data-list="ol" style="${STYLES.li}">${processInline(line.slice(line.indexOf('.') + 2))}</li>`;
     }
     // Empty line
     else if (line.trim() === '') {
@@ -187,16 +187,17 @@ function wrapLists(html: string): string {
   let inOl = false;
 
   for (const line of lines) {
-    const isLi = line.startsWith('<li ');
-    const isOl = line.match(/^\d+\.\s+<li /) !== null;
+    const isOlItem = line.includes('data-list="ol"');
+    const isUlItem = line.includes('data-list="ul"');
+    const isLi = isOlItem || isUlItem;
 
     if (isLi && !inUl && !inOl) {
-      // Start new list
-      if (isOl) {
-        output.push('<ol>');
+      // Start new list based on data attribute
+      if (isOlItem) {
+        output.push(`<ol style="${STYLES.ol}">`);
         inOl = true;
       } else {
-        output.push('<ul>');
+        output.push(`<ul style="${STYLES.ul}">`);
         inUl = true;
       }
     } else if (!isLi && (inUl || inOl)) {
@@ -210,7 +211,8 @@ function wrapLists(html: string): string {
       }
     }
 
-    output.push(line);
+    // Strip data-list attribute from output
+    output.push(line.replace(/ data-list="(?:ul|ol)"/, ''));
   }
 
   // Close any open list at end

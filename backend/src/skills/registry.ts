@@ -134,7 +134,7 @@ export class SkillRegistryImpl implements SkillRegistry {
     const commonMap = this.skills.get(COMMON_TEAM_SLUG);
     if (commonMap) {
       for (const [name, skill] of commonMap) {
-        merged.set(name, skill);
+        merged.set(name, { ...skill });
       }
     }
 
@@ -142,11 +142,11 @@ export class SkillRegistryImpl implements SkillRegistry {
     const teamMap = this.skills.get(teamSlug);
     if (teamMap) {
       for (const [name, skill] of teamMap) {
-        merged.set(name, skill);
+        merged.set(name, { ...skill });
       }
     }
 
-    // Return defensive copy
+    // Return defensive copy (objects already cloned above)
     return Array.from(merged.values());
   }
 }

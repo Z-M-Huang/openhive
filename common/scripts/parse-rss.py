@@ -66,16 +66,25 @@ def parse_datetime(date_str: str | None) -> str | None:
 
 def parse_element_text(elem: ET.Element, tag: str, namespaces: dict | None = None) -> str:
     """Extract text from element, handling namespaces."""
-    if namespaces:
-        # Try with namespace prefix
-        for prefix, uri in namespaces.items():
-            ns_elem = elem.find(f".//{{{uri}}}{tag}")
-            if ns_elem is not None and ns_elem.text:
-                return sanitize_string(ns_elem.text)
-    # Try without namespace
-    plain_elem = elem.find(f".//{tag}")
-    if plain_elem is not None and plain_elem.text:
-        return sanitize_string(plain_elem.text)
+    # Split prefixed tags (e.g., "dc:date" -> prefix="dc", local="date")
+    if ":" in tag:
+        ns_prefix, local_name = tag.split(":", 1)
+    else:
+        ns_prefix, local_name = None, tag
+
+    if namespaces and ns_prefix and ns_prefix in namespaces:
+        # Look up using the full namespace URI + local name
+        uri = namespaces[ns_prefix]
+        ns_elem = elem.find(f".//{{{uri}}}{local_name}")
+        if ns_elem is not None and ns_elem.text:
+            return sanitize_string(ns_elem.text)
+
+    # Try plain lookup (only safe for tags without namespace prefix)
+    if ns_prefix is None:
+        plain_elem = elem.find(f".//{local_name}")
+        if plain_elem is not None and plain_elem.text:
+            return sanitize_string(plain_elem.text)
+
     return ""
 
 
@@ -151,12 +160,8 @@ def parse_rss(root: ET.Element) -> list[dict[str, Any]]:
     namespaces = detect_namespaces(root)
 
     for channel in channels:
-        # RSS 1.0 uses <item>, RSS 2.0 uses <item>
+        # findall("item") gets direct children — covers both RSS 1.0 and 2.0
         for item_elem in channel.findall("item"):
-            items.append(parse_entry(item_elem, namespaces))
-
-        # Also check for items directly under channel (RSS 2.0)
-        for item_elem in channel.findall(".//item"):
             items.append(parse_entry(item_elem, namespaces))
 
     return items

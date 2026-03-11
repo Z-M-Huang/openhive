@@ -136,7 +136,7 @@ describe('SkillRegistryImpl', () => {
       expect(sharedSkill?.description).toBe('Team version of shared');
     });
 
-    it('listForTeam snapshot is immutable', () => {
+    it('listForTeam snapshot is immutable (array modification)', () => {
       registry.register('my-team', createSkill('skill1', 'First skill'));
 
       const skills = registry.listForTeam('my-team');
@@ -151,6 +151,18 @@ describe('SkillRegistryImpl', () => {
       expect(freshList.length).toBe(originalLength);
       expect(freshList.find(s => s.name === 'skill1')).toBeDefined();
       expect(freshList.find(s => s.name === 'injected')).toBeUndefined();
+    });
+
+    it('listForTeam snapshot is immutable (object mutation)', () => {
+      registry.register('my-team', createSkill('skill1', 'Original description'));
+
+      const skills = registry.listForTeam('my-team');
+      // Mutate the returned object
+      skills[0].description = 'Mutated description';
+
+      // Registry should be unaffected
+      const fresh = registry.get('my-team', 'skill1');
+      expect(fresh?.description).toBe('Original description');
     });
 
     it('empty team with no team-specific skills returns only common skills', () => {

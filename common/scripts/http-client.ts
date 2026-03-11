@@ -103,24 +103,41 @@ function isPrivateIP(ip: string): boolean {
   return false;
 }
 
+function isLiteralIP(hostname: string): boolean {
+  // IPv6 literal (bracketed or raw) or IPv4 dotted-decimal
+  return hostname.includes(':') || /^\d{1,3}(\.\d{1,3}){3}$/.test(hostname);
+}
+
 async function resolveHostname(hostname: string): Promise<string[]> {
+  // Literal IPs don't need DNS resolution — validate directly
+  if (isLiteralIP(hostname)) {
+    return [hostname.replace(/^\[|\]$/g, '')];
+  }
+
   const dns = await import('dns');
   const { promisify } = await import('util');
 
   const resolve4 = promisify(dns.resolve4);
   const resolve6 = promisify(dns.resolve6);
 
+  // Resolve BOTH families and validate all addresses
+  const addresses: string[] = [];
+
   try {
-    const addresses = await resolve4(hostname);
-    return addresses;
-  } catch {
-    try {
-      const addresses6 = await resolve6(hostname);
-      return addresses6;
-    } catch {
-      throw new Error(`DNS resolution failed for: ${hostname}`);
-    }
+    const v4 = await resolve4(hostname);
+    addresses.push(...v4);
+  } catch { /* no A records */ }
+
+  try {
+    const v6 = await resolve6(hostname);
+    addresses.push(...v6);
+  } catch { /* no AAAA records */ }
+
+  if (addresses.length === 0) {
+    throw new Error('DNS resolution failed: no addresses found');
   }
+
+  return addresses;
 }
 
 async function validateUrl(urlString: string, allowHttp: boolean): Promise<URL> {
@@ -240,33 +257,33 @@ async function fetchWithRetry(
 async function main() {
   const args = parseCliArgs();
 
-  // Validate URL
-  const url = await validateUrl(args.url, args.allowHttp);
-
-  // Build fetch options
-  const fetchOptions: RequestInit & { timeout: number } = {
-    method: args.method,
-    timeout: args.timeout,
-    headers: {
-      'User-Agent': 'OpenHive-HTTP-Client/1.0',
-    },
-  };
-
-  if (args.data) {
-    try {
-      JSON.parse(args.data); // Validate JSON
-      fetchOptions.body = args.data;
-      fetchOptions.headers = {
-        ...fetchOptions.headers,
-        'Content-Type': 'application/json',
-      };
-    } catch {
-      console.error('Error: --data must be valid JSON');
-      process.exit(1);
-    }
-  }
-
   try {
+    // Validate URL (inside try to catch validation/DNS errors as JSON)
+    const url = await validateUrl(args.url, args.allowHttp);
+
+    // Build fetch options
+    const fetchOptions: RequestInit & { timeout: number } = {
+      method: args.method,
+      timeout: args.timeout,
+      headers: {
+        'User-Agent': 'OpenHive-HTTP-Client/1.0',
+      },
+    };
+
+    if (args.data) {
+      try {
+        JSON.parse(args.data); // Validate JSON
+        fetchOptions.body = args.data;
+        fetchOptions.headers = {
+          ...fetchOptions.headers,
+          'Content-Type': 'application/json',
+        };
+      } catch {
+        console.error(JSON.stringify({ status: 'error', error: '--data must be valid JSON' }));
+        process.exit(1);
+      }
+    }
+
     const response = await fetchWithRetry(url.toString(), fetchOptions);
 
     // Handle redirect
