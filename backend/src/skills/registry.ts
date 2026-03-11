@@ -130,11 +130,11 @@ export class SkillRegistryImpl implements SkillRegistry {
     // INV-08: Team-scoped skill copies
     const merged = new Map<string, SkillDefinition>();
 
-    // Copy all common skills first
+    // Copy all common skills first (deep clone to prevent nested mutation leaks)
     const commonMap = this.skills.get(COMMON_TEAM_SLUG);
     if (commonMap) {
       for (const [name, skill] of commonMap) {
-        merged.set(name, { ...skill });
+        merged.set(name, structuredClone(skill));
       }
     }
 
@@ -142,11 +142,11 @@ export class SkillRegistryImpl implements SkillRegistry {
     const teamMap = this.skills.get(teamSlug);
     if (teamMap) {
       for (const [name, skill] of teamMap) {
-        merged.set(name, { ...skill });
+        merged.set(name, structuredClone(skill));
       }
     }
 
-    // Return defensive copy (objects already cloned above)
+    // Return defensive copy (objects already deep-cloned above)
     return Array.from(merged.values());
   }
 }

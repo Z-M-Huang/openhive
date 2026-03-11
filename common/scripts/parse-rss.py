@@ -85,6 +85,13 @@ def parse_element_text(elem: ET.Element, tag: str, namespaces: dict | None = Non
         if plain_elem is not None and plain_elem.text:
             return sanitize_string(plain_elem.text)
 
+        # Try default namespace (RSS 1.0/RDF uses xmlns="..." without prefix)
+        if namespaces and "__default__" in namespaces:
+            default_uri = namespaces["__default__"]
+            ns_elem = elem.find(f".//{{{default_uri}}}{local_name}")
+            if ns_elem is not None and ns_elem.text:
+                return sanitize_string(ns_elem.text)
+
     return ""
 
 
@@ -102,13 +109,15 @@ def parse_entry(entry: ET.Element, namespaces: dict | None = None) -> dict[str, 
     if not item["title"]:
         item["title"] = parse_element_text(entry, "name", namespaces)  # For Atom author
 
-    # Link - RSS has <link>, Atom has multiple <link> with rel
-    link_elem = entry.find(".//link")
-    if link_elem is not None:
-        href = link_elem.get("href") or (link_elem.text if link_elem.text else "")
-        item["link"] = sanitize_string(href)
+    # Link - RSS has <link> with text, Atom has <link> with href attr
+    item["link"] = parse_element_text(entry, "link", namespaces)
     if not item["link"]:
-        # Try Atom self link
+        # Try href attribute on <link> elements (Atom style)
+        link_elem = entry.find(".//link")
+        if link_elem is not None and link_elem.get("href"):
+            item["link"] = sanitize_string(link_elem.get("href", ""))
+    if not item["link"]:
+        # Try Atom namespace link
         for link in entry.findall(".//{http://www.w3.org/2005/Atom}link"):
             rel = link.get("rel", "alternate")
             if rel == "alternate" or rel is None:
@@ -152,6 +161,11 @@ def detect_namespaces(xml_text: str, root: ET.Element) -> dict[str, str] | None:
         prefix, uri = match.group(1), match.group(2)
         ns[prefix] = uri
 
+    # Also detect default namespace (xmlns="...") for RSS 1.0/RDF
+    default_match = re.search(r'xmlns=["\']([^"\']+)["\']', xml_text)
+    if default_match:
+        ns["__default__"] = default_match.group(1)
+
     return ns if ns else None
 
 
@@ -162,10 +176,20 @@ def parse_rss(root: ET.Element, xml_text: str) -> list[dict[str, Any]]:
 
     namespaces = detect_namespaces(xml_text, root)
 
+    # Track items found inside channels to avoid duplicates
+    seen_items: set[int] = set()
+
     for channel in channels:
-        # findall("item") gets direct children — covers both RSS 1.0 and 2.0
+        # findall("item") gets direct children — covers RSS 2.0
         for item_elem in channel.findall("item"):
+            seen_items.add(id(item_elem))
             items.append(parse_entry(item_elem, namespaces))
+
+    # RSS 1.0 / RDF: <item> elements are siblings of <channel> at root level
+    for child in root:
+        tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+        if tag == "item" and id(child) not in seen_items:
+            items.append(parse_entry(child, namespaces))
 
     return items
 

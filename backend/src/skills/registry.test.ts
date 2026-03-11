@@ -165,6 +165,24 @@ describe('SkillRegistryImpl', () => {
       expect(fresh?.description).toBe('Original description');
     });
 
+    it('listForTeam snapshot is immutable (nested array mutation)', () => {
+      const skill: SkillDefinition = {
+        name: 'with-tools',
+        description: 'Has tools',
+        body: '# Tools',
+        allowedTools: ['read_file', 'write_file'],
+      };
+      registry.register('__common__', skill);
+
+      const skills = registry.listForTeam('my-team');
+      // Mutate a nested array on the returned object
+      skills[0].allowedTools!.push('dangerous_tool');
+
+      // Registry should be unaffected
+      const fresh = registry.get('my-team', 'with-tools');
+      expect(fresh?.allowedTools).toEqual(['read_file', 'write_file']);
+    });
+
     it('empty team with no team-specific skills returns only common skills', () => {
       // Register common skill
       registry.register('__common__', createSkill('common-skill', 'A common skill'));
