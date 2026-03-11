@@ -1,31 +1,16 @@
 {
   "name": "openhive",
-  "version": "0.1.0",
+  "version": "2.0.0",
   "private": true,
+  "workspaces": [
+    "backend",
+    "web"
+  ],
   "scripts": {
-    "build": "bun run build:backend && bun run build:agent-runner && bun run build:web",
-    "build:backend": "cd backend && (bun install --frozen-lockfile 2>/dev/null || bun install) && bun run build",
-    "build:agent-runner": "cd agent-runner && (bun install --frozen-lockfile 2>/dev/null || bun install) && bun run build",
-    "build:web": "cd web && (bun install --frozen-lockfile 2>/dev/null || bun install) && bun run build",
-    "check": "bun run lint && bun run test",
-    "test": "bun run test:backend && bun run test:agent-runner && bun run test:web",
-    "test:backend": "cd backend && (bun install --frozen-lockfile 2>/dev/null || bun install) && bun run test",
-    "test:agent-runner": "cd agent-runner && (bun install --frozen-lockfile 2>/dev/null || bun install) && bun run test",
-    "test:web": "cd web && (bun install --frozen-lockfile 2>/dev/null || bun install) && bun run test",
-    "lint": "bun run lint:backend && bun run lint:agent-runner && bun run lint:web",
-    "lint:backend": "cd backend && (bun install --frozen-lockfile 2>/dev/null || bun install) && bun run lint",
-    "lint:agent-runner": "cd agent-runner && (bun install --frozen-lockfile 2>/dev/null || bun install) && bun run lint",
-    "lint:web": "cd web && (bun install --frozen-lockfile 2>/dev/null || bun install) && bun run lint",
-    "coverage": "bun run coverage:backend && bun run coverage:agent-runner && bun run coverage:web",
-    "coverage:backend": "mkdir -p coverage && cd backend && bun run test:coverage",
-    "coverage:agent-runner": "mkdir -p coverage && cd agent-runner && bun run test:coverage",
-    "coverage:web": "mkdir -p coverage && cd web && bun run test:coverage",
-    "docker:build": "cd deployments && docker build -t openhive-team -f Dockerfile.team ..",
-    "docker": "mkdir -p .run && chmod a+w data .run && cd deployments && docker compose up --build -d",
-    "docker:logs": "cd deployments && docker compose logs -f --no-log-prefix -t",
-    "docker:clean": "cd deployments && docker compose down --rmi local --volumes && rm -rf ../.run && mkdir -p ../.run",
-    "docker:stop": "cd deployments && docker compose down",
-    "cli": "bun run cli/index.ts",
-    "clean": "docker system prune -af; rm -rf coverage/ backend/dist/ backend/node_modules/ agent-runner/dist/ agent-runner/node_modules/ web/dist/ web/node_modules/"
+    "build": "cd backend && bun run build && cd ../web && bun run build",
+    "test": "cd backend && npx vitest run && cd ../web && npx vitest run",
+    "lint": "cd backend && npx eslint src/ && cd ../web && npx eslint src/",
+    "docker": "docker build -t openhive -f deployments/Dockerfile . && docker compose -f deployments/docker-compose.yml up",
+    "smoke": "cd backend && npx vitest run src/phase-gates/"
   }
 }

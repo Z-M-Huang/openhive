@@ -1,27 +1,25 @@
+# =============================================================================
+# OpenHive v2 Docker Compose -- AC17
+# Network: ICC disabled for container isolation
+# No privileged mode, no host networking
+# =============================================================================
+
 services:
   openhive:
-    build:
-      context: ..
-      dockerfile: deployments/Dockerfile
+    image: openhive:latest
     ports:
       - "8080:8080"
     volumes:
-      # Config and team definitions (read-write: API updates config, creates teams)
-      - ../data:/app/data
-      # Runtime state: database, workspaces, archives (read-write)
-      - ../.run:/app/run
-      # Docker socket for spawning team containers (sibling containers, not DinD)
+      - ./.run/workspace:/app/workspace
+      - ./data:/app/data
       - /var/run/docker.sock:/var/run/docker.sock
-    # environment:
-    #   - OPENHIVE_MASTER_KEY=<your-master-key>
+    environment:
+      OPENHIVE_IS_ROOT: "true"
     networks:
       - openhive-network
 
 networks:
   openhive-network:
-    name: openhive-network
     driver: bridge
     driver_opts:
-      # Disable inter-container communication — containers can only communicate
-      # via the backend, not directly with each other.
       com.docker.network.bridge.enable_icc: "false"

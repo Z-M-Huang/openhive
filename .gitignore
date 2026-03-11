@@ -1,47 +1,38 @@
-.vcp
-.claude
-
-# Go
-openhive
-bin/
-*.exe
-*.exe~
-*.dll
-*.so
-*.dylib
-
-# Node.js
-node_modules/
-dist/
-cmd/openhive/web_dist/
-
-# Coverage
-coverage/
-
-# Runtime state (database, workspaces, archives, docker logs)
+# Runtime state
 .run/
+.claude/
 
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-*~
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+coverage/
+*.tsbuildinfo
+
+# Config files (real configs, not examples)
+data/openhive.yaml
+data/providers.yaml
+
+# Environment
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Database
+*.db-wal
+*.db-shm
+
+# Security
+*.key
+*.pem
+
+# Archives
+data/archives/
 
 # OS
 .DS_Store
 Thumbs.db
 
-# Env
-.env
-.env.local
-
-# Docker compose local override (contains host-specific volume paths)
-deployments/docker-compose.override.yml
-
-# Credentials (real configs contain tokens/keys — only .example files are committed)
-data/openhive.yaml
-data/providers.yaml
-coverage.out
-docker.log
-*.tsbuildinfo
+.vcp

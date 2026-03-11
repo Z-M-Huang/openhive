@@ -1,241 +1,142 @@
 /**
- * OpenHive Backend - API Server
+ * REST API server for OpenHive (root-only).
  *
- * Wires all middleware, API routes, WebSocket endpoints, and SPA together
- * into a Fastify server instance.
+ * Provides the HTTP layer for the OpenHive web portal and REST API endpoints.
+ * Built on Fastify with CORS support, static file serving for the React SPA,
+ * and WebSocket integration for the container hub.
  *
- * createServer(listenAddr, logger, km, spaDir, wsHandler, chatHandler, allowedOrigins, deps)
- * Returns ServerInstance: { start(), shutdown(), address(), app }
+ * **Bind address (NFR06 / AC20):**
+ * By default, the server binds to `127.0.0.1` (loopback only) for security.
+ * Advanced users can override the listen address by setting the
+ * `OPENHIVE_SYSTEM_LISTEN_ADDRESS` environment variable (e.g., `0.0.0.0`
+ * to listen on all interfaces when running behind a reverse proxy).
  *
+ * **Root-only module:** This server is only started when
+ * `OPENHIVE_IS_ROOT=true`. Non-root containers do not run an HTTP server.
+ *
+ * **Static file serving:** The compiled React SPA is served from the
+ * `web/dist` directory. All unmatched routes fall through to `index.html`
+ * for client-side routing.
+ *
+ * **WebSocket integration:** The HTTP server's `upgrade` event is forwarded
+ * to the WSHub for container WebSocket connections on the `/ws/container` path.
+ *
+ * @example
+ * ```ts
+ * const server = new APIServer({ port: 3000 });
+ * await server.start();
+ * // Server listening on http://127.0.0.1:3000
+ * await server.stop();
+ * ```
  */
 
-import Fastify from 'fastify';
-import fastifyWebsocket from '@fastify/websocket';
-import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import type { WebSocket } from 'ws';
-
-import type {
-  ConfigLoader,
-  FastifyUpgradeHandler,
-  GoOrchestrator,
-  HeartbeatMonitor,
-  KeyManager,
-  LogStore,
-  OrgChart,
-  TaskStore,
-} from '../domain/interfaces.js';
-import type { DBLogger, MiddlewareLogger } from './middleware.js';
-import {
-  corsPlugin,
-  panicRecoveryPlugin,
-  requestIdPlugin,
-  securityHeadersPlugin,
-  structuredLoggingPlugin,
-  timingPlugin,
-} from './middleware.js';
-import type { DroppedLogCounter } from './handlers.js';
-import { healthHandler, notFoundHandler, unlockHandler } from './handlers.js';
-import { registerConfigRoutes } from './handlers-config.js';
-import { registerLogRoutes } from './handlers-logs.js';
-import {
-  getTeamsHandler,
-  getTeamHandler,
-  createTeamHandler,
-  deleteTeamHandler,
-  SLUG_PARAM_SCHEMA,
-  CREATE_TEAM_SCHEMA,
-} from './handlers-teams.js';
-import {
-  getTasksHandler,
-  getTaskHandler,
-  cancelTaskHandler,
-  TASK_ID_PARAM_SCHEMA,
-  GET_TASKS_QUERY_SCHEMA,
-} from './handlers-tasks.js';
-import type { PortalWSHandler } from './portal-ws.js';
-import { registerPortalWSRoutes } from './portal-ws.js';
-import { spaPlugin } from './spa.js';
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-/** Route handler type for POST /api/v1/chat. */
-export type ChatHandler = (request: FastifyRequest, reply: FastifyReply) => void | Promise<void>;
-
-/** Optional server dependencies. All fields are optional. */
-export interface ServerDeps {
-  logStore?: LogStore;
-  taskStore?: TaskStore;
-  configLoader?: ConfigLoader;
-  orgChart?: OrgChart;
-  goOrchestrator?: GoOrchestrator;
-  heartbeatMonitor?: HeartbeatMonitor;
-  portalWS?: PortalWSHandler;
-  dbLogger?: DroppedLogCounter;
-  logWriter?: DBLogger;
-}
-
-/** API server instance returned by createServer. */
-export interface ServerInstance {
-  /** Start listening for connections. */
-  start(): Promise<void>;
-  /** Gracefully close the server and release the port. */
-  shutdown(): Promise<void>;
-  /**
-   * Returns the bound address as "host:port" after start(),
-   * or the configured listenAddr before start().
-   */
-  address(): string;
-  /** Underlying Fastify instance (for inject-based testing). */
-  app: FastifyInstance;
-}
-
-// ---------------------------------------------------------------------------
-// createServer
-// ---------------------------------------------------------------------------
+import type { WSHub } from '../domain/index.js';
 
 /**
- * Creates and configures the Fastify API server.
+ * Configuration options for the API server.
  */
-export function createServer(
-  listenAddr: string,
-  logger: MiddlewareLogger,
-  km: KeyManager,
-  spaDir: string | null,
-  wsHandler: FastifyUpgradeHandler | null,
-  chatHandler: ChatHandler | null,
-  allowedOrigins: string[],
-  deps: ServerDeps = {},
-): ServerInstance {
-  const startTime = new Date();
-  const fastify = Fastify({ logger: false, disableRequestLogging: true });
+export interface APIServerConfig {
+  /**
+   * TCP port to listen on.
+   * @default 3000
+   */
+  port: number;
 
-  // ── WebSocket plugin + routes (must be registered in the same scope) ──────
-  // @fastify/websocket's onRoute hook only intercepts routes within its scope.
-  // Routes with { websocket: true } MUST be inside this register() callback.
-  if (wsHandler !== null || deps.portalWS !== undefined) {
-    void fastify.register(async (instance) => {
-      await instance.register(fastifyWebsocket);
+  /**
+   * Bind address for the HTTP server.
+   *
+   * Defaults to `127.0.0.1` (loopback only) per NFR06.
+   * Set to `0.0.0.0` to listen on all interfaces (e.g., behind a reverse proxy).
+   * Can be overridden via the `OPENHIVE_SYSTEM_LISTEN_ADDRESS` environment variable.
+   *
+   * @default '127.0.0.1'
+   */
+  listenAddress?: string;
 
-      if (wsHandler !== null) {
-        instance.get(
-          '/ws/container',
-          { websocket: true },
-          wsHandler as (socket: WebSocket, request: FastifyRequest) => void,
-        );
-      }
+  /**
+   * Optional WSHub instance for WebSocket upgrade handling.
+   * When provided, HTTP upgrade requests on `/ws/container` are forwarded
+   * to the hub.
+   */
+  wsHub?: WSHub;
 
-      if (deps.portalWS !== undefined) {
-        registerPortalWSRoutes(instance, deps.portalWS);
-      }
-    });
+  /**
+   * Path to the static SPA assets directory (compiled React app).
+   * Defaults to the `web/dist` directory relative to the project root.
+   */
+  staticDir?: string;
+}
+
+/**
+ * REST API server implementing the Fastify-based HTTP layer (root-only).
+ *
+ * Responsibilities:
+ * - Serves the REST API endpoints (teams, agents, tasks, logs, config)
+ * - Serves the React SPA as static files with fallback to index.html
+ * - Enables CORS for development and cross-origin access
+ * - Forwards HTTP upgrade requests to the WSHub for WebSocket connections
+ *
+ * **Default bind address:** `127.0.0.1` (loopback only, per NFR06 / AC20).
+ * Override with `OPENHIVE_SYSTEM_LISTEN_ADDRESS` environment variable or
+ * the `listenAddress` config option for advanced deployments.
+ */
+export class APIServer {
+  private readonly _config: APIServerConfig;
+
+  constructor(config: APIServerConfig) {
+    this._config = config;
+    // Prevent unused variable lint error
+    void this._config;
   }
 
-  // ── Middleware stack ─────────────────────────────────────────────────────
-  void fastify.register(requestIdPlugin);
-  void fastify.register(securityHeadersPlugin);
-  void fastify.register(panicRecoveryPlugin(logger));
-  void fastify.register(corsPlugin(allowedOrigins));
-  void fastify.register(timingPlugin);
-  void fastify.register(structuredLoggingPlugin(logger, deps.logWriter));
-
-  // ── Core routes ───────────────────────────────────────────────────────────
-  fastify.get('/api/v1/health', healthHandler(startTime, deps.dbLogger));
-  fastify.post('/api/v1/auth/unlock', unlockHandler(km));
-
-  if (chatHandler !== null) {
-    fastify.post('/api/v1/chat', chatHandler);
+  /**
+   * Start the Fastify server.
+   *
+   * Initialization sequence:
+   * 1. Create Fastify instance with logging
+   * 2. Register `@fastify/cors` plugin for cross-origin requests
+   * 3. Register `@fastify/static` plugin for SPA static file serving
+   * 4. Call {@link registerRoutes} to mount all API route handlers
+   * 5. Set up HTTP upgrade handler to forward `/ws/container` to WSHub
+   * 6. Listen on the configured port and address
+   *
+   * The listen address is resolved in this order:
+   * 1. `OPENHIVE_SYSTEM_LISTEN_ADDRESS` environment variable (highest priority)
+   * 2. `listenAddress` from {@link APIServerConfig}
+   * 3. `127.0.0.1` (default, loopback only per NFR06)
+   *
+   * @throws Error if the server fails to bind to the configured address/port
+   */
+  start(): Promise<void> {
+    throw new Error('Not implemented');
   }
 
-  // Config + provider management (conditional on configLoader)
-  if (deps.configLoader !== undefined) {
-    registerConfigRoutes(fastify, deps.configLoader, km, logger);
+  /**
+   * Gracefully stop the Fastify server.
+   *
+   * Closes all active connections, stops accepting new requests,
+   * and releases the listening socket. Safe to call multiple times.
+   */
+  stop(): Promise<void> {
+    throw new Error('Not implemented');
   }
 
-  // Log viewer (conditional on logStore)
-  if (deps.logStore !== undefined) {
-    registerLogRoutes(fastify, deps.logStore, logger);
+  /**
+   * Register all REST API route handlers on the Fastify instance.
+   *
+   * Mounts route modules under their respective prefixes:
+   * - `/api/teams` - Team CRUD and listing
+   * - `/api/agents` - Agent management
+   * - `/api/tasks` - Task lifecycle and queries
+   * - `/api/logs` - Log querying and streaming
+   * - `/api/config` - Configuration read/write
+   * - `/api/topology` - Org chart / topology inspection
+   * - `/api/health` - Health check endpoint
+   *
+   * Also registers a catch-all route that serves `index.html` for
+   * client-side routing (SPA fallback).
+   */
+  registerRoutes(): void {
+    throw new Error('Not implemented');
   }
-
-  // Team management: GET routes require orgChart; write routes require orch
-  if (deps.orgChart !== undefined) {
-    const hbm = deps.heartbeatMonitor ?? null;
-    fastify.get('/api/v1/teams', getTeamsHandler(deps.orgChart, hbm, logger));
-    fastify.get(
-      '/api/v1/teams/:slug',
-      { schema: SLUG_PARAM_SCHEMA },
-      getTeamHandler(deps.orgChart, hbm, logger),
-    );
-  }
-  if (deps.goOrchestrator !== undefined) {
-    fastify.post(
-      '/api/v1/teams',
-      { schema: CREATE_TEAM_SCHEMA },
-      createTeamHandler(deps.goOrchestrator, logger),
-    );
-    fastify.delete(
-      '/api/v1/teams/:slug',
-      { schema: SLUG_PARAM_SCHEMA },
-      deleteTeamHandler(deps.goOrchestrator, logger),
-    );
-  }
-
-  // Task monitoring: GET routes require taskStore; cancel requires both
-  if (deps.taskStore !== undefined) {
-    fastify.get(
-      '/api/v1/tasks',
-      { schema: GET_TASKS_QUERY_SCHEMA },
-      getTasksHandler(deps.taskStore, logger),
-    );
-    fastify.get(
-      '/api/v1/tasks/:id',
-      { schema: TASK_ID_PARAM_SCHEMA },
-      getTaskHandler(deps.taskStore, logger),
-    );
-  }
-  if (deps.taskStore !== undefined && deps.goOrchestrator !== undefined) {
-    fastify.post(
-      '/api/v1/tasks/:id/cancel',
-      { schema: TASK_ID_PARAM_SCHEMA },
-      cancelTaskHandler(deps.goOrchestrator, deps.taskStore, logger),
-    );
-  }
-
-  // NOTE: WebSocket routes (/ws/container and /api/v1/portal/ws) are registered
-  // inside the @fastify/websocket plugin scope at the top of this function.
-
-  // SPA catch-all or JSON 404 (must be last)
-  if (spaDir !== null) {
-    void fastify.register(spaPlugin, { root: spaDir });
-  } else {
-    fastify.setNotFoundHandler(notFoundHandler());
-  }
-
-  // ── Listen address parsing ────────────────────────────────────────────────
-  const lastColon = listenAddr.lastIndexOf(':');
-  const host = lastColon > 0 ? listenAddr.slice(0, lastColon) : '0.0.0.0';
-  const port = parseInt(listenAddr.slice(lastColon + 1), 10);
-
-  // ── ServerInstance ────────────────────────────────────────────────────────
-  return {
-    app: fastify,
-
-    async start(): Promise<void> {
-      await fastify.listen({ host, port });
-    },
-
-    async shutdown(): Promise<void> {
-      await fastify.close();
-    },
-
-    address(): string {
-      const addr = fastify.server.address();
-      if (addr === null || typeof addr === 'string') {
-        return listenAddr;
-      }
-      const { address, port: boundPort } = addr;
-      return address.includes(':') ? `[${address}]:${boundPort}` : `${address}:${boundPort}`;
-    },
-  };
 }

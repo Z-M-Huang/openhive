@@ -1,25 +1,74 @@
-# OpenHive Provider Configuration
+# =============================================================================
+# OpenHive Provider Presets — providers.yaml
+# =============================================================================
 #
-# cp data/providers.yaml.example data/providers.yaml
+# AI provider presets referenced by name from assistant and agent configs.
+# Copy this file to data/providers.yaml and replace placeholder values
+# with your actual credentials.
 #
-# providers.yaml is gitignored — never commit it.
+# IMPORTANT: data/providers.yaml contains real API keys and is gitignored.
+#            Never commit actual credentials to version control.
+#
+# Provider types:
+#   - oauth:            Uses Claude Code OAuth flow
+#                       Sets CLAUDE_CODE_OAUTH_TOKEN in containers
+#   - anthropic_direct: Uses Anthropic API key directly
+#                       Sets ANTHROPIC_API_KEY + ANTHROPIC_BASE_URL in containers
+#
+# Model tier mapping:
+#   Skills specify a tier (haiku, sonnet, opus) and the provider preset
+#   maps each tier to a concrete model ID. The orchestrator resolves:
+#     agent.model_tier -> provider.models[tier] -> ANTHROPIC_DEFAULT_MODEL
+#
+# See the wiki Configuration-Schemas.md for full details.
+# =============================================================================
 
 providers:
-  # Option A: Claude Code OAuth (run "claude auth login", token is in ~/.claude/.credentials.json)
+  # --------------------------------------------------------------------------
+  # OAuth-based provider (Claude Code OAuth flow)
+  # --------------------------------------------------------------------------
+  # When type is "oauth", the orchestrator sets:
+  #   CLAUDE_CODE_OAUTH_TOKEN=<oauth_token>
+  # in the spawned container's environment.
+  # --------------------------------------------------------------------------
   default:
-    type: oauth
-    oauth_token: ""
+    type: oauth                                  # "oauth" | "anthropic_direct"
+    oauth_token: ""                              # Your Claude Code OAuth token goes here
+                                                 # Auto-encrypted at rest by KeyManager
     models:
-      haiku: haiku
-      sonnet: sonnet
-      opus: opus
+      haiku: claude-haiku-4-5-20251001           # Tier -> concrete model ID
+      sonnet: claude-sonnet-4-6
+      opus: claude-opus-4-6
 
-  # Option B: Direct Anthropic API key (https://console.anthropic.com/settings/keys)
-  # direct:
+  # --------------------------------------------------------------------------
+  # Direct API key provider (Anthropic API)
+  # --------------------------------------------------------------------------
+  # When type is "anthropic_direct", the orchestrator sets:
+  #   ANTHROPIC_API_KEY=<api_key>
+  #   ANTHROPIC_BASE_URL=<base_url>
+  # in the spawned container's environment.
+  # --------------------------------------------------------------------------
+  anthropic-direct:
+    type: anthropic_direct
+    api_key: ""                                  # Your Anthropic API key goes here
+                                                 # Auto-encrypted at rest by KeyManager
+    base_url: https://api.anthropic.com          # Anthropic API base URL
+    models:
+      haiku: claude-haiku-4-5-20251001
+      sonnet: claude-sonnet-4-6
+      opus: claude-opus-4-6
+
+  # --------------------------------------------------------------------------
+  # Non-Anthropic model via compatible API proxy (example)
+  # --------------------------------------------------------------------------
+  # You can use any model that exposes an Anthropic-compatible API endpoint.
+  # The model tier mapping lets you assign any model ID to each tier.
+  # --------------------------------------------------------------------------
+  # custom-proxy:
   #   type: anthropic_direct
-  #   api_key: ""                          # sk-ant-...
-  #   base_url: "https://api.anthropic.com"
+  #   api_key: ""                                # Your proxy API key goes here
+  #   base_url: https://api.example.com/anthropic
   #   models:
-  #     haiku: claude-3-haiku-20240307
-  #     sonnet: claude-sonnet-4-20250514
-  #     opus: claude-opus-4-20250514
+  #     haiku: custom-model-small
+  #     sonnet: custom-model-medium
+  #     opus: custom-model-large

@@ -1,29 +1,129 @@
 /**
- * OpenHive Backend - Config Defaults
+ * Compiled defaults for OpenHive master configuration.
  *
- * Provides compiled-in default values for MasterConfig.
+ * These defaults form the first layer of the three-layer config resolution chain:
+ *   1. Compiled defaults (this file) — safe starting values so the system boots with minimal config
+ *   2. YAML files (data/openhive.yaml) — override compiled defaults field-by-field
+ *   3. Environment variables (OPENHIVE_*) — override YAML values
  *
- * Loading order:
- *   1. defaultMasterConfig() — compiled-in defaults (this file)
- *   2. YAML config file overrides
- *   3. Environment variable overrides (OPENHIVE_* prefix)
+ * All values match Configuration-Schemas.md § "Compiled Defaults" exactly.
  */
 
-import type { MasterConfig } from '../domain/types.js';
+// ---------------------------------------------------------------------------
+// MasterConfig Type
+// ---------------------------------------------------------------------------
+
+export interface LogArchiveConfig {
+  enabled: boolean;
+  max_entries: number;
+  keep_copies: number;
+  archive_dir: string;
+}
+
+export interface MessageArchiveConfig {
+  enabled: boolean;
+  max_entries: number;
+  keep_copies: number;
+  archive_dir: string;
+}
+
+export interface ServerConfig {
+  listen_address: string;
+  data_dir: string;
+  log_level: string;
+  log_archive: LogArchiveConfig;
+  max_message_length: number;
+  default_idle_timeout: string;
+  event_bus_workers: number;
+  portal_ws_max_connections: number;
+  message_archive: MessageArchiveConfig;
+}
+
+export interface DatabasePragma {
+  journal_size_limit: number;
+  cache_size: number;
+  busy_timeout: number;
+}
+
+export interface DatabaseConfig {
+  path: string;
+  wal_mode: boolean;
+  pragma: DatabasePragma;
+}
+
+export interface ResourceLimits {
+  max_memory: string;
+  max_cpus: number;
+  max_old_space: number;
+}
+
+export interface DockerConfig {
+  image: string;
+  network: string;
+  resource_limits: ResourceLimits;
+}
+
+export interface SecurityConfig {
+  encryption_key_path: string;
+  token_ttl: string;
+  allowed_origins: string[];
+}
+
+export interface LimitsConfig {
+  max_depth: number;
+  max_teams: number;
+  max_agents_per_team: number;
+  max_concurrent_tasks: number;
+}
+
+export interface AssistantConfig {
+  name: string;
+  aid: string;
+  provider: string;
+  model_tier: string;
+  max_turns: number;
+  timeout_minutes: number;
+}
+
+export interface ChannelConfig {
+  enabled: boolean;
+}
+
+export interface ChannelsConfig {
+  discord: ChannelConfig;
+  slack: ChannelConfig;
+}
+
+export interface MasterConfig {
+  server: ServerConfig;
+  database: DatabaseConfig;
+  docker: DockerConfig;
+  security: SecurityConfig;
+  limits: LimitsConfig;
+  assistant: AssistantConfig;
+  channels: ChannelsConfig;
+}
+
+// ---------------------------------------------------------------------------
+// Default Values
+// ---------------------------------------------------------------------------
 
 /**
- * Returns a new MasterConfig populated with compiled-in default values.
+ * Returns the compiled default configuration for OpenHive.
+ *
+ * Every field has a safe default so the system can boot with a minimal
+ * (or empty) `openhive.yaml`. Values are overridden by YAML config,
+ * then by OPENHIVE_* environment variables at runtime.
  */
 export function defaultMasterConfig(): MasterConfig {
   return {
-    system: {
+    server: {
       listen_address: '127.0.0.1:8080',
       data_dir: 'data',
-      workspace_root: '/openhive/workspace',
       log_level: 'info',
       log_archive: {
         enabled: true,
-        max_entries: 100000,
+        max_entries: 100_000,
         keep_copies: 5,
         archive_dir: 'data/archives',
       },
@@ -38,6 +138,35 @@ export function defaultMasterConfig(): MasterConfig {
         archive_dir: '',
       },
     },
+    database: {
+      path: 'data/openhive.db',
+      wal_mode: true,
+      pragma: {
+        journal_size_limit: 67_108_864,
+        cache_size: -2000,
+        busy_timeout: 5000,
+      },
+    },
+    docker: {
+      image: 'openhive:latest',
+      network: 'openhive-network',
+      resource_limits: {
+        max_memory: '1024m',
+        max_cpus: 1.0,
+        max_old_space: 768,
+      },
+    },
+    security: {
+      encryption_key_path: 'data/master.key',
+      token_ttl: '24h',
+      allowed_origins: ['http://localhost:8080'],
+    },
+    limits: {
+      max_depth: 3,
+      max_teams: 10,
+      max_agents_per_team: 5,
+      max_concurrent_tasks: 50,
+    },
     assistant: {
       name: 'OpenHive Assistant',
       aid: 'aid-main-001',
@@ -48,7 +177,7 @@ export function defaultMasterConfig(): MasterConfig {
     },
     channels: {
       discord: { enabled: false },
-      whatsapp: { enabled: false },
+      slack: { enabled: false },
     },
   };
 }

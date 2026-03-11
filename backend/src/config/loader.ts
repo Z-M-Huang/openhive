@@ -1,555 +1,210 @@
 /**
- * OpenHive Backend - ConfigLoader
- *
- * The main config management class that coordinates file I/O, file watching,
- * and channel token encryption.
+ * Config loader implementing ConfigLoader interface.
  *
  * Responsibilities:
- *   - Load/save openhive.yaml (master config)
- *   - Auto-encrypt plaintext channel tokens when a KeyManager is available
- *   - Warn about plaintext tokens when KeyManager is locked
- *   - Load/save providers.yaml
- *   - Load/save per-team team.yaml files
- *   - Create and delete team directory structures
- *   - List team slugs from the filesystem
- *   - Watch config files for live-reload via FileWatcher
- *   - Decrypt enc:-prefixed channel tokens for runtime use
+ * - Loads and parses YAML configuration files using the `yaml` library
+ * - Three-layer priority chain: compiled defaults -> YAML files -> env var overlay (OPENHIVE_* prefix)
+ * - Persists config changes back to YAML files
+ * - Hot-reload via chokidar file watcher with 500ms debounce (CON-04)
+ * - Team directory lifecycle (create, delete, list)
+ *
+ * Config files managed:
+ * - data/openhive.yaml — master config (merged with compiled defaults)
+ * - data/providers.yaml — global AI provider presets
+ * - .run/workspace/teams/<slug>/team.yaml — per-team config
  */
 
-import { readdirSync, rmSync, lstatSync } from 'node:fs';
-import { join } from 'node:path';
-
-import type { MasterConfig, Provider, Team, ChannelsConfig } from '../domain/types.js';
-import type { ConfigLoader, KeyManager } from '../domain/interfaces.js';
-import { validateSlug } from '../domain/validation.js';
-import { loadMasterFromFile, saveMasterToFile } from './master.js';
-import { loadProvidersFromFile, saveProvidersToFile } from './providers.js';
-import { validateTeamPath, loadTeamFromFile, saveTeamToFile, createTeamDirectory } from './team.js';
-import { validateMasterConfig } from './validation.js';
-import { FileWatcher } from './watcher.js';
-
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-const ENC_TOKEN_PREFIX = 'enc:';
-const DEFAULT_DEBOUNCE_MS = 200;
-
-// ---------------------------------------------------------------------------
-// ConfigLoaderImpl
-// ---------------------------------------------------------------------------
+import type { ConfigLoader } from '../domain/index.js';
 
 /**
- * Implements the ConfigLoader interface. Coordinates config file I/O,
- * file watching, and channel token encryption.
+ * YAML-based config loader with env var overlay and file watching.
  *
- * Constructor parameters:
- *   - dataDir:  path to the global config directory (openhive.yaml, providers.yaml)
- *   - teamsDir: path to the directory containing the teams/ subdirectory.
- *               Defaults to dataDir if not provided.
+ * Uses chokidar for file system watching with 500ms debounce to avoid
+ * rapid-fire reloads during editor save sequences (CON-04).
  */
 export class ConfigLoaderImpl implements ConfigLoader {
-  private readonly dataDir: string;
-  private readonly teamsDir: string;
-  private masterCfg: MasterConfig | null = null;
-  private watcher: FileWatcher | null = null;
-  private keyManager: KeyManager | null = null;
-
-  constructor(dataDir: string = 'data', teamsDir: string = '') {
-    this.dataDir = dataDir !== '' ? dataDir : 'data';
-    this.teamsDir = teamsDir !== '' ? teamsDir : this.dataDir;
-  }
-
-  // -------------------------------------------------------------------------
-  // setKeyManager
-  // -------------------------------------------------------------------------
-
   /**
-   * Attaches a KeyManager for auto-encryption of channel tokens.
-   * Must be called before loadMaster() for auto-encryption to take effect.
+   * Loads the master config from data/openhive.yaml.
+   *
+   * Resolution chain:
+   *   1. Start with compiled defaults (defaultMasterConfig)
+   *   2. Deep-merge YAML file fields over defaults
+   *   3. Apply OPENHIVE_* env var overrides (dot-path mapping)
+   *
+   * The merged result is validated via validateMasterConfig before return.
+   * Caches the result in memory for getMaster() access.
+   *
+   * @returns The fully resolved master config
+   * @throws Error if the YAML file exists but is malformed
+   * @throws Error if validation fails after merge
    */
-  setKeyManager(km: KeyManager): void {
-    this.keyManager = km;
+  loadMaster(): Promise<Record<string, unknown>> {
+    throw new Error('Not implemented');
   }
 
-  // -------------------------------------------------------------------------
-  // loadMaster
-  // -------------------------------------------------------------------------
-
   /**
-   * Reads and parses openhive.yaml from dataDir.
+   * Persists the master config to data/openhive.yaml.
    *
-   * If a KeyManager is set and unlocked, plaintext channel tokens are encrypted
-   * and the file is written back to disk automatically.
+   * Writes only fields that differ from compiled defaults to keep the
+   * YAML file minimal. Validates before writing.
    *
-   * If a KeyManager is set but locked, a warning is logged for each plaintext
-   * token (tokens remain functional, just unencrypted at rest).
-   *
-   * Updates the internal cache on success.
+   * @param config - The master config to save
+   * @throws Error if validation fails
+   * @throws Error if the file cannot be written
    */
-  async loadMaster(): Promise<MasterConfig> {
-    const path = join(this.dataDir, 'openhive.yaml');
-    const cfg = loadMasterFromFile(path);
-
-    if (this.keyManager !== null && !this.keyManager.isLocked()) {
-      // KeyManager is unlocked — auto-encrypt any plaintext tokens.
-      let changed = false;
-
-      if (
-        cfg.channels.discord.token !== undefined &&
-        cfg.channels.discord.token !== '' &&
-        !cfg.channels.discord.token.startsWith(ENC_TOKEN_PREFIX)
-      ) {
-        try {
-          const encrypted = await this.keyManager.encrypt(cfg.channels.discord.token);
-          cfg.channels.discord.token = encrypted;
-          changed = true;
-        } catch (err) {
-          // Log warning but do not fail — token remains plaintext.
-          console.warn('failed to encrypt discord token:', err instanceof Error ? err.message : String(err));
-        }
-      }
-
-      if (
-        cfg.channels.whatsapp.token !== undefined &&
-        cfg.channels.whatsapp.token !== '' &&
-        !cfg.channels.whatsapp.token.startsWith(ENC_TOKEN_PREFIX)
-      ) {
-        try {
-          const encrypted = await this.keyManager.encrypt(cfg.channels.whatsapp.token);
-          cfg.channels.whatsapp.token = encrypted;
-          changed = true;
-        } catch (err) {
-          console.warn('failed to encrypt whatsapp token:', err instanceof Error ? err.message : String(err));
-        }
-      }
-
-      if (changed) {
-        try {
-          saveMasterToFile(path, cfg);
-        } catch (err) {
-          // Non-fatal — encryption succeeded but persistence failed.
-          console.warn('failed to persist encrypted tokens:', err instanceof Error ? err.message : String(err));
-        }
-      }
-    } else if (this.keyManager !== null && this.keyManager.isLocked()) {
-      // KeyManager present but locked: warn about any plaintext tokens.
-      if (
-        cfg.channels.discord.token !== undefined &&
-        cfg.channels.discord.token !== '' &&
-        !cfg.channels.discord.token.startsWith(ENC_TOKEN_PREFIX)
-      ) {
-        console.warn(
-          'STARTUP WARNING: discord channel token is stored in plaintext; ' +
-          'unlock the key manager to encrypt it at rest',
-          { channel: 'discord', action_required: 'POST /api/v1/auth/unlock' },
-        );
-      }
-
-      if (
-        cfg.channels.whatsapp.token !== undefined &&
-        cfg.channels.whatsapp.token !== '' &&
-        !cfg.channels.whatsapp.token.startsWith(ENC_TOKEN_PREFIX)
-      ) {
-        console.warn(
-          'STARTUP WARNING: whatsapp channel token is stored in plaintext; ' +
-          'unlock the key manager to encrypt it at rest',
-          { channel: 'whatsapp', action_required: 'POST /api/v1/auth/unlock' },
-        );
-      }
-    }
-
-    this.masterCfg = cfg;
-    return cfg;
+  saveMaster(_config: Record<string, unknown>): Promise<void> {
+    throw new Error('Not implemented');
   }
 
-  // -------------------------------------------------------------------------
-  // saveMaster
-  // -------------------------------------------------------------------------
-
   /**
-   * Validates and writes the master config to openhive.yaml atomically.
-   * Updates the internal cache on success.
+   * Returns the cached master config loaded by the most recent loadMaster() call.
    *
-   * Throws ValidationError if the config is invalid.
-   * Throws Error if the file cannot be written.
+   * Does NOT reload from disk. Call loadMaster() first to populate.
+   *
+   * @returns The cached master config
+   * @throws Error if loadMaster() has not been called
    */
-  async saveMaster(cfg: MasterConfig): Promise<void> {
-    validateMasterConfig(cfg);
-
-    const path = join(this.dataDir, 'openhive.yaml');
-    saveMasterToFile(path, cfg);
-
-    this.masterCfg = cfg;
+  getMaster(): Record<string, unknown> {
+    throw new Error('Not implemented');
   }
 
-  // -------------------------------------------------------------------------
-  // getMaster
-  // -------------------------------------------------------------------------
-
   /**
-   * Returns the currently cached master config.
+   * Loads provider presets from data/providers.yaml.
    *
-   * Throws Error if loadMaster() has not been called yet.
+   * Validates via validateProviders. Does not apply env var overlay
+   * (providers contain secrets resolved at container_init time).
+   *
+   * @returns The parsed and validated providers config
+   * @throws Error if the file is missing or malformed
+   * @throws Error if validation fails
    */
-  getMaster(): MasterConfig {
-    if (this.masterCfg === null) {
-      throw new Error('master config not loaded; call loadMaster() first');
-    }
-    return this.masterCfg;
+  loadProviders(): Promise<Record<string, unknown>> {
+    throw new Error('Not implemented');
   }
 
-  // -------------------------------------------------------------------------
-  // loadProviders
-  // -------------------------------------------------------------------------
-
   /**
-   * Reads and parses providers.yaml from dataDir.
+   * Persists provider presets to data/providers.yaml.
    *
-   * Throws Error if the file cannot be read or parsed.
-   * Throws ValidationError if the providers map is empty or any entry is invalid.
+   * Validates before writing.
+   *
+   * @param providers - The providers config to save
+   * @throws Error if validation fails
+   * @throws Error if the file cannot be written
    */
-  async loadProviders(): Promise<Record<string, Provider>> {
-    const path = join(this.dataDir, 'providers.yaml');
-    return loadProvidersFromFile(path);
+  saveProviders(_providers: Record<string, unknown>): Promise<void> {
+    throw new Error('Not implemented');
   }
 
-  // -------------------------------------------------------------------------
-  // saveProviders
-  // -------------------------------------------------------------------------
-
   /**
-   * Writes providers.yaml to dataDir atomically.
+   * Loads a team config from .run/workspace/teams/<slug>/team.yaml.
    *
-   * Throws Error if the file cannot be written.
+   * Validates via validateTeam.
+   *
+   * @param slug - The team slug (directory name)
+   * @returns The parsed and validated team config
+   * @throws Error if the team directory or file is missing
+   * @throws Error if validation fails
    */
-  async saveProviders(providers: Record<string, Provider>): Promise<void> {
-    const path = join(this.dataDir, 'providers.yaml');
-    saveProvidersToFile(path, providers);
+  loadTeam(_slug: string): Promise<Record<string, unknown>> {
+    throw new Error('Not implemented');
   }
 
-  // -------------------------------------------------------------------------
-  // loadTeam
-  // -------------------------------------------------------------------------
-
   /**
-   * Reads and parses <teamsDir>/teams/<slug>/team.yaml.
+   * Persists a team config to .run/workspace/teams/<slug>/team.yaml.
    *
-   * Validates the path via validateTeamPath before reading.
+   * Validates via validateTeam before writing.
    *
-   * Throws ValidationError if the slug is invalid or the path fails security checks.
-   * Throws Error if the file cannot be read or parsed.
+   * @param slug - The team slug (directory name)
+   * @param team - The team config to save
+   * @throws Error if the team directory does not exist
+   * @throws Error if validation fails
    */
-  async loadTeam(slug: string): Promise<Team> {
-    const teamDir = validateTeamPath(this.teamsDir, slug);
-    const path = join(teamDir, 'team.yaml');
-    return loadTeamFromFile(path, slug);
+  saveTeam(_slug: string, _team: Record<string, unknown>): Promise<void> {
+    throw new Error('Not implemented');
   }
 
-  // -------------------------------------------------------------------------
-  // saveTeam
-  // -------------------------------------------------------------------------
-
   /**
-   * Writes <teamsDir>/teams/<slug>/team.yaml atomically.
+   * Creates a team workspace directory at .run/workspace/teams/<slug>/.
    *
-   * Validates the path via validateTeamPath before writing.
+   * Scaffolds the directory structure including .claude/agents/,
+   * .claude/skills/, .claude/settings.json, and work/tasks/.
    *
-   * Throws ValidationError if the slug is invalid or the path fails security checks.
-   * Throws Error if the file cannot be written.
+   * @param slug - The team slug (must be valid kebab-case, not reserved)
+   * @throws Error if the directory already exists
+   * @throws Error if the slug is invalid
    */
-  async saveTeam(slug: string, team: Team): Promise<void> {
-    const teamDir = validateTeamPath(this.teamsDir, slug);
-    const path = join(teamDir, 'team.yaml');
-    saveTeamToFile(path, team);
+  createTeamDir(_slug: string): Promise<void> {
+    throw new Error('Not implemented');
   }
 
-  // -------------------------------------------------------------------------
-  // createTeamDir
-  // -------------------------------------------------------------------------
-
   /**
-   * Creates the config directory for a new team under teamsDir.
+   * Deletes a team workspace directory at .run/workspace/teams/<slug>/.
    *
-   * Delegates to createTeamDirectory which creates:
-   *   <teamsDir>/teams/<slug>/
-   *   <teamsDir>/teams/<slug>/team.yaml  (minimal, if absent)
+   * Removes the entire directory tree. Use archiveWorkspace() on
+   * ContainerProvisioner first if preservation is needed.
    *
-   * Workspace files (CLAUDE.md, .claude/agents/, .claude/skills/) are
-   * created separately by scaffoldTeamWorkspace() in .run/teams/<slug>/.
+   * @param slug - The team slug
+   * @throws Error if the directory does not exist
    */
-  async createTeamDir(slug: string): Promise<void> {
-    createTeamDirectory(this.teamsDir, slug);
+  deleteTeamDir(_slug: string): Promise<void> {
+    throw new Error('Not implemented');
   }
 
-  // -------------------------------------------------------------------------
-  // deleteTeamDir
-  // -------------------------------------------------------------------------
-
   /**
-   * Removes the team directory at <teamsDir>/teams/<slug>.
+   * Lists all team slugs by scanning .run/workspace/teams/ for directories
+   * that contain a team.yaml file.
    *
-   * Validates the path via validateTeamPath before deleting to prevent
-   * directory traversal attacks.
-   *
-   * Throws ValidationError if the slug is invalid or the path fails security checks.
-   * Throws Error if the directory cannot be removed.
+   * @returns Array of team slug strings, sorted alphabetically
    */
-  async deleteTeamDir(slug: string): Promise<void> {
-    const teamDir = validateTeamPath(this.teamsDir, slug);
-    try {
-      rmSync(teamDir, { recursive: true, force: true });
-    } catch (err) {
-      throw new Error(
-        `failed to remove team directory ${teamDir}: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
+  listTeams(): Promise<string[]> {
+    throw new Error('Not implemented');
   }
 
-  // -------------------------------------------------------------------------
-  // listTeams
-  // -------------------------------------------------------------------------
-
   /**
-   * Returns all team slugs found in <teamsDir>/teams/.
+   * Starts watching data/openhive.yaml for changes.
    *
-   * Filters entries to only include:
-   *   - directories (not files or symlinks)
-   *   - slugs that pass validateSlug
-   *   - slugs that have a team.yaml file present
+   * Uses chokidar with 500ms debounce (CON-04). On change, reloads and
+   * validates the config, then invokes the callback. Ignores changes
+   * that result in identical config (content-hash comparison).
    *
-   * Returns an empty array if the teams/ directory does not exist.
+   * @param callback - Called after successful reload
    */
-  async listTeams(): Promise<string[]> {
-    const teamsDir = join(this.teamsDir, 'teams');
-
-    let entryNames: string[];
-    try {
-      // Read as plain strings (not Dirent) to avoid Buffer vs string type confusion
-      // in different @types/node versions.
-      entryNames = readdirSync(teamsDir, { encoding: 'utf8' });
-    } catch (err) {
-      const nodeErr = err as NodeJS.ErrnoException;
-      if (nodeErr.code === 'ENOENT') {
-        return [];
-      }
-      throw new Error(
-        `failed to list teams: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-
-    const slugs: string[] = [];
-
-    for (const name of entryNames) {
-      // Only consider valid slugs — filters out entries with invalid names
-      // (e.g. uppercase, path traversal, etc.).
-      try {
-        validateSlug(name);
-      } catch {
-        continue;
-      }
-
-      // Verify it is a directory (not a file or symlink at the top level).
-      const entryPath = join(teamsDir, name);
-      try {
-        const stat = lstatSync(entryPath);
-        if (!stat.isDirectory()) {
-          continue;
-        }
-      } catch {
-        continue;
-      }
-
-      // Only include slugs that have a team.yaml file present.
-      const teamFile = join(teamsDir, name, 'team.yaml');
-      try {
-        lstatSync(teamFile);
-        slugs.push(name);
-      } catch {
-        // No team.yaml — skip this entry.
-      }
-    }
-
-    return slugs;
+  watchMaster(_callback: () => void): Promise<void> {
+    throw new Error('Not implemented');
   }
 
-  // -------------------------------------------------------------------------
-  // watchMaster
-  // -------------------------------------------------------------------------
-
   /**
-   * Watches openhive.yaml for changes and calls the callback (debounced 200ms)
-   * with the reloaded config. Also updates the internal cache on reload.
+   * Starts watching data/providers.yaml for changes.
    *
-   * Creates a FileWatcher if one does not already exist.
-   */
-  async watchMaster(callback: (cfg: MasterConfig) => void): Promise<void> {
-    this.ensureWatcher();
-
-    const path = join(this.dataDir, 'openhive.yaml');
-    this.watcher!.watch(path, () => {
-      let cfg: MasterConfig;
-      try {
-        cfg = loadMasterFromFile(path);
-      } catch (err) {
-        console.error('failed to reload master config:', err instanceof Error ? err.message : String(err));
-        return;
-      }
-      this.masterCfg = cfg;
-      callback(cfg);
-    });
-  }
-
-  // -------------------------------------------------------------------------
-  // watchProviders
-  // -------------------------------------------------------------------------
-
-  /**
-   * Watches providers.yaml for changes and calls the callback (debounced 200ms)
-   * with the reloaded providers map.
+   * Uses chokidar with 500ms debounce (CON-04). On change, reloads and
+   * validates, then invokes the callback.
    *
-   * Creates a FileWatcher if one does not already exist.
+   * @param callback - Called after successful reload
    */
-  async watchProviders(callback: (providers: Record<string, Provider>) => void): Promise<void> {
-    this.ensureWatcher();
-
-    const path = join(this.dataDir, 'providers.yaml');
-    this.watcher!.watch(path, () => {
-      let providers: Record<string, Provider>;
-      try {
-        providers = loadProvidersFromFile(path);
-      } catch (err) {
-        console.error('failed to reload providers config:', err instanceof Error ? err.message : String(err));
-        return;
-      }
-      callback(providers);
-    });
+  watchProviders(_callback: () => void): Promise<void> {
+    throw new Error('Not implemented');
   }
 
-  // -------------------------------------------------------------------------
-  // watchTeam
-  // -------------------------------------------------------------------------
-
   /**
-   * Watches <teamsDir>/teams/<slug>/team.yaml for changes and calls the
-   * callback (debounced 200ms) with the reloaded team config.
+   * Starts watching a team's team.yaml for changes.
    *
-   * Creates a FileWatcher if one does not already exist.
+   * Uses chokidar with 500ms debounce (CON-04). On change, reloads and
+   * validates, then invokes the callback.
+   *
+   * @param slug - The team slug
+   * @param callback - Called after successful reload
    */
-  async watchTeam(slug: string, callback: (team: Team) => void): Promise<void> {
-    this.ensureWatcher();
-
-    const path = join(this.teamsDir, 'teams', slug, 'team.yaml');
-    this.watcher!.watch(path, () => {
-      let team: Team;
-      try {
-        team = loadTeamFromFile(path, slug);
-      } catch (err) {
-        console.error(
-          `failed to reload team config for slug "${slug}":`,
-          err instanceof Error ? err.message : String(err),
-        );
-        return;
-      }
-      callback(team);
-    });
+  watchTeam(_slug: string, _callback: () => void): Promise<void> {
+    throw new Error('Not implemented');
   }
 
-  // -------------------------------------------------------------------------
-  // stopWatching
-  // -------------------------------------------------------------------------
-
   /**
-   * Stops all file watchers and cancels pending debounce timers.
+   * Stops all active file watchers and clears debounce timers.
+   *
+   * Safe to call multiple times. After this call, no further change
+   * callbacks will fire.
    */
   stopWatching(): void {
-    if (this.watcher !== null) {
-      // stop() is async (chokidar close). Fire-and-forget — we don't await
-      // here because the interface declares stopWatching() as void. Callers who need clean shutdown
-      // should await stopWatchingAsync() if added in the future.
-      void this.watcher.stop();
-      this.watcher = null;
-    }
+    throw new Error('Not implemented');
   }
-
-  // -------------------------------------------------------------------------
-  // decryptChannelTokens
-  // -------------------------------------------------------------------------
-
-  /**
-   * Returns a copy of ChannelsConfig with all enc:-prefixed tokens decrypted
-   * for runtime use.
-   *
-   * If the KeyManager is null or locked, tokens are returned as-is. Callers
-   * must not use enc:-prefixed values as real credentials.
-   *
-   * Throws Error if decryption fails for any token.
-   */
-  async decryptChannelTokens(channels: ChannelsConfig): Promise<ChannelsConfig> {
-    // Deep copy the channels config to avoid mutating the original.
-    const result: ChannelsConfig = {
-      discord: { ...channels.discord },
-      whatsapp: { ...channels.whatsapp },
-    };
-
-    if (this.keyManager === null || this.keyManager.isLocked()) {
-      return result;
-    }
-
-    if (
-      result.discord.token !== undefined &&
-      result.discord.token.startsWith(ENC_TOKEN_PREFIX)
-    ) {
-      try {
-        result.discord.token = await this.keyManager.decrypt(result.discord.token);
-      } catch (err) {
-        throw new Error(
-          `failed to decrypt discord token: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    }
-
-    if (
-      result.whatsapp.token !== undefined &&
-      result.whatsapp.token.startsWith(ENC_TOKEN_PREFIX)
-    ) {
-      try {
-        result.whatsapp.token = await this.keyManager.decrypt(result.whatsapp.token);
-      } catch (err) {
-        throw new Error(
-          `failed to decrypt whatsapp token: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    }
-
-    return result;
-  }
-
-  // -------------------------------------------------------------------------
-  // Private helpers
-  // -------------------------------------------------------------------------
-
-  /**
-   * Ensures a FileWatcher instance exists, creating one if needed.
-   */
-  private ensureWatcher(): void {
-    if (this.watcher === null) {
-      this.watcher = new FileWatcher(DEFAULT_DEBOUNCE_MS);
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Factory
-// ---------------------------------------------------------------------------
-
-/**
- * Creates a new ConfigLoaderImpl instance.
- *
- *   - dataDir:  global config files (openhive.yaml, providers.yaml).
- *               Defaults to "data" if empty.
- *   - teamsDir: team definitions (teams/<slug>/). Defaults to dataDir if empty.
- */
-export function newConfigLoader(dataDir: string = 'data', teamsDir: string = ''): ConfigLoaderImpl {
-  return new ConfigLoaderImpl(dataDir, teamsDir);
 }

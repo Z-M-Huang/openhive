@@ -1,33 +1,183 @@
-# OpenHive Master Configuration
+# =============================================================================
+# OpenHive Configuration — openhive.yaml
+# =============================================================================
 #
-# cp data/openhive.yaml.example data/openhive.yaml
+# Main configuration file for the OpenHive root orchestrator.
+# Copy this file to data/openhive.yaml and edit to match your environment.
 #
-# openhive.yaml is gitignored — never commit it (contains channel tokens).
+# Configuration resolution order (later overrides earlier):
+#   1. Compiled defaults (defaultMasterConfig)
+#   2. This YAML file (data/openhive.yaml)
+#   3. OPENHIVE_* environment variables
+#
+# See the wiki Configuration-Schemas.md for full details.
+# =============================================================================
 
-system:
-  listen_address: "127.0.0.1:8080"
-  data_dir: "data"
-  workspace_root: "data/workspaces"
-  log_level: "debug"
+# ------------------------------------------------------------------------------
+# Server settings
+# ------------------------------------------------------------------------------
+server:
+  listen_address: "0.0.0.0:8080"       # Host:port for the HTTP/WS server
+                                        # Env override: OPENHIVE_SYSTEM_LISTEN_ADDRESS
+  port: 8080                            # Port (alternative to listen_address)
+  host: "0.0.0.0"                       # Bind address
+  data_dir: data                        # Directory for persistent data files
+                                        # Env override: OPENHIVE_DATA_DIR
+  log_level: info                       # debug | info | warn | error
+                                        # Env override: OPENHIVE_LOG_LEVEL
   log_archive:
-    enabled: true
-    max_entries: 100000
-    keep_copies: 5
-    archive_dir: "data/archives"
+    enabled: true                       # Archive old log entries
+    max_entries: 100000                  # Max entries before archiving
+    keep_copies: 5                      # Number of archive copies to retain
+    archive_dir: /app/workspace/archives # Directory for archived logs
+  max_message_length: 0                 # 0 = no limit on message length
+  default_idle_timeout: ""              # Container idle timeout, e.g. "30m" (empty = no timeout)
+  event_bus_workers: 0                  # 0 = use default worker count
+  portal_ws_max_connections: 0          # 0 = no limit on portal WebSocket connections
+  message_archive:
+    enabled: false                      # Archive old messages
+    max_entries: 0                      # Max message entries before archiving
+    keep_copies: 0                      # Number of message archive copies
+    archive_dir: ""                     # Directory for message archives
 
+# ------------------------------------------------------------------------------
+# Database settings (SQLite with WAL mode)
+# ------------------------------------------------------------------------------
+database:
+  path: "data/openhive.db"             # SQLite database file path
+  wal_mode: true                        # Enable WAL mode for concurrent reads
+  pragma:
+    journal_size_limit: 67108864        # 64 MB journal size limit
+    cache_size: -2000                   # Negative = KiB; -2000 = 2 MB cache
+    busy_timeout: 5000                  # Wait 5s before returning SQLITE_BUSY
+
+# ------------------------------------------------------------------------------
+# Docker container settings
+# All team containers use the same image (INV-06).
+# ------------------------------------------------------------------------------
+docker:
+  image: "openhive:latest"             # Docker image for all containers
+  network: "openhive-network"          # Docker bridge network name
+  resource_limits:
+    max_memory: "1024m"                 # Default memory limit per container
+    max_cpus: 1.0                       # CPU limit per container
+    max_old_space: 768                  # Node.js --max-old-space-size (MB)
+
+# ------------------------------------------------------------------------------
+# Security settings
+# ------------------------------------------------------------------------------
+security:
+  encryption_key_path: "data/master.key"  # Path to AES-256-GCM master key file
+                                          # Env override: OPENHIVE_MASTER_KEY (value, not path)
+  token_ttl: "24h"                        # Long-lived config token TTL
+                                          # One-time connection tokens derive a 5-min TTL
+  allowed_origins:                        # CORS origins for the web portal
+    - "http://localhost:3000"
+    - "http://localhost:8080"
+
+# ------------------------------------------------------------------------------
+# System limits (configurable safety nets)
+# See Design-Rules CON-01 through CON-12
+# ------------------------------------------------------------------------------
+limits:
+  max_depth: 3                          # Max team nesting depth (CON-01)
+  max_teams: 10                         # Max teams per parent (CON-02)
+  max_agents_per_team: 5                # Max agents in a single team (CON-03)
+  max_concurrent_tasks: 50              # Max tasks in active state system-wide
+
+# ------------------------------------------------------------------------------
+# Main assistant configuration
+# The assistant is the root-level AI agent that users interact with directly.
+# ------------------------------------------------------------------------------
 assistant:
-  name: "OpenHive Assistant"
-  aid: "aid-main-001"
-  provider: "default"
-  model_tier: "opus"
-  max_turns: 50
-  timeout_minutes: 10
+  name: "OpenHive Assistant"            # Assistant display name
+  aid: "aid-main-001"                   # Agent ID (must match aid-xxx-xxx format)
+  provider: "default"                   # References a preset in providers.yaml
+  model_tier: "opus"                    # haiku | sonnet | opus
+  max_turns: 50                         # Safety cap on conversation turns
+  timeout_minutes: 10                   # Default timeout per task (minutes)
 
+# ------------------------------------------------------------------------------
+# Top-level agents (team leads for root-level teams)
+# Populated dynamically as the assistant creates teams.
+# Each agent here leads a child team from the root container.
+# ------------------------------------------------------------------------------
+agents:
+  - aid: "aid-example-a1b2c3d4"         # Agent ID (globally unique, aid-xxx-xxx format)
+    name: "ExampleTeamLead"             # Agent display name
+    leads_team: "example-team"          # Team slug this agent leads
+
+# ------------------------------------------------------------------------------
+# Messaging channels
+# Configure how users communicate with the assistant.
+# Discord-only for v2.0; Slack adapter interface ready but not implemented.
+# ------------------------------------------------------------------------------
 channels:
   discord:
-    enabled: false
-    token: ""             # Bot token from https://discord.com/developers/applications
-    channel_id: ""        # Right-click channel > Copy Channel ID
-  whatsapp:
-    enabled: false
-    store_path: "data/whatsapp"  # Session persistence directory (QR auth on first run)
+    enabled: true                       # Enable Discord channel
+    token_env: DISCORD_BOT_TOKEN        # Env var name that holds the bot token
+                                        # (do NOT put the token value here)
+    prefix: "!"                         # Command prefix for channel messages
+    channel_id: "123456789012345678"    # Discord channel ID to listen on
+  slack:
+    enabled: false                      # Enable Slack channel (not implemented in v2.0)
+    token_env: SLACK_BOT_TOKEN          # Env var name that holds the bot token
+    prefix: "/"                         # Command prefix for channel messages
+
+# ------------------------------------------------------------------------------
+# Provider config reference
+# Points to the providers.yaml file containing AI provider presets.
+# See data/providers.yaml.example for the provider schema.
+# ------------------------------------------------------------------------------
+providers: "data/providers.yaml"        # Path to provider presets file
+
+# ------------------------------------------------------------------------------
+# Global triggers
+# Automate task creation via cron schedules, webhooks, or channel events.
+# These triggers can target any team in the system.
+# See Configuration-Schemas.md Section 5 for the full trigger schema.
+# ------------------------------------------------------------------------------
+triggers:
+  # Cron trigger — runs on a schedule
+  - name: "weekly-report"
+    type: "cron"
+    schedule: "0 9 * * MON"             # Every Monday at 9 AM (cron expression)
+    agent: "aid-analyst-a1b2c3d4"       # Agent AID to assign the task to
+    target_team: "analytics-team"       # Team slug to dispatch the task to
+    task:
+      title: "Weekly metrics summary"
+      prompt: "Generate and distribute the weekly metrics report."
+      priority: 3                       # 1 (lowest) to 5 (highest), default 3
+
+  # Webhook trigger — fires on HTTP POST to the registered path
+  - name: "pr-review"
+    type: "webhook"
+    event: "pull_request"               # Event type label
+    source: "github"                    # Source system
+    path: "/hooks/github-pr"            # URL path for incoming webhooks
+    agent: "aid-reviewer-e5f6g7h8"      # Agent AID to assign the task to
+    target_team: "code-review-team"
+    task:
+      title: "Review PR"
+      prompt: "Review the following pull request: {{payload}}"
+      priority: 4
+
+  # Channel event trigger — fires on matching messages
+  # - name: "urgent-keyword"
+  #   type: "channel_event"
+  #   channel: "discord"                # Channel name (discord, slack)
+  #   pattern: "(?i)\\bURGENT\\b"      # Regex pattern to match messages
+  #   agent: "aid-triage-i9j0k1l2"
+  #   target_team: "support-team"
+  #   task:
+  #     title: "Urgent message triage"
+  #     prompt: "Triage the urgent message: {{payload}}"
+  #     priority: 5
+
+# ------------------------------------------------------------------------------
+# External skill registries
+# URLs of remote skill registries for discovering and installing agent skills.
+# ------------------------------------------------------------------------------
+skill_registries:
+  - "https://example.com/skills"
+  - "https://skills.example.org/registry"

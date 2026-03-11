@@ -1,204 +1,439 @@
-# OpenHive
+# OpenHive v2 -- Developer Reference
 
-Personal AI agent orchestration platform. Users interact with a main assistant via any messaging channel (Discord, WhatsApp, etc.). The assistant dynamically creates hierarchical teams of AI agents that collaborate on tasks. Each team runs in an isolated Docker container with multiple Claude Agent SDK instances. A unified orchestrator runs identically in every container. The root container (`OPENHIVE_IS_ROOT=true`) additionally runs messaging channels, database, REST API, and web portal.
+AI agent orchestration platform. User talks to an assistant via messaging channels. The assistant creates hierarchical teams of agents in Docker containers. Each container runs multiple Claude Agent SDK instances managed by a unified orchestrator. Single TypeScript/Bun codebase runs in all containers.
 
-## Architecture
-
-```
-User → Messaging Channel (Discord/WhatsApp/...)
-         ↓
-┌─ ROOT CONTAINER (OPENHIVE_IS_ROOT=true) ────────┐
-│  Unified Orchestrator                            │
-│  (agent executors, WS hub, channels, DB, API)    │
-│         ↕                                        │
-│    Docker API (socket)                           │
-└─────────┬────────────────────────────────────────┘
-          ↕ WebSocket (openhive-network)
-  ┌───────┴───────┐
-  Team A Container  Team B Container  ...
-  (same image,      (same image,
-   orchestrator      orchestrator
-   + agent execs)    + agent execs)
-```
-
-All containers run the same `openhive` image. The root container's orchestrator manages the WS hub, messaging channels, SQLite database, REST API, and web portal. Non-root containers connect to root via WebSocket. All inter-container communication goes through root — no direct container-to-container.
-
-Full architecture: [Wiki — Architecture](https://github.com/Z-M-Huang/openhive/wiki/Architecture)
+---
 
 ## Three Core Definitions
 
-| Concept | What It Is | Identifier |
-|---------|-----------|------------|
-| **User** | Person using the app, "team lead" of root level | N/A |
-| **Agent** | Claude Agent SDK instance (standalone process) | AID (`aid-xxx-xxx`) |
-| **Team** | Group of agents with a designated lead, runs in Docker container | TID (`tid-xxx-xxx`) |
+| Entity | Definition |
+|--------|-----------|
+| **User** | External human who interacts via messaging channels. Ultimate authority: can override any policy, cancel any task, reshape any team. Not containerized. Final escalation target. |
+| **Agent** | A Claude Agent SDK instance (standalone process) with AID (`aid-name-hexchars`), definition file, model tier, skills, and timeout. Every AI entity is an agent -- main assistant, team leads, members. Role is an assignment, not a type hierarchy. |
+| **Team** | A group of agents with a designated lead, running in an isolated Docker container. Unit of isolation, deployment, and capability scoping. Identified by TID (`tid-name-hexchars`) and slug. Recursively nestable. |
 
-Every AI entity is an agent — main assistant, team leads, team members. Team lead always runs in the parent container (fixed placement). Team scope = lead agent's role definition.
+---
 
-Full details: [Wiki — Vision and Core Concepts](https://github.com/Z-M-Huang/openhive/wiki/Vision-and-Core-Concepts)
+## Three-Layer Architecture
+
+```
+Skills Layer (20-30 SKILL.md files)
+  |  LLM reads skills, calls tools
+  v
+MCP Tools Layer (~22 built-in tools)
+  |  Tools execute against infrastructure
+  v
+Infrastructure Layer (~4,000-5,000 lines TypeScript)
+```
+
+**Skills** define what agents do and when (orchestration, behavior, integration playbooks). **MCP Tools** provide validated, schema-checked I/O between LLM and infrastructure. **Infrastructure** enforces invariants, manages lifecycle, persists state.
+
+Behavioral decisions live in skills. Structural guarantees live in code. This separation is governed by the invariants-vs-policies framework: invariants are things that must always hold true (code); policies depend on judgment and context (skills).
+
+---
+
+## Design Invariants (MUST NEVER violate)
+
+| ID | Rule | Description |
+|----|------|-------------|
+| INV-01 | Team lead in parent container | Team lead always executes in the parent container, never in the team's own container. |
+| INV-02 | All messages through root WS hub | All inter-container messages route through root's WebSocket hub. |
+| INV-03 | No container-to-container communication | ICC disabled. All traffic goes through root. No direct links between non-root containers. |
+| INV-04 | Single SQLite writer | Only the root container writes to SQLite. Non-root containers forward data via WebSocket. |
+| INV-05 | Root spawns all containers | All container spawning goes through root's Docker socket. Non-root containers request creation via WS. |
+| INV-06 | Same image everywhere | Single `openhive` image. `OPENHIVE_IS_ROOT=true` toggles root-only services. |
+| INV-07 | Per-agent memory | Agent memory is scoped per-agent, not per-team. Agents share a workspace but have separate memory directories. |
+| INV-08 | Team-scoped skill copies | Skills are team-scoped local copies. Can be sourced from registries but never shared live references between teams. |
+| INV-09 | Invariants in code, policies in skills | Code enforces invariants (security, isolation, data integrity). Skills encode policies (when to escalate, how to prioritize, what tone to use). |
+| INV-10 | Root is a control plane | The root process orchestrates, validates, and audits. It is not a pass-through message bus. Every tool call is validated at root before execution. |
+
+---
+
+## Configurable Constraints
+
+Defaults tuneable per deployment. Changing a default requires a new ADR.
+
+| ID | Rule | Default | Config key |
+|----|------|---------|------------|
+| CON-01 | Max team nesting depth | 3 | `limits.max_depth` |
+| CON-02 | Max teams per parent | 10 | `limits.max_teams` |
+| CON-03 | Max agents per team | 5 | `limits.max_agents_per_team` |
+| CON-04 | File watcher debounce | 500 ms | Hard-coded in ConfigLoader |
+| CON-05 | Heartbeat interval | 30 s | Hard-coded in container health monitor |
+| CON-06 | Unhealthy threshold | 90 s (3 missed heartbeats) | Hard-coded in container health monitor |
+| CON-07 | Proactive check minimum interval | 5 min | `proactive_interval_minutes` in team.yaml / agent config |
+| CON-08 | Proactive check default interval | 30 min | `proactive_interval_minutes` in team.yaml (default: 30) |
+| CON-09 | Tool timeout: query tools | 10 s | Implementation-defined |
+| CON-10 | Tool timeout: mutating tools | 60 s | Implementation-defined |
+| CON-11 | Tool timeout: blocking tools | 5 min | Implementation-defined |
+| CON-12 | Skill files max 500 lines | ~500 lines | Per-skill convention |
+
+---
+
+## Technology Stack
+
+| Component | Technology | Notes |
+|-----------|-----------|-------|
+| Language | TypeScript 5.x | Strict mode enforced (`strict: true`, `noUnusedLocals`, `noImplicitReturns`) |
+| Dev runtime / Package manager | **Bun 1.3+** | All installs, scripts, and test execution via `bun` |
+| Production runtime | Node.js 22 LTS | `node:22-bookworm-slim` base image |
+| Agent SDK | @anthropic-ai/claude-agent-sdk 0.2.x | One SDK instance per agent |
+| MCP SDK | @modelcontextprotocol/sdk 1.8.x | In-process MCP server for built-in tools |
+| Database | SQLite (better-sqlite3 9.x) + Drizzle ORM 0.41.x | WAL mode, single-writer (INV-04) |
+| WebSocket | ws 8.x | Hub-and-spoke topology |
+| HTTP server | Fastify 5.x | REST API + web portal serving |
+| Validation | Zod 3.x | Runtime schema validation |
+| Logging | Pino 9.x | Structured JSON logging to stdout |
+| Containers | Docker 24+, dockerode 4.x | Sibling containers (no DinD) |
+| Config parsing | yaml 2.x | YAML config file parsing |
+| File watching | chokidar 4.x | Config/skill file hot-reload |
+| Scheduling | node-cron 3.x | Cron-based trigger scheduling |
+| Encryption | Node.js crypto (AES-256-GCM) + argon2 0.43.x | Master key derivation |
+| Web portal | React 18.x + Vite 6.x + shadcn/ui + TanStack Query 5.x | Monitoring SPA, no AI in frontend |
+| Testing | vitest 3.x + @vitest/coverage-v8 | Interface-first test doubles |
+| E2E testing | Playwright 1.50.x | Web portal E2E |
+| Linting | ESLint 8.x + @typescript-eslint 8.x | Code quality |
+
+**Provider model:** Anthropic-protocol only. Skills specify model tier (`haiku`/`sonnet`/`opus`); providers map tiers to actual model names.
+
+---
+
+## Conventions
+
+- **Strict TypeScript** -- no `any`, no `as` casts without justification, strict null checks
+- **Interface-first** -- every external dependency behind an interface in `src/domain/interfaces.ts`
+- **Test doubles** -- manual mock objects implementing interfaces via `vi.fn()`, no mock libraries
+- **File naming** -- kebab-case for all files (skills, agents, source)
+- **Slug format** -- `^[a-z0-9]+(-[a-z0-9]+)*$`, 3-50 chars
+- **ID formats** -- `aid-name-hexchars`, `tid-name-hexchars`
+- **Reserved slugs** -- `main`, `admin`, `system`, `root`, `openhive`
+- **Test co-location** -- `foo.test.ts` next to `foo.ts`
+- **Coverage** -- 95% for core domain (`domain/`, `orchestrator/`, `executor/`, `store/`), 80% for API/WS/web
+- **Package manager** -- `bun` (not npm, not yarn)
+- **Test runner** -- `npx vitest run` (not `bun test`)
+
+---
 
 ## Project Structure
 
 ```
 openhive/
-├── backend/                          # TypeScript/Bun unified codebase
-│   ├── src/
-│   │   ├── index.ts                  # Entry point
-│   │   ├── api/                      # REST API handlers (Fastify) [root-only]
-│   │   ├── channel/                  # Discord, WhatsApp adapters [root-only]
-│   │   ├── config/                   # YAML config management
-│   │   ├── container/                # Docker container lifecycle (dockerode) [root-only]
-│   │   ├── crypto/                   # AES-256-GCM key encryption
-│   │   ├── domain/                   # Domain types, errors, enums
-│   │   ├── event/                    # Event bus (pub/sub)
-│   │   ├── logging/                  # DB-backed structured logging [root-only]
-│   │   ├── orchestrator/             # Unified orchestrator, agent executor, SDK tools
-│   │   ├── store/                    # Drizzle ORM + SQLite layer [root-only]
-│   │   └── ws/                       # WebSocket hub (root) + client (non-root)
-│   ├── package.json
-│   ├── tsconfig.json
-│   └── vitest.config.ts
-├── web/                              # React SPA (monitoring + config)
-├── deployments/
-│   ├── Dockerfile                    # Single image (OPENHIVE_IS_ROOT=true enables extras)
-│   └── docker-compose.yml
-├── data/
-│   ├── openhive.yaml                 # System config
-│   └── providers.yaml                # Global AI provider presets
-├── .run/                             # Runtime state (gitignored)
-│   └── workspace/                    # Root workspace (→ /app/workspace in root container)
-│       ├── CLAUDE.md
-│       ├── .claude/
-│       │   ├── settings.json         # {"allowedTools":[]} (scaffolded)
-│       │   ├── agents/               # Agent definition files
-│       │   │   └── <name>.md         # YAML frontmatter + free-form content
-│       │   └── skills/               # Skill definition files
-│       │       └── <name>/
-│       │           └── SKILL.md
-│       ├── work/
-│       │   └── tasks/
-│       └── teams/                    # Child team workspaces (recursive)
-│           └── <team-slug>/
-│               ├── team.yaml
-│               └── ...               # Same structure recursively
-├── package.json
-└── README.md
++-- package.json              # Workspace root (workspaces: backend, web)
++-- backend/
+|   +-- package.json
+|   +-- tsconfig.json
+|   +-- vitest.config.ts
+|   +-- src/
+|       +-- index.ts                        # Entry point (checks OPENHIVE_IS_ROOT)
+|       +-- domain/                         # Core types, interfaces, errors, enums
+|       |   +-- domain.ts                   # Domain types
+|       |   +-- interfaces.ts               # All interfaces (single file)
+|       |   +-- errors.ts                   # Domain error classes
+|       |   +-- enums.ts                    # Enums (TaskStatus, LogLevel, etc.)
+|       |   +-- index.ts                    # Barrel export
+|       +-- control-plane/                  # Root orchestration
+|       |   +-- orchestrator.ts             # Unified orchestrator
+|       |   +-- router.ts                   # Two-tier routing
+|       |   +-- event-bus.ts                # In-memory pub/sub
+|       |   +-- org-chart.ts                # Hierarchy tracking
+|       |   +-- workspace-lock.ts           # Workspace mutex
+|       +-- executor/                       # SDK process lifecycle
+|       |   +-- executor.ts                 # Agent executor
+|       |   +-- session.ts                  # SDK session management
+|       |   +-- hooks.ts                    # PreToolUse/PostToolUse hooks
+|       +-- containers/                     # Docker management (root-only)
+|       |   +-- runtime.ts                  # Container create/start/stop
+|       |   +-- manager.ts                  # Lifecycle coordination
+|       |   +-- provisioner.ts              # Workspace provisioning
+|       |   +-- health.ts                   # Health checks, stuck agent detection
+|       +-- mcp/                            # MCP tool implementations
+|       |   +-- tools/index.ts              # ~22 tool handlers
+|       |   +-- bridge.ts                   # WebSocket <-> MCP bridge
+|       |   +-- registry.ts                 # Tool registration and discovery
+|       +-- websocket/                      # WS server + hub
+|       |   +-- server.ts                   # WS hub server (root-only)
+|       |   +-- hub.ts                      # Connection registry, message routing
+|       |   +-- connection.ts               # WS client connection wrapper
+|       |   +-- protocol.ts                 # Wire format, direction validation
+|       |   +-- token-manager.ts            # One-time auth tokens
+|       +-- storage/                        # SQLite + file storage (root-only)
+|       |   +-- database.ts                 # Drizzle ORM setup, WAL mode
+|       |   +-- schema.ts                   # Drizzle schema definitions
+|       |   +-- stores/index.ts             # Store implementations
+|       +-- channels/                       # External messaging adapters (root-only)
+|       |   +-- adapter.ts                  # Channel adapter interface
+|       |   +-- discord.ts                  # Discord adapter
+|       |   +-- router.ts                   # Message routing
+|       +-- api/                            # REST API (root-only)
+|       |   +-- server.ts                   # Fastify server setup
+|       |   +-- routes/index.ts             # Route handlers
+|       |   +-- portal-ws.ts                # Web portal WebSocket relay
+|       +-- config/                         # Configuration loading
+|       |   +-- loader.ts                   # YAML config loader
+|       |   +-- defaults.ts                 # Default config values
+|       |   +-- validation.ts               # Zod schema validation
+|       +-- logging/                        # Logging infrastructure
+|       |   +-- logger.ts                   # Pino logger setup
+|       |   +-- sinks.ts                    # DB sink, file sink
+|       +-- security/                       # Credentials, auth
+|       |   +-- key-manager.ts              # AES-256-GCM encryption
+|       +-- skills/                         # Skill management
+|       |   +-- loader.ts                   # Skill file loader
+|       |   +-- registry.ts                 # Skill registry
+|       +-- triggers/                       # Event triggers
+|       |   +-- scheduler.ts                # Cron, webhook, event triggers
+|       +-- phase-gates/                    # Integration tests (L0-L11)
+|           +-- layer-0.test.ts .. layer-11.test.ts
++-- web/                                    # React SPA (monitoring portal)
+|   +-- package.json
+|   +-- tsconfig.json
+|   +-- vite.config.ts
+|   +-- src/
++-- common/                                 # Baked into Docker image at /app/common/
+|   +-- skills/                             # 6 common skills
+|   |   +-- escalation/SKILL.md
+|   |   +-- health-report/SKILL.md
+|   |   +-- integration-usage/SKILL.md
+|   |   +-- memory-management/SKILL.md
+|   |   +-- system-smoke/SKILL.md
+|   |   +-- task-completion/SKILL.md
+|   +-- scripts/                            # Utility helpers (.gitkeep)
+|   +-- templates/                          # Standard format templates (.gitkeep)
++-- data/                                   # Config files (version-controlled)
+|   +-- openhive.yaml                       # Not in git (has secrets) -- see example
+|   +-- providers.yaml                      # Not in git (has API keys) -- see example
++-- deployments/
+|   +-- Dockerfile                          # Multi-stage build
+|   +-- docker-compose.yml                  # Development orchestration
+|   +-- openhive.yaml.example               # Example config
+|   +-- providers.yaml.example              # Example providers
++-- .env.example                            # Environment variables template
 ```
 
-## Tech Stack
+The same codebase ships in every container. `OPENHIVE_IS_ROOT=true` activates: channels, database, REST API, WebSocket hub server, Docker socket access. Non-root containers run: orchestrator, agent executors, WebSocket client.
 
-| Layer | Technology | Purpose |
-|-------|-----------|---------|
-| Backend + Agent Runtime | TypeScript/Bun (Node.js 22, strict) | Orchestration, agent execution, Docker API, REST API, channels, DB |
-| Package Manager | bun | Dependency management (backend, web) |
-| Web Portal | React 18+ / Vite / shadcn/ui | Monitoring + configuration (no AI) |
-| Database | Drizzle ORM + SQLite (WAL) | Runtime data (tasks, messages, logs) |
-| Containers | Docker (sibling, not DinD) | Team isolation |
-| WebSocket | ws (Node.js) | All root ↔ container communication |
-
-Full stack: [Wiki — Technology Stack](https://github.com/Z-M-Huang/openhive/wiki/Technology-Stack)
-
-## Key Conventions
-
-### TypeScript (unified codebase)
-- TypeScript strict mode — no `any` or `unknown` types. All values must be strongly typed with explicit interfaces. Use type guards and discriminated unions instead of type assertions.
-- bun for package management and scripts
-- vitest for testing (run with `npx vitest run` or `bun run test`)
-- Interfaces for all services; manual test doubles (no mockery)
-- Fastify for HTTP (root container), ws for WebSocket
-- Claude Agent SDK (`@anthropic-ai/claude-agent-sdk`) — one SDK instance per agent (standalone process)
-- Built-in tools exposed via in-process MCP server, forwarded over WebSocket to root
-
-### Workspace Directories
-- Runtime state lives under `.run/` (gitignored, not `data/`)
-- Recursive nesting: `.run/workspace/teams/<slug>/teams/<child>/`
-- Agent definitions: `.run/workspace/teams/<slug>/.claude/agents/<name>.md`
-- Skill definitions: `.run/workspace/teams/<slug>/.claude/skills/<name>/SKILL.md`
-- Task work dirs: `.run/workspace/teams/<slug>/work/tasks/<task-id>/`
-- Workspaces are scaffolded on team creation; never pre-created at startup (except main assistant)
-
-### React (web portal)
-- shadcn/ui (Radix primitives)
-- TanStack Query for data fetching
-- React Router for navigation
-- vitest + React Testing Library
-
-## Critical Patterns
-
-These are architecture decisions that MUST be followed. Not suggestions — requirements.
-
-1. **Hub-and-Spoke WebSocket** — All root ↔ container communication uses WebSocket (single connection per container). Root routes all messages based on the org chart. No stdin/stdout markers, no file-based IPC, no polling. [Wiki — WebSocket Protocol](https://github.com/Z-M-Huang/openhive/wiki/WebSocket-Protocol)
-
-2. **Built-in Tools via In-Process MCP Server** — 24 internal management tools (create_team, dispatch_task, get_config, update_config, etc.) are exposed to the Claude Agent SDK as an in-process MCP server (`openhive-tools`). The MCPBridge forwards tool calls over WebSocket to root's SDKToolHandler and returns results. Each tool also has a SKILL.md file in `main-assistant/.claude/skills/` for agent-facing documentation. External MCP servers (GitHub, databases) are configured separately per-team.
-
-3. **Team Lead in Parent Container** — Team lead ALWAYS runs in the parent container. Never in the child team's container. Child team's `leader_aid` references an AID from the parent team's config.
-
-4. **Two-Step Team Creation** — `create_agent` first (creates lead in parent team, returns AID), then `create_team` (creates team referencing that AID). Agent identity established before team structure.
-
-5. **Global Provider Presets** — AI providers are global in `data/providers.yaml`, NOT per-team. Default = Claude Code OAuth subscription. Agents reference presets by name. Root resolves presets → flattened credentials per agent in `container_init`.
-
-6. **Recursive Nested Workspaces** — Workspace tree lives under `.run/workspace/`, mirrors team hierarchy recursively (`.run/workspace/teams/<slug>/teams/<child>/`). Parent containers see child team workspaces. Cross-team file transfer = root copies files (logged). Task-scoped folders: `.run/workspace/teams/<slug>/work/tasks/<task-id>/`.
-
-7. **Team Identity is Slug** — Slug (directory name) is the canonical identity. Display name auto-derived (hyphens → spaces, title case). No `name` field in team.yaml. Wire protocol uses TID; all workspace lookups use slug. Reserved slug `main` is blocked in all create-team code paths.
-
-8. **OAuth Runtime Mapping** — `type: "oauth"` → sets `CLAUDE_CODE_OAUTH_TOKEN`. `type: "anthropic_direct"` → sets `ANTHROPIC_API_KEY` + `ANTHROPIC_BASE_URL`.
-
-9. **Model Tier System** — Skills specify `haiku`/`sonnet`/`opus`. Providers map tiers to actual model names. Env vars: `ANTHROPIC_DEFAULT_{HAIKU,SONNET,OPUS}_MODEL`.
-
-10. **Verbose by Default** — All WebSocket messages carry full detail. All actions logged to DB with ALL parameters. No brief-only messages in the protocol.
-
-11. **Agent Definition Files** — Each agent is defined by a single `.claude/agents/<name>.md` file in the team workspace (`<name>` = slug). The file has YAML frontmatter (`name`, `description`, optional `model`, `tools`) followed by optional free-form content. Written to the team's recursive workspace path (e.g., `.run/workspace/teams/<slug>/.claude/agents/<name>.md`). NOT inline in YAML, NOT in `data/teams/`.
-
-12. **Skill Definition Files** — Each skill lives in `.claude/skills/<name>/SKILL.md` within the team workspace. YAML frontmatter (`name`, `description`, optional `argumentHint`, `allowedTools`, `model`) followed by the skill body. Written to the team's recursive workspace path (e.g., `.run/workspace/teams/<slug>/.claude/skills/<name>/SKILL.md`). Hard cutover — no config-dir fallback.
-
-13. **MCP Env Template Syntax** — Config files use `{secrets.GITHUB_TOKEN}` for secret references.
+---
 
 ## Configuration Files
 
-| File | Scope | Purpose |
-|------|-------|---------|
-| `data/openhive.yaml` | Global | System settings, assistant, channels |
-| `data/providers.yaml` | Global | AI provider presets |
-| `.run/workspace/teams/<slug>/team.yaml` | Per-team | Team config (agents, MCP servers) |
-| `.run/workspace/teams/<slug>/.claude/agents/<name>.md` | Per-agent | Agent definition (YAML frontmatter + content) |
-| `.run/workspace/teams/<slug>/.claude/skills/<name>/SKILL.md` | Per-skill | Skill definition (YAML frontmatter + body) |
-| `.run/workspace/teams/<slug>/.claude/settings.json` | Per-team | Allowed tools (scaffolded on team creation) |
+| File | Scope | Location | Purpose |
+|------|-------|----------|---------|
+| `openhive.yaml` | Global | `data/openhive.yaml` | System settings, assistant config, channels, limits, triggers |
+| `providers.yaml` | Global | `data/providers.yaml` | AI provider presets (API keys -- gitignored) |
+| `team.yaml` | Per-team | `<workspace>/team.yaml` | Team config (agents, MCP servers, triggers) |
+| Agent `.md` files | Per-agent | `<workspace>/.claude/agents/<name>.md` | Agent definition (YAML frontmatter + system prompt) |
+| `CLAUDE.md` | Per-team | `<workspace>/.claude/CLAUDE.md` | Team instructions for agents |
+| `settings.json` | Per-team | `<workspace>/.claude/settings.json` | Allowed tools for Claude Agent SDK |
+| Integration YAML | Per-team | `<workspace>/integrations/<name>.yaml` | Declarative integration configs |
+| `.env` | Global | Project root | Environment variable overrides |
 
-Full schemas: [Wiki — Configuration Schemas](https://github.com/Z-M-Huang/openhive/wiki/Configuration-Schemas)
+**Config resolution order:** Compiled defaults -> YAML files -> `OPENHIVE_*` env vars. Containers receive resolved config via `container_init` WebSocket message.
 
-## Docker Image
+---
 
-| Image | Base | Contents |
-|-------|------|----------|
-| `openhive` | `node:22-bookworm-slim` + Python 3 | Compiled JS + production deps. `OPENHIVE_IS_ROOT=true` enables channels, DB, API, web portal |
+## Container Architecture
 
-Containers contain **only compiled code** — no TypeScript source, no devDependencies. Multi-stage Docker builds enforce this.
+```
+Root Container (OPENHIVE_IS_ROOT=true):
+  +-- Main Assistant (agent)
+  +-- Team-A Lead (agent)          <-- leads Team A, runs HERE (INV-01)
+  +-- Team-B Lead (agent)          <-- leads Team B, runs HERE (INV-01)
+  +-- WebSocket Hub Server         (INV-02)
+  +-- REST API + Web Portal
+  +-- SQLite Database              (INV-04)
+  +-- Channel Adapters (Discord)
 
-## Build & Run
+Team-A Container:
+  +-- Member-1 (agent)
+  +-- Member-2 (agent)
+  +-- Sub-Team-A1 Lead (agent)     <-- leads Sub-Team-A1, runs HERE (INV-01)
 
-```bash
-bun run build          # Compile TypeScript (backend) + build React SPA
-bun run test           # Run all tests (backend + web)
-bun run lint           # Run linters (eslint across all packages)
-bun run docker         # Build image + start via docker compose
-
-# Per-package test (from within backend/):
-npx vitest run         # Run vitest tests for that package
-bun run test:coverage  # Run tests with coverage report
+Sub-Team-A1 Container:
+  +-- Member-3 (agent)
+  +-- Member-4 (agent)
 ```
 
-## Design Documentation
+All containers run from the same Docker image (INV-06). ICC disabled (INV-03). All traffic through root hub (INV-02).
 
-All detailed design docs live in the [GitHub Wiki](https://github.com/Z-M-Huang/openhive/wiki) (single source of truth):
+---
 
-- [Vision and Core Concepts](https://github.com/Z-M-Huang/openhive/wiki/Vision-and-Core-Concepts) — Three definitions, hierarchy, escalation, task DAG
-- [Architecture](https://github.com/Z-M-Huang/openhive/wiki/Architecture) — Root container, unified orchestration, data flow
-- [Configuration Schemas](https://github.com/Z-M-Huang/openhive/wiki/Configuration-Schemas) — openhive.yaml, providers.yaml, team.yaml, agent files
-- [WebSocket Protocol](https://github.com/Z-M-Huang/openhive/wiki/WebSocket-Protocol) — Wire protocol, message types, built-in tools, MCP servers
-- [Technology Stack](https://github.com/Z-M-Huang/openhive/wiki/Technology-Stack) — TypeScript/Bun, Node.js, React, Docker, dependencies
-- [Core Interfaces](https://github.com/Z-M-Huang/openhive/wiki/Core-Interfaces) — Service interfaces for all components
-- [Logging](https://github.com/Z-M-Huang/openhive/wiki/Logging) — DB-backed verbose logging, auto-archive
-- [Reference Patterns](https://github.com/Z-M-Huang/openhive/wiki/Reference-Patterns) — NanoClaw/dev-buddy patterns adapted
-- [Testing Standards](https://github.com/Z-M-Huang/openhive/wiki/Testing-Standards) — 95% coverage, interface-first, phase gate tests
-- [Architecture Decisions](https://github.com/Z-M-Huang/openhive/wiki/Architecture-Decisions) — 64 documented decisions with context
-- [Future Features](https://github.com/Z-M-Huang/openhive/wiki/Future-Features) — Browser service, triggers, policies, etc.
+## Workspace Layout
+
+```
+.run/                              # Runtime directory (gitignored)
++-- workspace/                     # Root container mounts this at /app/workspace
+    +-- openhive.db                # SQLite database (root only)
+    +-- .claude/                   # Root agent config
+    |   +-- agents/
+    |   +-- skills/
+    |   +-- settings.json
+    |   +-- CLAUDE.md
+    +-- teams/
+        +-- weather-team/          # Team-A workspace -> container /app/workspace
+        |   +-- team.yaml
+        |   +-- .claude/
+        |   +-- memory/
+        |   +-- work/
+        |   +-- teams/             # Sub-teams nest here
+        |       +-- forecast-team/
+        +-- code-review-team/      # Team-B workspace
+```
+
+Every container mounts its workspace at `/app/workspace` (fixed internal path). Parent containers see all descendant workspaces. Deletion cascades via filesystem removal.
+
+---
+
+## WebSocket Protocol Summary
+
+Hub-and-spoke topology. One persistent bidirectional JSON channel per container. Wire format uses snake_case; codebase uses camelCase with conversion at boundary.
+
+**Root-to-Container (7 types):** `container_init`, `task_dispatch`, `shutdown`, `tool_result`, `agent_added`, `escalation_response`, `task_cancel`
+
+**Container-to-Root (9 types):** `ready`, `heartbeat`, `task_result`, `escalation`, `log_event`, `tool_call`, `status_update`, `agent_ready`, `org_chart_update`
+
+**Authentication:** One-time tokens (32 bytes hex, 5-min TTL, single-use). Token is the only secret passed as env var; all other secrets delivered over established WebSocket via `container_init`.
+
+**Reconnection:** Exponential backoff (1s base, 2x multiplier, 30s max, +/-20% jitter). On root restart: tokens invalidated, containers reconnect with fresh tokens, state re-synced.
+
+**Connection limits:** 256-message write queue, 100 msgs/sec rate limit, 1 MB max message size, ping/pong every 30s.
+
+See wiki: WebSocket-Protocol.md
+
+---
+
+## MCP Tools (~22 built-in)
+
+| Category | Tools | Count |
+|----------|-------|-------|
+| Container | `spawn_container`, `stop_container`, `list_containers` | 3 |
+| Team | `create_team`, `create_agent` | 2 |
+| Task | `create_task`, `dispatch_subtask`, `update_task_status` | 3 |
+| Messaging | `send_message` | 1 |
+| Orchestration | `escalate` | 1 |
+| Memory | `save_memory`, `recall_memory` | 2 |
+| Integration | `create_integration`, `test_integration`, `activate_integration` | 3 |
+| Secrets | `get_credential`, `set_credential` | 2 |
+| Query | `get_team`, `get_task`, `get_health`, `inspect_topology` | 4 |
+| Events | `register_webhook` | 1 |
+
+**Timeout tiers:** Query (10s) / Mutating (60s) / Blocking (5 min).
+
+**Role access:** Main Assistant has full access. Team Leads have team-scoped access (no container tools). Members have minimal access (update status, send message, escalate, memory, read credentials, query own tasks).
+
+**Tool call flow:** Agent SDK -> in-process MCP server -> MCPBridge -> WebSocket -> Root Hub -> SDKToolHandler -> validate + execute -> response back via same path. Every call authorized against org chart at root.
+
+See wiki: MCP-Tools.md
+
+---
+
+## Database Schema Summary
+
+SQLite in WAL mode via Drizzle ORM. Root container only (INV-04).
+
+| Table | Purpose |
+|-------|---------|
+| `tasks` | Task DAG with `blocked_by` JSON array, status state machine |
+| `messages` | Chat messages from messaging channels |
+| `chat_sessions` | Active chat sessions per channel |
+| `log_entries` | Unified log table (all events) |
+| `task_events` | Task lifecycle transitions (FK to log_entries) |
+| `tool_calls` | Tool invocation records (FK to log_entries) |
+| `decisions` | LLM decision audit trail (FK to log_entries) |
+| `agent_memories` | Searchable memory index (per-agent) |
+| `integrations` | Integration configs and lifecycle status |
+| `credentials` | AES-256-GCM encrypted credentials (per-team) |
+
+**Task states:** `pending` -> `active` -> `completed` | `failed` | `escalated` | `cancelled`
+
+**Tiered log retention:** audit=permanent, error=90d, warn=30d, info=30d, debug=7d, trace=3d
+
+See wiki: Database-Schema.md
+
+---
+
+## 12-Layer TDD Roadmap
+
+Each layer builds on prior layers. Phase gate tests prove end-to-end integration at each boundary.
+
+| Layer | Name | What It Covers |
+|-------|------|---------------|
+| L0 | Stub scaffold | TypeScript compiles, vitest runs, all stubs present |
+| L1 | Config + logging | ConfigLoader, Zod validation, Pino logger, DB logger sink |
+| L2 | Storage | Drizzle schema, all store implementations, async write queue |
+| L3 | Domain core | Domain types, OrgChart, EventBus, error hierarchy |
+| L4 | WebSocket | Protocol, Connection, Hub, TokenManager, direction enforcement |
+| L5 | Containers | ContainerRuntime (dockerode), Manager, Provisioner, health monitor |
+| L6 | MCP tools | All ~22 tool handlers, MCPBridge, SDKToolHandler, tool registry |
+| L7 | Executor | Agent executor, session management, PreToolUse/PostToolUse hooks |
+| L8 | Orchestrator | Unified orchestrator, two-tier router, task dispatch chain |
+| L9 | Channels | Discord adapter, message router, channel lifecycle |
+| L10 | API + portal | Fastify REST API, web portal WebSocket relay, React SPA |
+| L11 | Integration | End-to-end: Docker compose, health check, SPA loads, full flow |
+
+**Phase gate tests** live in `backend/src/phase-gates/layer-{N}.test.ts`. Each gate proves the layer works end-to-end with all prior layers using real implementations where possible and mocking only external dependencies (Docker, Claude SDK, Discord).
+
+---
+
+## Build Commands
+
+```bash
+bun install                    # Install all dependencies (workspace root)
+bun run build                  # Compile TypeScript + build React SPA
+bun run test                   # Run all tests (backend + web)
+bun run lint                   # Run ESLint across all packages
+bun run smoke                  # Run phase gate integration tests
+bun run docker                 # Build image + start via docker compose
+```
+
+**Docker build:** Multi-stage. Builder stage (`node:22-bookworm-slim`) installs Bun, compiles TypeScript, builds SPA. Final stage has compiled JS + production deps + common/ folder. No TypeScript source in production image.
+
+---
+
+## Environment Variables
+
+| Variable | Required | Purpose |
+|----------|----------|---------|
+| `OPENHIVE_IS_ROOT` | Yes (root) | Set to `true` for the root container |
+| `OPENHIVE_MASTER_KEY` | Yes | AES-256-GCM master key (min 32 chars) |
+| `DISCORD_BOT_TOKEN` | If Discord enabled | Discord bot token |
+| `OPENHIVE_LOG_LEVEL` | No | Override log level (default: info) |
+| `OPENHIVE_DATA_DIR` | No | Override data directory path |
+| `OPENHIVE_RUN_DIR` | No | Override runtime directory path |
+| `OPENHIVE_SYSTEM_LISTEN_ADDRESS` | No | Override API listen address (default: 127.0.0.1:8080) |
+
+---
+
+## Key Design Patterns
+
+- **Two-tier routing** -- config-defined slug mappings (fast, deterministic) + LLM judgment routing (novel/ambiguous requests)
+- **Agent-as-Feature** -- capabilities are compositions of Teams + Agents + Skills + Triggers, not coded services
+- **Hub-and-spoke WebSocket** -- single persistent connection per container, all through root
+- **Team creation two-step** -- `create_agent` first (lead in parent), then `create_team` (blocking, provisions container)
+- **Escalation chain** -- bottom-up through hierarchy, each hop logged, max 10 hops before direct-to-user
+- **Proactive behavior** -- orchestrator-driven timers, skip-if-busy, idempotent check IDs
+- **Self-developing integrations** -- agents create, test, and activate their own declarative integration configs
+
+---
+
+## Wiki Reference
+
+Full design documentation lives in the wiki at `/app/openhive.wiki/`:
+
+| File | Content |
+|------|---------|
+| Architecture.md | Three-layer architecture, dispatch chain, escalation, task state machine, source layout |
+| Vision.md | Core philosophy, three definitions, Agent-as-Feature, key principles |
+| Design-Rules.md | Invariants (INV-01 to INV-10), constraints (CON-01 to CON-12), conventions |
+| Technology-Stack.md | All runtime/dev/infra dependencies with versions |
+| WebSocket-Protocol.md | 16 message types, wire format, auth, reconnection, tool call flow |
+| Database-Schema.md | All tables, indexes, store interfaces, task dependency system |
+| MCP-Tools.md | 22 tools across 10 categories, role-based access, timeout tiers |
+| Configuration-Schemas.md | openhive.yaml, providers.yaml, team.yaml schemas |
+| Testing-Standards.md | Coverage requirements, test patterns, phase gate tests |
+| Control-Plane.md | Root internals, container infrastructure, workspace layout, logging |
+| Skill-Standards.md | SKILL.md format, memory conventions, PROACTIVE.md |
+| Architecture-Decisions.md | ADR log with context and rationale |
+| Agent-as-Feature.md | Features as team+agent+skill compositions |
+| Self-Developing-Integrations.md | Staged integration lifecycle |
+| Extensibility.md | Runtime extension surfaces |
+| Self-Evolution.md | Self-evolution patterns |

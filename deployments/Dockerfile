@@ -1,60 +1,96 @@
-# OpenHive Master Container Image
-# TypeScript backend layered on top of the team base image (openhive-team).
+# =============================================================================
+# OpenHive v2 Multi-Stage Dockerfile
+# FR14/AC16: Compiled JS + production deps only. No TypeScript source in final.
 #
-# Build stages:
-#   1. backend-builder: compiles TypeScript backend to JS
-#   2. final: team base image + compiled backend + web SPA
-#
-# Requires: openhive-team image must be built first (Dockerfile.team).
-# Web SPA must be pre-built (web/dist) before running docker build.
+# Single image for all containers (root and non-root).
+# Claude Code CLI installed as non-root 'node' user (UID 1000) —
+# Claude Code refuses --dangerously-skip-permissions as root.
+# =============================================================================
 
-# ── Stage 1: TypeScript backend build ─────────────────────────────────────
-FROM node:22-bookworm-slim AS backend-builder
-
-# better-sqlite3 requires native compilation tools
-RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ && rm -rf /var/lib/apt/lists/*
-RUN npm install -g bun@1.3.10
+# ---------------------------------------------------------------------------
+# Stage 1: Builder -- install deps, compile TypeScript, build SPA
+# ---------------------------------------------------------------------------
+FROM node:22-bookworm-slim AS builder
 
 WORKDIR /build
 
-# Install dependencies first (layer cache friendly)
-COPY backend/package.json backend/bun.lock ./backend/
-RUN cd backend && bun install --frozen-lockfile
+# Install bun (pinned for reproducible builds)
+RUN npm install -g bun@1.3.10
 
-# Copy source and compile
-COPY backend/src/ ./backend/src/
-COPY backend/tsconfig.json ./backend/
+# Copy workspace-level package files first (layer cache optimisation)
+COPY package.json bun.lock ./
+COPY backend/package.json backend/
+COPY web/package.json web/
 
+# Install all dependencies (including devDependencies for compilation)
+RUN bun install --frozen-lockfile
+
+# Copy source code
+COPY backend/ backend/
+COPY web/ web/
+COPY common/ common/
+
+# Compile backend TypeScript -> JS
 RUN cd backend && bun run build
 
-# ── Stage 2: Master = team image + compiled backend + web SPA ─────────────
-FROM openhive-team
+# Build web SPA (vite)
+RUN cd web && bun run build
 
-# Node.js backend runs as root (PID 1) — needs write access to mounted
-# volumes and Docker socket. The agent-runner child process drops to
-# the 'node' user (UID 1000) via SysProcAttr.Credential.
+# Prune devDependencies for production image
+RUN bun install --frozen-lockfile --production
+
+# ---------------------------------------------------------------------------
+# Stage 2: Final -- slim runtime with compiled output only
+# ---------------------------------------------------------------------------
+FROM node:22-bookworm-slim
+
+# Install runtime system dependencies:
+#   - Python 3 with pip + venv (for Claude Agent SDK / tool use)
+#   - curl (health checks, debugging)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        python3 \
+        python3-pip \
+        python3-venv \
+        curl && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install bun runtime (pinned)
+RUN npm install -g bun@1.3.10
+
+# Install Claude Code CLI as non-root 'node' user (UID 1000).
+# Claude Code refuses --dangerously-skip-permissions when running as root.
+USER node
+RUN curl -fsSL https://claude.ai/install.sh | bash
+ENV PATH="/home/node/.claude/bin:$PATH"
+
 USER root
+WORKDIR /app
 
-# Copy compiled backend (JS only — no TypeScript source)
-COPY --from=backend-builder /build/backend/dist /app/backend/dist
-COPY --from=backend-builder /build/backend/node_modules /app/backend/node_modules
+# Copy compiled backend JS (no TypeScript source -- NFR13)
+COPY --from=builder /build/backend/dist/ backend/dist/
+COPY --from=builder /build/backend/package.json backend/
 
-# Copy pre-built web SPA (must be built before docker build)
-COPY web/dist /app/web/dist
+# Copy web SPA bundle
+COPY --from=builder /build/web/dist/ web/dist/
 
-# Copy config data directory (templates and defaults)
-COPY data/ /app/data/
+# Copy production node_modules (no devDependencies)
+COPY --from=builder /build/node_modules/ node_modules/
+COPY --from=builder /build/backend/node_modules/ backend/node_modules/
+COPY --from=builder /build/package.json .
 
-# Copy main assistant static directory (CLAUDE.md, skills, settings)
-COPY main-assistant/ /app/main-assistant/
+# Copy common/ folder (skills, scripts, templates) -- AC16
+COPY common/ /app/common/
 
-# Fixed container paths — volumes mount host dirs to these locations.
-ENV OPENHIVE_DATA_DIR=/app/data \
-    OPENHIVE_RUN_DIR=/app/run \
-    OPENHIVE_SYSTEM_LISTEN_ADDRESS=0.0.0.0:8080
+# Ensure non-root user owns app directories
+RUN chown -R node:node /app
+
+# Switch to non-root user for runtime
+USER node
+
+EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD curl -sf http://localhost:8080/api/v1/health || exit 1
 
-# Node.js backend is PID 1, spawns agent-runner child process
-ENTRYPOINT ["node", "backend/dist/index.js"]
+CMD ["node", "backend/dist/index.js"]

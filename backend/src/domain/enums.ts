@@ -1,250 +1,230 @@
 /**
- * OpenHive Backend - Domain Enums
+ * Domain enums for OpenHive.
  *
- * String literal union types for all domain enums.
- * Uses strings everywhere to match the wire protocol.
- *
- * Each enum provides:
- *   - A string literal union type
- *   - A const array of all valid values (for iteration)
- *   - A parse function that returns the typed value or throws an Error
- *   - A validate function that returns boolean
+ * Uses `as const` objects for runtime values and derived union types.
+ * All values match the canonical definitions in Architecture.md,
+ * Database-Schema.md, WebSocket-Protocol.md, and MCP-Tools.md.
  */
 
 // ---------------------------------------------------------------------------
-// TaskStatus
+// Task Status
 // ---------------------------------------------------------------------------
 
-/** Lifecycle state of a task. */
-export type TaskStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+/** Canonical task states from the task state machine (Architecture.md). */
+export const TaskStatus = {
+  Pending: 'pending',
+  Active: 'active',
+  Completed: 'completed',
+  Failed: 'failed',
+  Escalated: 'escalated',
+  Cancelled: 'cancelled',
+} as const;
 
-/** All valid TaskStatus values, in canonical order. */
-export const TASK_STATUSES = ['pending', 'running', 'completed', 'failed', 'cancelled'] as const;
-
-/**
- * Validates whether the given string is a valid TaskStatus.
- */
-export function validateTaskStatus(value: string): value is TaskStatus {
-  return (TASK_STATUSES as readonly string[]).includes(value);
-}
-
-/**
- * Parses a string into a TaskStatus.
- * Throws an Error if the value is not a known TaskStatus.
- */
-export function parseTaskStatus(value: string): TaskStatus {
-  if (validateTaskStatus(value)) {
-    return value;
-  }
-  throw new Error(`invalid task status: "${value}"`);
-}
+export type TaskStatus = (typeof TaskStatus)[keyof typeof TaskStatus];
 
 // ---------------------------------------------------------------------------
-// EventType
+// Log Level
 // ---------------------------------------------------------------------------
 
-/** Type of an event emitted within the system. */
-export type EventType =
-  | 'task_created'
-  | 'task_updated'
-  | 'task_completed'
-  | 'task_failed'
-  | 'config_changed'
-  | 'team_created'
-  | 'team_deleted'
-  | 'agent_started'
-  | 'agent_stopped'
-  | 'channel_message'
-  | 'heartbeat_received'
-  | 'container_state_changed'
-  | 'log_entry'
-  | 'task_cancelled';
+/** Numeric log levels for structured logging (Database-Schema.md). */
+export const LogLevel = {
+  Trace: 0,
+  Debug: 10,
+  Info: 20,
+  Warn: 30,
+  Error: 40,
+  Audit: 50,
+} as const;
 
-/** All valid EventType values, in canonical order. */
-export const EVENT_TYPES = [
-  'task_created',
-  'task_updated',
-  'task_completed',
-  'task_failed',
-  'config_changed',
-  'team_created',
-  'team_deleted',
-  'agent_started',
-  'agent_stopped',
-  'channel_message',
-  'heartbeat_received',
-  'container_state_changed',
-  'log_entry',
-  'task_cancelled',
-] as const;
-
-/**
- * Validates whether the given string is a valid EventType.
- */
-export function validateEventType(value: string): value is EventType {
-  return (EVENT_TYPES as readonly string[]).includes(value);
-}
-
-/**
- * Parses a string into an EventType.
- * Throws an Error if the value is not a known EventType.
- */
-export function parseEventType(value: string): EventType {
-  if (validateEventType(value)) {
-    return value;
-  }
-  throw new Error(`invalid event type: "${value}"`);
-}
+export type LogLevel = (typeof LogLevel)[keyof typeof LogLevel];
 
 // ---------------------------------------------------------------------------
-// ProviderType
+// Model Tier
 // ---------------------------------------------------------------------------
 
-/** Type of AI provider. */
-export type ProviderType = 'oauth' | 'anthropic_direct';
+/** Model tier system — skills specify a tier, providers map to actual models. */
+export const ModelTier = {
+  Haiku: 'haiku',
+  Sonnet: 'sonnet',
+  Opus: 'opus',
+} as const;
 
-/** All valid ProviderType values, in canonical order. */
-export const PROVIDER_TYPES = ['oauth', 'anthropic_direct'] as const;
-
-/**
- * Validates whether the given string is a valid ProviderType.
- */
-export function validateProviderType(value: string): value is ProviderType {
-  return (PROVIDER_TYPES as readonly string[]).includes(value);
-}
-
-/**
- * Parses a string into a ProviderType.
- * Throws an Error if the value is not a known ProviderType.
- */
-export function parseProviderType(value: string): ProviderType {
-  if (validateProviderType(value)) {
-    return value;
-  }
-  throw new Error(`invalid provider type: "${value}"`);
-}
+export type ModelTier = (typeof ModelTier)[keyof typeof ModelTier];
 
 // ---------------------------------------------------------------------------
-// LogLevel
+// Agent Role
 // ---------------------------------------------------------------------------
 
-/** Logging severity level. */
-export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+/** Role of an agent within the hierarchy. */
+export const AgentRole = {
+  MainAssistant: 'main_assistant',
+  TeamLead: 'team_lead',
+  Member: 'member',
+} as const;
 
-/** All valid LogLevel values, in canonical order. */
-export const LOG_LEVELS = ['debug', 'info', 'warn', 'error'] as const;
-
-/**
- * Validates whether the given string is a valid LogLevel.
- */
-export function validateLogLevel(value: string): value is LogLevel {
-  return (LOG_LEVELS as readonly string[]).includes(value);
-}
-
-/**
- * Parses a string into a LogLevel.
- * Throws an Error if the value is not a known LogLevel.
- */
-export function parseLogLevel(value: string): LogLevel {
-  if (validateLogLevel(value)) {
-    return value;
-  }
-  throw new Error(`invalid log level: "${value}"`);
-}
+export type AgentRole = (typeof AgentRole)[keyof typeof AgentRole];
 
 // ---------------------------------------------------------------------------
-// ContainerState
+// Agent Status
 // ---------------------------------------------------------------------------
 
-/** State of a Docker container. */
-export type ContainerState =
-  | 'created'
-  | 'starting'
-  | 'running'
-  | 'stopping'
-  | 'stopped'
-  | 'error';
+/** Runtime status of an agent, reported via heartbeat (WebSocket-Protocol.md). */
+export const AgentStatus = {
+  Idle: 'idle',
+  Busy: 'busy',
+  Error: 'error',
+  Starting: 'starting',
+} as const;
 
-/** All valid ContainerState values, in canonical order. */
-export const CONTAINER_STATES = [
-  'created',
-  'starting',
-  'running',
-  'stopping',
-  'stopped',
-  'error',
-] as const;
-
-/**
- * Validates whether the given string is a valid ContainerState.
- */
-export function validateContainerState(value: string): value is ContainerState {
-  return (CONTAINER_STATES as readonly string[]).includes(value);
-}
-
-/**
- * Parses a string into a ContainerState.
- * Throws an Error if the value is not a known ContainerState.
- */
-export function parseContainerState(value: string): ContainerState {
-  if (validateContainerState(value)) {
-    return value;
-  }
-  throw new Error(`invalid container state: "${value}"`);
-}
+export type AgentStatus = (typeof AgentStatus)[keyof typeof AgentStatus];
 
 // ---------------------------------------------------------------------------
-// ModelTier
+// Container Health
 // ---------------------------------------------------------------------------
 
-/** Model capability tier. */
-export type ModelTier = 'haiku' | 'sonnet' | 'opus';
+/** Container lifecycle health states (Control-Plane.md state machine). */
+export const ContainerHealth = {
+  Starting: 'starting',
+  Running: 'running',
+  Degraded: 'degraded',
+  Unhealthy: 'unhealthy',
+  Unreachable: 'unreachable',
+  Stopping: 'stopping',
+  Stopped: 'stopped',
+} as const;
 
-/** All valid ModelTier values, in canonical order. */
-export const MODEL_TIERS = ['haiku', 'sonnet', 'opus'] as const;
-
-/**
- * Validates whether the given string is a valid ModelTier.
- */
-export function validateModelTier(value: string): value is ModelTier {
-  return (MODEL_TIERS as readonly string[]).includes(value);
-}
-
-/**
- * Parses a string into a ModelTier.
- * Throws an Error if the value is not a known ModelTier.
- */
-export function parseModelTier(value: string): ModelTier {
-  if (validateModelTier(value)) {
-    return value;
-  }
-  throw new Error(`invalid model tier: "${value}"`);
-}
+export type ContainerHealth = (typeof ContainerHealth)[keyof typeof ContainerHealth];
 
 // ---------------------------------------------------------------------------
-// AgentStatusType
+// Channel Type
 // ---------------------------------------------------------------------------
 
-/** Runtime status of an agent. */
-export type AgentStatusType = 'idle' | 'busy' | 'starting' | 'stopped' | 'error';
+/** Messaging channel adapters (Database-Schema.md chat_sessions.channel_type). */
+export const ChannelType = {
+  Discord: 'discord',
+  WhatsApp: 'whatsapp',
+  Api: 'api',
+  Cli: 'cli',
+} as const;
 
-/** All valid AgentStatusType values, in canonical order. */
-export const AGENT_STATUS_TYPES = ['idle', 'busy', 'starting', 'stopped', 'error'] as const;
+export type ChannelType = (typeof ChannelType)[keyof typeof ChannelType];
 
-/**
- * Validates whether the given string is a valid AgentStatusType.
- */
-export function validateAgentStatusType(value: string): value is AgentStatusType {
-  return (AGENT_STATUS_TYPES as readonly string[]).includes(value);
-}
+// ---------------------------------------------------------------------------
+// Tool Timeout Tier
+// ---------------------------------------------------------------------------
 
-/**
- * Parses a string into an AgentStatusType.
- * Throws an Error if the value is not a known AgentStatusType.
- */
-export function parseAgentStatusType(value: string): AgentStatusType {
-  if (validateAgentStatusType(value)) {
-    return value;
-  }
-  throw new Error(`invalid agent status type: "${value}"`);
-}
+/** Timeout tiers for built-in tools (MCP-Tools.md). */
+export const ToolTimeoutTier = {
+  Query: 'query',
+  Mutating: 'mutating',
+  Blocking: 'blocking',
+} as const;
+
+export type ToolTimeoutTier = (typeof ToolTimeoutTier)[keyof typeof ToolTimeoutTier];
+
+/** Default timeout values in milliseconds for each tier. */
+export const ToolTimeoutMs = {
+  [ToolTimeoutTier.Query]: 10_000,
+  [ToolTimeoutTier.Mutating]: 60_000,
+  [ToolTimeoutTier.Blocking]: 300_000,
+} as const;
+
+// ---------------------------------------------------------------------------
+// Provider Type
+// ---------------------------------------------------------------------------
+
+/** AI provider authentication type (Configuration-Schemas.md). */
+export const ProviderType = {
+  OAuth: 'oauth',
+  AnthropicDirect: 'anthropic_direct',
+} as const;
+
+export type ProviderType = (typeof ProviderType)[keyof typeof ProviderType];
+
+// ---------------------------------------------------------------------------
+// Memory Type
+// ---------------------------------------------------------------------------
+
+/** Agent memory entry type (Database-Schema.md agent_memories.memory_type). */
+export const MemoryType = {
+  Curated: 'curated',
+  Daily: 'daily',
+} as const;
+
+export type MemoryType = (typeof MemoryType)[keyof typeof MemoryType];
+
+// ---------------------------------------------------------------------------
+// Decision Type
+// ---------------------------------------------------------------------------
+
+/** LLM decision types logged to the decisions table (Database-Schema.md). */
+export const DecisionType = {
+  Routing: 'routing',
+  Escalation: 'escalation',
+  Delegation: 'delegation',
+  Prioritization: 'prioritization',
+} as const;
+
+export type DecisionType = (typeof DecisionType)[keyof typeof DecisionType];
+
+// ---------------------------------------------------------------------------
+// Escalation Reason
+// ---------------------------------------------------------------------------
+
+/** Reason for escalation (WebSocket-Protocol.md escalation message). */
+export const EscalationReason = {
+  NeedGuidance: 'need_guidance',
+  OutOfScope: 'out_of_scope',
+  Error: 'error',
+  Timeout: 'timeout',
+} as const;
+
+export type EscalationReason = (typeof EscalationReason)[keyof typeof EscalationReason];
+
+// ---------------------------------------------------------------------------
+// Integration Status
+// ---------------------------------------------------------------------------
+
+/** Integration lifecycle states (Database-Schema.md integrations.status). */
+export const IntegrationStatus = {
+  Proposed: 'proposed',
+  Validated: 'validated',
+  Tested: 'tested',
+  Approved: 'approved',
+  Active: 'active',
+  Failed: 'failed',
+  RolledBack: 'rolled_back',
+} as const;
+
+export type IntegrationStatus = (typeof IntegrationStatus)[keyof typeof IntegrationStatus];
+
+// ---------------------------------------------------------------------------
+// WebSocket Error Code
+// ---------------------------------------------------------------------------
+
+/** Error codes returned in tool_result on failure (WebSocket-Protocol.md). */
+export const WSErrorCode = {
+  NotFound: 'NOT_FOUND',
+  ValidationError: 'VALIDATION_ERROR',
+  Conflict: 'CONFLICT',
+  EncryptionLocked: 'ENCRYPTION_LOCKED',
+  RateLimited: 'RATE_LIMITED',
+  AccessDenied: 'ACCESS_DENIED',
+  InternalError: 'INTERNAL_ERROR',
+  DepthLimitExceeded: 'DEPTH_LIMIT_EXCEEDED',
+  CycleDetected: 'CYCLE_DETECTED',
+} as const;
+
+export type WSErrorCode = (typeof WSErrorCode)[keyof typeof WSErrorCode];
+
+// ---------------------------------------------------------------------------
+// Message Direction
+// ---------------------------------------------------------------------------
+
+/** WebSocket message flow direction (WebSocket-Protocol.md). */
+export const MessageDirection = {
+  RootToContainer: 'root_to_container',
+  ContainerToRoot: 'container_to_root',
+} as const;
+
+export type MessageDirection = (typeof MessageDirection)[keyof typeof MessageDirection];

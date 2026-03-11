@@ -1,126 +1,104 @@
 /**
- * OpenHive Backend - Config Validation
+ * Config validation stubs using Zod schemas.
  *
- * Functions:
- *   validateMasterConfig(cfg) — validates all required fields in MasterConfig
- *   validateProviders(providers) — validates a map of provider presets
+ * Validation rules derived from Configuration-Schemas.md:
  *
- * All validators throw ValidationError on invalid input.
+ * ### masterConfigSchema (validateMasterConfig)
+ * - server.listen_address: Required, non-empty
+ * - server.data_dir: Required, non-empty
+ * - server.log_level: Must be a valid LogLevel (debug, info, warn, error)
+ * - assistant.name: Required, non-empty
+ * - assistant.aid: Must match aid-xxx-xxx format
+ * - assistant.provider: Required, non-empty
+ * - assistant.model_tier: Must be a valid ModelTier (haiku, sonnet, opus)
+ * - limits.max_depth: Positive integer, max 10
+ * - limits.max_teams: Positive integer
+ * - limits.max_agents_per_team: Positive integer
+ *
+ * ### providerConfigSchema (validateProviders)
+ * - At least one provider in the map
+ * - name: Non-empty (set from map key)
+ * - type: Must be "oauth" or "anthropic_direct"
+ * - oauth requires oauth_token
+ * - anthropic_direct requires api_key
+ *
+ * ### teamConfigSchema (validateTeam)
+ * - slug: Must pass validateSlug (lowercase kebab-case, max 63 chars, not reserved)
+ * - leader_aid: Required, must match aid-xxx-xxx format
+ * - tid: Must match tid-xxx-xxx format (if set)
+ * - agents[*].aid: Must match aid-xxx-xxx format
+ * - agents[*].name: Must be non-empty
  */
 
-import { ValidationError } from '../domain/errors.js';
-import { parseLogLevel, parseModelTier } from '../domain/enums.js';
-import { validateAID, validateAgent, validateProvider } from '../domain/validation.js';
-import type { MasterConfig, Provider } from '../domain/types.js';
+import { z } from 'zod';
+import type { MasterConfig } from './defaults.js';
 
 // ---------------------------------------------------------------------------
-// validateMasterConfig
+// Zod Schema Stubs
 // ---------------------------------------------------------------------------
 
 /**
- * Validates a MasterConfig object.
- *
- * Checks:
- *   - system.listen_address not empty
- *   - system.data_dir not empty
- *   - system.workspace_root not empty
- *   - system.log_level is a valid LogLevel (if non-empty)
- *   - assistant.name not empty
- *   - assistant.aid is a valid AID (if non-empty)
- *   - assistant.provider not empty
- *   - assistant.model_tier is a valid ModelTier (if non-empty)
- *   - each agent in cfg.agents passes validateAgent
- *
- * Throws ValidationError on the first invalid field found.
+ * Zod schema for the root config (data/openhive.yaml).
+ * Validates all fields per Configuration-Schemas.md § "Validation Rules (validateMasterConfig)".
  */
-export function validateMasterConfig(cfg: MasterConfig): void {
-  if (cfg.system.listen_address === '') {
-    throw new ValidationError('system.listen_address', 'cannot be empty');
-  }
+export const masterConfigSchema: z.ZodType<MasterConfig> = z.any() as z.ZodType<MasterConfig>;
 
-  if (cfg.system.data_dir === '') {
-    throw new ValidationError('system.data_dir', 'cannot be empty');
-  }
+/**
+ * Zod schema for provider presets (data/providers.yaml).
+ * Validates provider type, required credentials per type, and model tier mappings.
+ * See Configuration-Schemas.md § "Validation Rules (validateProviders)".
+ */
+export const providerConfigSchema: z.ZodType<Record<string, unknown>> = z.any() as z.ZodType<Record<string, unknown>>;
 
-  if (cfg.system.workspace_root === '') {
-    throw new ValidationError('system.workspace_root', 'cannot be empty');
-  }
+/**
+ * Zod schema for per-team config (team.yaml).
+ * Validates slug format, leader_aid, tid, and agent entries.
+ * See Configuration-Schemas.md § "Validation Rules (validateTeam)".
+ */
+export const teamConfigSchema: z.ZodType<Record<string, unknown>> = z.any() as z.ZodType<Record<string, unknown>>;
 
-  if (cfg.system.log_level !== '') {
-    try {
-      parseLogLevel(cfg.system.log_level);
-    } catch {
-      throw new ValidationError(
-        'system.log_level',
-        'invalid log level: ' + cfg.system.log_level,
-      );
-    }
-  }
+// ---------------------------------------------------------------------------
+// Validation Functions
+// ---------------------------------------------------------------------------
 
-  if (cfg.assistant.name === '') {
-    throw new ValidationError('assistant.name', 'cannot be empty');
-  }
-
-  if (cfg.assistant.aid !== '') {
-    validateAID(cfg.assistant.aid);
-  }
-
-  if (cfg.assistant.provider === '') {
-    throw new ValidationError('assistant.provider', 'cannot be empty');
-  }
-
-  if (cfg.assistant.model_tier !== '') {
-    try {
-      parseModelTier(cfg.assistant.model_tier);
-    } catch {
-      throw new ValidationError(
-        'assistant.model_tier',
-        'invalid model tier: ' + cfg.assistant.model_tier,
-      );
-    }
-  }
-
-  const agents = cfg.agents ?? [];
-  for (let i = 0; i < agents.length; i++) {
-    const agent = agents[i]!;
-    try {
-      validateAgent(agent);
-    } catch (err) {
-      throw new ValidationError(
-        `agents[${i}]`,
-        err instanceof Error ? err.message : String(err),
-      );
-    }
-  }
+/**
+ * Validates a parsed master config object against the masterConfigSchema.
+ *
+ * Called after the three-layer resolution chain (compiled defaults -> YAML -> env vars)
+ * merges all sources into a final config object.
+ *
+ * @param config - The merged master config to validate
+ * @returns The validated MasterConfig
+ * @throws Error if validation fails with descriptive field-level messages
+ */
+export function validateMasterConfig(_config: Record<string, unknown>): MasterConfig {
+  throw new Error('Not implemented');
 }
 
-// ---------------------------------------------------------------------------
-// validateProviders
-// ---------------------------------------------------------------------------
+/**
+ * Validates a parsed providers config against the providerConfigSchema.
+ *
+ * Ensures at least one provider exists, each has a valid type,
+ * and type-specific credential fields are present.
+ *
+ * @param providers - The parsed providers.yaml content
+ * @returns The validated providers config
+ * @throws Error if validation fails
+ */
+export function validateProviders(_providers: Record<string, unknown>): Record<string, unknown> {
+  throw new Error('Not implemented');
+}
 
 /**
- * Validates a map of provider presets.
+ * Validates a parsed team config against the teamConfigSchema.
  *
- * Checks:
- *   - At least one provider must be defined
- *   - Each provider passes validateProvider (with name set from map key)
+ * Checks slug format (via domain validateSlug), leader_aid format,
+ * optional tid format, and all agent entries.
  *
- * Throws ValidationError on the first invalid provider found.
+ * @param team - The parsed team.yaml content
+ * @returns The validated team config
+ * @throws Error if validation fails
  */
-export function validateProviders(providers: Record<string, Provider>): void {
-  if (Object.keys(providers).length === 0) {
-    throw new ValidationError('providers', 'at least one provider preset must be defined');
-  }
-
-  for (const [name, p] of Object.entries(providers)) {
-    const providerWithName: Provider = { ...p, name };
-    try {
-      validateProvider(providerWithName);
-    } catch (err) {
-      throw new ValidationError(
-        'providers.' + name,
-        err instanceof Error ? err.message : String(err),
-      );
-    }
-  }
+export function validateTeam(_team: Record<string, unknown>): Record<string, unknown> {
+  throw new Error('Not implemented');
 }

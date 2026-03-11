@@ -1,257 +1,120 @@
 /**
- * OpenHive Backend - Portal WebSocket Handler
+ * Portal WebSocket relay for OpenHive (root-only).
  *
- * Implements GET /api/v1/portal/ws — real-time event streaming to web portal
- * clients. Localhost-only origin check, max connection limit, event filtering
- * by team/level, subscriptions to log, task, heartbeat, and container events.
+ * Provides a secondary WebSocket connection from the REST API server for the
+ * web portal. Unlike the container-facing WSHub (which uses the internal
+ * hub-and-spoke protocol), this relay bridges internal {@link EventBus} events
+ * to browser clients over standard WebSocket frames.
  *
+ * **Relayed event types:**
+ * - `heartbeat` — container/agent health status updates
+ * - `task` — task lifecycle state transitions (created, started, completed, failed, escalated)
+ * - `org-chart` — team/agent topology changes (team created/removed, agent added/removed)
+ *
+ * **Connection lifecycle:**
+ * 1. Browser opens a WebSocket to `/ws/portal` on the API server
+ * 2. The relay subscribes to relevant EventBus topics
+ * 3. Events are serialized as JSON and broadcast to all connected portal clients
+ * 4. On disconnect, per-client subscriptions are cleaned up
+ *
+ * **Root-only module:** This relay is only started when `OPENHIVE_IS_ROOT=true`.
+ * Non-root containers do not serve portal WebSocket connections.
+ *
+ * @example
+ * ```ts
+ * const relay = new PortalWSRelay({ eventBus, server });
+ * await relay.start();
+ * // Browser clients can now connect to ws://host:port/ws/portal
+ * relay.broadcast({ type: 'task', data: { taskId: '123', status: 'completed' } });
+ * await relay.stop();
+ * ```
  */
 
-// Activate @fastify/websocket TypeScript declaration merging for 'websocket: true'
-import '@fastify/websocket';
-import type { FastifyInstance, FastifyRequest } from 'fastify';
-import type { WebSocket } from 'ws';
-
-import type { EventBus } from '../domain/interfaces.js';
-import type { Event } from '../domain/types.js';
-import type { LogLevel } from '../domain/enums.js';
-import { LOG_LEVELS, validateLogLevel } from '../domain/enums.js';
-import type { MiddlewareLogger } from './middleware.js';
-
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-const DEFAULT_MAX_CONNECTIONS = 10;
+import type { BusEvent, EventBus } from '../domain/index.js';
 
 /**
- * Log level priority order. Index position is used for numeric comparison
- * since LogLevel values are string literals.
+ * Configuration options for the portal WebSocket relay.
  */
-const LOG_LEVEL_ORDER: readonly LogLevel[] = LOG_LEVELS;
+export interface PortalWSRelayConfig {
+  /**
+   * The EventBus instance to subscribe to for internal system events.
+   * The relay listens for heartbeat, task, and org-chart events and
+   * forwards them to connected browser clients.
+   */
+  eventBus: EventBus;
 
-// ---------------------------------------------------------------------------
-// PortalWSFilter
-// ---------------------------------------------------------------------------
-
-/**
- * Filtering criteria for a portal WebSocket connection.
- */
-export interface PortalWSFilter {
-  teamSlug: string;
-  minLevel: LogLevel;
-  excludeDebug: boolean;
+  /**
+   * Optional WebSocket path for portal connections.
+   * @default '/ws/portal'
+   */
+  path?: string;
 }
 
-// ---------------------------------------------------------------------------
-// PortalSocket — minimal interface for testability
-// ---------------------------------------------------------------------------
-
 /**
- * Minimal WebSocket socket interface used by PortalWSHandler.
- * Concrete usage: ws.WebSocket cast at the registration boundary.
- * Test usage: mock socket objects.
+ * Portal WebSocket relay that bridges internal EventBus events to browser clients.
+ *
+ * Responsibilities:
+ * - Accepts WebSocket connections from the web portal SPA
+ * - Subscribes to the internal {@link EventBus} for heartbeat, task, and org-chart events
+ * - Serializes and broadcasts matching events to all connected portal clients
+ * - Manages per-client connection lifecycle (connect, disconnect, cleanup)
+ *
+ * This is distinct from the {@link WSHub} which handles the internal
+ * hub-and-spoke protocol between root and team containers. The PortalWSRelay
+ * is a read-only fan-out to browser clients for real-time UI updates.
  */
-export interface PortalSocket {
-  send(data: string): void;
-  close(): void;
-  on(event: 'close', listener: () => void): void;
-  on(event: 'error', listener: (err: Error) => void): void;
-}
+export class PortalWSRelay {
+  private readonly _config: PortalWSRelayConfig;
 
-// ---------------------------------------------------------------------------
-// PortalRequest — minimal request interface for testability
-// ---------------------------------------------------------------------------
-
-/**
- * Minimal HTTP request interface used by PortalWSHandler.
- * Concrete usage: FastifyRequest adapter at registration boundary.
- * Test usage: plain object literals.
- */
-export interface PortalRequest {
-  headers: { origin?: string };
-  url: string;
-}
-
-// ---------------------------------------------------------------------------
-// checkPortalOrigin — pure function, exported for testing
-// ---------------------------------------------------------------------------
-
-/**
- * Validates that the origin is localhost-only.
- * Empty origin (direct connection) is always allowed.
- */
-export function checkPortalOrigin(origin: string): boolean {
-  if (origin === '') return true;
-  let host = origin.toLowerCase();
-  // Strip protocol
-  const protoIdx = host.indexOf('://');
-  if (protoIdx >= 0) host = host.slice(protoIdx + 3);
-  // Strip path
-  const pathIdx = host.indexOf('/');
-  if (pathIdx >= 0) host = host.slice(0, pathIdx);
-  // Strip port
-  const portIdx = host.lastIndexOf(':');
-  if (portIdx >= 0) host = host.slice(0, portIdx);
-  return host === 'localhost' || host === '127.0.0.1' || host === '::1';
-}
-
-// ---------------------------------------------------------------------------
-// parsePortalWSFilter — pure function, exported for testing
-// ---------------------------------------------------------------------------
-
-/**
- * Parses portal WebSocket filter from a URL query string.
- */
-export function parsePortalWSFilter(search: string): PortalWSFilter {
-  const params = new URLSearchParams(search.startsWith('?') ? search.slice(1) : search);
-  const teamSlug = params.get('team') ?? '';
-  const excludeDebug = params.get('include_debug') !== 'true';
-  const levelStr = params.get('level');
-  let minLevel: LogLevel;
-  if (levelStr !== null && validateLogLevel(levelStr)) {
-    minLevel = levelStr;
-  } else {
-    minLevel = excludeDebug ? 'info' : 'debug';
-  }
-  return { teamSlug, minLevel, excludeDebug };
-}
-
-// ---------------------------------------------------------------------------
-// buildPortalFilter — pure function, exported for testing
-// ---------------------------------------------------------------------------
-
-/**
- * Builds an EventBus filter function from a PortalWSFilter.
- */
-export function buildPortalFilter(filter: PortalWSFilter): (event: Event) => boolean {
-  const minLevelIdx = LOG_LEVEL_ORDER.indexOf(filter.minLevel);
-  return (event: Event): boolean => {
-    if (event.type === 'log_entry' && event.payload.kind === 'log_entry') {
-      const entry = event.payload.entry;
-      const entryLevelIdx = LOG_LEVEL_ORDER.indexOf(entry.level);
-      if (entryLevelIdx < minLevelIdx) return false;
-      if (filter.excludeDebug && entry.level === 'debug') return false;
-      if (filter.teamSlug !== '' && entry.team_name !== filter.teamSlug) return false;
-    }
-    return true;
-  };
-}
-
-// ---------------------------------------------------------------------------
-// PortalWSHandler
-// ---------------------------------------------------------------------------
-
-/**
- * Portal WebSocket handler — real-time event streaming endpoint.
- */
-export class PortalWSHandler {
-  private readonly eventBus: EventBus;
-  private readonly logger: MiddlewareLogger;
-  private readonly maxConnections: number;
-  private _activeConnections = 0;
-
-  constructor(
-    eventBus: EventBus,
-    logger: MiddlewareLogger,
-    maxConnections = DEFAULT_MAX_CONNECTIONS,
-  ) {
-    this.eventBus = eventBus;
-    this.logger = logger;
-    this.maxConnections = maxConnections;
+  constructor(config: PortalWSRelayConfig) {
+    this._config = config;
+    // Prevent unused variable lint error
+    void this._config;
   }
 
   /**
-   * Handles an upgraded WebSocket connection from the portal.
+   * Start the portal WebSocket relay.
+   *
+   * Initialization sequence:
+   * 1. Set up WebSocket server or attach to existing HTTP server upgrade path
+   * 2. Subscribe to EventBus for heartbeat, task, and org-chart event types
+   * 3. Register connection handler for incoming browser WebSocket connections
+   * 4. Begin relaying matching events to all connected clients
+   *
+   * @throws Error if the relay fails to initialize or subscribe to the EventBus
    */
-  handleUpgrade(socket: PortalSocket, request: PortalRequest): void {
-    // Rate limit: reject if at max connections
-    if (this._activeConnections >= this.maxConnections) {
-      socket.close();
-      return;
-    }
-
-    // Validate origin
-    const origin = request.headers.origin ?? '';
-    if (!checkPortalOrigin(origin)) {
-      socket.close();
-      return;
-    }
-
-    // Parse filter from query string
-    const qIdx = request.url.indexOf('?');
-    const search = qIdx >= 0 ? request.url.slice(qIdx) : '';
-    const filter = parsePortalWSFilter(search);
-    const filterFn = buildPortalFilter(filter);
-
-    this._activeConnections++;
-
-    // Dispatch helper: serialize event and send (drop on error)
-    const dispatch = (event: Event): void => {
-      try {
-        socket.send(JSON.stringify(event));
-      } catch {
-        // Drop the event if the socket is unavailable; cleanup handles disconnect
-      }
-    };
-
-    // Subscribe to the 4 event types
-    const subIds = [
-      this.eventBus.filteredSubscribe('log_entry', filterFn, dispatch),
-      this.eventBus.filteredSubscribe('task_updated', filterFn, dispatch),
-      this.eventBus.filteredSubscribe('heartbeat_received', filterFn, dispatch),
-      this.eventBus.filteredSubscribe('container_state_changed', filterFn, dispatch),
-    ];
-
-    // Cleanup on disconnect (guarded to avoid double-cleanup on error+close)
-    let cleanedUp = false;
-    const cleanup = (): void => {
-      if (cleanedUp) return;
-      cleanedUp = true;
-      for (const id of subIds) {
-        this.eventBus.unsubscribe(id);
-      }
-      this._activeConnections--;
-      this.logger.info('portal ws client disconnected');
-    };
-
-    socket.on('close', cleanup);
-    socket.on('error', (err: Error) => {
-      this.logger.warn('portal ws client error', err.message);
-      cleanup();
-    });
-
-    this.logger.info('portal ws client connected', { teamFilter: filter.teamSlug });
+  start(): Promise<void> {
+    throw new Error('Not implemented');
   }
 
   /**
-   * Returns the number of active portal WebSocket connections.
+   * Gracefully stop the portal WebSocket relay.
+   *
+   * Shutdown sequence:
+   * 1. Unsubscribe from all EventBus subscriptions
+   * 2. Send close frames to all connected portal clients
+   * 3. Close the WebSocket server and release resources
+   *
+   * Safe to call multiple times. After stopping, no further events
+   * are relayed and new connections are rejected.
    */
-  activeConnections(): number {
-    return this._activeConnections;
+  stop(): Promise<void> {
+    throw new Error('Not implemented');
   }
-}
 
-// ---------------------------------------------------------------------------
-// registerPortalWSRoutes
-// ---------------------------------------------------------------------------
-
-/**
- * Registers the portal WebSocket route on the Fastify instance.
- * Requires @fastify/websocket to be registered on the instance.
- */
-export function registerPortalWSRoutes(
-  fastify: FastifyInstance,
-  handler: PortalWSHandler,
-): void {
-  fastify.get(
-    '/api/v1/portal/ws',
-    { websocket: true },
-    (socket: WebSocket, request: FastifyRequest) => {
-      handler.handleUpgrade(socket as unknown as PortalSocket, {
-        headers: { origin: request.headers.origin },
-        url: request.url,
-      });
-    },
-  );
+  /**
+   * Broadcast an event to all connected portal WebSocket clients.
+   *
+   * The event is serialized as a JSON string and sent to every currently
+   * connected browser client. Clients that have disconnected or whose
+   * send buffers are full are skipped (with a warning logged).
+   *
+   * @param event - The bus event to broadcast. Must include `type` and `data` fields.
+   *                Typically one of: heartbeat, task, or org-chart event types.
+   *
+   * @throws Error if the relay has not been started
+   */
+  broadcast(_event: BusEvent): void {
+    throw new Error('Not implemented');
+  }
 }
