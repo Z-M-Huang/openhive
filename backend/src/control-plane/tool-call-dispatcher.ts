@@ -74,9 +74,12 @@ export class ToolCallDispatcher {
     args: Record<string, unknown>,
     callId: string,
   ): Promise<Record<string, unknown>> {
-    // 1. Dedup check
+    // 1. Dedup check (LRU: move to end on access)
     const cached = this.dedupCache.get(callId);
     if (cached && cached.expiresAt > Date.now()) {
+      // LRU: re-insert to move to most-recently-used position
+      this.dedupCache.delete(callId);
+      this.dedupCache.set(callId, cached);
       return cached.result;
     }
 
@@ -164,11 +167,12 @@ export class ToolCallDispatcher {
   }
 
   private cacheResult(callId: string, result: Record<string, unknown>): void {
-    // Evict oldest if at capacity
+    // LRU eviction: delete least-recently-used (first key in Map)
+    // Map iteration order is insertion order, so first = oldest access
     if (this.dedupCache.size >= DEDUP_MAX_SIZE) {
-      const firstKey = this.dedupCache.keys().next().value;
-      if (firstKey !== undefined) {
-        this.dedupCache.delete(firstKey);
+      const lruKey = this.dedupCache.keys().next().value;
+      if (lruKey !== undefined) {
+        this.dedupCache.delete(lruKey);
       }
     }
 

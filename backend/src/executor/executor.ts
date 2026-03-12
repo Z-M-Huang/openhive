@@ -70,6 +70,9 @@ export class AgentExecutorImpl implements AgentExecutor {
     // Map provider type to environment variables
     if (agent.provider.type === ProviderType.OAuth && agent.provider.oauthToken) {
       env['CLAUDE_CODE_OAUTH_TOKEN'] = agent.provider.oauthToken;
+      // Clear any existing API key vars when using OAuth
+      delete env['ANTHROPIC_API_KEY'];
+      delete env['ANTHROPIC_BASE_URL'];
     } else if (agent.provider.type === ProviderType.AnthropicDirect) {
       if (agent.provider.apiKey) {
         env['ANTHROPIC_API_KEY'] = agent.provider.apiKey;
@@ -77,6 +80,8 @@ export class AgentExecutorImpl implements AgentExecutor {
       if (agent.provider.baseUrl) {
         env['ANTHROPIC_BASE_URL'] = agent.provider.baseUrl;
       }
+      // Clear any existing OAuth token when using direct API
+      delete env['CLAUDE_CODE_OAUTH_TOKEN'];
     }
 
     const child = spawn('node', ['dist/agent-entry.js'], {

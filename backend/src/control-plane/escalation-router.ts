@@ -62,18 +62,22 @@ export class EscalationRouter {
    * Handle an escalation from an agent.
    * Walks the OrgChart upward (max 10 hops), dedup by correlation_id+direction.
    * Returns the correlation_id.
+   * AC-L8-10: Accepts optional caller-supplied correlation_id for deduplication.
    */
   async handleEscalation(
     agentAid: string,
     taskId: string,
     reason: EscalationReason,
     context: Record<string, unknown>,
+    callerCorrelationId?: string,
   ): Promise<string> {
-    const correlationId = crypto.randomUUID();
+    // AC-L8-10: Use caller-supplied correlation_id if provided, otherwise generate
+    const correlationId = callerCorrelationId ?? crypto.randomUUID();
 
-    // Dedup check
+    // Dedup check - prevents duplicate escalation for same correlation_id+direction
     const dedupKey = `${correlationId}:up`;
     if (this.dedupSet.has(dedupKey)) {
+      this.logger.info('Escalation deduplicated', { correlation_id: correlationId });
       return correlationId;
     }
     this.dedupSet.add(dedupKey);
@@ -118,7 +122,14 @@ export class EscalationRouter {
     });
 
     const escalationContext = hopCount >= MAX_HOPS
-      ? { ...context, max_hops_exceeded: true, hop_count: MAX_HOPS }
+      ? {
+          ...context,
+          max_hops_exceeded: true,
+          hop_count: MAX_HOPS,
+          // AC-L8-11: Explicit chain-exhaustion context
+          exhaustion_reason: 'escalation_chain_exhausted',
+          exhaustion_message: `Escalation walked ${MAX_HOPS} hops without finding authorized target; forcing to user`,
+        }
       : context;
 
     const record: EscalationRecord = {
@@ -166,6 +177,13 @@ export class EscalationRouter {
       },
       timestamp: Date.now(),
       source: agentAid,
+    });
+
+    this.logger.debug('escalation.created', {
+      correlation_id: correlationId,
+      source_aid: agentAid,
+      target_aid: targetAid ?? 'user',
+      task_id: taskId,
     });
 
     return correlationId;

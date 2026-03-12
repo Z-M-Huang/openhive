@@ -581,18 +581,18 @@ describe('Layer 6: MCP Tools + Skills', () => {
   describe('Tool execution: create_task', () => {
     it('should create task with blocked_by dependencies', async () => {
       const ctx = createMockToolContext();
-      const { mainAid } = setupOrgChart(ctx.orgChart as OrgChartImpl);
+      const { leadAid, memberAid } = setupOrgChart(ctx.orgChart as OrgChartImpl);
 
       const handler = new SDKToolHandler(ctx);
       const result = await handler.handle(
         'create_task',
         {
-          agent_aid: 'aid-member-ghi789',
+          agent_aid: memberAid,
           prompt: 'Run tests',
           blocked_by: ['dep-task-1', 'dep-task-2'],
           priority: 5,
         },
-        mainAid,
+        leadAid,
         'call-7',
       );
 
@@ -616,7 +616,7 @@ describe('Layer 6: MCP Tools + Skills', () => {
 
     it('should reject create_task when cycle detected in dependencies', async () => {
       const ctx = createMockToolContext();
-      const { mainAid } = setupOrgChart(ctx.orgChart as OrgChartImpl);
+      const { leadAid, memberAid } = setupOrgChart(ctx.orgChart as OrgChartImpl);
 
       // Mock validateDependencies to throw CycleDetectedError
       (ctx.taskStore.validateDependencies as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
@@ -627,11 +627,11 @@ describe('Layer 6: MCP Tools + Skills', () => {
       const result = await handler.handle(
         'create_task',
         {
-          agent_aid: 'aid-member-ghi789',
+          agent_aid: memberAid,
           prompt: 'Cyclic task',
           blocked_by: ['task-b'],
         },
-        mainAid,
+        leadAid,
         'call-8',
       );
 
@@ -1097,18 +1097,18 @@ describe('Layer 6: MCP Tools + Skills', () => {
     it('should execute full tool call flow: SDKToolHandler -> handler -> stores -> result', async () => {
       const ctx = createMockToolContext();
       const orgChart = ctx.orgChart as OrgChartImpl;
-      const { mainAid, memberAid, teamSlug } = setupOrgChart(orgChart);
+      const { mainAid, leadAid, memberAid, teamSlug } = setupOrgChart(orgChart);
 
       const events: BusEvent[] = [];
       (ctx.eventBus as EventBusImpl).subscribe((event) => events.push(event));
 
       const handler = new SDKToolHandler(ctx);
 
-      // Step 1: Create a task (main assistant)
+      // Step 1: Create a task (lead assigning to their team member)
       const createResult = await handler.handle(
         'create_task',
         { agent_aid: memberAid, prompt: 'Build the feature', priority: 3 },
-        mainAid,
+        leadAid,
         'call-flow-1',
       );
       expect(createResult.success).toBe(true);
@@ -1146,10 +1146,10 @@ describe('Layer 6: MCP Tools + Skills', () => {
       // Step 3: Tool call logging happened for both calls
       expect(ctx.toolCallStore.create).toHaveBeenCalledTimes(2);
 
-      // Step 4: Verify send_message between agents
+      // Step 4: Verify send_message between agents (member to their team lead)
       const sendResult = await handler.handle(
         'send_message',
-        { target_aid: mainAid, content: 'Task complete' },
+        { target_aid: leadAid, content: 'Task complete' },
         memberAid,
         'call-flow-3',
       );
@@ -1160,6 +1160,16 @@ describe('Layer 6: MCP Tools + Skills', () => {
           role: 'agent',
         }),
       );
+
+      // Step 5: Verify cross-branch messaging is denied
+      const crossResult = await handler.handle(
+        'send_message',
+        { target_aid: mainAid, content: 'Should fail' },
+        memberAid,
+        'call-flow-4',
+      );
+      expect(crossResult.success).toBe(false);
+      expect(crossResult.error_code).toBe(WSErrorCode.AccessDenied);
     });
 
     it('should verify all 22 tool schemas are defined', () => {

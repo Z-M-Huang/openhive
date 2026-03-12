@@ -1,9 +1,13 @@
+import zlib from 'node:zlib';
+import { promisify } from 'node:util';
 import type {
   LogStore,
   MemoryStore,
   Logger,
 } from '../domain/interfaces.js';
 import { LogLevel } from '../domain/enums.js';
+
+const gzip = promisify(zlib.gzip);
 
 /**
  * Log retention tiers: level -> max age in days.
@@ -38,7 +42,7 @@ export class RetentionWorker {
   private readonly memoryStore: MemoryStore;
   private readonly logger: Logger;
 
-  /** Callback to write archive data (gzip NDJSON). Receives serialized entries. */
+  /** Callback to write archive data (gzip NDJSON, base64-encoded). Receives serialized entries. */
   private readonly archiveWriter: (entries: string, copyIndex: number) => Promise<void>;
 
   private retentionTimer: ReturnType<typeof setInterval> | undefined;
@@ -148,12 +152,13 @@ export class RetentionWorker {
       const oldest = await this.logStore.getOldest(ARCHIVE_BATCH_SIZE);
       if (oldest.length === 0) return 0;
 
-      // Serialize to NDJSON
+      // AC-L8-15: Serialize to NDJSON and gzip compress
       const ndjson = oldest.map((e) => JSON.stringify(e)).join('\n');
+      const compressed = await gzip(Buffer.from(ndjson, 'utf8'));
 
-      // Write archive (rotated)
+      // Write archive (rotated) - gzip compressed, base64-encoded
       const copyIndex = this.archiveCopyIndex % MAX_ARCHIVE_COPIES;
-      await this.archiveWriter(ndjson, copyIndex);
+      await this.archiveWriter(compressed.toString('base64'), copyIndex);
       this.archiveCopyIndex++;
 
       // Delete archived entries

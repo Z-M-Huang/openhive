@@ -25,6 +25,7 @@ import type {
 } from '../domain/enums.js';
 
 import { ValidationError } from '../domain/errors.js';
+import { z } from 'zod';
 
 // Re-export for single import point
 export { mapDomainErrorToWSError } from '../domain/errors.js';
@@ -35,6 +36,161 @@ export { mapDomainErrorToWSError } from '../domain/errors.js';
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+
+// ---------------------------------------------------------------------------
+// Zod schemas for message payload validation (AC-L4-08)
+// ---------------------------------------------------------------------------
+
+const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
+  z.union([z.string(), z.number(), z.boolean(), z.null(), z.array(JsonValueSchema), z.record(JsonValueSchema)])
+);
+
+// Root-to-Container message schemas
+
+export const ContainerInitSchema = z.object({
+  protocol_version: z.string().min(1),
+  is_main_assistant: z.boolean(),
+  team_config: JsonValueSchema,
+  agents: z.array(z.any()), // AgentInitConfig validated at higher layer
+  secrets: z.record(z.string()).optional(),
+  mcp_servers: z.array(z.any()).optional(), // MCPServerConfig validated at higher layer
+});
+
+export const TaskDispatchSchema = z.object({
+  task_id: z.string().min(1),
+  agent_aid: z.string().min(1),
+  prompt: z.string(),
+  session_id: z.string().optional(),
+  work_dir: z.string().optional(),
+  blocked_by: z.array(z.string()),
+});
+
+export const ShutdownSchema = z.object({
+  reason: z.string(),
+  timeout: z.number().int().nonnegative(),
+});
+
+export const ToolResultSchema = z.object({
+  call_id: z.string().min(1),
+  result: JsonValueSchema.optional(),
+  error_code: z.string().optional(),
+  error_message: z.string().optional(),
+});
+
+export const AgentAddedSchema = z.object({
+  agent: z.any(), // AgentInitConfig validated at higher layer
+});
+
+export const EscalationResponseSchema = z.object({
+  correlation_id: z.string().min(1),
+  task_id: z.string().min(1),
+  agent_aid: z.string().min(1),
+  source_team: z.string().min(1),
+  destination_team: z.string().min(1),
+  resolution: z.string(),
+  context: z.record(JsonValueSchema),
+});
+
+export const TaskCancelSchema = z.object({
+  task_id: z.string().min(1),
+  cascade: z.boolean(),
+  reason: z.string().optional(),
+});
+
+// Container-to-Root message schemas
+
+export const ReadySchema = z.object({
+  team_id: z.string().min(1),
+  agent_count: z.number().int().nonnegative(),
+  protocol_version: z.string().min(1),
+});
+
+export const AgentStatusInfoSchema = z.object({
+  aid: z.string().min(1),
+  status: z.string().min(1), // AgentStatus enum
+  detail: z.string(),
+  elapsed_seconds: z.number().int().nonnegative(),
+  memory_mb: z.number().nonnegative(),
+});
+
+export const HeartbeatSchema = z.object({
+  team_id: z.string().min(1),
+  agents: z.array(AgentStatusInfoSchema),
+});
+
+export const TaskResultSchema = z.object({
+  task_id: z.string().min(1),
+  agent_aid: z.string().min(1),
+  status: z.enum(['completed', 'failed']),
+  result: z.string().optional(),
+  error: z.string().optional(),
+  files_created: z.array(z.string()).optional(),
+  duration: z.number().nonnegative(),
+});
+
+export const EscalationSchema = z.object({
+  correlation_id: z.string().min(1),
+  task_id: z.string().min(1),
+  agent_aid: z.string().min(1),
+  source_team: z.string().min(1),
+  destination_team: z.string().min(1),
+  escalation_level: z.number().int().nonnegative(),
+  reason: z.string().min(1), // EscalationReason enum
+  context: z.record(JsonValueSchema),
+});
+
+export const LogEventSchema = z.object({
+  level: z.enum(['debug', 'info', 'warn', 'error']),
+  source_aid: z.string().min(1),
+  message: z.string(),
+  metadata: z.record(JsonValueSchema),
+  timestamp: z.string().min(1),
+});
+
+export const ToolCallSchema = z.object({
+  call_id: z.string().min(1),
+  tool_name: z.string().min(1),
+  arguments: JsonValueSchema,
+  agent_aid: z.string().min(1),
+});
+
+export const StatusUpdateSchema = z.object({
+  agent_aid: z.string().min(1),
+  status: z.string().min(1), // AgentStatus enum
+  detail: z.string().optional(),
+});
+
+export const AgentReadySchema = z.object({
+  aid: z.string().min(1),
+});
+
+export const OrgChartUpdateSchema = z.object({
+  action: z.enum(['agent_added', 'agent_removed', 'team_created', 'team_deleted']),
+  team_slug: z.string().min(1),
+  agent_aid: z.string().optional(),
+  agent_name: z.string().optional(),
+  timestamp: z.string().min(1),
+});
+
+// Message type to schema mapping
+const MESSAGE_SCHEMAS: Record<string, z.ZodType> = {
+  container_init: ContainerInitSchema,
+  task_dispatch: TaskDispatchSchema,
+  shutdown: ShutdownSchema,
+  tool_result: ToolResultSchema,
+  agent_added: AgentAddedSchema,
+  escalation_response: EscalationResponseSchema,
+  task_cancel: TaskCancelSchema,
+  ready: ReadySchema,
+  heartbeat: HeartbeatSchema,
+  task_result: TaskResultSchema,
+  escalation: EscalationSchema,
+  log_event: LogEventSchema,
+  tool_call: ToolCallSchema,
+  status_update: StatusUpdateSchema,
+  agent_ready: AgentReadySchema,
+  org_chart_update: OrgChartUpdateSchema,
+};
 
 // ---------------------------------------------------------------------------
 // Org Chart Action (org_chart_update message)
@@ -281,9 +437,10 @@ export function toWireFormat(message: WSMessage): string {
 
 /**
  * Parses a raw wire-format JSON string into a typed WSMessage.
- * Validates the message structure and type discriminator.
+ * Validates the message structure, type discriminator, and payload schema.
  * This is the PRIMARY TRUST BOUNDARY for all inter-container communication.
- * Throws on invalid JSON, unknown message type, or size limit exceeded.
+ * Throws on invalid JSON, unknown message type, schema violation, or size limit exceeded.
+ * AC-L4-08: Per-message-type payload validation.
  */
 export function parseMessage(raw: string): WSMessage {
   // 1MB check BEFORE JSON.parse to prevent memory exhaustion attacks
@@ -332,8 +489,33 @@ export function parseMessage(raw: string): WSMessage {
     throw new ValidationError('Message data must be a non-null object');
   }
 
+  // AC-L4-08: Validate payload against per-message-type schema
+  const schema = MESSAGE_SCHEMAS[message.type];
+  if (schema) {
+    const result = schema.safeParse(message.data);
+    if (!result.success) {
+      throw new ValidationError(`Invalid ${message.type} payload: ${result.error.issues[0]?.message || 'validation failed'}`);
+    }
+  }
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return { type: message.type, data: message.data } as WSMessage;
+}
+
+/**
+ * AC-L4-08: Extended parse with optional payload schema validation.
+ * This combines structural parsing with payload validation in a single call.
+ * Use this when you want all validation in one place.
+ */
+export function parseMessageWithValidation(
+  raw: string,
+  schemaValidator?: (message: WSMessage) => void,
+): WSMessage {
+  const message = parseMessage(raw);
+  if (schemaValidator) {
+    schemaValidator(message);
+  }
+  return message;
 }
 
 // ---------------------------------------------------------------------------

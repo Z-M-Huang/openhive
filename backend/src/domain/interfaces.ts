@@ -512,7 +512,12 @@ export interface MessageRouter {
 export interface KeyManager {
   unlock(masterKey: string): Promise<void>;
   lock(): Promise<void>;
-  rekey(newMasterKey: string): Promise<void>;
+  /** Rotate to a new master key. If credentialStore provided, migrates existing encrypted data. */
+  rekey(newMasterKey: string, credentialStore?: {
+    listByTeam: (teamSlug: string) => Promise<Credential[]>;
+    get: (id: string) => Promise<Credential>;
+    update: (credential: Credential) => Promise<void>;
+  }, teamSlugs?: string[]): Promise<number>;
   encrypt(plaintext: string): Promise<string>;
   decrypt(ciphertext: string): Promise<string>;
   isUnlocked(): boolean;

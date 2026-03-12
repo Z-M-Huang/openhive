@@ -240,7 +240,7 @@ function createMockContext(): ToolContext {
   const keyManager: KeyManager = {
     unlock: vi.fn(async () => {}),
     lock: vi.fn(async () => {}),
-    rekey: vi.fn(async () => {}),
+    rekey: vi.fn(async () => 0),
     encrypt: vi.fn(async (text: string) => `encrypted:${text}`),
     decrypt: vi.fn(async (text: string) => text.replace('encrypted:', '')),
     isUnlocked: vi.fn(() => true),

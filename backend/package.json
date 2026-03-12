@@ -8,7 +8,8 @@
     "build": "tsc",
     "test": "npx vitest run",
     "test:coverage": "npx vitest run --coverage",
-    "lint": "npx eslint src/"
+    "lint": "npx eslint src/",
+    "smoke": "npx vitest run src/phase-gates/"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2",

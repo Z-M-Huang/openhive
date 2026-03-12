@@ -861,8 +861,9 @@ export function newMemoryStore(db: Database): MemoryStore {
         conditions.push(gte(schema.agentMemories.created_at, query.since.getTime()));
       }
       if (query.query) {
-        // LIKE-based text matching on content
-        conditions.push(sql`${schema.agentMemories.content} LIKE ${'%' + query.query + '%'}`);
+        // LIKE-based text matching on content with escaped wildcards
+        const escapedQuery = query.query.replace(/[%_]/g, '\\$&');
+        conditions.push(sql`${schema.agentMemories.content} LIKE ${'%' + escapedQuery + '%'} ESCAPE '\\'`);
       }
 
       let q = db.getDB()
@@ -944,7 +945,7 @@ export function newMemoryStore(db: Database): MemoryStore {
           .where(
             and(
               sql`${schema.agentMemories.deleted_at} IS NOT NULL`,
-              lt(schema.agentMemories.deleted_at, cutoff),
+              lte(schema.agentMemories.deleted_at, cutoff),
             )
           )
           .run();

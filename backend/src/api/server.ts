@@ -30,7 +30,17 @@
  * ```
  */
 
-import type { WSHub } from '../domain/index.js';
+import Fastify from 'fastify';
+import cors from '@fastify/cors';
+import staticPlugin from '@fastify/static';
+import type { FastifyRequest, FastifyReply } from 'fastify';
+import { createServer } from 'node:http';
+import { existsSync } from 'node:fs';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import type { WSHub, EventBus, OrgChart, ContainerManager, HealthMonitor, TriggerScheduler, Orchestrator, TaskStore, LogStore, TaskEventStore } from '../domain/index.js';
+import { registerRoutes, type RouteContext } from './routes/index.js';
+import { PortalWSRelay } from './portal-ws.js';
 
 /**
  * Configuration options for the API server.
@@ -65,6 +75,51 @@ export interface APIServerConfig {
    * Defaults to the `web/dist` directory relative to the project root.
    */
   staticDir?: string;
+
+  /**
+   * EventBus for portal WebSocket relay.
+   */
+  eventBus?: EventBus;
+
+  /**
+   * OrgChart for team/agent queries.
+   */
+  orgChart?: OrgChart;
+
+  /**
+   * ContainerManager for container operations.
+   */
+  containerManager?: ContainerManager;
+
+  /**
+   * HealthMonitor for health status.
+   */
+  healthMonitor?: HealthMonitor;
+
+  /**
+   * TriggerScheduler for trigger management.
+   */
+  triggerScheduler?: TriggerScheduler;
+
+  /**
+   * Orchestrator for task dispatch.
+   */
+  orchestrator?: Orchestrator;
+
+  /**
+   * TaskStore for task persistence.
+   */
+  taskStore?: TaskStore;
+
+  /**
+   * LogStore for log persistence.
+   */
+  logStore?: LogStore;
+
+  /**
+   * TaskEventStore for task events.
+   */
+  taskEventStore?: TaskEventStore;
 }
 
 /**
@@ -82,11 +137,38 @@ export interface APIServerConfig {
  */
 export class APIServer {
   private readonly _config: APIServerConfig;
+  private app: ReturnType<typeof Fastify> | null = null;
+  private httpServer: ReturnType<typeof createServer> | null = null;
+  private portalRelay: PortalWSRelay | null = null;
+  private startTime = 0;
 
   constructor(config: APIServerConfig) {
     this._config = config;
-    // Prevent unused variable lint error
-    void this._config;
+  }
+
+  /**
+   * Resolve the listen address from config or environment.
+   * Priority: env var > config > default (127.0.0.1)
+   */
+  private resolveListenAddress(): string {
+    const envAddress = process.env.OPENHIVE_SYSTEM_LISTEN_ADDRESS;
+    if (envAddress) {
+      return envAddress;
+    }
+    return this._config.listenAddress ?? '127.0.0.1';
+  }
+
+  /**
+   * Resolve the static files directory.
+   * Falls back to ../web/dist relative to this module.
+   */
+  private resolveStaticDir(): string {
+    if (this._config.staticDir) {
+      return this._config.staticDir;
+    }
+    // Default to web/dist relative to this module
+    const moduleDir = dirname(fileURLToPath(import.meta.url));
+    return resolve(moduleDir, '../../../web/dist');
   }
 
   /**
@@ -107,8 +189,99 @@ export class APIServer {
    *
    * @throws Error if the server fails to bind to the configured address/port
    */
-  start(): Promise<void> {
-    throw new Error('Not implemented');
+  async start(): Promise<void> {
+    this.startTime = Date.now();
+
+    // Create Fastify instance
+    this.app = Fastify({
+      logger: false, // We use Pino separately
+    });
+
+    // Register CORS plugin
+    await this.app.register(cors, {
+      origin: ['http://localhost:3000', 'http://localhost:5173', 'http://127.0.0.1:3000', 'http://127.0.0.1:5173'],
+      credentials: true,
+    });
+
+    // Register static file serving for SPA
+    const staticDir = this.resolveStaticDir();
+    if (existsSync(staticDir)) {
+      await this.app.register(staticPlugin, {
+        root: staticDir,
+        prefix: '/',
+        decorateReply: true,
+      });
+
+      // SPA fallback - serve index.html for unmatched routes (except /api/* and /ws/*)
+      this.app.setNotFoundHandler((request: FastifyRequest, reply: FastifyReply) => {
+        if (request.url.startsWith('/api') || request.url.startsWith('/ws')) {
+          reply.code(404).send({ error: 'Not found' });
+          return;
+        }
+        reply.sendFile('index.html');
+      });
+    }
+
+    // Build route context
+    const routeContext: RouteContext = {
+      orgChart: this._config.orgChart,
+      containerManager: this._config.containerManager,
+      healthMonitor: this._config.healthMonitor,
+      triggerScheduler: this._config.triggerScheduler,
+      orchestrator: this._config.orchestrator,
+      taskStore: this._config.taskStore,
+      logStore: this._config.logStore,
+      taskEventStore: this._config.taskEventStore,
+    };
+
+    // Register API routes
+    registerRoutes(this.app, routeContext);
+
+    // Get underlying HTTP server for WebSocket upgrade handling
+    this.httpServer = this.app.server;
+
+    // Set up WebSocket upgrade handler for container connections
+    if (this._config.wsHub && this.httpServer) {
+      this.httpServer.on('upgrade', (request, socket, head) => {
+        const url = request.url ?? '';
+
+        // Route container WebSocket connections to WSHub
+        if (url.startsWith('/ws/container')) {
+          this._config.wsHub!.handleUpgrade(request, socket, head);
+          return;
+        }
+
+        // Route portal WebSocket connections
+        if (url.startsWith('/ws/portal')) {
+          // PortalWSRelay handles this via its own WebSocketServer
+          // We just need to not destroy the socket here
+          return;
+        }
+
+        // Reject other upgrade requests
+        socket.destroy();
+      });
+    }
+
+    // Start portal WebSocket relay
+    if (this._config.eventBus) {
+      this.portalRelay = new PortalWSRelay({
+        eventBus: this._config.eventBus,
+        path: '/ws/portal',
+      });
+    }
+
+    // Listen on configured port and address
+    const listenAddress = this.resolveListenAddress();
+    await this.app.listen({
+      port: this._config.port,
+      host: listenAddress,
+    });
+
+    // Start portal relay after server is listening
+    if (this.portalRelay && this.httpServer) {
+      await this.portalRelay.start(this.httpServer);
+    }
   }
 
   /**
@@ -117,26 +290,56 @@ export class APIServer {
    * Closes all active connections, stops accepting new requests,
    * and releases the listening socket. Safe to call multiple times.
    */
-  stop(): Promise<void> {
-    throw new Error('Not implemented');
+  async stop(): Promise<void> {
+    // Stop portal relay first
+    if (this.portalRelay) {
+      await this.portalRelay.stop();
+      this.portalRelay = null;
+    }
+
+    // Close Fastify server
+    if (this.app) {
+      await this.app.close();
+      this.app = null;
+      this.httpServer = null;
+    }
   }
 
   /**
-   * Register all REST API route handlers on the Fastify instance.
-   *
-   * Mounts route modules under their respective prefixes:
-   * - `/api/teams` - Team CRUD and listing
-   * - `/api/agents` - Agent management
-   * - `/api/tasks` - Task lifecycle and queries
-   * - `/api/logs` - Log querying and streaming
-   * - `/api/config` - Configuration read/write
-   * - `/api/topology` - Org chart / topology inspection
-   * - `/api/health` - Health check endpoint
-   *
-   * Also registers a catch-all route that serves `index.html` for
-   * client-side routing (SPA fallback).
+   * Get the Fastify instance.
+   * Returns null if server has not been started.
    */
-  registerRoutes(): void {
-    throw new Error('Not implemented');
+  getApp(): ReturnType<typeof Fastify> | null {
+    return this.app;
+  }
+
+  /**
+   * Get the underlying HTTP server.
+   * Returns null if server has not been started.
+   */
+  getServer(): ReturnType<typeof createServer> | null {
+    return this.httpServer;
+  }
+
+  /**
+   * Get the server start time (epoch ms).
+   * Returns 0 if server has not been started.
+   */
+  getStartTime(): number {
+    return this.startTime;
+  }
+
+  /**
+   * Get the port the server is listening on.
+   */
+  getPort(): number {
+    return this._config.port;
+  }
+
+  /**
+   * Get the resolved listen address.
+   */
+  getListenAddress(): string {
+    return this.resolveListenAddress();
   }
 }

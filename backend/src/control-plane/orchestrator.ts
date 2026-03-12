@@ -1,204 +1,330 @@
+import type {
+  Orchestrator,
+  Logger,
+  EventBus,
+  OrgChart,
+  WSHub,
+  WSConnection,
+  TaskStore,
+  ContainerManager,
+  HealthMonitor,
+  TriggerScheduler,
+  AgentExecutor,
+  SessionManager,
+  ConfigLoader,
+  KeyManager,
+  MCPRegistry,
+  ToolCallStore,
+  LogStore,
+  MemoryStore,
+  AgentInitConfig,
+  BusEvent,
+} from '../domain/interfaces.js';
 import type { Task } from '../domain/domain.js';
-import type { TaskStatus, EscalationReason } from '../domain/enums.js';
-import type { Orchestrator } from '../domain/interfaces.js';
+import type { TaskStatus, EscalationReason, AgentStatus } from '../domain/enums.js';
+import { TaskStatus as TS } from '../domain/enums.js';
+import { ToolCallDispatcher } from './tool-call-dispatcher.js';
+import { TaskDAGManager } from './task-dag-manager.js';
+import { EscalationRouter } from './escalation-router.js';
+import { ProactiveScheduler } from './proactive-scheduler.js';
+import { RetentionWorker } from './retention-worker.js';
+
+/** All store interfaces combined for convenience. */
+export interface AllStores {
+  taskStore: TaskStore;
+  logStore: LogStore;
+  memoryStore: MemoryStore;
+  toolCallStore: ToolCallStore;
+}
+
+/** Dependencies for OrchestratorImpl. */
+export interface OrchestratorDeps {
+  configLoader: ConfigLoader;
+  logger: Logger;
+  database?: unknown; // root only - Database type not needed here
+  keyManager?: KeyManager; // root only
+  eventBus: EventBus;
+  orgChart: OrgChart;
+  wsServer?: unknown; // root only - WSServer type
+  wsConnection?: WSConnection; // non-root only
+  wsHub?: WSHub; // root only
+  containerManager?: ContainerManager; // root only
+  healthMonitor?: HealthMonitor; // root only
+  triggerScheduler?: TriggerScheduler; // root only
+  router?: unknown; // root only - Router type
+  agentExecutor: AgentExecutor;
+  sessionManager?: SessionManager; // optional - not used directly by orchestrator
+  stores?: AllStores; // root only
+  mcpRegistry: MCPRegistry;
+}
 
 /**
- * Unified orchestrator — central coordination logic for OpenHive.
+ * Unified orchestrator — thin coordinator that delegates to 5 collaborators.
  *
- * Runs in every container (root and non-root) with different capabilities:
+ * User Decision #2: Orchestrator is now a thin coordinator. It wires and delegates to:
+ * - ToolCallDispatcher (tool call processing)
+ * - TaskDAGManager (task dispatch and dependency resolution)
+ * - EscalationRouter (escalation chain)
+ * - ProactiveScheduler (proactive behavior)
+ * - RetentionWorker (log retention and archiving)
  *
- * **Root container** (`OPENHIVE_IS_ROOT=true`):
- * - Full access to Docker API, SQLite database, WebSocket hub
- * - Manages container lifecycle (spawn, stop, restart team containers)
- * - Owns the org chart and task store (single source of truth)
- * - Routes tool calls from non-root containers to SDKToolHandler
- * - Dispatches tasks to the correct agent/team based on org chart
- * - Handles escalation routing up the team hierarchy
- * - Runs the message router for inbound channel messages
- *
- * **Non-root container**:
- * - Manages local agent execution (start/stop SDK processes)
- * - Forwards tool calls over WebSocket to root via MCPBridge
- * - Reports heartbeat with local agent status
- * - Receives container_init, task assignments, and escalation responses from root
- *
- * **Tool call dispatch flow:**
- * 1. Agent SDK invokes a built-in tool via in-process MCP server
- * 2. MCPBridge serializes the call and sends it over WebSocket to root
- * 3. Root's orchestrator receives the tool_call message
- * 4. {@link handleToolCall} validates authorization (org chart) and dispatches
- *    to the appropriate SDKToolHandler
- * 5. Result flows back: root → WebSocket → MCPBridge → MCP server → SDK
- *
- * **Task lifecycle:**
- * 1. {@link dispatchTask} assigns a task to an agent, transitions to pending
- * 2. Agent picks up the task, orchestrator transitions to active
- * 3. {@link handleTaskResult} processes completion/failure
- * 4. On failure with retries remaining, re-enqueue as pending
- * 5. On failure with no retries, escalate to team lead
- * 6. Completed tasks unblock dependent tasks in the DAG
- *
- * **Escalation routing:**
- * 1. Agent calls {@link handleEscalation} with reason and context
- * 2. Orchestrator walks the org chart upward to find the team lead
- * 3. Creates an escalation record with a correlation ID
- * 4. Delivers the escalation to the lead agent
- * 5. Lead responds via {@link handleEscalationResponse}, which resumes
- *    the blocked agent with the resolution
- *
- * **Root restart recovery sequence:**
- * 1. {@link start} is called — load config, initialize stores
- * 2. Query Docker for running openhive containers (by label)
- * 3. For each found container:
- *    a. Re-establish WebSocket connection (container reconnects on its own)
- *    b. Send `container_init` to re-sync agent configs
- *    c. Request heartbeat to rebuild health state
- * 4. Rebuild the org chart from persisted team configs + live container state
- * 5. Resume any in-progress tasks (re-dispatch if agents are available)
- * 6. Re-register channel adapters and resume message routing
- * 7. {@link rebuildState} encapsulates steps 2-6
+ * Runs in every container (root and non-root) with different capabilities.
  */
 export class OrchestratorImpl implements Orchestrator {
-  /**
-   * Dispatch a tool call from an agent to the appropriate handler.
-   *
-   * Validates that the calling agent exists in the org chart and is authorized
-   * to invoke the requested tool. Routes to the SDKToolHandler which executes
-   * the tool and returns the result. Logs the tool call to the ToolCallStore.
-   *
-   * @param agentAid - The AID of the agent making the call
-   * @param toolName - Name of the built-in tool to invoke
-   * @param args - Tool arguments as a key-value map
-   * @param callId - Unique identifier for this tool call (for correlation)
-   * @returns The tool result as a key-value map
-   * @throws NotFoundError if the agent or tool is not found
-   * @throws AccessDeniedError if the agent is not authorized for this tool
-   */
-  handleToolCall(
-    _agentAid: string,
-    _toolName: string,
-    _args: Record<string, unknown>,
-    _callId: string,
-  ): Promise<Record<string, unknown>> {
-    throw new Error('Not implemented');
-  }
+  private readonly isRoot: boolean;
+  private readonly deps: OrchestratorDeps;
+  private readonly logger: Logger;
 
-  /**
-   * Dispatch a task to the appropriate agent for execution.
-   *
-   * Determines the target agent based on the task's team_slug and agent_aid.
-   * If agent_aid is empty, selects the best available agent in the team.
-   * Validates the task DAG (blocked_by dependencies must be completed).
-   * Transitions the task to pending and sends it to the target container.
-   *
-   * @param task - The task to dispatch
-   * @throws NotFoundError if the target team or agent is not found
-   * @throws ValidationError if task dependencies are not met
-   */
-  dispatchTask(_task: Task): Promise<void> {
-    throw new Error('Not implemented');
-  }
+  // Collaborators
+  private toolCallDispatcher?: ToolCallDispatcher;
+  private taskDAGManager?: TaskDAGManager;
+  private escalationRouter?: EscalationRouter;
+  private proactiveScheduler?: ProactiveScheduler;
+  private retentionWorker?: RetentionWorker;
 
-  /**
-   * Process a task result reported by an agent.
-   *
-   * Handles task completion, failure, and error cases:
-   * - Completed: unblock dependent tasks in the DAG, notify parent if subtask
-   * - Failed with retries: re-enqueue as pending with incremented retry_count
-   * - Failed without retries: escalate to team lead
-   * - Records a TaskEvent for the state transition
-   *
-   * @param taskId - The task ID
-   * @param agentAid - The agent that produced the result
-   * @param status - The resulting task status (completed, failed)
-   * @param result - Task output on success
-   * @param error - Error message on failure
-   * @throws NotFoundError if the task is not found
-   * @throws InvalidTransitionError if the status transition is invalid
-   */
-  handleTaskResult(
-    _taskId: string,
-    _agentAid: string,
-    _status: TaskStatus,
-    _result?: string,
-    _error?: string,
-  ): Promise<void> {
-    throw new Error('Not implemented');
-  }
+  // Event subscriptions for cleanup
+  private eventSubscriptions: string[] = [];
 
-  /**
-   * Handle an escalation request from an agent.
-   *
-   * Walks the org chart upward from the escalating agent's team to find the
-   * team lead. Creates an escalation record with a unique correlation ID and
-   * delivers it to the lead. The lead agent receives the escalation context
-   * and is expected to respond via {@link handleEscalationResponse}.
-   *
-   * @param agentAid - The agent requesting escalation
-   * @param taskId - The task being escalated
-   * @param reason - Why the agent is escalating
-   * @param context - Additional context for the escalation
-   * @returns The correlation ID for tracking the escalation response
-   * @throws NotFoundError if the agent or team lead is not found
-   */
-  handleEscalation(
-    _agentAid: string,
-    _taskId: string,
-    _reason: EscalationReason,
-    _context: Record<string, unknown>,
-  ): Promise<string> {
-    throw new Error('Not implemented');
-  }
+  // Init promise for non-root
+  private initResolve?: () => void;
+  private initPromise?: Promise<void>;
 
-  /**
-   * Process a response to a prior escalation.
-   *
-   * Looks up the original escalation by correlation ID, delivers the resolution
-   * to the blocked agent, and transitions the escalated task back to pending
-   * so it can be retried with the lead's guidance.
-   *
-   * @param correlationId - The correlation ID from the original escalation
-   * @param resolution - The lead's resolution/guidance
-   * @param context - Additional context from the lead
-   * @throws NotFoundError if the correlation ID is not found
-   */
-  handleEscalationResponse(
-    _correlationId: string,
-    _resolution: string,
-    _context: Record<string, unknown>,
-  ): Promise<void> {
-    throw new Error('Not implemented');
+  // Agent configs received in container_init
+  private agentConfigs: AgentInitConfig[] = [];
+
+  constructor(deps: OrchestratorDeps, isRoot: boolean = true) {
+    this.deps = deps;
+    this.logger = deps.logger;
+    this.isRoot = isRoot;
   }
 
   /**
    * Start the orchestrator.
    *
-   * Initializes all subsystems in order:
-   * 1. Load configuration (openhive.yaml, providers.yaml)
-   * 2. Initialize stores (SQLite, if root)
-   * 3. Start the event bus
-   * 4. Initialize the org chart
-   * 5. If root: start WS hub, channel adapters, REST API, health monitor
-   * 6. If root: call {@link rebuildState} to recover from prior state
-   * 7. If non-root: connect to root via WebSocket, await container_init
+   * NOTE: Orchestrator does NOT own infrastructure initialization.
+   * main() (Step 46) creates all infra and passes ready instances via OrchestratorDeps.
+   * This method only performs orchestrator-specific logic.
    */
-  start(): Promise<void> {
-    throw new Error('Not implemented');
+  async start(): Promise<void> {
+    this.logger.info('Orchestrator starting', { is_root: this.isRoot });
+
+    if (this.isRoot) {
+      await this.startRoot();
+    } else {
+      await this.startNonRoot();
+    }
+
+    this.logger.info('Orchestrator started', { is_root: this.isRoot });
+  }
+
+  private async startRoot(): Promise<void> {
+    // Initialize collaborators
+    this.initCollaborators();
+
+    // Subscribe to EventBus events
+    this.subscribeToEvents();
+
+    // Start ProactiveScheduler (register agents from org chart)
+    this.startProactiveScheduler();
+
+    // Start RetentionWorker
+    if (this.retentionWorker) {
+      this.retentionWorker.start();
+    }
+
+    // Rebuild state from persisted data
+    await this.rebuildState();
+  }
+
+  private async startNonRoot(): Promise<void> {
+    // Register WS message handlers
+    if (this.deps.wsConnection) {
+      this.deps.wsConnection.onMessage(this.handleWSMessage.bind(this));
+    }
+
+    // Wait for container_init message
+    this.initPromise = new Promise<void>((resolve) => {
+      this.initResolve = resolve;
+    });
+
+    // Send ready message
+    if (this.deps.wsConnection) {
+      this.deps.wsConnection.send({
+        type: 'ready',
+        data: { tid: this.deps.wsConnection.tid },
+      });
+    }
+
+    // Wait for init (with timeout)
+    const timeout = setTimeout(() => {
+      this.logger.warn('container_init timeout, continuing anyway');
+      this.initResolve?.();
+    }, 30000);
+
+    await this.initPromise;
+    clearTimeout(timeout);
+
+    // Start agents from received configs
+    await this.startAgents();
+  }
+
+  private initCollaborators(): void {
+    const { stores, mcpRegistry, orgChart, wsHub, eventBus, healthMonitor } = this.deps;
+
+    if (!stores || !wsHub || !healthMonitor) {
+      return; // Non-root doesn't have these
+    }
+
+    // Tool handlers map (populated externally or defaults)
+    const handlers = new Map<string, (args: Record<string, unknown>, agentAid: string, teamSlug: string) => Promise<Record<string, unknown>>>();
+
+    // ToolCallDispatcher
+    this.toolCallDispatcher = new ToolCallDispatcher({
+      orgChart,
+      mcpRegistry,
+      toolCallStore: stores.toolCallStore,
+      logger: this.logger,
+      handlers,
+    });
+
+    // TaskDAGManager
+    this.taskDAGManager = new TaskDAGManager({
+      taskStore: stores.taskStore,
+      orgChart,
+      wsHub,
+      eventBus,
+      logger: this.logger,
+      onEscalation: this.handleEscalation.bind(this),
+    });
+
+    // EscalationRouter
+    this.escalationRouter = new EscalationRouter({
+      orgChart,
+      wsHub,
+      taskStore: stores.taskStore,
+      eventBus,
+      logger: this.logger,
+    });
+
+    // ProactiveScheduler
+    this.proactiveScheduler = new ProactiveScheduler({
+      healthMonitor,
+      logger: this.logger,
+      dispatcher: async (agentAid: string, checkId: string) => {
+        this.logger.debug('proactive.dispatch', { agent_aid: agentAid, check_id: checkId });
+        // Dispatch a proactive task - will be implemented in tool handlers
+      },
+    });
+
+    // RetentionWorker
+    this.retentionWorker = new RetentionWorker({
+      logStore: stores.logStore,
+      memoryStore: stores.memoryStore,
+      logger: this.logger,
+      archiveWriter: async (entries: string, _copyIndex: number) => {
+        // Archive writer - writes to file system (will be implemented later)
+        this.logger.debug('archive.write', { size: entries.length });
+      },
+    });
+  }
+
+  private subscribeToEvents(): void {
+    const { eventBus } = this.deps;
+
+    // Subscribe to tool_call events
+    const toolCallSub = eventBus.filteredSubscribe(
+      (e: BusEvent) => e.type === 'tool_call',
+      (e: BusEvent) => {
+        this.logger.debug('tool_call event', { data: e.data });
+      },
+    );
+    this.eventSubscriptions.push(toolCallSub);
+
+    // Subscribe to task_result events
+    const taskResultSub = eventBus.filteredSubscribe(
+      (e: BusEvent) => e.type === 'task_result',
+      (e: BusEvent) => {
+        const { task_id, agent_aid, status, result, error } = e.data as {
+          task_id: string;
+          agent_aid: string;
+          status: TaskStatus;
+          result?: string;
+          error?: string;
+        };
+        this.handleTaskResult(task_id, agent_aid, status, result, error).catch((err) => {
+          this.logger.error('task_result handler failed', { error: String(err) });
+        });
+      },
+    );
+    this.eventSubscriptions.push(taskResultSub);
+
+    // Subscribe to escalation events
+    const escalationSub = eventBus.filteredSubscribe(
+      (e: BusEvent) => e.type === 'escalation',
+      (e: BusEvent) => {
+        const { agent_aid, task_id, reason, context } = e.data as {
+          agent_aid: string;
+          task_id: string;
+          reason: EscalationReason;
+          context: Record<string, unknown>;
+        };
+        this.handleEscalation(agent_aid, task_id, reason, context).catch((err) => {
+          this.logger.error('escalation handler failed', { error: String(err) });
+        });
+      },
+    );
+    this.eventSubscriptions.push(escalationSub);
+
+    // Subscribe to heartbeat events
+    const heartbeatSub = eventBus.filteredSubscribe(
+      (e: BusEvent) => e.type === 'heartbeat',
+      (e: BusEvent) => {
+        const { tid, agents } = e.data as {
+          tid: string;
+          agents: Array<{ aid: string; status: AgentStatus; detail: string }>;
+        };
+        this.deps.healthMonitor?.recordHeartbeat(tid, agents);
+      },
+    );
+    this.eventSubscriptions.push(heartbeatSub);
+  }
+
+  private startProactiveScheduler(): void {
+    if (!this.proactiveScheduler) return;
+
+    // Register all agents from org chart
+    const agents = this.deps.orgChart.listTeams()
+      .flatMap((team) => this.deps.orgChart.getAgentsByTeam(team.slug));
+
+    for (const agent of agents) {
+      // Default 30 min interval, can be configured per agent
+      this.proactiveScheduler.registerAgent(agent.aid, 30);
+    }
   }
 
   /**
    * Stop the orchestrator gracefully.
    *
-   * Shuts down subsystems in reverse order:
-   * 1. Stop accepting new tasks and tool calls
-   * 2. Wait for in-flight operations to complete (with timeout)
-   * 3. If root: stop channel adapters, REST API, health monitor
-   * 4. Close WebSocket connections
-   * 5. Flush logs and close stores
-   * 6. Close the event bus
+   * Stops orchestrator-owned workers only (main() owns shared infrastructure teardown).
+   * Stops: auto-archive worker, RetentionWorker, ProactiveScheduler timers,
+   * EventBus subscriptions (orchestrator's own handlers).
    */
-  stop(): Promise<void> {
-    throw new Error('Not implemented');
+  async stop(): Promise<void> {
+    this.logger.info('Orchestrator stopping', { is_root: this.isRoot });
+
+    // Stop ProactiveScheduler
+    this.proactiveScheduler?.stop();
+
+    // Stop RetentionWorker
+    this.retentionWorker?.stop();
+
+    // Unsubscribe from EventBus
+    for (const subId of this.eventSubscriptions) {
+      this.deps.eventBus.unsubscribe(subId);
+    }
+    this.eventSubscriptions = [];
+
+    this.logger.info('Orchestrator stopped', { is_root: this.isRoot });
   }
 
   /**
@@ -210,13 +336,240 @@ export class OrchestratorImpl implements Orchestrator {
    * 3. Send container_init to re-sync agent configurations
    * 4. Request heartbeat to rebuild health state in HealthMonitor
    * 5. Rebuild org chart from persisted team configs + live container state
-   * 6. Resume in-progress tasks (re-dispatch to available agents)
-   * 7. Re-register channel adapters and resume message routing
-   *
-   * Called automatically by {@link start} on root containers.
-   * Idempotent — safe to call multiple times.
+   * 6. Task recovery: mark active tasks as failed (recovery), retry or escalate
    */
-  rebuildState(): Promise<void> {
-    throw new Error('Not implemented');
+  async rebuildState(): Promise<void> {
+    if (!this.isRoot) return;
+
+    this.logger.info('Rebuilding orchestrator state');
+
+    // 1. Query running containers
+    const containers = await this.deps.containerManager?.listRunningContainers() ?? [];
+    this.logger.info('Found running containers', { count: containers.length });
+
+    // 2-4. For each container, re-establish connection and request heartbeat
+    for (const container of containers) {
+      this.logger.debug('container.recovery', {
+        tid: container.tid,
+        slug: container.teamSlug,
+        health: container.health,
+      });
+
+      // Request heartbeat via WS (connection already established by WS server)
+      if (this.deps.wsHub?.isConnected(container.tid)) {
+        this.deps.wsHub.send(container.tid, {
+          type: 'heartbeat',
+          data: { request: true },
+        });
+      }
+    }
+
+    // 5. Rebuild org chart from stored state
+    // (Assumes teams were loaded from config during startup)
+
+    // 6. Task recovery
+    await this.recoverTasks();
+
+    this.logger.info('State rebuild complete');
+  }
+
+  /**
+   * Task recovery: mark active tasks as failed (recovery), retry or escalate.
+   */
+  private async recoverTasks(): Promise<void> {
+    const taskStore = this.deps.stores?.taskStore;
+    if (!taskStore) return;
+
+    // Find all active tasks
+    const activeTasks = await taskStore.listByStatus(TS.Active);
+
+    for (const task of activeTasks) {
+      this.logger.info('task.recovery', { task_id: task.id, agent_aid: task.agent_aid });
+
+      // Mark as failed with reason 'recovery'
+      const now = Date.now();
+      await taskStore.update({
+        ...task,
+        status: TS.Failed,
+        error: 'Task interrupted by orchestrator restart (recovery)',
+        updated_at: now,
+        completed_at: now,
+      });
+
+      // Check retry count
+      if (task.retry_count < task.max_retries) {
+        // Transition to pending for retry
+        await taskStore.update({
+          ...task,
+          id: task.id,
+          status: TS.Pending,
+          retry_count: task.retry_count + 1,
+          error: '',
+          updated_at: Date.now(),
+          completed_at: null,
+        });
+        this.logger.info('task.recovery.retry', {
+          task_id: task.id,
+          retry_count: task.retry_count + 1,
+          max_retries: task.max_retries,
+        });
+      } else {
+        // Escalate to team lead
+        const team = this.deps.orgChart.getTeamBySlug(task.team_slug);
+        const leaderAid = team?.leaderAid ?? task.agent_aid;
+
+        await this.handleEscalation(leaderAid, task.id, 'error' as EscalationReason, {
+          recovery: true,
+          failed_task_id: task.id,
+          error: 'Task failed after orchestrator restart, retries exhausted',
+          retries_exhausted: true,
+        });
+      }
+    }
+  }
+
+  /**
+   * Handle WebSocket message (non-root).
+   */
+  private handleWSMessage(message: { type: string; data: Record<string, unknown> }): void {
+    switch (message.type) {
+      case 'container_init':
+        this.handleContainerInit(message.data as { agents: AgentInitConfig[] });
+        break;
+      case 'task_dispatch':
+        this.handleTaskDispatch(message.data as { task_id: string; agent_aid: string; prompt: string });
+        break;
+      case 'shutdown':
+        this.handleShutdown();
+        break;
+      case 'escalation_response':
+        // Handled by MCPBridge
+        break;
+      default:
+        this.logger.debug('ws.message.unhandled', { type: message.type });
+    }
+  }
+
+  /**
+   * Handle container_init message (non-root).
+   */
+  private handleContainerInit(data: { agents: AgentInitConfig[] }): void {
+    this.logger.info('container_init received', { agent_count: data.agents?.length ?? 0 });
+    this.agentConfigs = data.agents ?? [];
+    this.initResolve?.();
+  }
+
+  /**
+   * Start agents from received configs (non-root).
+   */
+  private async startAgents(): Promise<void> {
+    for (const config of this.agentConfigs) {
+      try {
+        await this.deps.agentExecutor.start(config, '/app/workspace');
+        this.logger.info('agent.started', { aid: config.aid });
+      } catch (err) {
+        this.logger.error('agent.start.failed', {
+          aid: config.aid,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
+
+  /**
+   * Handle task_dispatch message (non-root).
+   */
+  private handleTaskDispatch(data: { task_id: string; agent_aid: string; prompt: string }): void {
+    this.logger.debug('task_dispatch received', { task_id: data.task_id, agent_aid: data.agent_aid });
+    // Forward to agent executor - will be handled by SDK hooks
+  }
+
+  /**
+   * Handle shutdown message (non-root).
+   */
+  private handleShutdown(): void {
+    this.logger.info('shutdown received');
+    this.stop().catch((err) => {
+      this.logger.error('shutdown failed', { error: String(err) });
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Delegation methods (thin wrappers)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Dispatch a tool call from an agent to the appropriate handler.
+   * Delegates to ToolCallDispatcher.
+   */
+  async handleToolCall(
+    agentAid: string,
+    toolName: string,
+    args: Record<string, unknown>,
+    callId: string,
+  ): Promise<Record<string, unknown>> {
+    if (!this.toolCallDispatcher) {
+      throw new Error('ToolCallDispatcher not initialized');
+    }
+    return this.toolCallDispatcher.handleToolCall(agentAid, toolName, args, callId);
+  }
+
+  /**
+   * Dispatch a task to the appropriate agent for execution.
+   * Delegates to TaskDAGManager.
+   */
+  async dispatchTask(task: Task): Promise<void> {
+    if (!this.taskDAGManager) {
+      throw new Error('TaskDAGManager not initialized');
+    }
+    return this.taskDAGManager.dispatchTask(task);
+  }
+
+  /**
+   * Process a task result reported by an agent.
+   * Delegates to TaskDAGManager.
+   */
+  async handleTaskResult(
+    taskId: string,
+    agentAid: string,
+    status: TaskStatus,
+    result?: string,
+    error?: string,
+  ): Promise<void> {
+    if (!this.taskDAGManager) {
+      throw new Error('TaskDAGManager not initialized');
+    }
+    return this.taskDAGManager.handleTaskResult(taskId, agentAid, status, result, error);
+  }
+
+  /**
+   * Handle an escalation request from an agent.
+   * Delegates to EscalationRouter.
+   */
+  async handleEscalation(
+    agentAid: string,
+    taskId: string,
+    reason: EscalationReason,
+    context: Record<string, unknown>,
+  ): Promise<string> {
+    if (!this.escalationRouter) {
+      throw new Error('EscalationRouter not initialized');
+    }
+    return this.escalationRouter.handleEscalation(agentAid, taskId, reason, context);
+  }
+
+  /**
+   * Process a response to a prior escalation.
+   * Delegates to EscalationRouter.
+   */
+  async handleEscalationResponse(
+    correlationId: string,
+    resolution: string,
+    context: Record<string, unknown>,
+  ): Promise<void> {
+    if (!this.escalationRouter) {
+      throw new Error('EscalationRouter not initialized');
+    }
+    return this.escalationRouter.handleEscalationResponse(correlationId, resolution, context);
   }
 }

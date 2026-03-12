@@ -93,6 +93,13 @@ export interface ToolContext {
   mcpRegistry: MCPRegistry;
   healthMonitor: HealthMonitor;
   logger: Logger;
+  /** Memory file writer for dual-write (AC-L6-06). Writes to workspace memory file. */
+  memoryFileWriter?: (agentAid: string, teamSlug: string, entry: {
+    id: number;
+    content: string;
+    memory_type: 'curated' | 'daily';
+    created_at: number;
+  }) => Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -224,7 +231,11 @@ const InspectTopologySchema = z.object({
 });
 
 const RegisterWebhookSchema = z.object({
-  path: z.string().min(1),
+  // AC-L10-10: Path must be alphanumeric with hyphens, not reserved
+  path: z.string()
+    .min(1)
+    .max(128)
+    .regex(/^[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]$|^[a-zA-Z0-9]$/, 'Path must be alphanumeric with hyphens, no leading/trailing hyphens'),
   target_team: z.string().min(1),
   event_type: z.string().optional(),
 });
@@ -392,6 +403,9 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
     const parsed = CreateTaskSchema.parse(args);
     validateAID(parsed.agent_aid);
 
+    // Note: Hierarchy authorization now enforced centrally in SDKToolHandler.handle()
+    // (AC-L6-04: Central authorization wrapper)
+
     const taskId = crypto.randomUUID();
 
     // Validate dependencies if provided
@@ -426,6 +440,9 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
   handlers.set('dispatch_subtask', async (args, agentAid) => {
     const parsed = DispatchSubtaskSchema.parse(args);
     validateAID(parsed.agent_aid);
+
+    // Note: Hierarchy authorization now enforced centrally in SDKToolHandler.handle()
+    // (AC-L6-04: Central authorization wrapper)
 
     const taskId = crypto.randomUUID();
 
@@ -505,6 +522,7 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
   handlers.set('send_message', async (args, agentAid) => {
     const parsed = SendMessageSchema.parse(args);
 
+    // Note: Hierarchy authorization enforced centrally in SDKToolHandler.handle()
     const targetAgent = ctx.orgChart.getAgent(parsed.target_aid);
     if (!targetAgent) {
       throw new NotFoundError(`Target agent '${parsed.target_aid}' not found`);
@@ -591,17 +609,37 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
     const parsed = SaveMemorySchema.parse(args);
 
     const memoryId = Date.now();
+    const createdAt = Date.now();
+    const entry = {
+      id: memoryId,
+      content: parsed.content,
+      memory_type: parsed.memory_type,
+      created_at: createdAt,
+    };
 
-    // DUAL-WRITE: file first (source of truth), then MemoryStore index via WS
-    // The file write would happen on the agent's workspace. Here we persist
-    // the index entry which is the store-level half.
+    // AC-L6-06: DUAL-WRITE - file first (source of truth), then SQLite index
+    // This ensures workspace portability and durability
+    if (ctx.memoryFileWriter) {
+      try {
+        await ctx.memoryFileWriter(agentAid, teamSlug, entry);
+      } catch (fileErr) {
+        // Log but continue - SQLite is still the primary query interface
+        ctx.logger.warn('Memory file write failed, continuing with SQLite only', {
+          agent_aid: agentAid,
+          memory_id: memoryId,
+          error: fileErr instanceof Error ? fileErr.message : String(fileErr),
+        });
+      }
+    }
+
+    // Index in SQLite for fast search/recall
     await ctx.memoryStore.save({
       id: memoryId,
       agent_aid: agentAid,
       team_slug: teamSlug,
       content: parsed.content,
       memory_type: parsed.memory_type,
-      created_at: Date.now(),
+      created_at: createdAt,
       deleted_at: null,
     });
 
@@ -814,6 +852,12 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
   handlers.set('register_webhook', async (args, _agentAid, teamSlug) => {
     const parsed = RegisterWebhookSchema.parse(args);
 
+    // AC-L10-10: Reject reserved paths that shadow API routes
+    const reservedPrefixes = ['api', 'health', 'ws', 'hooks', 'static', 'admin'];
+    if (reservedPrefixes.some(prefix => parsed.path.toLowerCase().startsWith(prefix))) {
+      throw new ValidationError(`Webhook path '${parsed.path}' uses reserved prefix`);
+    }
+
     const registrationId = crypto.randomUUID();
     const webhookUrl = `/api/v1/hooks/${parsed.path}`;
 
@@ -854,6 +898,17 @@ export interface SDKToolHandlerResult {
  * and audit logging. This is the root-side handler for incoming tool_call
  * WebSocket messages.
  */
+/**
+ * Tools that require hierarchy-based authorization and their target field.
+ * The handler extracts the target from args and checks OrgChart.isAuthorized().
+ */
+const HIERARCHY_AUTH_TOOLS: Record<string, string> = {
+  create_task: 'agent_aid',
+  dispatch_subtask: 'agent_aid',
+  send_message: 'target_aid',
+  escalate: 'target_aid', // optional target
+};
+
 export class SDKToolHandler {
   private readonly handlers: Map<string, ToolHandler>;
   private readonly ctx: ToolContext;
@@ -885,11 +940,24 @@ export class SDKToolHandler {
     const role = (agent?.role ?? 'member') as AgentRole;
 
     try {
-      // 1. Authorization: check role-based access
+      // 1. Authorization: Two-tier model (AC-L6-04)
+      // - Role-based access (RBAC): Enforced centrally via mcpRegistry.isAllowed()
+      // - Hierarchy-based access: Enforced centrally for tools with explicit targets
       if (!this.ctx.mcpRegistry.isAllowed(toolName, role)) {
         throw new AccessDeniedError(
           `Agent '${agentAid}' (role: ${role}) is not authorized to call '${toolName}'`
         );
+      }
+
+      // Central hierarchy authorization for tools with explicit targets
+      const targetField = HIERARCHY_AUTH_TOOLS[toolName];
+      if (targetField && args[targetField] && typeof args[targetField] === 'string') {
+        const targetAid = args[targetField] as string;
+        if (!this.ctx.orgChart.isAuthorized(agentAid, targetAid)) {
+          throw new AccessDeniedError(
+            `Agent '${agentAid}' is not authorized to perform '${toolName}' on '${targetAid}'`
+          );
+        }
       }
 
       // 2. Check handler exists

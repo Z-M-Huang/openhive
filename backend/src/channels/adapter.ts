@@ -105,15 +105,18 @@ export abstract class BaseChannelAdapter implements ChannelAdapter {
    *
    * Concrete adapters call this method when a message arrives from
    * the platform. Handlers are invoked sequentially in registration
-   * order. If a handler throws, the error propagates and remaining
-   * handlers are not called (fail-fast behavior — concrete adapters
-   * should catch and log errors as appropriate).
+   * order. If a handler throws, the error is logged to stderr and
+   * iteration continues to the next handler (fail-safe behavior).
    *
    * @param msg - The inbound message received from the platform.
    */
   protected async notifyHandlers(msg: InboundMessage): Promise<void> {
     for (const handler of this._handlers) {
-      await handler(msg);
+      try {
+        await handler(msg);
+      } catch (err) {
+        console.error('[BaseChannelAdapter] Handler error for message', msg.id, err);
+      }
     }
   }
 }

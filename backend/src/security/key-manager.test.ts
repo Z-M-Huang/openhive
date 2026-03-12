@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { KeyManagerImpl } from './key-manager.js';
 import { EncryptionLockedError, ValidationError } from '../domain/index.js';
 
@@ -139,17 +139,69 @@ describe('KeyManagerImpl', () => {
       await expect(km.rekey(OTHER_MASTER_KEY)).rejects.toThrow(EncryptionLockedError);
     });
 
-    it('allows decrypt with new key after rekey', async () => {
+    it('without credentialStore: destructive rekey (old ciphertext fails)', async () => {
       await km.unlock(MASTER_KEY);
       const ct = await km.encrypt('before-rekey');
-      // Rekey changes the derived key
-      await km.rekey(OTHER_MASTER_KEY);
+      // Rekey without migration changes the derived key
+      const count = await km.rekey(OTHER_MASTER_KEY);
+      expect(count).toBe(0); // No credentials migrated
       // Old ciphertext encrypted with old key should fail
       await expect(km.decrypt(ct)).rejects.toThrow(ValidationError);
       // New encryption with new key should round-trip
       const ct2 = await km.encrypt('after-rekey');
       const pt2 = await km.decrypt(ct2);
       expect(pt2).toBe('after-rekey');
+    });
+
+    it('with credentialStore: migrates credentials to new key (AC-L2-11)', async () => {
+      await km.unlock(MASTER_KEY);
+
+      // Create mock credential store with encrypted values
+      const cred1 = {
+        id: 'cred-1',
+        team_slug: 'team-a',
+        key_name: 'api_key',
+        encrypted_value: await km.encrypt('secret-value-1'),
+        created_at: Date.now(),
+        updated_at: Date.now(),
+      };
+      const cred2 = {
+        id: 'cred-2',
+        team_slug: 'team-b',
+        key_name: 'token',
+        encrypted_value: await km.encrypt('secret-value-2'),
+        created_at: Date.now(),
+        updated_at: Date.now(),
+      };
+
+      const mockStore = {
+        listByTeam: vi.fn().mockImplementation((teamSlug: string) => {
+          if (teamSlug === 'team-a') return Promise.resolve([cred1]);
+          if (teamSlug === 'team-b') return Promise.resolve([cred2]);
+          return Promise.resolve([]);
+        }),
+        get: vi.fn().mockImplementation((id: string) => {
+          if (id === 'cred-1') return Promise.resolve(cred1);
+          if (id === 'cred-2') return Promise.resolve(cred2);
+          throw new Error('Not found');
+        }),
+        update: vi.fn().mockResolvedValue(undefined),
+      };
+
+      // Rekey with migration
+      const count = await km.rekey(OTHER_MASTER_KEY, mockStore, ['team-a', 'team-b']);
+      expect(count).toBe(2); // Both credentials migrated
+
+      // Verify credentials were re-encrypted (update called twice)
+      expect(mockStore.update).toHaveBeenCalledTimes(2);
+
+      // Verify we can decrypt the new ciphertext with the new key
+      const updatedCred1 = mockStore.update.mock.calls[0][0];
+      const updatedCred2 = mockStore.update.mock.calls[1][0];
+      const pt1 = await km.decrypt(updatedCred1.encrypted_value);
+      const pt2 = await km.decrypt(updatedCred2.encrypted_value);
+      expect(pt1).toBe('secret-value-1');
+      expect(pt2).toBe('secret-value-2');
     });
 
     it('maintains unlocked state after rekey', async () => {

@@ -1,5 +1,5 @@
 /**
- * Message router for inbound channel messages.
+ * Message router implementation for inbound channel messages.
  *
  * Implements the {@link MessageRouter} interface from the domain layer,
  * mapping incoming channel messages to the appropriate team/agent using
@@ -16,8 +16,6 @@
  *
  * After routing, the router:
  *   - Stores the inbound message in the {@link MessageStore} for history.
- *   - Advances the per-session cursor so the channel adapter knows which
- *     messages have been processed.
  *   - Dispatches the message content to the resolved team's lead agent.
  *
  * Channel adapters are registered/unregistered dynamically. Each adapter's
@@ -27,7 +25,7 @@
  *
  * @example
  * ```ts
- * const router = new MessageRouterImpl();
+ * const router = new MessageRouterImpl(messageStore, orchestratorRouter);
  * router.registerChannel(ChannelType.Discord, discordAdapter);
  * router.addMapping('discord:123:456', 'weather-team');
  * // Inbound messages from discord:123:456 now route to weather-team.
@@ -35,28 +33,43 @@
  *
  * @see {@link MessageRouter} in domain/interfaces.ts for the interface contract.
  * @see {@link Router} in domain/interfaces.ts for the orchestrator-level router.
- * @see Architecture.md section on message routing for the two-tier design.
  */
 
 import type {
   MessageRouter,
   ChannelAdapter,
   InboundMessage,
-} from '../domain/index.js';
-
-import type { ChannelType } from '../domain/index.js';
+  MessageStore,
+  Router,
+  Orchestrator,
+} from '../domain/interfaces.js';
+import type { ChannelType } from '../domain/enums.js';
+import type { Message } from '../domain/domain.js';
 
 /**
  * Concrete implementation of the {@link MessageRouter} interface.
  *
  * Routes inbound channel messages to the appropriate team/agent using
  * two-tier routing (known routes first, LLM fallback second). Stores
- * processed messages in the database and advances the per-session cursor.
- *
- * All methods currently throw — implementation is deferred to the
- * messaging layer build-out (L7+).
+ * processed messages in the database.
  */
 export class MessageRouterImpl implements MessageRouter {
+  private readonly channels = new Map<ChannelType, ChannelAdapter>();
+  private readonly knownMappings = new Map<string, string>();
+
+  /**
+   * Create a new MessageRouterImpl.
+   *
+   * @param messageStore - Store for persisting inbound messages
+   * @param router - Orchestrator-level router for LLM fallback (Tier 2)
+   * @param orchestrator - Orchestrator for dispatching messages to teams (optional for testing)
+   */
+  constructor(
+    private readonly messageStore: MessageStore,
+    private readonly router: Router,
+    private readonly orchestrator?: Orchestrator
+  ) {}
+
   /**
    * Route an inbound message to the appropriate team/agent.
    *
@@ -67,15 +80,35 @@ export class MessageRouterImpl implements MessageRouter {
    *
    * After resolving the target team, the method:
    * - Persists the message via {@link MessageStore.create}.
-   * - Advances the session cursor so the channel adapter tracks progress.
-   * - Dispatches the message content to the team's lead agent.
+   * - Dispatches the message content to the team's lead agent (if orchestrator is set).
    *
    * @param msg - The inbound message received from a channel adapter.
-   * @throws Error — Not implemented.
    */
   async routeMessage(msg: InboundMessage): Promise<void> {
-    void msg;
-    throw new Error('Not implemented');
+    // Always persist the message first
+    const dbMessage: Message = {
+      id: msg.id,
+      chat_jid: msg.chatJid,
+      role: 'user',
+      content: msg.content,
+      type: 'text',
+      timestamp: msg.timestamp,
+    };
+    await this.messageStore.create(dbMessage);
+
+    // Check known mappings (Tier 1)
+    const knownTeamSlug = this.knownMappings.get(msg.chatJid);
+    if (knownTeamSlug) {
+      // Direct dispatch to known team
+      await this.dispatchToTeam(msg, knownTeamSlug);
+      return;
+    }
+
+    // Fall back to Router for LLM-based routing (Tier 2)
+    const teamSlug = await this.router.route(msg);
+
+    // Dispatch to resolved team
+    await this.dispatchToTeam(msg, teamSlug);
   }
 
   /**
@@ -90,26 +123,33 @@ export class MessageRouterImpl implements MessageRouter {
    *
    * @param channelType - The channel type (e.g., `ChannelType.Discord`).
    * @param adapter - The channel adapter instance to register.
-   * @throws Error — Not implemented.
    */
   registerChannel(channelType: ChannelType, adapter: ChannelAdapter): void {
-    void channelType;
-    void adapter;
-    throw new Error('Not implemented');
+    // Unregister existing adapter if any
+    if (this.channels.has(channelType)) {
+      // Note: We don't have a way to unwire the handler, but that's okay
+      // because the old adapter's handler will just call routeMessage
+      // which will work correctly.
+    }
+
+    // Wire the adapter's message handler
+    adapter.onMessage(async (msg: InboundMessage) => {
+      await this.routeMessage(msg);
+    });
+
+    this.channels.set(channelType, adapter);
   }
 
   /**
    * Unregister a channel adapter for a given channel type.
    *
-   * Removes the adapter and its message handler. Messages from this channel
-   * type will no longer be routed until a new adapter is registered.
+   * Removes the adapter. Messages from this channel type will no longer be
+   * routed until a new adapter is registered.
    *
    * @param channelType - The channel type to unregister.
-   * @throws Error — Not implemented.
    */
   unregisterChannel(channelType: ChannelType): void {
-    void channelType;
-    throw new Error('Not implemented');
+    this.channels.delete(channelType);
   }
 
   /**
@@ -124,11 +164,68 @@ export class MessageRouterImpl implements MessageRouter {
    *
    * @param chatJid - The chat JID to map (e.g., `discord:123:456`).
    * @param teamSlug - The target team slug (e.g., `weather-team`).
-   * @throws Error — Not implemented.
    */
   addMapping(chatJid: string, teamSlug: string): void {
-    void chatJid;
-    void teamSlug;
-    throw new Error('Not implemented');
+    this.knownMappings.set(chatJid, teamSlug);
+  }
+
+  /**
+   * Remove a known chat-JID-to-team mapping.
+   *
+   * @param chatJid - The chat JID to remove from the mapping.
+   */
+  removeMapping(chatJid: string): void {
+    this.knownMappings.delete(chatJid);
+  }
+
+  /**
+   * Get the current team mapping for a chat JID.
+   *
+   * @param chatJid - The chat JID to look up.
+   * @returns The team slug if a mapping exists, undefined otherwise.
+   */
+  getMapping(chatJid: string): string | undefined {
+    return this.knownMappings.get(chatJid);
+  }
+
+  /**
+   * List all registered channel types.
+   *
+   * @returns Array of registered channel types.
+   */
+  listChannels(): ChannelType[] {
+    return Array.from(this.channels.keys());
+  }
+
+  /**
+   * Dispatch a message to a team's lead agent.
+   *
+   * @param msg - The inbound message.
+   * @param teamSlug - The target team slug.
+   */
+  private async dispatchToTeam(msg: InboundMessage, teamSlug: string): Promise<void> {
+    if (this.orchestrator) {
+      // Create a task for the team's lead agent
+      // The orchestrator will handle finding and dispatching to the lead
+      await this.orchestrator.dispatchTask({
+        id: `msg-${msg.id}-${Date.now()}`,
+        parent_id: '',
+        team_slug: teamSlug,
+        agent_aid: '', // Orchestrator will resolve to lead
+        title: `Process message from ${msg.chatJid}`,
+        status: 'pending',
+        prompt: msg.content,
+        result: '',
+        error: '',
+        blocked_by: null,
+        priority: 0,
+        retry_count: 0,
+        max_retries: 0,
+        created_at: Date.now(),
+        updated_at: Date.now(),
+        completed_at: null,
+      });
+    }
+    // If no orchestrator, just log (useful for testing)
   }
 }

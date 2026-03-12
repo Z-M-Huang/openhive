@@ -1,0 +1,72 @@
+# =============================================================================
+# OpenHive v2 Docker Compose for E2E Testing
+# =============================================================================
+#
+# This compose file is used for end-to-end integration tests (Layer 11).
+# It configures a root container with all services enabled for testing.
+#
+# Usage:
+#   docker compose -f docker-compose.test.yml up -d
+#   npx vitest run src/phase-gates/layer-11.test.ts
+#   docker compose -f docker-compose.test.yml down
+#
+# Security:
+# - ICC disabled for container isolation (INV-03)
+# - No privileged mode
+# - No host networking
+# - Read-only root filesystem with writable workspace volume and tmpfs for /tmp
+#
+# =============================================================================
+
+services:
+  openhive-test:
+    image: openhive:latest
+    container_name: openhive-test-root
+    ports:
+      - "8080:8080"
+    volumes:
+      # Workspace mount for root team
+      - ../.run/workspace:/app/workspace
+      # Config files (read-only in production, writable for tests)
+      - ../data:/app/data:ro
+      # Docker socket for sibling container spawning (INV-05)
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Common skills (read-only)
+      - ../common:/app/common:ro
+    environment:
+      # Root mode activation (INV-10)
+      OPENHIVE_IS_ROOT: "true"
+      # Master encryption key (32+ chars required)
+      OPENHIVE_MASTER_KEY: "test-master-key-32-chars-minimum-length"
+      # Optional: Override log level for debugging
+      OPENHIVE_LOG_LEVEL: "debug"
+      # Optional: Override listen address (default: 127.0.0.1:8080)
+      OPENHIVE_SYSTEM_LISTEN_ADDRESS: "0.0.0.0:8080"
+      # Optional: Discord bot token for channel tests
+      # DISCORD_BOT_TOKEN: "${DISCORD_BOT_TOKEN:-}"
+    networks:
+      - openhive-test-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    read_only: true  # Root filesystem read-only; workspace volume is writable
+
+networks:
+  openhive-test-network:
+    driver: bridge
+    driver_opts:
+      # INV-03: Disable inter-container communication
+      com.docker.network.bridge.enable_icc: "false"
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.28.0.0/16

@@ -53,6 +53,9 @@ export class RouterImpl implements Router {
    * Routes are stored in priority order (exact > prefix > regex).
    * If a pattern already exists, its target is updated.
    *
+   * AC-L8-03: Conflict detection within same route type (exact, prefix, regex).
+   * Different types are NOT conflicts - priority ordering resolves them.
+   *
    * @param pattern - The route pattern
    * @param teamSlug - Target team slug
    * @param type - Match type (default: 'exact')
@@ -67,15 +70,30 @@ export class RouterImpl implements Router {
       return;
     }
 
-    // Check for conflicts: overlapping prefix/regex with different teams
+    // AC-L8-03: Check for conflicts within same route type only
+    // Different types are resolved by priority ordering (exact > prefix > regex)
     for (const route of this.routes) {
       if (route.teamSlug === teamSlug) continue;
+      if (route.type !== type) continue; // Different types = not a conflict
 
       // prefix vs prefix overlap: one is a prefix of the other
-      if (type === 'prefix' && route.type === 'prefix') {
+      if (type === 'prefix') {
         if (pattern.startsWith(route.pattern) || route.pattern.startsWith(pattern)) {
           throw new ConflictError(
             `Ambiguous route: prefix '${pattern}' overlaps with existing prefix '${route.pattern}' (team '${route.teamSlug}')`
+          );
+        }
+      }
+
+      // exact vs exact: same pattern already handled above (duplicate check)
+
+      // regex vs regex: both patterns could match same string
+      // Simple heuristic: test if either regex matches the other's pattern
+      if (type === 'regex') {
+        const newRegex = new RegExp(pattern);
+        if (route.compiledRegex?.test(pattern) || newRegex.test(route.pattern)) {
+          throw new ConflictError(
+            `Ambiguous route: regex '${pattern}' overlaps with existing regex '${route.pattern}' (team '${route.teamSlug}')`
           );
         }
       }

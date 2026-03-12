@@ -46,8 +46,133 @@
  * @module
  */
 
+import { resolve } from 'node:path';
+import Dockerode from 'dockerode';
+
 // INV-09: Invariants in code, policies in skills
 // INV-10: Root is a control plane
+
+import { ConfigLoaderImpl } from './config/loader.js';
+import { LoggerImpl } from './logging/logger.js';
+import { StdoutSink } from './logging/sinks.js';
+import { SQLiteSink } from './logging/sinks.js';
+import { Database } from './storage/database.js';
+import {
+  newTaskStore,
+  newMessageStore,
+  newLogStore,
+  newTaskEventStore,
+  newToolCallStore,
+  newDecisionStore,
+  newSessionStore,
+  newMemoryStore,
+  newIntegrationStore,
+  newCredentialStore,
+} from './storage/stores/index.js';
+import { KeyManagerImpl } from './security/key-manager.js';
+import { EventBusImpl } from './control-plane/event-bus.js';
+import { OrgChartImpl } from './control-plane/org-chart.js';
+import { WSServer } from './websocket/server.js';
+import { WSConnectionImpl } from './websocket/connection.js';
+import { WSHubImpl } from './websocket/hub.js';
+import { TokenManagerImpl } from './websocket/token-manager.js';
+import { APIServer } from './api/server.js';
+import { HealthMonitorImpl } from './containers/health.js';
+import { DiscordAdapter } from './channels/discord.js';
+import { TriggerSchedulerImpl } from './triggers/scheduler.js';
+import { OrchestratorImpl } from './control-plane/orchestrator.js';
+import { AgentExecutorImpl } from './executor/executor.js';
+import { SessionManagerImpl } from './executor/session.js';
+import { MCPRegistryImpl } from './mcp/registry.js';
+import { ContainerRuntimeImpl } from './containers/runtime.js';
+import { ContainerManagerImpl } from './containers/manager.js';
+import { ContainerProvisionerImpl } from './containers/provisioner.js';
+import { LogLevel } from './domain/enums.js';
+import type { Logger, OrgChartTeam, OrgChartAgent, SessionStore } from './domain/interfaces.js';
+
+// ---------------------------------------------------------------------------
+// Global State (for shutdown handling)
+// ---------------------------------------------------------------------------
+
+interface ShutdownState {
+  configLoader: ConfigLoaderImpl | null;
+  logger: Logger | null;
+  eventBus: EventBusImpl | null;
+  database: Database | null;
+  wsServer: WSServer | null;
+  wsConnection: WSConnectionImpl | null;
+  apiServer: APIServer | null;
+  healthMonitor: HealthMonitorImpl | null;
+  discordAdapter: DiscordAdapter | null;
+  triggerScheduler: TriggerSchedulerImpl | null;
+  orchestrator: OrchestratorImpl | null;
+  tokenManager: TokenManagerImpl | null;
+  keyManager: KeyManagerImpl | null;
+}
+
+const shutdownState: ShutdownState = {
+  configLoader: null,
+  logger: null,
+  eventBus: null,
+  database: null,
+  wsServer: null,
+  wsConnection: null,
+  apiServer: null,
+  healthMonitor: null,
+  discordAdapter: null,
+  triggerScheduler: null,
+  orchestrator: null,
+  tokenManager: null,
+  keyManager: null,
+};
+
+let isShuttingDown = false;
+
+// ---------------------------------------------------------------------------
+// Helper Functions
+// ---------------------------------------------------------------------------
+
+/**
+ * Parses a log level string to LogLevel enum.
+ * Defaults to Info if invalid or not provided.
+ */
+function parseLogLevel(level: string | undefined): LogLevel {
+  switch (level?.toLowerCase()) {
+    case 'trace':
+      return LogLevel.Trace;
+    case 'debug':
+      return LogLevel.Debug;
+    case 'info':
+      return LogLevel.Info;
+    case 'warn':
+      return LogLevel.Warn;
+    case 'error':
+      return LogLevel.Error;
+    case 'audit':
+      return LogLevel.Audit;
+    default:
+      return LogLevel.Info;
+  }
+}
+
+/**
+ * Parses a listen address string (e.g., "127.0.0.1:8080") into host and port.
+ */
+function parseListenAddress(address: string): { host: string; port: number } {
+  const parts = address.split(':');
+  if (parts.length === 2) {
+    const port = parseInt(parts[1], 10);
+    if (!isNaN(port) && port > 0 && port < 65536) {
+      return { host: parts[0], port };
+    }
+  }
+  // Default fallback
+  return { host: '127.0.0.1', port: 8080 };
+}
+
+// ---------------------------------------------------------------------------
+// Main Entry Point
+// ---------------------------------------------------------------------------
 
 /**
  * Application entry point.
@@ -66,8 +191,6 @@
  *
  * Registers SIGINT and SIGTERM handlers for graceful shutdown that tears down
  * subsystems in reverse initialization order.
- *
- * @throws Error - Stub is not yet implemented.
  */
 export async function main(): Promise<void> {
   const isRoot = process.env['OPENHIVE_IS_ROOT'] === 'true';
@@ -76,8 +199,881 @@ export async function main(): Promise<void> {
   // INV-10: Root is a control plane — root mode activates the full
   //         control plane; non-root activates orchestrator + WS client only.
 
-  // Prevent unused variable lint error until implemented
-  void isRoot;
+  // -------------------------------------------------------------------------
+  // Phase 1: Load Configuration
+  // -------------------------------------------------------------------------
 
-  throw new Error('Not implemented');
+  const configLoader = new ConfigLoaderImpl();
+  shutdownState.configLoader = configLoader;
+
+  // Load master config
+  const masterConfig = await configLoader.loadMaster();
+  const logLevel = parseLogLevel(masterConfig.server.log_level);
+  const { host: listenHost, port: listenPort } = parseListenAddress(
+    masterConfig.server.listen_address
+  );
+
+  // Load providers (root only, but load in both to validate)
+  let providers: Record<string, unknown> = {};
+  try {
+    providers = await configLoader.loadProviders();
+  } catch {
+    // providers.yaml is optional in non-root
+    if (isRoot) {
+      throw new Error('providers.yaml is required in root mode');
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Phase 2: Initialize Logger
+  // -------------------------------------------------------------------------
+
+  const sinks = [new StdoutSink(logLevel)];
+  const logger = new LoggerImpl({
+    minLevel: logLevel,
+    sinks,
+    batchSize: 50,
+    flushIntervalMs: 100,
+  });
+  shutdownState.logger = logger;
+
+  logger.info('OpenHive starting', {
+    is_root: isRoot,
+    log_level: masterConfig.server.log_level,
+    listen_address: masterConfig.server.listen_address,
+  });
+
+  // -------------------------------------------------------------------------
+  // Phase 3: Root-Specific Initialization
+  // -------------------------------------------------------------------------
+
+  if (isRoot) {
+    await initializeRootMode(configLoader, logger, masterConfig, providers, listenHost, listenPort);
+  } else {
+    await initializeNonRootMode(logger);
+  }
+
+  // -------------------------------------------------------------------------
+  // Phase 4: Register Shutdown Handlers
+  // -------------------------------------------------------------------------
+
+  registerShutdownHandlers(logger);
+
+  logger.info('OpenHive initialized', { is_root: isRoot });
+}
+
+/**
+ * Initializes all root-only services.
+ */
+async function initializeRootMode(
+  configLoader: ConfigLoaderImpl,
+  logger: Logger,
+  masterConfig: Awaited<ReturnType<typeof configLoader.loadMaster>>,
+  _providers: Record<string, unknown>,
+  listenHost: string,
+  listenPort: number,
+): Promise<void> {
+  logger.info('Initializing root mode services');
+
+  // 1. Validate master key
+  const masterKey = process.env['OPENHIVE_MASTER_KEY'];
+  if (!masterKey || masterKey.length < 32) {
+    throw new Error('OPENHIVE_MASTER_KEY environment variable must be at least 32 characters');
+  }
+
+  // 2. Initialize database
+  const dbPath = resolve(masterConfig.database.path);
+  const database = new Database(dbPath);
+  await database.initialize();
+  shutdownState.database = database;
+
+  logger.info('Database initialized', { path: dbPath });
+
+  // 3. Initialize key manager
+  const keyManager = new KeyManagerImpl();
+  await keyManager.unlock(masterKey);
+  shutdownState.keyManager = keyManager;
+
+  logger.info('Key manager unlocked');
+
+  // 4. Initialize stores
+  const taskStore = newTaskStore(database);
+  const messageStore = newMessageStore(database); // Used by channels adapter
+  const logStore = newLogStore(database);
+  const taskEventStore = newTaskEventStore(database);
+  const toolCallStore = newToolCallStore(database);
+  const decisionStore = newDecisionStore(database); // Used for decision audit
+  const sessionStore = newSessionStore(database);
+  const memoryStore = newMemoryStore(database);
+  const integrationStore = newIntegrationStore(database); // Used for integrations
+  const credentialStore = newCredentialStore(database); // Used for credentials
+
+  // Suppress unused warnings for stores that will be wired up later
+  void messageStore;
+  void decisionStore;
+  void integrationStore;
+  void credentialStore;
+
+  // Add SQLite sink to logger for persistence
+  const sqliteSink = new SQLiteSink(logStore);
+  (logger as unknown as { sinks: unknown[] }).sinks.push(sqliteSink);
+
+  logger.info('Stores initialized');
+
+  // 5. Initialize event bus
+  const eventBus = new EventBusImpl();
+  shutdownState.eventBus = eventBus;
+
+  logger.info('Event bus started');
+
+  // 6. Build org chart from config
+  const orgChart = new OrgChartImpl();
+
+  // Bootstrap root team with main assistant
+  const assistantConfig = masterConfig.assistant;
+  const rootTeamTid = `tid-main-${Date.now().toString(16)}`;
+
+  // Create root team (bypassing INV-01 check for bootstrap)
+  const rootTeam: OrgChartTeam = {
+    tid: rootTeamTid,
+    slug: 'main',
+    leaderAid: assistantConfig.aid,
+    parentTid: '',
+    depth: 0,
+    containerId: 'root',
+    health: 'running',
+    agentAids: [assistantConfig.aid],
+    workspacePath: '/app/workspace',
+  };
+
+  // Add root team directly to internal maps (bypasses INV-01 for bootstrap)
+  (orgChart as unknown as { teamsByTid: Map<string, OrgChartTeam> }).teamsByTid.set(rootTeamTid, rootTeam);
+  (orgChart as unknown as { teamsBySlug: Map<string, OrgChartTeam> }).teamsBySlug.set(rootTeam.slug, rootTeam);
+  (orgChart as unknown as { agentsByTeam: Map<string, Set<string>> }).agentsByTeam.set(rootTeam.slug, new Set([assistantConfig.aid]));
+
+  // Add main assistant agent
+  const mainAssistant: OrgChartAgent = {
+    aid: assistantConfig.aid,
+    name: assistantConfig.name,
+    teamSlug: 'main',
+    role: 'main_assistant',
+    status: 'idle',
+    leadsTeam: 'main',
+  };
+  (orgChart as unknown as { agentsByAid: Map<string, OrgChartAgent> }).agentsByAid.set(mainAssistant.aid, mainAssistant);
+
+  logger.info('Org chart initialized', {
+    root_tid: rootTeamTid,
+    main_assistant: assistantConfig.aid,
+  });
+
+  // 7. Initialize token manager
+  const tokenManager = new TokenManagerImpl({ ttlMs: 300_000 });
+  tokenManager.startCleanup(60_000);
+  shutdownState.tokenManager = tokenManager;
+
+  logger.info('Token manager started');
+
+  // 8. Initialize WebSocket hub
+  const wsHub = new WSHubImpl();
+  const wsServer = new WSServer(tokenManager, {
+    onMessage: (tid: string, message: { type: string; data: Record<string, unknown> }) => {
+      logger.debug('WS message received', { tid, type: message.type });
+      // Forward to orchestrator for processing
+      if (message.type === 'heartbeat') {
+        const agents = message.data['agents'] as Array<{ aid: string; status: string; detail: string }>;
+        if (agents) {
+          shutdownState.healthMonitor?.recordHeartbeat(tid, agents.map(a => ({
+            aid: a.aid,
+            status: a.status as 'idle' | 'busy' | 'error' | 'starting',
+            detail: a.detail,
+          })));
+        }
+      }
+    },
+    onConnect: (tid: string) => {
+      logger.info('Container connected', { tid });
+    },
+    onDisconnect: (tid: string) => {
+      logger.info('Container disconnected', { tid });
+    },
+  });
+  wsServer.start();
+  shutdownState.wsServer = wsServer;
+
+  logger.info('WebSocket hub started');
+
+  // 9. Initialize health monitor
+  const healthMonitor = new HealthMonitorImpl(eventBus);
+  healthMonitor.start();
+  shutdownState.healthMonitor = healthMonitor;
+
+  logger.info('Health monitor started');
+
+  // 10. Initialize container infrastructure
+  const docker = new Dockerode({ socketPath: '/var/run/docker.sock' });
+  const containerRuntime = new ContainerRuntimeImpl(docker);
+  const provisioner = new ContainerProvisionerImpl('/app/workspace');
+  const containerManager = new ContainerManagerImpl(
+    containerRuntime,
+    tokenManager,
+    eventBus,
+    provisioner,
+    {
+      image: masterConfig.docker.image,
+      network: masterConfig.docker.network,
+      workspaceRoot: '/app/workspace',
+      rootHost: 'openhive',
+      memoryLimit: masterConfig.docker.resource_limits.max_memory,
+      cpuLimit: Math.floor((masterConfig.docker.resource_limits.max_cpus ?? 1) * 100000),
+    }
+  );
+
+  logger.info('Container manager initialized');
+
+  // 11. Initialize trigger scheduler
+  const triggerScheduler = new TriggerSchedulerImpl(eventBus, (teamSlug: string, prompt: string) => {
+    logger.info('Trigger fired', { team_slug: teamSlug, prompt });
+    // TODO: Dispatch task to team
+  });
+  await triggerScheduler.loadTriggers();
+  triggerScheduler.start();
+  shutdownState.triggerScheduler = triggerScheduler;
+
+  logger.info('Trigger scheduler started');
+
+  // 12. Initialize MCP registry
+  const mcpRegistry = new MCPRegistryImpl();
+
+  // Register built-in tools (placeholder handlers)
+  registerBuiltinTools(mcpRegistry, logger);
+
+  logger.info('MCP registry initialized');
+
+  // 13. Initialize agent executor and session manager
+  const agentExecutor = new AgentExecutorImpl(eventBus, logger);
+  const sessionManager = new SessionManagerImpl(sessionStore as SessionStore, '/app/workspace');
+
+  logger.info('Agent executor initialized');
+
+  // 14. Initialize orchestrator
+  const orchestrator = new OrchestratorImpl({
+    configLoader,
+    logger,
+    database,
+    keyManager,
+    eventBus,
+    orgChart,
+    wsServer,
+    wsHub,
+    containerManager,
+    healthMonitor,
+    triggerScheduler,
+    agentExecutor,
+    sessionManager,
+    stores: {
+      taskStore,
+      logStore,
+      memoryStore,
+      toolCallStore,
+    },
+    mcpRegistry,
+  }, true);
+
+  await orchestrator.start();
+  shutdownState.orchestrator = orchestrator;
+
+  logger.info('Orchestrator started');
+
+  // 15. Initialize API server (must be last before channels)
+  const apiServer = new APIServer({
+    port: listenPort,
+    listenAddress: listenHost,
+    wsHub: wsServer,
+    eventBus,
+    orgChart,
+    containerManager,
+    healthMonitor,
+    triggerScheduler,
+    orchestrator,
+    taskStore,
+    logStore,
+    taskEventStore,
+  });
+  await apiServer.start();
+  shutdownState.apiServer = apiServer;
+
+  logger.info('API server started', {
+    host: listenHost,
+    port: listenPort,
+  });
+
+  // 16. Initialize channel adapters
+  if (masterConfig.channels.discord.enabled) {
+    const discordToken = process.env['DISCORD_BOT_TOKEN'];
+    if (discordToken) {
+      const discordAdapter = new DiscordAdapter();
+      try {
+        await discordAdapter.connect();
+        shutdownState.discordAdapter = discordAdapter;
+        logger.info('Discord adapter connected');
+      } catch (err) {
+        logger.error('Failed to connect Discord adapter', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    } else {
+      logger.warn('Discord enabled but DISCORD_BOT_TOKEN not set');
+    }
+  }
+
+  logger.info('Root mode initialization complete');
+}
+
+/**
+ * Initializes non-root (container) mode.
+ */
+async function initializeNonRootMode(logger: Logger): Promise<void> {
+  logger.info('Initializing non-root mode services');
+
+  // 1. Get connection parameters from environment
+  const tid = process.env['OPENHIVE_TEAM_TID'];
+  const token = process.env['OPENHIVE_WS_TOKEN'];
+  const rootHost = process.env['OPENHIVE_ROOT_HOST'] || 'openhive';
+  const hubUrl = `ws://${rootHost}:8080`;
+
+  if (!tid || !token) {
+    throw new Error('OPENHIVE_TEAM_TID and OPENHIVE_WS_TOKEN are required in non-root mode');
+  }
+
+  // 2. Initialize event bus
+  const eventBus = new EventBusImpl();
+  shutdownState.eventBus = eventBus;
+
+  // 3. Initialize MCP registry
+  const mcpRegistry = new MCPRegistryImpl();
+  registerBuiltinTools(mcpRegistry, logger);
+
+  // 4. Initialize agent executor (session manager requires store, use no-op)
+  const agentExecutor = new AgentExecutorImpl(eventBus, logger);
+
+  // 5. Initialize org chart (will be populated from container_init)
+  const orgChart = new OrgChartImpl();
+
+  // 6. Connect to root WebSocket hub
+  const wsConnection = new WSConnectionImpl({
+    tid,
+    token,
+    hubUrl,
+  });
+
+  // Register message handler
+  wsConnection.onMessage((message) => {
+    logger.debug('Received message from root', { type: message.type });
+
+    if (message.type === 'container_init') {
+      // Store agent configs and signal ready
+      logger.info('Received container_init from root');
+    } else if (message.type === 'task_dispatch') {
+      // Handle task dispatch
+      logger.info('Received task_dispatch', {
+        task_id: message.data['task_id'] as string,
+      });
+    } else if (message.type === 'shutdown') {
+      logger.info('Received shutdown signal from root');
+      gracefulShutdown().catch((err) => {
+        logger.error('Shutdown failed', { error: String(err) });
+      });
+    }
+  });
+
+  wsConnection.onClose((code, reason) => {
+    logger.warn('WebSocket connection closed', { code, reason });
+  });
+
+  await wsConnection.connect();
+  shutdownState.wsConnection = wsConnection;
+
+  logger.info('Connected to root hub', { tid, hubUrl });
+
+  // 7. Initialize orchestrator (non-root) - sessionManager is optional for non-root
+  const orchestrator = new OrchestratorImpl({
+    configLoader: new ConfigLoaderImpl(),
+    logger,
+    eventBus,
+    orgChart,
+    wsConnection,
+    agentExecutor,
+    mcpRegistry,
+  }, false);
+
+  await orchestrator.start();
+  shutdownState.orchestrator = orchestrator;
+
+  logger.info('Non-root mode initialization complete');
+}
+
+/**
+ * Registers built-in MCP tools with placeholder handlers.
+ */
+function registerBuiltinTools(mcpRegistry: MCPRegistryImpl, logger: Logger): void {
+  // Container tools
+  mcpRegistry.registerTool(
+    'spawn_container',
+    {
+      type: 'object',
+      properties: {
+        team_slug: { type: 'string', description: 'Team slug' },
+      },
+      required: ['team_slug'],
+    },
+    async (args) => {
+      logger.info('spawn_container called', { team_slug: args['team_slug'] });
+      return { status: 'not_implemented' };
+    }
+  );
+
+  mcpRegistry.registerTool(
+    'stop_container',
+    {
+      type: 'object',
+      properties: {
+        team_slug: { type: 'string', description: 'Team slug' },
+      },
+      required: ['team_slug'],
+    },
+    async (args) => {
+      logger.info('stop_container called', { team_slug: args['team_slug'] });
+      return { status: 'not_implemented' };
+    }
+  );
+
+  mcpRegistry.registerTool(
+    'list_containers',
+    { type: 'object', properties: {}, required: [] },
+    async () => {
+      return { containers: [] };
+    }
+  );
+
+  // Team tools
+  mcpRegistry.registerTool(
+    'create_team',
+    {
+      type: 'object',
+      properties: {
+        slug: { type: 'string', description: 'Team slug' },
+        leader_aid: { type: 'string', description: 'Leader AID' },
+        purpose: { type: 'string', description: 'Team purpose' },
+      },
+      required: ['slug', 'leader_aid', 'purpose'],
+    },
+    async (args) => {
+      logger.info('create_team called', args);
+      return { status: 'not_implemented' };
+    }
+  );
+
+  mcpRegistry.registerTool(
+    'create_agent',
+    {
+      type: 'object',
+      properties: {
+        aid: { type: 'string', description: 'Agent ID' },
+        name: { type: 'string', description: 'Agent name' },
+        team_slug: { type: 'string', description: 'Team slug' },
+      },
+      required: ['aid', 'name', 'team_slug'],
+    },
+    async (args) => {
+      logger.info('create_agent called', args);
+      return { status: 'not_implemented' };
+    }
+  );
+
+  // Task tools
+  mcpRegistry.registerTool(
+    'create_task',
+    {
+      type: 'object',
+      properties: {
+        team_slug: { type: 'string', description: 'Team slug' },
+        agent_aid: { type: 'string', description: 'Agent AID' },
+        title: { type: 'string', description: 'Task title' },
+        prompt: { type: 'string', description: 'Task prompt' },
+      },
+      required: ['team_slug', 'title', 'prompt'],
+    },
+    async (args) => {
+      logger.info('create_task called', args);
+      return { status: 'not_implemented' };
+    }
+  );
+
+  mcpRegistry.registerTool(
+    'dispatch_subtask',
+    {
+      type: 'object',
+      properties: {
+        parent_task_id: { type: 'string', description: 'Parent task ID' },
+        agent_aid: { type: 'string', description: 'Agent AID' },
+        prompt: { type: 'string', description: 'Subtask prompt' },
+      },
+      required: ['parent_task_id', 'agent_aid', 'prompt'],
+    },
+    async (args) => {
+      logger.info('dispatch_subtask called', args);
+      return { status: 'not_implemented' };
+    }
+  );
+
+  mcpRegistry.registerTool(
+    'update_task_status',
+    {
+      type: 'object',
+      properties: {
+        task_id: { type: 'string', description: 'Task ID' },
+        status: { type: 'string', description: 'New status' },
+        result: { type: 'string', description: 'Task result' },
+        error: { type: 'string', description: 'Error message' },
+      },
+      required: ['task_id', 'status'],
+    },
+    async (args) => {
+      logger.info('update_task_status called', args);
+      return { status: 'not_implemented' };
+    }
+  );
+
+  // Messaging tools
+  mcpRegistry.registerTool(
+    'send_message',
+    {
+      type: 'object',
+      properties: {
+        chat_jid: { type: 'string', description: 'Chat JID' },
+        content: { type: 'string', description: 'Message content' },
+      },
+      required: ['chat_jid', 'content'],
+    },
+    async (args) => {
+      logger.info('send_message called', args);
+      return { status: 'not_implemented' };
+    }
+  );
+
+  // Orchestration tools
+  mcpRegistry.registerTool(
+    'escalate',
+    {
+      type: 'object',
+      properties: {
+        task_id: { type: 'string', description: 'Task ID' },
+        reason: { type: 'string', description: 'Escalation reason' },
+        context: { type: 'object', description: 'Additional context' },
+      },
+      required: ['task_id', 'reason'],
+    },
+    async (args) => {
+      logger.info('escalate called', args);
+      return { status: 'not_implemented' };
+    }
+  );
+
+  // Memory tools
+  mcpRegistry.registerTool(
+    'save_memory',
+    {
+      type: 'object',
+      properties: {
+        agent_aid: { type: 'string', description: 'Agent AID' },
+        team_slug: { type: 'string', description: 'Team slug' },
+        content: { type: 'string', description: 'Memory content' },
+        memory_type: { type: 'string', description: 'Memory type' },
+      },
+      required: ['agent_aid', 'team_slug', 'content'],
+    },
+    async (args) => {
+      logger.info('save_memory called', args);
+      return { status: 'not_implemented' };
+    }
+  );
+
+  mcpRegistry.registerTool(
+    'recall_memory',
+    {
+      type: 'object',
+      properties: {
+        agent_aid: { type: 'string', description: 'Agent AID' },
+        query: { type: 'string', description: 'Search query' },
+        limit: { type: 'number', description: 'Max results' },
+      },
+      required: [],
+    },
+    async () => {
+      return { memories: [] };
+    }
+  );
+
+  // Integration tools
+  mcpRegistry.registerTool(
+    'create_integration',
+    {
+      type: 'object',
+      properties: {
+        team_slug: { type: 'string', description: 'Team slug' },
+        name: { type: 'string', description: 'Integration name' },
+        config: { type: 'object', description: 'Integration config' },
+      },
+      required: ['team_slug', 'name', 'config'],
+    },
+    async (args) => {
+      logger.info('create_integration called', args);
+      return { status: 'not_implemented' };
+    }
+  );
+
+  mcpRegistry.registerTool(
+    'test_integration',
+    {
+      type: 'object',
+      properties: {
+        integration_id: { type: 'string', description: 'Integration ID' },
+      },
+      required: ['integration_id'],
+    },
+    async (args) => {
+      logger.info('test_integration called', args);
+      return { status: 'not_implemented' };
+    }
+  );
+
+  mcpRegistry.registerTool(
+    'activate_integration',
+    {
+      type: 'object',
+      properties: {
+        integration_id: { type: 'string', description: 'Integration ID' },
+      },
+      required: ['integration_id'],
+    },
+    async (args) => {
+      logger.info('activate_integration called', args);
+      return { status: 'not_implemented' };
+    }
+  );
+
+  // Secret tools
+  mcpRegistry.registerTool(
+    'get_credential',
+    {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Credential name' },
+        team_slug: { type: 'string', description: 'Team slug' },
+      },
+      required: ['name', 'team_slug'],
+    },
+    async (args) => {
+      logger.info('get_credential called', { name: args['name'] });
+      return { status: 'not_implemented' };
+    }
+  );
+
+  mcpRegistry.registerTool(
+    'set_credential',
+    {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Credential name' },
+        team_slug: { type: 'string', description: 'Team slug' },
+        value: { type: 'string', description: 'Credential value' },
+      },
+      required: ['name', 'team_slug', 'value'],
+    },
+    async (args) => {
+      logger.info('set_credential called', { name: args['name'] });
+      return { status: 'not_implemented' };
+    }
+  );
+
+  // Query tools
+  mcpRegistry.registerTool(
+    'get_team',
+    {
+      type: 'object',
+      properties: {
+        slug: { type: 'string', description: 'Team slug' },
+      },
+      required: ['slug'],
+    },
+    async () => {
+      return { team: null };
+    }
+  );
+
+  mcpRegistry.registerTool(
+    'get_task',
+    {
+      type: 'object',
+      properties: {
+        task_id: { type: 'string', description: 'Task ID' },
+      },
+      required: ['task_id'],
+    },
+    async () => {
+      return { task: null };
+    }
+  );
+
+  mcpRegistry.registerTool(
+    'get_health',
+    { type: 'object', properties: {}, required: [] },
+    async () => {
+      return { health: 'unknown' };
+    }
+  );
+
+  mcpRegistry.registerTool(
+    'inspect_topology',
+    {
+      type: 'object',
+      properties: {
+        depth: { type: 'number', description: 'Max depth' },
+      },
+      required: [],
+    },
+    async () => {
+      return { topology: [] };
+    }
+  );
+
+  // Event tools
+  mcpRegistry.registerTool(
+    'register_webhook',
+    {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Webhook path' },
+        team_slug: { type: 'string', description: 'Team slug' },
+      },
+      required: ['path', 'team_slug'],
+    },
+    async (args) => {
+      logger.info('register_webhook called', args);
+      return { status: 'not_implemented' };
+    }
+  );
+}
+
+/**
+ * Registers SIGINT and SIGTERM handlers for graceful shutdown.
+ */
+function registerShutdownHandlers(logger: Logger): void {
+  const handler = (signal: string) => {
+    if (isShuttingDown) {
+      logger.warn('Shutdown already in progress, ignoring signal', { signal });
+      return;
+    }
+    isShuttingDown = true;
+
+    logger.info('Received shutdown signal', { signal });
+
+    gracefulShutdown()
+      .then(() => {
+        logger.info('Shutdown complete');
+        process.exit(0);
+      })
+      .catch((err) => {
+        logger.error('Shutdown failed', { error: String(err) });
+        process.exit(1);
+      });
+  };
+
+  process.on('SIGINT', () => handler('SIGINT'));
+  process.on('SIGTERM', () => handler('SIGTERM'));
+}
+
+/**
+ * Performs graceful shutdown in reverse initialization order.
+ */
+async function gracefulShutdown(): Promise<void> {
+  const logger = shutdownState.logger;
+
+  // Stop triggers
+  if (shutdownState.triggerScheduler) {
+    logger?.info('Stopping trigger scheduler');
+    shutdownState.triggerScheduler.stop();
+  }
+
+  // Disconnect channels
+  if (shutdownState.discordAdapter) {
+    logger?.info('Disconnecting Discord adapter');
+    await shutdownState.discordAdapter.disconnect();
+  }
+
+  // Stop orchestrator
+  if (shutdownState.orchestrator) {
+    logger?.info('Stopping orchestrator');
+    await shutdownState.orchestrator.stop();
+  }
+
+  // Stop health monitor
+  if (shutdownState.healthMonitor) {
+    logger?.info('Stopping health monitor');
+    shutdownState.healthMonitor.stop();
+  }
+
+  // Stop API server
+  if (shutdownState.apiServer) {
+    logger?.info('Stopping API server');
+    await shutdownState.apiServer.stop();
+  }
+
+  // Close WebSocket
+  if (shutdownState.wsServer) {
+    logger?.info('Closing WebSocket server');
+    await shutdownState.wsServer.close();
+  }
+  if (shutdownState.wsConnection) {
+    logger?.info('Disconnecting WebSocket client');
+    await shutdownState.wsConnection.disconnect();
+  }
+
+  // Stop token manager
+  if (shutdownState.tokenManager) {
+    logger?.info('Stopping token manager');
+    shutdownState.tokenManager.stopCleanup();
+    shutdownState.tokenManager.revokeAll();
+  }
+
+  // Close event bus
+  if (shutdownState.eventBus) {
+    logger?.info('Closing event bus');
+    shutdownState.eventBus.close();
+  }
+
+  // Close database
+  if (shutdownState.database) {
+    logger?.info('Closing database');
+    await shutdownState.database.close();
+  }
+
+  // Lock key manager
+  if (shutdownState.keyManager) {
+    logger?.info('Locking key manager');
+    await shutdownState.keyManager.lock();
+  }
+
+  // Stop config watchers
+  if (shutdownState.configLoader) {
+    logger?.info('Stopping config watchers');
+    shutdownState.configLoader.stopWatching();
+  }
+
+  // Flush and stop logger
+  if (logger) {
+    logger.info('Shutting down logger');
+    await logger.stop();
+  }
 }

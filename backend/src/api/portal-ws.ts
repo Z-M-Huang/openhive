@@ -30,6 +30,9 @@
  * ```
  */
 
+import { WebSocketServer, WebSocket } from 'ws';
+import type { IncomingMessage } from 'node:http';
+import type { Socket } from 'node:net';
 import type { BusEvent, EventBus } from '../domain/index.js';
 
 /**
@@ -48,6 +51,13 @@ export interface PortalWSRelayConfig {
    * @default '/ws/portal'
    */
   path?: string;
+
+  /**
+   * Allowed origins for WebSocket connections.
+   * Used for origin validation during the WebSocket handshake.
+   * @default ['http://localhost:3000', 'http://localhost:5173']
+   */
+  allowedOrigins?: string[];
 }
 
 /**
@@ -65,11 +75,40 @@ export interface PortalWSRelayConfig {
  */
 export class PortalWSRelay {
   private readonly _config: PortalWSRelayConfig;
+  private wss: WebSocketServer | null = null;
+  private clients = new Set<WebSocket>();
+  private subscriptionId: string | null = null;
+  private started = false;
 
   constructor(config: PortalWSRelayConfig) {
     this._config = config;
-    // Prevent unused variable lint error
-    void this._config;
+  }
+
+  /**
+   * Get the default allowed origins list.
+   */
+  private getDefaultAllowedOrigins(): string[] {
+    return [
+      'http://localhost:3000',
+      'http://localhost:5173',
+      'http://127.0.0.1:3000',
+      'http://127.0.0.1:5173',
+    ];
+  }
+
+  /**
+   * Validate the origin of an incoming WebSocket connection.
+   * Returns true if the origin is allowed, false otherwise.
+   */
+  private isOriginAllowed(origin: string | undefined): boolean {
+    const allowedOrigins = this._config.allowedOrigins ?? this.getDefaultAllowedOrigins();
+
+    // Allow connections with no origin (e.g., from same origin or non-browser clients)
+    if (!origin) {
+      return true;
+    }
+
+    return allowedOrigins.includes(origin);
   }
 
   /**
@@ -81,10 +120,91 @@ export class PortalWSRelay {
    * 3. Register connection handler for incoming browser WebSocket connections
    * 4. Begin relaying matching events to all connected clients
    *
+   * @param server - The HTTP server to attach the WebSocket server to
    * @throws Error if the relay fails to initialize or subscribe to the EventBus
    */
-  start(): Promise<void> {
-    throw new Error('Not implemented');
+  async start(server: ReturnType<typeof import('node:http').createServer>): Promise<void> {
+    if (this.started) {
+      return;
+    }
+
+    const path = this._config.path ?? '/ws/portal';
+
+    // Create WebSocket server
+    this.wss = new WebSocketServer({
+      noServer: true,
+      path,
+    });
+
+    // Handle upgrade requests
+    server.on('upgrade', (request: IncomingMessage, socket: Socket, head: Buffer) => {
+      const url = request.url ?? '';
+
+      if (!url.startsWith(path)) {
+        return; // Not our path, let other handlers deal with it
+      }
+
+      // Origin validation (AC-L10-06)
+      const origin = request.headers.origin;
+      if (!this.isOriginAllowed(origin)) {
+        socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+
+      this.wss!.handleUpgrade(request, socket, head, (ws) => {
+        this.wss!.emit('connection', ws, request);
+      });
+    });
+
+    // Handle new connections
+    this.wss.on('connection', (ws: WebSocket) => {
+      this.clients.add(ws);
+
+      // Send welcome message
+      this.sendToClient(ws, {
+        type: 'connected',
+        data: { timestamp: Date.now() },
+        timestamp: Date.now(),
+      });
+
+      // Handle client disconnect
+      ws.on('close', () => {
+        this.clients.delete(ws);
+      });
+
+      // Handle errors
+      ws.on('error', (error) => {
+        console.error('PortalWSRelay client error:', error);
+        this.clients.delete(ws);
+      });
+
+      // Handle incoming messages (typically client doesn't send, but handle anyway)
+      ws.on('message', (data) => {
+        try {
+          const message = JSON.parse(data.toString());
+          // Could handle ping/pong or subscription requests here
+          if (message.type === 'ping') {
+            this.sendToClient(ws, { type: 'pong', data: {}, timestamp: Date.now() });
+          }
+        } catch {
+          // Ignore malformed messages
+        }
+      });
+    });
+
+    // Subscribe to EventBus for relevant events
+    this.subscriptionId = this._config.eventBus.filteredSubscribe(
+      (event: BusEvent) => {
+        // Filter for events we care about
+        return ['heartbeat', 'task', 'org-chart', 'container', 'agent'].includes(event.type);
+      },
+      (event: BusEvent) => {
+        this.broadcast(event);
+      }
+    );
+
+    this.started = true;
   }
 
   /**
@@ -98,8 +218,51 @@ export class PortalWSRelay {
    * Safe to call multiple times. After stopping, no further events
    * are relayed and new connections are rejected.
    */
-  stop(): Promise<void> {
-    throw new Error('Not implemented');
+  async stop(): Promise<void> {
+    if (!this.started) {
+      return;
+    }
+
+    // Unsubscribe from EventBus
+    if (this.subscriptionId) {
+      this._config.eventBus.unsubscribe(this.subscriptionId);
+      this.subscriptionId = null;
+    }
+
+    // Close all client connections
+    for (const client of this.clients) {
+      try {
+        client.close(1000, 'Server shutting down');
+      } catch {
+        // Ignore errors on close
+      }
+    }
+    this.clients.clear();
+
+    // Close WebSocket server
+    if (this.wss) {
+      await new Promise<void>((resolve) => {
+        this.wss!.close(() => resolve());
+      });
+      this.wss = null;
+    }
+
+    this.started = false;
+  }
+
+  /**
+   * Send a message to a specific client.
+   */
+  private sendToClient(ws: WebSocket, event: BusEvent): void {
+    if (ws.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    try {
+      ws.send(JSON.stringify(event));
+    } catch (error) {
+      console.error('PortalWSRelay send error:', error);
+    }
   }
 
   /**
@@ -111,10 +274,46 @@ export class PortalWSRelay {
    *
    * @param event - The bus event to broadcast. Must include `type` and `data` fields.
    *                Typically one of: heartbeat, task, or org-chart event types.
-   *
-   * @throws Error if the relay has not been started
    */
-  broadcast(_event: BusEvent): void {
-    throw new Error('Not implemented');
+  broadcast(event: BusEvent): void {
+    if (!this.started) {
+      return;
+    }
+
+    const message = JSON.stringify(event);
+    const deadClients: WebSocket[] = [];
+
+    for (const client of this.clients) {
+      if (client.readyState !== WebSocket.OPEN) {
+        deadClients.push(client);
+        continue;
+      }
+
+      try {
+        client.send(message);
+      } catch (error) {
+        console.warn('PortalWSRelay broadcast error:', error);
+        deadClients.push(client);
+      }
+    }
+
+    // Clean up dead clients
+    for (const dead of deadClients) {
+      this.clients.delete(dead);
+    }
+  }
+
+  /**
+   * Get the number of currently connected clients.
+   */
+  getClientCount(): number {
+    return this.clients.size;
+  }
+
+  /**
+   * Check if the relay is started.
+   */
+  isStarted(): boolean {
+    return this.started;
   }
 }

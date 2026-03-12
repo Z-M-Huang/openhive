@@ -35,7 +35,7 @@
 
 import crypto from 'node:crypto';
 import argon2 from 'argon2';
-import type { KeyManager } from '../domain/index.js';
+import type { KeyManager, Credential } from '../domain/index.js';
 import { EncryptionLockedError, ValidationError } from '../domain/index.js';
 
 const GCM_IV_BYTES = 12;
@@ -93,7 +93,20 @@ export class KeyManagerImpl implements KeyManager {
     this.isUnlockedState = false;
   }
 
-  async rekey(newMasterKey: string): Promise<void> {
+  async rekey(
+    newMasterKey: string,
+    credentialStore?: {
+      listByTeam: (teamSlug: string) => Promise<Credential[]>;
+      get: (id: string) => Promise<Credential>;
+      update: (credential: Credential) => Promise<void>;
+    },
+    teamSlugs?: string[],
+  ): Promise<number> {
+    // AC-L2-11: If credentialStore provided, perform migration
+    if (credentialStore) {
+      return this.rekeyWithMigration(newMasterKey, credentialStore, teamSlugs);
+    }
+    // No credentialStore - just swap key (destructive, for testing only)
     this.guardLocked();
     const newKey = await deriveKey(newMasterKey);
     // Zero-fill old key before replacing
@@ -101,6 +114,79 @@ export class KeyManagerImpl implements KeyManager {
       this.derivedKey.fill(0);
     }
     this.derivedKey = newKey;
+    return 0; // No credentials migrated
+  }
+
+  /**
+   * Rekey with credential migration (AC-L2-11).
+   * Decrypts all stored credentials with old key, then re-encrypts with new key.
+   * This should be called during maintenance windows with explicit migration.
+   *
+   * @param newMasterKey - The new master key
+   * @param credentialStore - Store to migrate credentials from
+   * @param teamSlugs - List of team slugs to migrate (all teams if omitted)
+   * @returns Number of credentials re-encrypted
+   */
+  async rekeyWithMigration(
+    newMasterKey: string,
+    credentialStore: {
+      listByTeam: (teamSlug: string) => Promise<Credential[]>;
+      get: (id: string) => Promise<Credential>;
+      update: (credential: Credential) => Promise<void>;
+    },
+    teamSlugs?: string[],
+  ): Promise<number> {
+    this.guardLocked();
+
+    // Derive new key
+    const newKey = await deriveKey(newMasterKey);
+
+    // Track re-encrypted count
+    let reencrypted = 0;
+
+    // For each team, decrypt and re-encrypt credentials
+    const teams = teamSlugs ?? []; // If no teams provided, caller must enumerate
+
+    for (const teamSlug of teams) {
+      const credentials = await credentialStore.listByTeam(teamSlug);
+
+      for (const cred of credentials) {
+        if (cred.encrypted_value) {
+          try {
+            // Decrypt with old key
+            const plaintext = await this.decrypt(cred.encrypted_value);
+            // Re-encrypt with new key (using newKey directly)
+            const iv = crypto.randomBytes(GCM_IV_BYTES);
+            const cipher = crypto.createCipheriv('aes-256-gcm', newKey, iv);
+            const encrypted = Buffer.concat([
+              cipher.update(plaintext, 'utf8'),
+              cipher.final(),
+            ]);
+            const authTag = cipher.getAuthTag();
+            const payload = Buffer.concat([encrypted, authTag]);
+            const newCiphertext = `${iv.toString('base64')}:${payload.toString('base64')}`;
+
+            // Update in store
+            await credentialStore.update({
+              ...cred,
+              encrypted_value: newCiphertext,
+            });
+            reencrypted++;
+          } catch (err) {
+            // Log failure but continue with other credentials
+            console.error(`Failed to re-encrypt credential ${cred.id}:`, err);
+          }
+        }
+      }
+    }
+
+    // Now swap to new key
+    if (this.derivedKey) {
+      this.derivedKey.fill(0);
+    }
+    this.derivedKey = newKey;
+
+    return reencrypted;
   }
 
   async encrypt(plaintext: string): Promise<string> {
