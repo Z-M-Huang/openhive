@@ -14,7 +14,7 @@
  * - Comparison: crypto.timingSafeEqual to prevent timing side-channels.
  * - Single-use: validate-then-delete atomically consumes the token.
  * - TTL: 5-minute expiry (configurable via constructor).
- * - Cleanup: periodic sweep every 60 seconds (configurable) removes expired tokens.
+ * - Cleanup: periodic sweep (configurable) removes expired tokens.
  *
  * **Lifecycle:**
  * 1. Root generates a token for a team via {@link generate}.
@@ -29,6 +29,7 @@
  * - Token-to-TID binding is enforced: a token generated for team A cannot authenticate team B.
  */
 
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import type { TokenManager } from '../domain/interfaces.js';
 
 /**
@@ -102,10 +103,6 @@ export class TokenManagerImpl implements TokenManager {
 
   constructor(config?: TokenManagerConfig) {
     this._ttlMs = config?.ttlMs ?? 300_000;
-    // Prevent unused variable lint errors
-    void this._tokens;
-    void this._ttlMs;
-    void this._cleanupTimer;
   }
 
   // -------------------------------------------------------------------------
@@ -123,8 +120,9 @@ export class TokenManagerImpl implements TokenManager {
    * @returns A 64-character hex string token.
    */
   generate(tid: string): string {
-    void tid;
-    throw new Error('Not implemented');
+    const token = randomBytes(32).toString('hex');
+    this._tokens.set(token, { tid, createdAt: Date.now() });
+    return token;
   }
 
   // -------------------------------------------------------------------------
@@ -147,9 +145,30 @@ export class TokenManagerImpl implements TokenManager {
    * @returns true if the token is valid, bound to the TID, and not expired; false otherwise.
    */
   validate(token: string, tid: string): boolean {
-    void token;
-    void tid;
-    throw new Error('Not implemented');
+    const entry = this._tokens.get(token);
+    if (!entry) {
+      return false;
+    }
+
+    // Timing-safe TID comparison to prevent side-channel attacks.
+    // Both buffers must be the same length for timingSafeEqual.
+    const storedBuf = Buffer.from(entry.tid);
+    const providedBuf = Buffer.from(tid);
+    if (storedBuf.length !== providedBuf.length || !timingSafeEqual(storedBuf, providedBuf)) {
+      // Wrong TID — consume the token to prevent brute-force TID guessing
+      this._tokens.delete(token);
+      return false;
+    }
+
+    // Check TTL expiry
+    if (Date.now() - entry.createdAt > this._ttlMs) {
+      this._tokens.delete(token);
+      return false;
+    }
+
+    // Valid — atomic delete-on-success (single-use)
+    this._tokens.delete(token);
+    return true;
   }
 
   // -------------------------------------------------------------------------
@@ -165,8 +184,7 @@ export class TokenManagerImpl implements TokenManager {
    * @param token - The token string to revoke.
    */
   revoke(token: string): void {
-    void token;
-    throw new Error('Not implemented');
+    this._tokens.delete(token);
   }
 
   /**
@@ -176,7 +194,7 @@ export class TokenManagerImpl implements TokenManager {
    * become invalid immediately.
    */
   revokeAll(): void {
-    throw new Error('Not implemented');
+    this._tokens.clear();
   }
 
   // -------------------------------------------------------------------------
@@ -188,7 +206,6 @@ export class TokenManagerImpl implements TokenManager {
    *
    * The cleanup sweep iterates all tokens in the registry and removes any
    * whose age (Date.now() - createdAt) exceeds the configured TTL.
-   * Default cleanup interval: 60 seconds.
    *
    * If cleanup is already running, it is stopped and restarted with the
    * new interval.
@@ -196,8 +213,15 @@ export class TokenManagerImpl implements TokenManager {
    * @param intervalMs - Sweep interval in milliseconds (e.g., 60000 for 60s).
    */
   startCleanup(intervalMs: number): void {
-    void intervalMs;
-    throw new Error('Not implemented');
+    this.stopCleanup();
+    this._cleanupTimer = setInterval(() => {
+      const now = Date.now();
+      for (const [token, entry] of this._tokens) {
+        if (now - entry.createdAt > this._ttlMs) {
+          this._tokens.delete(token);
+        }
+      }
+    }, intervalMs);
   }
 
   /**
@@ -207,6 +231,9 @@ export class TokenManagerImpl implements TokenManager {
    * Should be called during graceful shutdown to prevent resource leaks.
    */
   stopCleanup(): void {
-    throw new Error('Not implemented');
+    if (this._cleanupTimer !== undefined) {
+      clearInterval(this._cleanupTimer);
+      this._cleanupTimer = undefined;
+    }
   }
 }

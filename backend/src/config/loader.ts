@@ -14,197 +14,420 @@
  * - .run/workspace/teams/<slug>/team.yaml — per-team config
  */
 
-import type { ConfigLoader } from '../domain/index.js';
+import { readFile, writeFile, mkdir, rm, readdir, stat, access } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
+import { createHash } from 'node:crypto';
+import * as YAML from 'yaml';
+import { watch, type FSWatcher } from 'chokidar';
+
+import type { ConfigLoader, Logger } from '../domain/index.js';
+import type { MasterConfig } from './defaults.js';
+import type { Provider, Team } from '../domain/index.js';
+import type { TeamConfig } from './defaults.js';
+import { defaultMasterConfig } from './defaults.js';
+import { validateMasterConfig, validateProviders, validateTeam } from './validation.js';
+import { validateSlug, RESERVED_SLUGS } from '../domain/domain.js';
+
+// ---------------------------------------------------------------------------
+// Options
+// ---------------------------------------------------------------------------
+
+export interface ConfigLoaderOptions {
+  dataDir?: string;
+  runDir?: string;
+  logger?: Logger;
+}
+
+// ---------------------------------------------------------------------------
+// Deep Merge Utility
+// ---------------------------------------------------------------------------
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
 
 /**
- * YAML-based config loader with env var overlay and file watching.
- *
- * Uses chokidar for file system watching with 500ms debounce to avoid
- * rapid-fire reloads during editor save sequences (CON-04).
+ * Recursive deep merge. For each key in source:
+ * - If both values are plain objects, recurse.
+ * - If source value is array, replace (not merge).
+ * - If source value is undefined, skip.
+ * - Otherwise, source wins.
  */
+export function deepMerge<T extends Record<string, unknown>>(target: T, source: Record<string, unknown>): T {
+  const result = { ...target } as Record<string, unknown>;
+  for (const key of Object.keys(source)) {
+    const srcVal = source[key];
+    if (srcVal === undefined) continue;
+    const tgtVal = result[key];
+    if (isPlainObject(tgtVal) && isPlainObject(srcVal)) {
+      result[key] = deepMerge(tgtVal as Record<string, unknown>, srcVal);
+    } else {
+      result[key] = srcVal;
+    }
+  }
+  return result as T;
+}
+
+// ---------------------------------------------------------------------------
+// Content Hash
+// ---------------------------------------------------------------------------
+
+function contentHash(data: string): string {
+  return createHash('sha256').update(data).digest('hex');
+}
+
+// ---------------------------------------------------------------------------
+// ConfigLoaderImpl
+// ---------------------------------------------------------------------------
+
 export class ConfigLoaderImpl implements ConfigLoader {
-  /**
-   * Loads the master config from data/openhive.yaml.
-   *
-   * Resolution chain:
-   *   1. Start with compiled defaults (defaultMasterConfig)
-   *   2. Deep-merge YAML file fields over defaults
-   *   3. Apply OPENHIVE_* env var overrides (dot-path mapping)
-   *
-   * The merged result is validated via validateMasterConfig before return.
-   * Caches the result in memory for getMaster() access.
-   *
-   * @returns The fully resolved master config
-   * @throws Error if the YAML file exists but is malformed
-   * @throws Error if validation fails after merge
-   */
-  loadMaster(): Promise<Record<string, unknown>> {
-    throw new Error('Not implemented');
+  private readonly dataDir: string;
+  private readonly runDir: string;
+  private readonly logger?: Logger;
+  private cachedMaster: MasterConfig | undefined;
+  private watchers: FSWatcher[] = [];
+  private debounceTimers: ReturnType<typeof setTimeout>[] = [];
+  private hashes = new Map<string, string>();
+
+  constructor(opts?: ConfigLoaderOptions) {
+    this.dataDir = resolve(opts?.dataDir ?? process.env['OPENHIVE_DATA_DIR'] ?? 'data');
+    this.runDir = resolve(opts?.runDir ?? process.env['OPENHIVE_RUN_DIR'] ?? '.run');
+    this.logger = opts?.logger;
   }
 
-  /**
-   * Persists the master config to data/openhive.yaml.
-   *
-   * Writes only fields that differ from compiled defaults to keep the
-   * YAML file minimal. Validates before writing.
-   *
-   * @param config - The master config to save
-   * @throws Error if validation fails
-   * @throws Error if the file cannot be written
-   */
-  saveMaster(_config: Record<string, unknown>): Promise<void> {
-    throw new Error('Not implemented');
+  // -----------------------------------------------------------------------
+  // Master config
+  // -----------------------------------------------------------------------
+
+  async loadMaster(): Promise<MasterConfig> {
+    // Step 1: compiled defaults
+    const defaults = defaultMasterConfig();
+
+    // Step 2: read YAML file (optional)
+    let yamlData: Record<string, unknown> = {};
+    const yamlPath = join(this.dataDir, 'openhive.yaml');
+    try {
+      const raw = await readFile(yamlPath, 'utf-8');
+      const parsed: unknown = YAML.parse(raw);
+      if (isPlainObject(parsed)) {
+        yamlData = parsed;
+      }
+    } catch (err: unknown) {
+      // File missing is fine — use defaults only
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+
+    // Step 3: deep merge
+    let merged = deepMerge(defaults as unknown as Record<string, unknown>, yamlData) as unknown as MasterConfig;
+
+    // Step 4: env var overlay
+    merged = this.applyEnvOverlay(merged);
+
+    // Step 5: validate
+    const validated = validateMasterConfig(merged);
+
+    // Step 6: cache
+    this.cachedMaster = validated;
+    return validated;
   }
 
-  /**
-   * Returns the cached master config loaded by the most recent loadMaster() call.
-   *
-   * Does NOT reload from disk. Call loadMaster() first to populate.
-   *
-   * @returns The cached master config
-   * @throws Error if loadMaster() has not been called
-   */
-  getMaster(): Record<string, unknown> {
-    throw new Error('Not implemented');
+  async saveMaster(config: MasterConfig): Promise<void> {
+    validateMasterConfig(config);
+    const defaults = defaultMasterConfig();
+    const diff = this.diffConfig(
+      defaults as unknown as Record<string, unknown>,
+      config as unknown as Record<string, unknown>,
+    );
+    const yamlStr = YAML.stringify(diff);
+    await mkdir(this.dataDir, { recursive: true });
+    await writeFile(join(this.dataDir, 'openhive.yaml'), yamlStr, 'utf-8');
+    this.cachedMaster = config;
   }
 
-  /**
-   * Loads provider presets from data/providers.yaml.
-   *
-   * Validates via validateProviders. Does not apply env var overlay
-   * (providers contain secrets resolved at container_init time).
-   *
-   * @returns The parsed and validated providers config
-   * @throws Error if the file is missing or malformed
-   * @throws Error if validation fails
-   */
-  loadProviders(): Promise<Record<string, unknown>> {
-    throw new Error('Not implemented');
+  getMaster(): MasterConfig {
+    if (!this.cachedMaster) {
+      throw new Error('ConfigLoader: loadMaster() must be called before getMaster()');
+    }
+    return this.cachedMaster;
   }
 
-  /**
-   * Persists provider presets to data/providers.yaml.
-   *
-   * Validates before writing.
-   *
-   * @param providers - The providers config to save
-   * @throws Error if validation fails
-   * @throws Error if the file cannot be written
-   */
-  saveProviders(_providers: Record<string, unknown>): Promise<void> {
-    throw new Error('Not implemented');
+  // -----------------------------------------------------------------------
+  // Providers
+  // -----------------------------------------------------------------------
+
+  async loadProviders(): Promise<Record<string, Provider>> {
+    const yamlPath = join(this.dataDir, 'providers.yaml');
+    const raw = await readFile(yamlPath, 'utf-8');
+    const parsed: unknown = YAML.parse(raw);
+    const validated = validateProviders(parsed);
+    // Map to Provider objects (add name from key)
+    const result: Record<string, Provider> = {};
+    for (const [key, value] of Object.entries(validated)) {
+      const entry = value as Record<string, unknown>;
+      result[key] = {
+        name: key,
+        type: entry['type'] as Provider['type'],
+        ...(entry['base_url'] !== undefined ? { base_url: entry['base_url'] as string } : {}),
+        ...(entry['api_key'] !== undefined ? { api_key: entry['api_key'] as string } : {}),
+        ...(entry['oauth_token'] !== undefined ? { oauth_token: entry['oauth_token'] as string } : {}),
+        ...(entry['models'] !== undefined ? { models: entry['models'] as Record<string, string> } : {}),
+      };
+    }
+    return result;
   }
 
-  /**
-   * Loads a team config from .run/workspace/teams/<slug>/team.yaml.
-   *
-   * Validates via validateTeam.
-   *
-   * @param slug - The team slug (directory name)
-   * @returns The parsed and validated team config
-   * @throws Error if the team directory or file is missing
-   * @throws Error if validation fails
-   */
-  loadTeam(_slug: string): Promise<Record<string, unknown>> {
-    throw new Error('Not implemented');
+  async saveProviders(providers: Record<string, Provider>): Promise<void> {
+    // Strip name field (it's the map key, not persisted in YAML)
+    const toWrite: Record<string, Record<string, unknown>> = {};
+    for (const [key, provider] of Object.entries(providers)) {
+      const { name: _name, ...rest } = provider;
+      toWrite[key] = rest;
+    }
+    validateProviders(toWrite);
+    const yamlStr = YAML.stringify(toWrite);
+    await mkdir(this.dataDir, { recursive: true });
+    await writeFile(join(this.dataDir, 'providers.yaml'), yamlStr, 'utf-8');
   }
 
-  /**
-   * Persists a team config to .run/workspace/teams/<slug>/team.yaml.
-   *
-   * Validates via validateTeam before writing.
-   *
-   * @param slug - The team slug (directory name)
-   * @param team - The team config to save
-   * @throws Error if the team directory does not exist
-   * @throws Error if validation fails
-   */
-  saveTeam(_slug: string, _team: Record<string, unknown>): Promise<void> {
-    throw new Error('Not implemented');
+  // -----------------------------------------------------------------------
+  // Team config
+  // -----------------------------------------------------------------------
+
+  async loadTeam(workspacePath: string): Promise<Team> {
+    const yamlPath = join(workspacePath, 'team.yaml');
+    const raw = await readFile(yamlPath, 'utf-8');
+    const parsed: unknown = YAML.parse(raw);
+    const validated = validateTeam(parsed);
+    return this.teamConfigToTeam(validated, workspacePath);
   }
 
-  /**
-   * Creates a team workspace directory at .run/workspace/teams/<slug>/.
-   *
-   * Scaffolds the directory structure including .claude/agents/,
-   * .claude/skills/, .claude/settings.json, and work/tasks/.
-   *
-   * @param slug - The team slug (must be valid kebab-case, not reserved)
-   * @throws Error if the directory already exists
-   * @throws Error if the slug is invalid
-   */
-  createTeamDir(_slug: string): Promise<void> {
-    throw new Error('Not implemented');
+  async saveTeam(workspacePath: string, team: Team): Promise<void> {
+    const teamConfig = this.teamToTeamConfig(team);
+    validateTeam(teamConfig);
+    const yamlStr = YAML.stringify(teamConfig);
+    await writeFile(join(workspacePath, 'team.yaml'), yamlStr, 'utf-8');
   }
 
-  /**
-   * Deletes a team workspace directory at .run/workspace/teams/<slug>/.
-   *
-   * Removes the entire directory tree. Use archiveWorkspace() on
-   * ContainerProvisioner first if preservation is needed.
-   *
-   * @param slug - The team slug
-   * @throws Error if the directory does not exist
-   */
-  deleteTeamDir(_slug: string): Promise<void> {
-    throw new Error('Not implemented');
+  // -----------------------------------------------------------------------
+  // Team directory lifecycle
+  // -----------------------------------------------------------------------
+
+  async createTeamDir(slug: string): Promise<void> {
+    validateSlug(slug);
+    if (RESERVED_SLUGS.has(slug)) {
+      throw new Error(`Reserved slug: "${slug}"`);
+    }
+
+    const teamPath = join(this.runDir, 'workspace', 'teams', slug);
+
+    // Check if already exists
+    try {
+      await access(teamPath);
+      throw new Error(`Team directory already exists: ${teamPath}`);
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+
+    // Scaffold directory tree
+    await mkdir(join(teamPath, '.claude', 'agents'), { recursive: true });
+    await mkdir(join(teamPath, '.claude', 'skills'), { recursive: true });
+    await mkdir(join(teamPath, 'memory'), { recursive: true });
+    await mkdir(join(teamPath, 'work'), { recursive: true });
+    await mkdir(join(teamPath, 'integrations'), { recursive: true });
+    await mkdir(join(teamPath, 'teams'), { recursive: true });
+
+    // Write default settings.json
+    await writeFile(
+      join(teamPath, '.claude', 'settings.json'),
+      JSON.stringify({ allowedTools: [] }, null, 2),
+      'utf-8',
+    );
   }
 
-  /**
-   * Lists all team slugs by scanning .run/workspace/teams/ for directories
-   * that contain a team.yaml file.
-   *
-   * @returns Array of team slug strings, sorted alphabetically
-   */
-  listTeams(): Promise<string[]> {
-    throw new Error('Not implemented');
+  async deleteTeamDir(slug: string): Promise<void> {
+    const teamPath = join(this.runDir, 'workspace', 'teams', slug);
+
+    // Validate path is within expected workspace root
+    const resolved = resolve(teamPath);
+    const expectedRoot = resolve(join(this.runDir, 'workspace', 'teams'));
+    if (!resolved.startsWith(expectedRoot)) {
+      throw new Error(`Path traversal detected: ${teamPath}`);
+    }
+
+    await rm(teamPath, { recursive: true, force: false });
   }
 
-  /**
-   * Starts watching data/openhive.yaml for changes.
-   *
-   * Uses chokidar with 500ms debounce (CON-04). On change, reloads and
-   * validates the config, then invokes the callback. Ignores changes
-   * that result in identical config (content-hash comparison).
-   *
-   * @param callback - Called after successful reload
-   */
-  watchMaster(_callback: () => void): Promise<void> {
-    throw new Error('Not implemented');
+  async listTeams(): Promise<string[]> {
+    const teamsDir = join(this.runDir, 'workspace', 'teams');
+    let entries: string[];
+    try {
+      entries = await readdir(teamsDir);
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw err;
+    }
+
+    const result: string[] = [];
+    for (const entry of entries) {
+      const entryPath = join(teamsDir, entry);
+      try {
+        const info = await stat(entryPath);
+        if (!info.isDirectory()) continue;
+        // Check for team.yaml
+        await access(join(entryPath, 'team.yaml'));
+        result.push(entry);
+      } catch {
+        // Not a valid team dir
+      }
+    }
+    return result.sort();
   }
 
-  /**
-   * Starts watching data/providers.yaml for changes.
-   *
-   * Uses chokidar with 500ms debounce (CON-04). On change, reloads and
-   * validates, then invokes the callback.
-   *
-   * @param callback - Called after successful reload
-   */
-  watchProviders(_callback: () => void): Promise<void> {
-    throw new Error('Not implemented');
+  // -----------------------------------------------------------------------
+  // File watching
+  // -----------------------------------------------------------------------
+
+  watchMaster(callback: (cfg: MasterConfig) => void): void {
+    const filePath = join(this.dataDir, 'openhive.yaml');
+    this.watchFile(filePath, async () => {
+      try {
+        const config = await this.loadMaster();
+        callback(config);
+      } catch (err) {
+        this.logger?.warn('Failed to reload master config', { error: String(err) });
+      }
+    });
   }
 
-  /**
-   * Starts watching a team's team.yaml for changes.
-   *
-   * Uses chokidar with 500ms debounce (CON-04). On change, reloads and
-   * validates, then invokes the callback.
-   *
-   * @param slug - The team slug
-   * @param callback - Called after successful reload
-   */
-  watchTeam(_slug: string, _callback: () => void): Promise<void> {
-    throw new Error('Not implemented');
+  watchProviders(callback: (providers: Record<string, Provider>) => void): void {
+    const filePath = join(this.dataDir, 'providers.yaml');
+    this.watchFile(filePath, async () => {
+      try {
+        const providers = await this.loadProviders();
+        callback(providers);
+      } catch (err) {
+        this.logger?.warn('Failed to reload providers config', { error: String(err) });
+      }
+    });
   }
 
-  /**
-   * Stops all active file watchers and clears debounce timers.
-   *
-   * Safe to call multiple times. After this call, no further change
-   * callbacks will fire.
-   */
+  watchTeam(workspacePath: string, callback: (team: Team) => void): void {
+    const filePath = join(workspacePath, 'team.yaml');
+    this.watchFile(filePath, async () => {
+      try {
+        const team = await this.loadTeam(workspacePath);
+        callback(team);
+      } catch (err) {
+        this.logger?.warn('Failed to reload team config', { error: String(err) });
+      }
+    });
+  }
+
   stopWatching(): void {
-    throw new Error('Not implemented');
+    for (const timer of this.debounceTimers) {
+      clearTimeout(timer);
+    }
+    this.debounceTimers = [];
+    for (const watcher of this.watchers) {
+      void watcher.close();
+    }
+    this.watchers = [];
+    this.hashes.clear();
+  }
+
+  // -----------------------------------------------------------------------
+  // Private helpers
+  // -----------------------------------------------------------------------
+
+  private applyEnvOverlay(config: MasterConfig): MasterConfig {
+    const result = { ...config, server: { ...config.server } };
+    const logLevel = process.env['OPENHIVE_LOG_LEVEL'];
+    if (logLevel !== undefined) {
+      result.server.log_level = logLevel;
+    }
+    const listenAddr = process.env['OPENHIVE_SYSTEM_LISTEN_ADDRESS'];
+    if (listenAddr !== undefined) {
+      result.server.listen_address = listenAddr;
+    }
+    const dataDir = process.env['OPENHIVE_DATA_DIR'];
+    if (dataDir !== undefined) {
+      result.server.data_dir = dataDir;
+    }
+    return result;
+  }
+
+  /**
+   * Computes the diff between defaults and current config.
+   * Returns only fields that differ from defaults.
+   */
+  private diffConfig(defaults: Record<string, unknown>, current: Record<string, unknown>): Record<string, unknown> {
+    const result: Record<string, unknown> = {};
+    for (const key of Object.keys(current)) {
+      const defVal = defaults[key];
+      const curVal = current[key];
+      if (isPlainObject(defVal) && isPlainObject(curVal)) {
+        const nested = this.diffConfig(defVal, curVal);
+        if (Object.keys(nested).length > 0) {
+          result[key] = nested;
+        }
+      } else if (JSON.stringify(defVal) !== JSON.stringify(curVal)) {
+        result[key] = curVal;
+      }
+    }
+    return result;
+  }
+
+  private watchFile(filePath: string, onChange: () => Promise<void>): void {
+    const watcher = watch(filePath, {
+      persistent: true,
+      ignoreInitial: true,
+    });
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    watcher.on('change', () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(async () => {
+        // Content-hash check
+        try {
+          const raw = await readFile(filePath, 'utf-8');
+          const hash = contentHash(raw);
+          const prevHash = this.hashes.get(filePath);
+          if (prevHash === hash) return; // No-op: content unchanged
+          this.hashes.set(filePath, hash);
+          await onChange();
+        } catch {
+          // File may have been deleted
+        }
+      }, 500); // CON-04: 500ms debounce
+
+      if (timer) this.debounceTimers.push(timer);
+    });
+
+    this.watchers.push(watcher);
+  }
+
+  private teamConfigToTeam(config: TeamConfig, workspacePath: string): Team {
+    return {
+      tid: config.tid ?? '',
+      slug: config.slug,
+      leader_aid: config.leader_aid,
+      parent_tid: config.parent_slug ?? '',
+      depth: 0,
+      container_id: '',
+      health: 'unknown',
+      agent_aids: (config.agents ?? []).map((a) => a.aid),
+      workspace_path: workspacePath,
+      created_at: Date.now(),
+    };
+  }
+
+  private teamToTeamConfig(team: Team): TeamConfig {
+    return {
+      slug: team.slug,
+      leader_aid: team.leader_aid,
+      ...(team.tid ? { tid: team.tid } : {}),
+      ...(team.parent_tid ? { parent_slug: team.parent_tid } : {}),
+    };
   }
 }

@@ -44,7 +44,19 @@
  * @module executor/session
  */
 
-import type { SessionManager } from '../domain/index.js';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import type { SessionManager, SessionStore } from '../domain/index.js';
+import { ConflictError, NotFoundError } from '../domain/index.js';
+import { ChannelType } from '../domain/index.js';
+
+/** Internal session tracking info. */
+interface SessionInfo {
+  sessionId: string;
+  agentAid: string;
+  taskId: string;
+  memoryContent: string | null;
+}
 
 /**
  * Manages Claude Agent SDK sessions with resume support.
@@ -52,105 +64,118 @@ import type { SessionManager } from '../domain/index.js';
  * Implements the {@link SessionManager} interface to provide session
  * creation, resumption, and termination for agent SDK processes.
  * Each agent can have at most one active session at a time.
- *
- * Key responsibilities:
- *
- * - **Session creation** — Allocates a new SDK session and persists the
- *   session ID in the ChatSession table for later resume
- * - **Session resume** — Restores a prior session by looking up the
- *   session_id from the ChatSession table and reinitializing the SDK
- *   with the saved conversation context
- * - **MEMORY.md injection** — At task start, reads the team's MEMORY.md
- *   file and injects its contents into the session as initial context,
- *   giving the agent access to accumulated knowledge
- * - **Working directory scoping** — Ensures each session runs within the
- *   correct workspace directory boundary for the agent's team
- * - **Session cleanup** — Releases SDK resources and updates persistence
- *   records when a session ends
- *
- * **One session per agent:** Each agent ID maps to at most one active
- * session. Creating a new session for an agent that already has one
- * requires ending the existing session first.
- *
- * @see {@link ChatSession} for the persistence record structure
- * @see {@link AgentExecutor} for the process that hosts these sessions
  */
 export class SessionManagerImpl implements SessionManager {
+  private readonly activeSessions = new Map<string, SessionInfo>();
+  private readonly sessionStore: SessionStore;
+  private readonly workspacePath: string;
+
+  constructor(sessionStore: SessionStore, workspacePath: string) {
+    this.sessionStore = sessionStore;
+    this.workspacePath = workspacePath;
+  }
+
   /**
    * Creates a new SDK session for an agent working on a task.
    *
-   * Allocates a fresh Claude Agent SDK session, associates it with the
-   * given agent and task, and persists the session ID in the ChatSession
-   * table. The session is scoped to the agent's workspace directory.
-   *
-   * If the agent's team has a MEMORY.md file, its contents are injected
-   * into the session as initial context before the first turn.
-   *
-   * @param _agentAid - Agent ID that will own this session
-   * @param _taskId - Task ID this session is associated with
+   * @param agentAid - Agent ID that will own this session
+   * @param taskId - Task ID this session is associated with
    * @returns The newly created session ID string
-   * @throws {Error} If the agent already has an active session
-   * @throws {Error} If session allocation fails
+   * @throws {ConflictError} If the agent already has an active session
    */
-  async createSession(_agentAid: string, _taskId: string): Promise<string> {
-    throw new Error('Not implemented');
+  async createSession(agentAid: string, taskId: string): Promise<string> {
+    if (this.activeSessions.has(agentAid)) {
+      throw new ConflictError(`Agent ${agentAid} already has an active session`);
+    }
+
+    const sessionId = crypto.randomUUID();
+
+    // Read MEMORY.md at session creation for initial context injection
+    let memoryContent: string | null = null;
+    try {
+      memoryContent = await readFile(join(this.workspacePath, 'MEMORY.md'), 'utf-8');
+    } catch {
+      // MEMORY.md is optional — no error if missing
+    }
+
+    // Persist to SessionStore
+    await this.sessionStore.upsert({
+      chat_jid: agentAid,
+      channel_type: ChannelType.Cli,
+      last_timestamp: Date.now(),
+      last_agent_timestamp: Date.now(),
+      session_id: sessionId,
+      agent_aid: agentAid,
+    });
+
+    this.activeSessions.set(agentAid, {
+      sessionId,
+      agentAid,
+      taskId,
+      memoryContent,
+    });
+
+    return sessionId;
   }
 
   /**
    * Resumes a previously created SDK session.
    *
-   * Looks up the session by its ID in the ChatSession table and
-   * reinitializes the SDK with the saved conversation context. This
-   * enables agents to continue where they left off after process
-   * restarts or task resumptions.
+   * MEMORY.md is NOT re-injected on resume — context is preserved from
+   * the original session.
    *
-   * The resumed session retains the original working directory scope
-   * and agent association. MEMORY.md is not re-injected on resume
-   * since the context is preserved from the original session.
-   *
-   * @param _sessionId - The session ID to resume (from ChatSession table)
-   * @throws {Error} If the session ID is not found
-   * @throws {Error} If the session has already been ended
+   * @param sessionId - The session ID to resume
+   * @throws {NotFoundError} If the session ID is not found in the store
    */
-  async resumeSession(_sessionId: string): Promise<void> {
-    throw new Error('Not implemented');
+  async resumeSession(sessionId: string): Promise<void> {
+    // Find the session in the store by listing and matching session_id
+    const allSessions = await this.sessionStore.listAll();
+    const stored = allSessions.find(s => s.session_id === sessionId);
+    if (!stored) {
+      throw new NotFoundError(`Session ${sessionId} not found`);
+    }
+
+    this.activeSessions.set(stored.agent_aid, {
+      sessionId: stored.session_id,
+      agentAid: stored.agent_aid,
+      taskId: '',
+      memoryContent: null,
+    });
   }
 
   /**
    * Ends an active SDK session and releases its resources.
    *
-   * Cleanly terminates the SDK session, flushes any pending state,
-   * and updates the ChatSession table record. After this call, the
-   * session ID is no longer valid for resume.
-   *
-   * This should be called when:
-   * - A task completes (successfully or with failure)
-   * - An agent is being stopped or killed
-   * - A session needs to be explicitly abandoned
-   *
-   * @param _sessionId - The session ID to end
-   * @throws {Error} If the session ID is not found
-   * @throws {Error} If the session has already been ended
+   * @param sessionId - The session ID to end
+   * @throws {NotFoundError} If the session ID is not found
    */
-  async endSession(_sessionId: string): Promise<void> {
-    throw new Error('Not implemented');
+  async endSession(sessionId: string): Promise<void> {
+    // Find the agent that owns this session
+    let agentAid: string | undefined;
+    for (const [aid, info] of this.activeSessions) {
+      if (info.sessionId === sessionId) {
+        agentAid = aid;
+        break;
+      }
+    }
+
+    if (!agentAid) {
+      throw new NotFoundError(`Session ${sessionId} not found`);
+    }
+
+    this.activeSessions.delete(agentAid);
+    await this.sessionStore.delete(agentAid);
   }
 
   /**
    * Returns the active session ID for a given agent.
    *
-   * Looks up the agent's current session in the internal tracking map.
-   * Returns `undefined` if the agent has no active session (never started,
-   * or session was ended).
+   * Synchronous lookup against in-memory state.
    *
-   * This is a synchronous lookup against in-memory state — it does not
-   * query the database. The in-memory map is kept in sync with the
-   * ChatSession table by createSession/resumeSession/endSession.
-   *
-   * @param _agentAid - Agent ID to query
+   * @param agentAid - Agent ID to query
    * @returns The active session ID, or `undefined` if no active session
    */
-  getSessionByAgent(_agentAid: string): string | undefined {
-    throw new Error('Not implemented');
+  getSessionByAgent(agentAid: string): string | undefined {
+    return this.activeSessions.get(agentAid)?.sessionId;
   }
 }

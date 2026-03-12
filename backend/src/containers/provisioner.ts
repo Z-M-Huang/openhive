@@ -48,13 +48,34 @@
  * @module containers/provisioner
  */
 
+import { resolve } from 'node:path';
+import { mkdir, writeFile, rm, stat } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { stringify as yamlStringify } from 'yaml';
+
 import type {
   ContainerProvisioner,
   AgentDefinition,
 } from '../domain/index.js';
 import type { Team } from '../domain/index.js';
+import { ValidationError, NotFoundError } from '../domain/index.js';
+import { validateSlug, RESERVED_SLUGS } from '../domain/index.js';
+
+const execFileAsync = promisify(execFile);
 
 // INV-01: Team lead always in parent container
+
+/** Subdirectories created inside every scaffolded workspace. */
+const WORKSPACE_DIRS = [
+  '.claude/agents',
+  '.claude/skills',
+  'memory',
+  'work/tasks',
+  'integrations',
+  'plugins/sinks',
+  'teams',
+];
 
 /**
  * Workspace provisioner for team containers.
@@ -63,148 +84,153 @@ import type { Team } from '../domain/index.js';
  * lifecycle of team workspace directories: scaffolding, configuration writing,
  * and teardown.
  *
- * **Invariants enforced by this class:**
- * - INV-01: Team lead always in parent container — the lead's agent definition
- *   is NOT written to the child workspace. Only non-lead agent definitions are
- *   placed in the child workspace's `.claude/agents/` directory.
- * - Workspace paths are validated against the workspace root to prevent
- *   path traversal attacks.
- * - Team slugs are validated before directory creation (no reserved slugs,
- *   valid format).
- * - Archive operations create compressed backups before workspace deletion.
- *
  * @see {@link Team} for the team configuration shape
  * @see {@link AgentDefinition} for the agent definition shape
  */
 export class ContainerProvisionerImpl implements ContainerProvisioner {
-  /**
-   * Scaffolds a new team workspace directory tree.
-   *
-   * Creates the complete workspace directory structure under
-   * `<parentPath>/teams/<teamSlug>/` with all required subdirectories:
-   *
-   * - `team.yaml` — empty team config placeholder
-   * - `.claude/CLAUDE.md` — team-specific Claude instructions
-   * - `.claude/settings.json` — default allowed tools (`{"allowedTools":[]}`)
-   * - `.claude/agents/` — agent definition files directory
-   * - `.claude/skills/` — skill definition files directory
-   * - `memory/` — agent memory storage
-   * - `integrations/` — integration configurations
-   * - `plugins/sinks/` — log sink plugins
-   * - `teams/` — child team workspaces (enables recursive nesting)
-   * - `work/tasks/` — task-scoped working directories
-   *
-   * // INV-01: Team lead always in parent container
-   * The scaffolded workspace does NOT include the team lead's agent definition.
-   * The lead agent runs in the parent container and its definition lives in the
-   * parent workspace. Only non-lead team members have definitions in this workspace.
-   *
-   * @param _parentPath - Absolute path to the parent workspace (e.g., `.run/workspace`)
-   * @param _teamSlug - Team slug for the new workspace (e.g., `weather-team`)
-   * @returns Absolute path to the newly created workspace directory
-   * @throws {ValidationError} If the team slug is invalid or reserved
-   * @throws {ValidationError} If the parent path is outside the workspace root
-   * @throws {Error} If the workspace directory already exists
-   */
-  async scaffoldWorkspace(_parentPath: string, _teamSlug: string): Promise<string> {
+  private readonly workspaceRoot: string;
+
+  constructor(workspaceRoot: string = '/app/workspace') {
+    this.workspaceRoot = resolve(workspaceRoot);
+  }
+
+  async scaffoldWorkspace(parentPath: string, teamSlug: string): Promise<string> {
+    // Validate slug format (throws generic Error on invalid)
+    try {
+      validateSlug(teamSlug);
+    } catch (err: unknown) {
+      throw new ValidationError((err as Error).message);
+    }
+
+    // Check reserved slugs
+    if (RESERVED_SLUGS.has(teamSlug)) {
+      throw new ValidationError(
+        `Reserved slug: "${teamSlug}". The following slugs are reserved: ${[...RESERVED_SLUGS].join(', ')}`
+      );
+    }
+
+    // Validate parentPath is within workspace root
+    this.assertWithinWorkspaceRoot(parentPath);
+
+    const fullPath = resolve(parentPath, 'teams', teamSlug);
+
+    // Create all subdirectories
+    for (const dir of WORKSPACE_DIRS) {
+      await mkdir(resolve(fullPath, dir), { recursive: true });
+    }
+
+    // Write default files
+    await writeFile(
+      resolve(fullPath, 'team.yaml'),
+      yamlStringify({ slug: teamSlug, agents: [] }),
+      'utf-8',
+    );
+
+    await writeFile(
+      resolve(fullPath, '.claude/CLAUDE.md'),
+      `# ${teamSlug}\n\nTeam instructions go here.\n`,
+      'utf-8',
+    );
+
+    await writeFile(
+      resolve(fullPath, '.claude/settings.json'),
+      JSON.stringify({ allowedTools: [] }, null, 2) + '\n',
+      'utf-8',
+    );
+
+    return fullPath;
+  }
+
+  async writeTeamConfig(workspacePath: string, team: Team): Promise<void> {
+    this.assertWithinWorkspaceRoot(workspacePath);
+    await this.assertDirectoryExists(workspacePath);
+
+    const filePath = resolve(workspacePath, 'team.yaml');
+    await writeFile(filePath, yamlStringify(team), 'utf-8');
+  }
+
+  async writeAgentDefinition(workspacePath: string, agent: AgentDefinition): Promise<void> {
     // INV-01: Team lead always in parent container
-    throw new Error('Not implemented');
+    this.assertWithinWorkspaceRoot(workspacePath);
+    await this.assertDirectoryExists(workspacePath);
+
+    const agentsDir = resolve(workspacePath, '.claude/agents');
+    await mkdir(agentsDir, { recursive: true });
+
+    // Build YAML frontmatter
+    const frontmatter: Record<string, unknown> = {
+      name: agent.name,
+      description: agent.description,
+    };
+    if (agent.model) {
+      frontmatter.model = agent.model;
+    }
+    if (agent.tools && agent.tools.length > 0) {
+      frontmatter.tools = agent.tools;
+    }
+
+    const content = `---\n${yamlStringify(frontmatter)}---\n${agent.content}\n`;
+    const filePath = resolve(agentsDir, `${agent.name}.md`);
+    await writeFile(filePath, content, 'utf-8');
+  }
+
+  async writeSettings(workspacePath: string, allowedTools: string[]): Promise<void> {
+    this.assertWithinWorkspaceRoot(workspacePath);
+    await this.assertDirectoryExists(workspacePath);
+
+    const filePath = resolve(workspacePath, '.claude/settings.json');
+    await writeFile(filePath, JSON.stringify({ allowedTools }, null, 2) + '\n', 'utf-8');
+  }
+
+  async deleteWorkspace(workspacePath: string): Promise<void> {
+    this.assertWithinWorkspaceRoot(workspacePath);
+    await this.assertDirectoryExists(workspacePath);
+
+    await rm(workspacePath, { recursive: true, force: true });
+  }
+
+  async archiveWorkspace(workspacePath: string, archivePath: string): Promise<void> {
+    this.assertWithinWorkspaceRoot(workspacePath);
+    await this.assertDirectoryExists(workspacePath);
+
+    // Ensure archive output directory exists
+    const archiveDir = resolve(archivePath, '..');
+    await mkdir(archiveDir, { recursive: true });
+
+    // Create tar.gz archive using the system tar command
+    const parentDir = resolve(workspacePath, '..');
+    const dirName = workspacePath.split('/').pop()!;
+    await execFileAsync('tar', ['-czf', archivePath, '-C', parentDir, dirName]);
   }
 
   /**
-   * Writes the team configuration file (`team.yaml`) to the workspace.
-   *
-   * Serializes the {@link Team} configuration to YAML format and writes it
-   * to `<workspacePath>/team.yaml`. This includes the team's agent list,
-   * MCP server configurations, and other team-level settings.
-   *
-   * // INV-01: Team lead always in parent container
-   * The `leader_aid` in the team config references an agent that runs in the
-   * parent container. The team.yaml records this AID for reference but the
-   * lead's agent definition file is NOT in this workspace.
-   *
-   * @param _workspacePath - Absolute path to the team workspace
-   * @param _team - Team configuration to write
-   * @throws {ValidationError} If the workspace path is outside the workspace root
-   * @throws {NotFoundError} If the workspace directory does not exist
+   * Validates that a resolved path is within the workspace root.
+   * Prevents path traversal attacks.
    */
-  async writeTeamConfig(_workspacePath: string, _team: Team): Promise<void> {
-    throw new Error('Not implemented');
+  private assertWithinWorkspaceRoot(targetPath: string): void {
+    const resolved = resolve(targetPath);
+    if (!resolved.startsWith(this.workspaceRoot)) {
+      throw new ValidationError(
+        `Path "${targetPath}" is outside the workspace root "${this.workspaceRoot}"`
+      );
+    }
   }
 
   /**
-   * Writes an agent definition file to the workspace.
-   *
-   * Creates or updates the agent definition file at
-   * `<workspacePath>/.claude/agents/<name>.md` with YAML frontmatter
-   * (`name`, `description`, optional `model`, `tools`) followed by the
-   * agent's free-form content/instructions.
-   *
-   * // INV-01: Team lead always in parent container
-   * This method should only be called for non-lead team members whose agent
-   * definitions belong in this workspace. The team lead's definition lives
-   * in the parent workspace, not the child team's workspace.
-   *
-   * @param _workspacePath - Absolute path to the team workspace
-   * @param _agent - Agent definition to write (name, description, content, etc.)
-   * @throws {ValidationError} If the workspace path is outside the workspace root
-   * @throws {NotFoundError} If the workspace directory does not exist
+   * Asserts that a directory exists at the given path.
    */
-  async writeAgentDefinition(_workspacePath: string, _agent: AgentDefinition): Promise<void> {
-    // INV-01: Team lead always in parent container
-    throw new Error('Not implemented');
-  }
-
-  /**
-   * Writes the allowed tools settings file to the workspace.
-   *
-   * Creates or updates `<workspacePath>/.claude/settings.json` with the
-   * specified list of allowed tools. The settings file follows the Claude
-   * workspace settings format: `{"allowedTools": [...]}`.
-   *
-   * @param _workspacePath - Absolute path to the team workspace
-   * @param _allowedTools - Array of tool name patterns to allow
-   * @throws {ValidationError} If the workspace path is outside the workspace root
-   * @throws {NotFoundError} If the workspace directory does not exist
-   */
-  async writeSettings(_workspacePath: string, _allowedTools: string[]): Promise<void> {
-    throw new Error('Not implemented');
-  }
-
-  /**
-   * Deletes a team workspace directory and all its contents.
-   *
-   * Recursively removes the workspace directory at the specified path.
-   * The path MUST be within the workspace root — attempting to delete
-   * outside the workspace tree is rejected.
-   *
-   * This is a destructive operation. Consider calling {@link archiveWorkspace}
-   * first to create a backup.
-   *
-   * @param _workspacePath - Absolute path to the workspace to delete
-   * @throws {ValidationError} If the path is outside the workspace root
-   * @throws {NotFoundError} If the workspace directory does not exist
-   */
-  async deleteWorkspace(_workspacePath: string): Promise<void> {
-    throw new Error('Not implemented');
-  }
-
-  /**
-   * Archives a team workspace to a compressed backup before deletion.
-   *
-   * Creates a compressed archive (tar.gz) of the workspace directory at the
-   * specified archive path. This preserves the workspace contents for audit
-   * and recovery purposes before the workspace is deleted.
-   *
-   * The archive includes all workspace files: team.yaml, agent definitions,
-   * skill definitions, memory, work directories, and any child team workspaces.
-   *
-   * @param _workspacePath - Absolute path to the workspace to archive
-   * @param _archivePath - Absolute path for the output archive file (.tar.gz)
-   * @throws {ValidationError} If either path is outside the workspace root
-   * @throws {NotFoundError} If the workspace directory does not exist
-   */
-  async archiveWorkspace(_workspacePath: string, _archivePath: string): Promise<void> {
-    throw new Error('Not implemented');
+  private async assertDirectoryExists(dirPath: string): Promise<void> {
+    try {
+      const s = await stat(dirPath);
+      if (!s.isDirectory()) {
+        throw new NotFoundError(`Not a directory: "${dirPath}"`);
+      }
+    } catch (err: unknown) {
+      if (err instanceof NotFoundError) throw err;
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw new NotFoundError(`Directory not found: "${dirPath}"`);
+      }
+      throw err;
+    }
   }
 }

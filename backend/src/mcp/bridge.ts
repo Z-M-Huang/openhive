@@ -74,7 +74,30 @@
  * @module mcp/bridge
  */
 
-import type { MCPBridge } from '../domain/index.js';
+import crypto from 'node:crypto';
+import type { MCPBridge, Logger } from '../domain/index.js';
+import { InternalError } from '../domain/index.js';
+
+/** Fields that should be redacted from tool call logs. */
+const SENSITIVE_FIELDS: ReadonlySet<string> = new Set([
+  'api_key',
+  'token',
+  'secret',
+  'password',
+]);
+
+/** Shape of a pending tool call entry. */
+interface PendingCall {
+  resolve: (value: Record<string, unknown>) => void;
+  reject: (reason: unknown) => void;
+  timer: ReturnType<typeof setTimeout>;
+  toolName: string;
+  agentAid: string;
+  startTime: number;
+}
+
+/** WebSocket send function signature. */
+export type WSSendFn = (message: Record<string, unknown>) => void;
 
 /**
  * Timeout duration in milliseconds for each tier.
@@ -165,122 +188,150 @@ const MUTATING_TOOLS: ReadonlySet<string> = new Set([
  *   Blocking = 5 min. Unknown tools default to the mutating tier (60s).
  */
 export class MCPBridgeImpl implements MCPBridge {
+  private readonly pendingCalls = new Map<string, PendingCall>();
+  private readonly send: WSSendFn;
+  private readonly logger: Logger | undefined;
+
+  constructor(send: WSSendFn, logger?: Logger) {
+    this.send = send;
+    this.logger = logger;
+  }
+
   /**
    * Sends a tool call over WebSocket and awaits the correlated result.
-   *
-   * Creates a unique call_id, stores a pending promise entry, sends the
-   * `tool_call` message via WebSocket, and starts a timeout timer based
-   * on the tool's timeout tier.
-   *
-   * The returned promise resolves when `handleResult()` is called with
-   * the matching call_id, or rejects when:
-   * - `handleError()` is called with the matching call_id
-   * - The timeout timer fires (rejects with TIMEOUT error)
-   *
-   * @param _toolName - Name of the tool to invoke (e.g., 'create_team')
-   * @param _args - Tool arguments as key-value pairs
-   * @param _agentAid - AID of the agent making the call (for authorization)
-   * @returns Promise resolving to the tool's result payload
-   *
-   * @example
-   * ```ts
-   * const result = await bridge.callTool('create_team', {
-   *   slug: 'research-team',
-   *   leader_aid: 'aid-abc-123',
-   *   purpose: 'Research and analysis',
-   * }, 'aid-abc-123');
-   * ```
    */
   callTool(
-    _toolName: string,
-    _args: Record<string, unknown>,
-    _agentAid: string,
+    toolName: string,
+    args: Record<string, unknown>,
+    agentAid: string,
   ): Promise<Record<string, unknown>> {
-    throw new Error('Not implemented');
+    const callId = crypto.randomUUID();
+    const timeoutMs = this.getTimeoutForTool(toolName);
+
+    // Redact sensitive fields for logging
+    const safeArgs: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(args)) {
+      safeArgs[key] = SENSITIVE_FIELDS.has(key) ? '[REDACTED]' : value;
+    }
+
+    this.logger?.debug('Tool call initiated', {
+      call_id: callId,
+      tool_name: toolName,
+      agent_aid: agentAid,
+      timeout_ms: timeoutMs,
+      args: safeArgs,
+    });
+
+    return new Promise<Record<string, unknown>>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingCalls.delete(callId);
+        const elapsed = Date.now() - startTime;
+        this.logger?.warn('Tool call timed out', {
+          call_id: callId,
+          tool_name: toolName,
+          agent_aid: agentAid,
+          elapsed_ms: elapsed,
+          timeout_ms: timeoutMs,
+        });
+        reject(new InternalError(`Tool call timed out: ${toolName} (call_id=${callId}, elapsed=${elapsed}ms)`));
+      }, timeoutMs);
+
+      const startTime = Date.now();
+
+      this.pendingCalls.set(callId, {
+        resolve,
+        reject,
+        timer,
+        toolName,
+        agentAid,
+        startTime,
+      });
+
+      this.send({
+        type: 'tool_call',
+        data: {
+          call_id: callId,
+          tool_name: toolName,
+          arguments: args,
+          agent_aid: agentAid,
+        },
+      });
+    });
   }
 
   /**
    * Handles a successful tool result from root.
-   *
-   * Called by the WebSocket message handler when a `tool_result` message
-   * arrives with a matching `call_id`. Looks up the pending promise entry,
-   * clears the timeout timer, removes the entry from the map, and resolves
-   * the promise with the result payload.
-   *
-   * If the call_id is not found in the pending map (already timed out or
-   * duplicate result), this method is a no-op and logs a warning.
-   *
-   * @param _callId - The call_id correlating this result to the original request
-   * @param _result - The tool's result payload from SDKToolHandler
    */
-  handleResult(
-    _callId: string,
-    _result: Record<string, unknown>,
-  ): void {
-    throw new Error('Not implemented');
+  handleResult(callId: string, result: Record<string, unknown>): void {
+    const entry = this.pendingCalls.get(callId);
+    if (!entry) {
+      this.logger?.warn('Received result for unknown call_id', { call_id: callId });
+      return;
+    }
+
+    clearTimeout(entry.timer);
+    this.pendingCalls.delete(callId);
+
+    this.logger?.debug('Tool call resolved', {
+      call_id: callId,
+      tool_name: entry.toolName,
+      elapsed_ms: Date.now() - entry.startTime,
+    });
+
+    entry.resolve(result);
   }
 
   /**
    * Handles a tool error from root.
-   *
-   * Called by the WebSocket message handler when a `tool_result` message
-   * arrives with an error payload for the given call_id. Looks up the
-   * pending promise entry, clears the timeout timer, removes the entry
-   * from the map, and rejects the promise with a structured error.
-   *
-   * If the call_id is not found in the pending map (already timed out or
-   * duplicate), this method is a no-op and logs a warning.
-   *
-   * @param _callId - The call_id correlating this error to the original request
-   * @param _errorCode - Structured error code (e.g., 'ACCESS_DENIED', 'NOT_FOUND')
-   * @param _errorMessage - Human-readable error description
    */
-  handleError(
-    _callId: string,
-    _errorCode: string,
-    _errorMessage: string,
-  ): void {
-    throw new Error('Not implemented');
+  handleError(callId: string, errorCode: string, errorMessage: string): void {
+    const entry = this.pendingCalls.get(callId);
+    if (!entry) {
+      this.logger?.warn('Received error for unknown call_id', { call_id: callId, error_code: errorCode });
+      return;
+    }
+
+    clearTimeout(entry.timer);
+    this.pendingCalls.delete(callId);
+
+    this.logger?.debug('Tool call rejected', {
+      call_id: callId,
+      tool_name: entry.toolName,
+      error_code: errorCode,
+      error_message: errorMessage,
+      elapsed_ms: Date.now() - entry.startTime,
+    });
+
+    entry.reject(new InternalError(errorMessage));
   }
 
-  /**
-   * Returns the number of in-flight tool calls.
-   *
-   * Returns the current size of the pending promise map. Useful for
-   * diagnostics, health checks, and graceful shutdown (wait until
-   * pending calls drain to zero before disconnecting).
-   *
-   * @returns Number of tool calls awaiting responses
-   */
+  /** Returns the number of in-flight tool calls. */
   getPendingCalls(): number {
-    throw new Error('Not implemented');
+    return this.pendingCalls.size;
+  }
+
+  /** Rejects all pending calls and clears timers. Used during shutdown. */
+  cancelAll(reason: string): void {
+    for (const [callId, entry] of this.pendingCalls) {
+      clearTimeout(entry.timer);
+      this.logger?.warn('Tool call cancelled', {
+        call_id: callId,
+        tool_name: entry.toolName,
+        reason,
+      });
+      entry.reject(new InternalError(reason));
+    }
+    this.pendingCalls.clear();
   }
 
   /**
    * Returns the timeout duration for a given tool based on its tier.
    *
-   * Timeout tiers (from MCP-Tools.md, Design-Rules CON-09/10/11):
+   * - Query (10s, CON-09): read-only lookups
+   * - Mutating (60s, CON-10): state-modifying operations
+   * - Blocking (5 min, CON-11): external operations with unpredictable latency
    *
-   * - **Query (10s):** get_team, get_task, get_health, inspect_topology,
-   *   recall_memory, get_credential, list_containers
-   * - **Mutating (60s):** create_team, create_agent, create_task,
-   *   dispatch_subtask, update_task_status, send_message, escalate,
-   *   save_memory, set_credential, register_webhook
-   * - **Blocking (5 min):** spawn_container, stop_container,
-   *   create_integration, test_integration, activate_integration
-   *
-   * Unknown tools default to the mutating tier (60s) as a safe middle ground.
-   *
-   * @param toolName - Name of the tool to look up
-   * @returns Timeout duration in milliseconds
-   *
-   * @example
-   * ```ts
-   * getTimeoutForTool('get_team')       // → 10_000  (10s, query tier)
-   * getTimeoutForTool('create_team')    // → 60_000  (60s, mutating tier)
-   * getTimeoutForTool('spawn_container') // → 300_000 (5min, blocking tier)
-   * getTimeoutForTool('unknown_tool')   // → 60_000  (60s, default to mutating)
-   * ```
+   * Unknown tools default to the mutating tier (60s).
    */
   getTimeoutForTool(toolName: string): number {
     if (QUERY_TOOLS.has(toolName)) {

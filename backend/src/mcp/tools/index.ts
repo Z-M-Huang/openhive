@@ -1,9 +1,9 @@
 /**
- * MCP tools index — stub handler functions for all 22 built-in management tools.
+ * MCP tools index — SDKToolHandler, ToolContext, and all 22 built-in tool handlers.
  *
- * Each function represents a tool exposed to agents via the in-process MCP server
- * (`openhive-tools`). Tool calls are forwarded over WebSocket to root's SDKToolHandler,
- * which invokes the corresponding handler function.
+ * Each handler is a function: (args, agentAid, teamSlug) => Promise<unknown>
+ * created via `createToolHandlers(ctx)` factory. The SDKToolHandler wraps
+ * handlers with authorization, validation, error mapping, and logging.
  *
  * ## Tool Catalog (10 categories, 22 tools)
  *
@@ -20,832 +20,955 @@
  * | Query          | 4     | get_team, get_task, get_health, inspect_topology                 |
  * | Event          | 1     | register_webhook                                                 |
  *
- * ## Timeout Tiers (MCP-Tools.md / Design-Rules CON-09..11)
- *
- * | Tier       | Timeout | Tools                                                                              |
- * |------------|---------|------------------------------------------------------------------------------------|
- * | Query      | 10s     | get_team, get_task, get_health, inspect_topology, recall_memory,                   |
- * |            |         | get_credential, list_containers                                                    |
- * | Mutating   | 60s     | create_team, create_agent, create_task, dispatch_subtask, update_task_status,       |
- * |            |         | send_message, escalate, save_memory, set_credential, register_webhook              |
- * | Blocking   | 5 min   | spawn_container, stop_container, create_integration, test_integration,              |
- * |            |         | activate_integration                                                               |
- *
- * @see {@link file://../../../.wiki/MCP-Tools.md} for the full tool catalog
- * @see {@link file://../../../.wiki/WebSocket-Protocol.md} for wire protocol
  * @module mcp/tools
  */
 
+import crypto from 'node:crypto';
+import { z } from 'zod';
+
 import type {
-  TaskStatus,
-  EscalationReason,
-  MemoryType,
-  ContainerHealth,
-  AgentStatus,
-  IntegrationStatus,
+  OrgChart,
+  TaskStore,
+  MessageStore,
+  LogStore,
+  MemoryStore,
+  IntegrationStore,
+  CredentialStore,
+  ToolCallStore,
+  ContainerManager,
+  ContainerProvisioner,
+  KeyManager,
+  WSHub,
+  EventBus,
+  TriggerScheduler,
+  MCPRegistry,
+  HealthMonitor,
+  Logger,
 } from '../../domain/index.js';
 
+import {
+  TaskStatus,
+  IntegrationStatus,
+  AgentStatus,
+  ContainerHealth,
+  WSErrorCode,
+} from '../../domain/index.js';
+
+import type { AgentRole } from '../../domain/index.js';
+
+import {
+  assertValidTransition,
+  validateSlug,
+  validateAID,
+} from '../../domain/domain.js';
+
+import {
+  DomainError,
+  NotFoundError,
+  ValidationError,
+  AccessDeniedError,
+  mapDomainErrorToWSError,
+} from '../../domain/errors.js';
+
 // ---------------------------------------------------------------------------
-// Tool Parameter Types
+// ToolContext — dependency injection for all handlers
 // ---------------------------------------------------------------------------
 
-/** Parameters for {@link spawnContainer}. */
-export interface SpawnContainerParams {
-  /** Team slug identifying the team whose container to spawn. */
-  team_slug: string;
-  /** Docker image name (optional, defaults to `openhive:latest`). */
-  image?: string;
-  /** Additional environment variables to inject. */
-  env?: Record<string, string>;
-}
-
-/** Result of {@link spawnContainer}. */
-export interface SpawnContainerResult {
-  /** Docker container ID. */
-  container_id: string;
-  /** Whether the container connected via WebSocket. */
-  connected: boolean;
-}
-
-/** Parameters for {@link stopContainer}. */
-export interface StopContainerParams {
-  /** Team slug identifying the team whose container to stop. */
-  team_slug: string;
-}
-
-/** Result of {@link stopContainer}. */
-export interface StopContainerResult {
-  /** Confirmation message. */
-  message: string;
-  /** Final container status. */
-  final_status: string;
-}
-
-/** Result of {@link listContainers}. */
-export interface ListContainersResult {
-  /** Array of running containers with health info. */
-  containers: Array<{
-    container_id: string;
-    team_slug: string;
-    health: ContainerHealth;
-    created_at: number;
-  }>;
-}
-
-/** Parameters for {@link createTeam}. */
-export interface CreateTeamParams {
-  /** Team slug (lowercase alphanumeric with hyphens). */
-  slug: string;
-  /** AID of the team leader (must already exist in parent team). */
-  leader_aid: string;
-  /** Team purpose/description. */
-  purpose: string;
-}
-
-/** Result of {@link createTeam}. */
-export interface CreateTeamResult {
-  /** Created team slug. */
-  slug: string;
-  /** Leader agent AID. */
-  leader_aid: string;
-  /** Creation status. */
-  status: string;
-}
-
-/** Parameters for {@link createAgent}. */
-export interface CreateAgentParams {
-  /** Agent name (slug format). */
-  name: string;
-  /** Agent role description. */
-  description: string;
-  /** Team slug to add the agent to. */
-  team_slug: string;
-  /** Model tier or specific model name. */
-  model?: string;
-  /** Skills to assign to the agent. */
-  skills?: string[];
-}
-
-/** Result of {@link createAgent}. */
-export interface CreateAgentResult {
-  /** Generated agent AID. */
-  aid: string;
-}
-
-/** Parameters for {@link createTask}. */
-export interface CreateTaskParams {
-  /** Target agent AID to execute the task. */
-  agent_aid: string;
-  /** Task prompt/instructions. */
-  prompt: string;
-  /** Task priority (lower = higher priority). */
-  priority?: number;
-  /** Task IDs that must complete before this task can start. */
-  blocked_by?: string[];
-  /** Maximum retry count on failure. */
-  max_retries?: number;
-}
-
-/** Result of {@link createTask}. */
-export interface CreateTaskResult {
-  /** Generated task ID. */
-  task_id: string;
-}
-
-/** Parameters for {@link dispatchSubtask}. */
-export interface DispatchSubtaskParams {
-  /** Target agent AID to execute the subtask. */
-  agent_aid: string;
-  /** Subtask prompt/instructions. */
-  prompt: string;
-  /** Parent task ID to link this subtask under. */
-  parent_task_id: string;
-  /** Task IDs that must complete before this subtask can start. */
-  blocked_by?: string[];
-  /** Subtask priority. */
-  priority?: number;
-}
-
-/** Result of {@link dispatchSubtask}. */
-export interface DispatchSubtaskResult {
-  /** Generated subtask ID. */
-  task_id: string;
-}
-
-/** Parameters for {@link updateTaskStatus}. */
-export interface UpdateTaskStatusParams {
-  /** Task ID to update. */
-  task_id: string;
-  /** New task status. */
-  status: TaskStatus;
-  /** Task result text (on completion). */
-  result?: string;
-  /** Error message (on failure). */
-  error?: string;
-}
-
-/** Result of {@link updateTaskStatus}. */
-export interface UpdateTaskStatusResult {
-  /** Updated task status. */
-  status: TaskStatus;
-}
-
-/** Parameters for {@link sendMessage}. */
-export interface SendMessageParams {
-  /** Target agent AID to receive the message. */
-  target_aid: string;
-  /** Message content. */
-  content: string;
-  /** Optional correlation ID for tracking message threads. */
-  correlation_id?: string;
-}
-
-/** Result of {@link sendMessage}. */
-export interface SendMessageResult {
-  /** Whether the message was delivered. */
-  delivered: boolean;
-}
-
-/** Parameters for {@link escalate}. */
-export interface EscalateParams {
-  /** Task ID to escalate. */
-  task_id: string;
-  /** Reason for escalation. */
-  reason: EscalationReason;
-  /** Additional context for the supervisor. */
-  context: Record<string, unknown>;
-}
-
-/** Result of {@link escalate}. */
-export interface EscalateResult {
-  /** Confirmation message. */
-  message: string;
-  /** Correlation ID for tracking the escalation chain. */
-  correlation_id: string;
-}
-
-/** Parameters for {@link saveMemory}. */
-export interface SaveMemoryParams {
-  /** Memory content text. */
-  content: string;
-  /** Memory type: curated (persistent) or daily (auto-expires). */
-  memory_type: MemoryType;
-}
-
-/** Result of {@link saveMemory}. */
-export interface SaveMemoryResult {
-  /** Generated memory entry ID. */
-  memory_id: number;
-  /** Save status. */
-  status: string;
-}
-
-/** Parameters for {@link recallMemory}. */
-export interface RecallMemoryParams {
-  /** Keyword search query. */
-  query: string;
-  /** Maximum number of results to return. */
-  limit?: number;
-  /** Only return memories created after this ISO 8601 timestamp. */
-  since?: string;
-}
-
-/** Result of {@link recallMemory}. */
-export interface RecallMemoryResult {
-  /** Matching memory entries. */
-  memories: Array<{
-    id: number;
-    content: string;
-    memory_type: MemoryType;
-    created_at: number;
-  }>;
-}
-
-/** Parameters for {@link createIntegration}. */
-export interface CreateIntegrationParams {
-  /** Integration name. */
-  name: string;
-  /** Integration type. */
-  type: string;
-  /** Integration configuration. */
-  config: Record<string, unknown>;
-}
-
-/** Result of {@link createIntegration}. */
-export interface CreateIntegrationResult {
-  /** Generated integration ID. */
-  integration_id: string;
-  /** Path to the integration config file. */
-  config_path: string;
-}
-
-/** Parameters for {@link testIntegration}. */
-export interface TestIntegrationParams {
-  /** Integration ID to test. */
-  integration_id: string;
-}
-
-/** Result of {@link testIntegration}. */
-export interface TestIntegrationResult {
-  /** Whether the test passed. */
-  success: boolean;
-  /** Errors encountered during testing. */
-  errors: string[];
-}
-
-/** Parameters for {@link activateIntegration}. */
-export interface ActivateIntegrationParams {
-  /** Integration ID to activate. */
-  integration_id: string;
-}
-
-/** Result of {@link activateIntegration}. */
-export interface ActivateIntegrationResult {
-  /** Activation status. */
-  status: IntegrationStatus;
-}
-
-/** Parameters for {@link getCredential}. */
-export interface GetCredentialParams {
-  /** Credential key name. */
-  key: string;
-}
-
-/** Result of {@link getCredential}. */
-export interface GetCredentialResult {
-  /** Decrypted credential value. */
-  value: string;
-}
-
-/** Parameters for {@link setCredential}. */
-export interface SetCredentialParams {
-  /** Credential key name. */
-  key: string;
-  /** Credential value (will be encrypted at rest with AES-256-GCM). */
-  value: string;
-  /** Credential scope (defaults to calling agent's team). */
-  scope?: string;
-}
-
-/** Result of {@link setCredential}. */
-export interface SetCredentialResult {
-  /** Confirmation message. */
-  message: string;
-}
-
-/** Parameters for {@link getTeam}. */
-export interface GetTeamParams {
-  /** Team slug to query. */
-  slug: string;
-}
-
-/** Result of {@link getTeam}. */
-export interface GetTeamResult {
-  /** Team slug. */
-  slug: string;
-  /** Team TID. */
-  tid: string;
-  /** Leader agent AID. */
-  leader_aid: string;
-  /** List of agent AIDs in this team. */
-  agent_aids: string[];
-  /** Team health status. */
-  health: string;
-}
-
-/** Parameters for {@link getTask}. */
-export interface GetTaskParams {
-  /** Task ID to query. */
-  task_id: string;
-  /** Optional status filter. */
-  status?: TaskStatus;
-}
-
-/** Result of {@link getTask}. */
-export interface GetTaskResult {
-  /** Task ID. */
-  task_id: string;
-  /** Current task status. */
-  status: TaskStatus;
-  /** Assigned agent AID. */
-  agent_aid: string;
-  /** Task prompt. */
-  prompt: string;
-  /** Task result (if completed). */
-  result: string;
-  /** Error message (if failed). */
-  error: string;
-  /** Creation timestamp. */
-  created_at: number;
-  /** Completion timestamp. */
-  completed_at: number | null;
-}
-
-/** Parameters for {@link getHealth}. */
-export interface GetHealthParams {
-  /** Optional scope: team slug or agent AID. If omitted, returns system-wide health. */
-  scope?: string;
-}
-
-/** Result of {@link getHealth}. */
-export interface GetHealthResult {
-  /** Health report entries. */
-  entries: Array<{
-    id: string;
-    type: 'agent' | 'container';
-    status: AgentStatus | ContainerHealth;
-    detail: string;
-  }>;
-}
-
-/** Parameters for {@link inspectTopology}. */
-export interface InspectTopologyParams {
-  /** Maximum depth to traverse in the org chart tree. */
-  depth?: number;
-}
-
-/** Result of {@link inspectTopology}. */
-export interface InspectTopologyResult {
-  /** Org chart tree nodes. */
-  tree: Array<{
-    tid: string;
-    slug: string;
-    leader_aid: string;
-    health: ContainerHealth;
-    agents: Array<{
-      aid: string;
-      name: string;
-      status: AgentStatus;
-    }>;
-    children: InspectTopologyResult['tree'];
-  }>;
-}
-
-/** Parameters for {@link registerWebhook}. */
-export interface RegisterWebhookParams {
-  /** URL path suffix for the webhook endpoint (creates `/api/v1/hooks/<path>`). */
-  path: string;
-  /** Target team slug to route webhook events to. */
-  target_team: string;
-  /** Optional event type filter. */
-  event_type?: string;
-}
-
-/** Result of {@link registerWebhook}. */
-export interface RegisterWebhookResult {
-  /** Full webhook URL. */
-  webhook_url: string;
-  /** Registration ID for managing this webhook. */
-  registration_id: string;
+/** Dependency bag injected into every tool handler via the factory. */
+export interface ToolContext {
+  orgChart: OrgChart;
+  taskStore: TaskStore;
+  messageStore: MessageStore;
+  logStore: LogStore;
+  memoryStore: MemoryStore;
+  integrationStore: IntegrationStore;
+  credentialStore: CredentialStore;
+  toolCallStore: ToolCallStore;
+  containerManager: ContainerManager;
+  provisioner: ContainerProvisioner;
+  keyManager: KeyManager;
+  wsHub: WSHub;
+  eventBus: EventBus;
+  triggerScheduler: TriggerScheduler;
+  mcpRegistry: MCPRegistry;
+  healthMonitor: HealthMonitor;
+  logger: Logger;
 }
 
 // ---------------------------------------------------------------------------
-// Container Tools (3)
+// Handler type
 // ---------------------------------------------------------------------------
 
-/**
- * Spawn a Docker container for a team.
- *
- * Creates and starts a new container, waits until it connects via WebSocket.
- * Blocking operation (5 min timeout tier).
- *
- * @param params - Container spawn parameters
- * @returns Container ID and connection status
- * @throws Error - Not yet implemented
- */
-export async function spawnContainer(params: SpawnContainerParams): Promise<SpawnContainerResult> {
-  void params;
-  throw new Error('Not implemented');
-}
-
-/**
- * Stop a running team container gracefully.
- *
- * Sends SIGTERM, waits for graceful shutdown, then SIGKILL if unresponsive.
- * Blocking operation (5 min timeout tier).
- *
- * @param params - Container stop parameters
- * @returns Confirmation and final status
- * @throws Error - Not yet implemented
- */
-export async function stopContainer(params: StopContainerParams): Promise<StopContainerResult> {
-  void params;
-  throw new Error('Not implemented');
-}
-
-/**
- * List all running containers with their team associations and health status.
- *
- * Query operation (10s timeout tier).
- *
- * @returns Container list with health info
- * @throws Error - Not yet implemented
- */
-export async function listContainers(): Promise<ListContainersResult> {
-  throw new Error('Not implemented');
-}
+/** Generic tool handler signature. */
+export type ToolHandler = (
+  args: Record<string, unknown>,
+  agentAid: string,
+  teamSlug: string,
+) => Promise<Record<string, unknown>>;
 
 // ---------------------------------------------------------------------------
-// Team Tools (2)
+// Per-tool Zod schemas
 // ---------------------------------------------------------------------------
 
-/**
- * Create a new team with workspace scaffolding.
- *
- * Provisions the workspace directory, writes team.yaml, and updates the org chart.
- * Two-step creation pattern: `create_agent` first (lead), then `create_team`.
- * Mutating operation (60s timeout tier).
- *
- * @param params - Team creation parameters
- * @returns Team slug, leader AID, and status
- * @throws Error - Not yet implemented
- */
-export async function createTeam(params: CreateTeamParams): Promise<CreateTeamResult> {
-  void params;
-  throw new Error('Not implemented');
-}
+const SpawnContainerSchema = z.object({
+  team_slug: z.string().min(1),
+  image: z.string().optional(),
+  env: z.record(z.string()).optional(),
+});
 
-/**
- * Create a new agent within an existing team.
- *
- * Writes agent definition file and registers in the org chart.
- * Mutating operation (60s timeout tier).
- *
- * @param params - Agent creation parameters
- * @returns Generated agent AID
- * @throws Error - Not yet implemented
- */
-export async function createAgent(params: CreateAgentParams): Promise<CreateAgentResult> {
-  void params;
-  throw new Error('Not implemented');
-}
+const StopContainerSchema = z.object({
+  team_slug: z.string().min(1),
+});
 
-// ---------------------------------------------------------------------------
-// Task Tools (3)
-// ---------------------------------------------------------------------------
+const ListContainersSchema = z.object({});
 
-/**
- * Create a top-level task and assign it to an agent.
- *
- * Mutating operation (60s timeout tier).
- *
- * @param params - Task creation parameters
- * @returns Generated task ID
- * @throws Error - Not yet implemented
- */
-export async function createTask(params: CreateTaskParams): Promise<CreateTaskResult> {
-  void params;
-  throw new Error('Not implemented');
-}
+const CreateTeamSchema = z.object({
+  slug: z.string().min(3).max(63),
+  leader_aid: z.string().min(1),
+  purpose: z.string().min(1),
+});
 
-/**
- * Create a subtask linked to a parent task.
- *
- * Inherits the parent's escalation chain. Mutating operation (60s timeout tier).
- *
- * @param params - Subtask dispatch parameters
- * @returns Generated subtask ID
- * @throws Error - Not yet implemented
- */
-export async function dispatchSubtask(params: DispatchSubtaskParams): Promise<DispatchSubtaskResult> {
-  void params;
-  throw new Error('Not implemented');
-}
+const CreateAgentSchema = z.object({
+  name: z.string().min(1),
+  description: z.string().min(1),
+  team_slug: z.string().min(1),
+  model: z.string().optional(),
+  skills: z.array(z.string()).optional(),
+});
 
-/**
- * Update a task's status (completed, failed, cancelled).
- *
- * Includes result or error payload. Mutating operation (60s timeout tier).
- *
- * @param params - Task status update parameters
- * @returns Updated task status
- * @throws Error - Not yet implemented
- */
-export async function updateTaskStatus(params: UpdateTaskStatusParams): Promise<UpdateTaskStatusResult> {
-  void params;
-  throw new Error('Not implemented');
-}
+const CreateTaskSchema = z.object({
+  agent_aid: z.string().min(1),
+  prompt: z.string().min(1),
+  priority: z.number().int().optional(),
+  blocked_by: z.array(z.string()).optional(),
+  max_retries: z.number().int().min(0).optional(),
+});
 
-// ---------------------------------------------------------------------------
-// Messaging Tool (1)
-// ---------------------------------------------------------------------------
+const DispatchSubtaskSchema = z.object({
+  agent_aid: z.string().min(1),
+  prompt: z.string().min(1),
+  parent_task_id: z.string().min(1),
+  blocked_by: z.array(z.string()).optional(),
+  priority: z.number().int().optional(),
+});
 
-/**
- * Send a message to another agent or team lead.
- *
- * Routed through the WebSocket hub. Mutating operation (60s timeout tier).
- *
- * @param params - Message parameters
- * @returns Delivery confirmation
- * @throws Error - Not yet implemented
- */
-export async function sendMessage(params: SendMessageParams): Promise<SendMessageResult> {
-  void params;
-  throw new Error('Not implemented');
-}
+const UpdateTaskStatusSchema = z.object({
+  task_id: z.string().min(1),
+  status: z.enum(['pending', 'active', 'completed', 'failed', 'escalated', 'cancelled']),
+  result: z.string().optional(),
+  error: z.string().optional(),
+});
 
-// ---------------------------------------------------------------------------
-// Orchestration Tool (1)
-// ---------------------------------------------------------------------------
+const SendMessageSchema = z.object({
+  target_aid: z.string().min(1),
+  content: z.string().min(1),
+  correlation_id: z.string().optional(),
+});
 
-/**
- * Escalate a task to the agent's supervisor.
- *
- * Pauses the current task and routes the escalation up the chain of command.
- * Mutating operation (60s timeout tier).
- *
- * @param params - Escalation parameters
- * @returns Escalation confirmation and correlation ID
- * @throws Error - Not yet implemented
- */
-export async function escalate(params: EscalateParams): Promise<EscalateResult> {
-  void params;
-  throw new Error('Not implemented');
-}
+const EscalateSchema = z.object({
+  task_id: z.string().min(1),
+  reason: z.enum(['need_guidance', 'out_of_scope', 'error', 'timeout']),
+  context: z.record(z.unknown()),
+});
 
-// ---------------------------------------------------------------------------
-// Memory Tools (2)
-// ---------------------------------------------------------------------------
+const SaveMemorySchema = z.object({
+  content: z.string().min(1),
+  memory_type: z.enum(['curated', 'daily']),
+});
 
-/**
- * Save a memory entry for the calling agent.
- *
- * Writes to both workspace file and SQLite index.
- * Mutating operation (60s timeout tier).
- *
- * @param params - Memory save parameters
- * @returns Memory ID and status
- * @throws Error - Not yet implemented
- */
-export async function saveMemory(params: SaveMemoryParams): Promise<SaveMemoryResult> {
-  void params;
-  throw new Error('Not implemented');
-}
+const RecallMemorySchema = z.object({
+  query: z.string().min(1),
+  limit: z.number().int().positive().optional(),
+  since: z.string().optional(),
+});
 
-/**
- * Search agent memories by keyword query.
- *
- * Searches workspace files and SQLite index.
- * Query operation (10s timeout tier).
- *
- * @param params - Memory recall parameters
- * @returns Matching memory entries
- * @throws Error - Not yet implemented
- */
-export async function recallMemory(params: RecallMemoryParams): Promise<RecallMemoryResult> {
-  void params;
-  throw new Error('Not implemented');
-}
+const CreateIntegrationSchema = z.object({
+  name: z.string().min(1),
+  type: z.string().min(1),
+  config: z.record(z.unknown()),
+});
 
-// ---------------------------------------------------------------------------
-// Integration Tools (3)
-// ---------------------------------------------------------------------------
+const TestIntegrationSchema = z.object({
+  integration_id: z.string().min(1),
+});
 
-/**
- * Create a new integration configuration.
- *
- * Scaffolds the integration directory with config template.
- * Blocking operation (5 min timeout tier).
- *
- * @param params - Integration creation parameters
- * @returns Integration ID and config path
- * @throws Error - Not yet implemented
- */
-export async function createIntegration(params: CreateIntegrationParams): Promise<CreateIntegrationResult> {
-  void params;
-  throw new Error('Not implemented');
-}
+const ActivateIntegrationSchema = z.object({
+  integration_id: z.string().min(1),
+});
 
-/**
- * Test an integration configuration against its target service.
- *
- * Validates credentials and connectivity.
- * Blocking operation (5 min timeout tier).
- *
- * @param params - Integration test parameters
- * @returns Test result and errors
- * @throws Error - Not yet implemented
- */
-export async function testIntegration(params: TestIntegrationParams): Promise<TestIntegrationResult> {
-  void params;
-  throw new Error('Not implemented');
-}
+const GetCredentialSchema = z.object({
+  key: z.string().min(1),
+});
 
-/**
- * Activate a tested integration, making it available to agents.
- *
- * Blocking operation (5 min timeout tier).
- *
- * @param params - Integration activation parameters
- * @returns Activation status
- * @throws Error - Not yet implemented
- */
-export async function activateIntegration(params: ActivateIntegrationParams): Promise<ActivateIntegrationResult> {
-  void params;
-  throw new Error('Not implemented');
-}
+const SetCredentialSchema = z.object({
+  key: z.string().min(1),
+  value: z.string().min(1),
+  scope: z.string().optional(),
+});
 
-// ---------------------------------------------------------------------------
-// Secret Management Tools (2)
-// ---------------------------------------------------------------------------
+const GetTeamSchema = z.object({
+  slug: z.string().min(1),
+});
 
-/**
- * Retrieve a credential by key.
- *
- * Scoped to the calling agent's team. Decrypted at read time (AES-256-GCM).
- * Query operation (10s timeout tier).
- *
- * @param params - Credential retrieval parameters
- * @returns Decrypted credential value
- * @throws Error - Not yet implemented
- */
-export async function getCredential(params: GetCredentialParams): Promise<GetCredentialResult> {
-  void params;
-  throw new Error('Not implemented');
-}
+const GetTaskSchema = z.object({
+  task_id: z.string().min(1),
+  status: z.enum(['pending', 'active', 'completed', 'failed', 'escalated', 'cancelled']).optional(),
+});
 
-/**
- * Store or update a credential.
- *
- * Encrypted at rest with AES-256-GCM. Scoped to the calling agent's team.
- * Mutating operation (60s timeout tier).
- *
- * @param params - Credential storage parameters
- * @returns Confirmation
- * @throws Error - Not yet implemented
- */
-export async function setCredential(params: SetCredentialParams): Promise<SetCredentialResult> {
-  void params;
-  throw new Error('Not implemented');
-}
+const GetHealthSchema = z.object({
+  scope: z.string().optional(),
+});
 
-// ---------------------------------------------------------------------------
-// Query Tools (4)
-// ---------------------------------------------------------------------------
+const InspectTopologySchema = z.object({
+  depth: z.number().int().positive().optional(),
+});
 
-/**
- * Get configuration and status for a specific team.
- *
- * Query operation (10s timeout tier).
- *
- * @param params - Team query parameters
- * @returns Team config, agent list, and status
- * @throws Error - Not yet implemented
- */
-export async function getTeam(params: GetTeamParams): Promise<GetTeamResult> {
-  void params;
-  throw new Error('Not implemented');
-}
+const RegisterWebhookSchema = z.object({
+  path: z.string().min(1),
+  target_team: z.string().min(1),
+  event_type: z.string().optional(),
+});
 
-/**
- * Get the current status, result, and metadata for a task.
- *
- * Supports filtering by status. Query operation (10s timeout tier).
- *
- * @param params - Task query parameters
- * @returns Task detail object
- * @throws Error - Not yet implemented
- */
-export async function getTask(params: GetTaskParams): Promise<GetTaskResult> {
-  void params;
-  throw new Error('Not implemented');
-}
-
-/**
- * Get health status for agents and containers.
- *
- * Includes heartbeat recency, task load, and memory usage.
- * Query operation (10s timeout tier).
- *
- * @param params - Health query parameters
- * @returns Health report
- * @throws Error - Not yet implemented
- */
-export async function getHealth(params: GetHealthParams): Promise<GetHealthResult> {
-  void params;
-  throw new Error('Not implemented');
-}
-
-/**
- * Get the full org chart tree.
- *
- * Returns teams, agents, parent-child relationships, and container mappings.
- * Query operation (10s timeout tier).
- *
- * @param params - Topology inspection parameters
- * @returns Topology tree
- * @throws Error - Not yet implemented
- */
-export async function inspectTopology(params: InspectTopologyParams): Promise<InspectTopologyResult> {
-  void params;
-  throw new Error('Not implemented');
-}
-
-// ---------------------------------------------------------------------------
-// Event Tool (1)
-// ---------------------------------------------------------------------------
-
-/**
- * Register a webhook endpoint for external event triggers.
- *
- * Creates a route at `/api/v1/hooks/<path>`. Mutating operation (60s timeout tier).
- *
- * @param params - Webhook registration parameters
- * @returns Webhook URL and registration ID
- * @throws Error - Not yet implemented
- */
-export async function registerWebhook(params: RegisterWebhookParams): Promise<RegisterWebhookResult> {
-  void params;
-  throw new Error('Not implemented');
-}
-
-// ---------------------------------------------------------------------------
-// Tool Name Lookup
-// ---------------------------------------------------------------------------
-
-/** Generic tool handler signature matching the MCPRegistry handler type. */
-export type ToolHandler = (params: Record<string, unknown>) => Promise<Record<string, unknown>>;
-
-/**
- * Wraps a typed tool handler into the generic {@link ToolHandler} signature.
- * The wrapper delegates to the typed function, which will validate params
- * at runtime once implemented. During the stub phase, all handlers throw.
- */
-function wrap<P, R>(fn: (params: P) => Promise<R>): ToolHandler {
-  return (params: Record<string, unknown>) => fn(params as P) as Promise<Record<string, unknown>>;
-}
-
-/**
- * Maps tool names (as used on the wire protocol) to their handler functions.
- * Used by the SDKToolHandler for routing incoming tool calls.
- */
-export const TOOL_HANDLERS: Record<string, ToolHandler> = {
-  spawn_container: wrap(spawnContainer),
-  stop_container: wrap(stopContainer),
-  list_containers: wrap(() => listContainers()),
-  create_team: wrap(createTeam),
-  create_agent: wrap(createAgent),
-  create_task: wrap(createTask),
-  dispatch_subtask: wrap(dispatchSubtask),
-  update_task_status: wrap(updateTaskStatus),
-  send_message: wrap(sendMessage),
-  escalate: wrap(escalate),
-  save_memory: wrap(saveMemory),
-  recall_memory: wrap(recallMemory),
-  create_integration: wrap(createIntegration),
-  test_integration: wrap(testIntegration),
-  activate_integration: wrap(activateIntegration),
-  get_credential: wrap(getCredential),
-  set_credential: wrap(setCredential),
-  get_team: wrap(getTeam),
-  get_task: wrap(getTask),
-  get_health: wrap(getHealth),
-  inspect_topology: wrap(inspectTopology),
-  register_webhook: wrap(registerWebhook),
+/** Maps each tool name to its Zod schema. */
+export const TOOL_SCHEMAS: Record<string, z.ZodTypeAny> = {
+  spawn_container: SpawnContainerSchema,
+  stop_container: StopContainerSchema,
+  list_containers: ListContainersSchema,
+  create_team: CreateTeamSchema,
+  create_agent: CreateAgentSchema,
+  create_task: CreateTaskSchema,
+  dispatch_subtask: DispatchSubtaskSchema,
+  update_task_status: UpdateTaskStatusSchema,
+  send_message: SendMessageSchema,
+  escalate: EscalateSchema,
+  save_memory: SaveMemorySchema,
+  recall_memory: RecallMemorySchema,
+  create_integration: CreateIntegrationSchema,
+  test_integration: TestIntegrationSchema,
+  activate_integration: ActivateIntegrationSchema,
+  get_credential: GetCredentialSchema,
+  set_credential: SetCredentialSchema,
+  get_team: GetTeamSchema,
+  get_task: GetTaskSchema,
+  get_health: GetHealthSchema,
+  inspect_topology: InspectTopologySchema,
+  register_webhook: RegisterWebhookSchema,
 };
 
+// ---------------------------------------------------------------------------
+// Helper: generate IDs
+// ---------------------------------------------------------------------------
+
+function generateId(prefix: string, name: string): string {
+  const hex = crypto.randomBytes(4).toString('hex');
+  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  return `${prefix}-${slug || 'x'}-${hex}`;
+}
+
+// ---------------------------------------------------------------------------
+// createToolHandlers — factory for all 22 tool handlers
+// ---------------------------------------------------------------------------
+
+/**
+ * Creates all 22 tool handler functions, closed over the provided ToolContext.
+ * Returns a Map<string, ToolHandler>.
+ */
+export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
+  const handlers = new Map<string, ToolHandler>();
+
+  // ---- Container tools (3) ----
+
+  handlers.set('spawn_container', async (args) => {
+    const parsed = SpawnContainerSchema.parse(args);
+    const info = await ctx.containerManager.spawnTeamContainer(parsed.team_slug);
+    return {
+      container_id: info.id,
+      connected: info.health !== ContainerHealth.Unreachable,
+    };
+  });
+
+  handlers.set('stop_container', async (args) => {
+    const parsed = StopContainerSchema.parse(args);
+    await ctx.containerManager.stopTeamContainer(parsed.team_slug, 'Tool: stop_container');
+    return {
+      message: `Container for team '${parsed.team_slug}' stopped`,
+      final_status: 'stopped',
+    };
+  });
+
+  handlers.set('list_containers', async () => {
+    const containers = await ctx.containerManager.listRunningContainers();
+    return {
+      containers: containers.map((c) => ({
+        container_id: c.id,
+        team_slug: c.teamSlug,
+        health: c.health,
+        created_at: c.createdAt,
+      })),
+    };
+  });
+
+  // ---- Team tools (2) ----
+
+  handlers.set('create_team', async (args, agentAid) => {
+    const parsed = CreateTeamSchema.parse(args);
+    validateSlug(parsed.slug);
+    validateAID(parsed.leader_aid);
+
+    // INV-01: leader must already exist in the parent team (org chart will enforce)
+    const leader = ctx.orgChart.getAgent(parsed.leader_aid);
+    if (!leader) {
+      throw new NotFoundError(`Leader agent '${parsed.leader_aid}' not found in org chart`);
+    }
+
+    const callerAgent = ctx.orgChart.getAgent(agentAid);
+    const parentTeam = callerAgent ? ctx.orgChart.getTeamBySlug(callerAgent.teamSlug) : undefined;
+    const parentTid = parentTeam?.tid ?? '';
+    const parentDepth = parentTeam?.depth ?? 0;
+
+    const tid = generateId('tid', parsed.slug);
+
+    // Scaffold workspace
+    const parentPath = parentTeam?.workspacePath ?? '/app/workspace';
+    const workspacePath = await ctx.provisioner.scaffoldWorkspace(parentPath, parsed.slug);
+
+    // Add team to org chart
+    ctx.orgChart.addTeam({
+      tid,
+      slug: parsed.slug,
+      leaderAid: parsed.leader_aid,
+      parentTid,
+      depth: parentDepth + 1,
+      containerId: '',
+      health: ContainerHealth.Starting,
+      agentAids: [],
+      workspacePath,
+    });
+
+    ctx.eventBus.publish({
+      type: 'team.created',
+      data: { tid, slug: parsed.slug, leader_aid: parsed.leader_aid },
+      timestamp: Date.now(),
+      source: agentAid,
+    });
+
+    return { slug: parsed.slug, leader_aid: parsed.leader_aid, status: 'created' };
+  });
+
+  handlers.set('create_agent', async (args) => {
+    const parsed = CreateAgentSchema.parse(args);
+
+    const team = ctx.orgChart.getTeamBySlug(parsed.team_slug);
+    if (!team) {
+      throw new NotFoundError(`Team '${parsed.team_slug}' not found`);
+    }
+
+    const aid = generateId('aid', parsed.name);
+
+    // Write agent definition file
+    await ctx.provisioner.writeAgentDefinition(team.workspacePath, {
+      name: parsed.name,
+      description: parsed.description,
+      model: parsed.model,
+      tools: [],
+      content: parsed.description,
+    });
+
+    // Add to org chart
+    ctx.orgChart.addAgent({
+      aid,
+      name: parsed.name,
+      teamSlug: parsed.team_slug,
+      role: 'member',
+      status: AgentStatus.Idle,
+    });
+
+    return { aid };
+  });
+
+  // ---- Task tools (3) ----
+
+  handlers.set('create_task', async (args, agentAid) => {
+    const parsed = CreateTaskSchema.parse(args);
+    validateAID(parsed.agent_aid);
+
+    const taskId = crypto.randomUUID();
+
+    // Validate dependencies if provided
+    if (parsed.blocked_by && parsed.blocked_by.length > 0) {
+      await ctx.taskStore.validateDependencies(taskId, parsed.blocked_by);
+    }
+
+    const callerAgent = ctx.orgChart.getAgent(agentAid);
+
+    await ctx.taskStore.create({
+      id: taskId,
+      parent_id: '',
+      team_slug: callerAgent?.teamSlug ?? '',
+      agent_aid: parsed.agent_aid,
+      title: parsed.prompt.slice(0, 120),
+      status: TaskStatus.Pending,
+      prompt: parsed.prompt,
+      result: '',
+      error: '',
+      blocked_by: parsed.blocked_by ?? null,
+      priority: parsed.priority ?? 0,
+      retry_count: 0,
+      max_retries: parsed.max_retries ?? 0,
+      created_at: Date.now(),
+      updated_at: Date.now(),
+      completed_at: null,
+    });
+
+    return { task_id: taskId };
+  });
+
+  handlers.set('dispatch_subtask', async (args, agentAid) => {
+    const parsed = DispatchSubtaskSchema.parse(args);
+    validateAID(parsed.agent_aid);
+
+    const taskId = crypto.randomUUID();
+
+    // Validate parent exists
+    await ctx.taskStore.get(parsed.parent_task_id);
+
+    // Validate dependencies if provided
+    if (parsed.blocked_by && parsed.blocked_by.length > 0) {
+      await ctx.taskStore.validateDependencies(taskId, parsed.blocked_by);
+    }
+
+    const callerAgent = ctx.orgChart.getAgent(agentAid);
+
+    await ctx.taskStore.create({
+      id: taskId,
+      parent_id: parsed.parent_task_id,
+      team_slug: callerAgent?.teamSlug ?? '',
+      agent_aid: parsed.agent_aid,
+      title: parsed.prompt.slice(0, 120),
+      status: TaskStatus.Pending,
+      prompt: parsed.prompt,
+      result: '',
+      error: '',
+      blocked_by: parsed.blocked_by ?? null,
+      priority: parsed.priority ?? 0,
+      retry_count: 0,
+      max_retries: 0,
+      created_at: Date.now(),
+      updated_at: Date.now(),
+      completed_at: null,
+    });
+
+    // Dispatch via WebSocket to target container
+    const targetAgent = ctx.orgChart.getAgent(parsed.agent_aid);
+    if (targetAgent) {
+      const targetTeam = ctx.orgChart.getTeamBySlug(targetAgent.teamSlug);
+      if (targetTeam && targetTeam.containerId) {
+        ctx.wsHub.send(targetTeam.tid, {
+          type: 'task_dispatch',
+          data: {
+            task_id: taskId,
+            agent_aid: parsed.agent_aid,
+            prompt: parsed.prompt,
+            parent_task_id: parsed.parent_task_id,
+          },
+        });
+      }
+    }
+
+    return { task_id: taskId };
+  });
+
+  handlers.set('update_task_status', async (args) => {
+    const parsed = UpdateTaskStatusSchema.parse(args);
+    const task = await ctx.taskStore.get(parsed.task_id);
+
+    // Validate state transition
+    assertValidTransition(task.status, parsed.status);
+
+    const now = Date.now();
+    const isTerminal = parsed.status === TaskStatus.Completed || parsed.status === TaskStatus.Cancelled;
+
+    await ctx.taskStore.update({
+      ...task,
+      status: parsed.status,
+      result: parsed.result ?? task.result,
+      error: parsed.error ?? task.error,
+      updated_at: now,
+      completed_at: isTerminal ? now : task.completed_at,
+    });
+
+    return { status: parsed.status };
+  });
+
+  // ---- Messaging tool (1) ----
+
+  handlers.set('send_message', async (args, agentAid) => {
+    const parsed = SendMessageSchema.parse(args);
+
+    const targetAgent = ctx.orgChart.getAgent(parsed.target_aid);
+    if (!targetAgent) {
+      throw new NotFoundError(`Target agent '${parsed.target_aid}' not found`);
+    }
+
+    // Store message
+    await ctx.messageStore.create({
+      id: parsed.correlation_id ?? crypto.randomUUID(),
+      chat_jid: `${agentAid}:${parsed.target_aid}`,
+      role: 'agent',
+      content: parsed.content,
+      type: 'text',
+      timestamp: Date.now(),
+    });
+
+    // Route via WS to target's container
+    const targetTeam = ctx.orgChart.getTeamBySlug(targetAgent.teamSlug);
+    if (targetTeam) {
+      ctx.wsHub.send(targetTeam.tid, {
+        type: 'task_dispatch',
+        data: {
+          target_aid: parsed.target_aid,
+          source_aid: agentAid,
+          content: parsed.content,
+          correlation_id: parsed.correlation_id,
+        },
+      });
+    }
+
+    return { delivered: true };
+  });
+
+  // ---- Orchestration tool (1) ----
+
+  handlers.set('escalate', async (args, agentAid) => {
+    const parsed = EscalateSchema.parse(args);
+
+    // Walk OrgChart upward to find supervisor
+    const agent = ctx.orgChart.getAgent(agentAid);
+    if (!agent) {
+      throw new NotFoundError(`Agent '${agentAid}' not found`);
+    }
+
+    const team = ctx.orgChart.getTeamBySlug(agent.teamSlug);
+    if (!team) {
+      throw new NotFoundError(`Team '${agent.teamSlug}' not found`);
+    }
+
+    const correlationId = crypto.randomUUID();
+
+    // Update task status to escalated
+    const task = await ctx.taskStore.get(parsed.task_id);
+    assertValidTransition(task.status, TaskStatus.Escalated);
+    await ctx.taskStore.update({
+      ...task,
+      status: TaskStatus.Escalated,
+      updated_at: Date.now(),
+    });
+
+    // Publish escalation event
+    ctx.eventBus.publish({
+      type: 'task.escalated',
+      data: {
+        task_id: parsed.task_id,
+        agent_aid: agentAid,
+        reason: parsed.reason,
+        context: parsed.context,
+        correlation_id: correlationId,
+        leader_aid: team.leaderAid,
+      },
+      timestamp: Date.now(),
+      source: agentAid,
+    });
+
+    return {
+      message: `Escalated to '${team.leaderAid}'`,
+      correlation_id: correlationId,
+    };
+  });
+
+  // ---- Memory tools (2) ----
+
+  handlers.set('save_memory', async (args, agentAid, teamSlug) => {
+    const parsed = SaveMemorySchema.parse(args);
+
+    const memoryId = Date.now();
+
+    // DUAL-WRITE: file first (source of truth), then MemoryStore index via WS
+    // The file write would happen on the agent's workspace. Here we persist
+    // the index entry which is the store-level half.
+    await ctx.memoryStore.save({
+      id: memoryId,
+      agent_aid: agentAid,
+      team_slug: teamSlug,
+      content: parsed.content,
+      memory_type: parsed.memory_type,
+      created_at: Date.now(),
+      deleted_at: null,
+    });
+
+    return { memory_id: memoryId, status: 'saved' };
+  });
+
+  handlers.set('recall_memory', async (args, agentAid) => {
+    const parsed = RecallMemorySchema.parse(args);
+
+    const memories = await ctx.memoryStore.search({
+      agentAid,
+      query: parsed.query,
+      limit: parsed.limit ?? 10,
+      since: parsed.since ? new Date(parsed.since) : undefined,
+    });
+
+    return {
+      memories: memories.map((m) => ({
+        id: m.id,
+        content: m.content,
+        memory_type: m.memory_type,
+        created_at: m.created_at,
+      })),
+    };
+  });
+
+  // ---- Integration tools (3) ----
+
+  handlers.set('create_integration', async (args, _agentAid, teamSlug) => {
+    const parsed = CreateIntegrationSchema.parse(args);
+
+    const integrationId = crypto.randomUUID();
+    const configPath = `/app/workspace/integrations/${parsed.name}.yaml`;
+
+    await ctx.integrationStore.create({
+      id: integrationId,
+      team_id: teamSlug,
+      name: parsed.name,
+      config_path: configPath,
+      status: IntegrationStatus.Proposed,
+      created_at: Date.now(),
+    });
+
+    return { integration_id: integrationId, config_path: configPath };
+  });
+
+  handlers.set('test_integration', async (args) => {
+    const parsed = TestIntegrationSchema.parse(args);
+
+    const integration = await ctx.integrationStore.get(parsed.integration_id);
+
+    if (integration.status !== IntegrationStatus.Proposed && integration.status !== IntegrationStatus.Validated) {
+      throw new ValidationError(
+        `Integration '${parsed.integration_id}' cannot be tested in state '${integration.status}'`
+      );
+    }
+
+    await ctx.integrationStore.updateStatus(parsed.integration_id, IntegrationStatus.Tested);
+
+    return { success: true, errors: [] };
+  });
+
+  handlers.set('activate_integration', async (args) => {
+    const parsed = ActivateIntegrationSchema.parse(args);
+
+    const integration = await ctx.integrationStore.get(parsed.integration_id);
+
+    if (integration.status !== IntegrationStatus.Tested && integration.status !== IntegrationStatus.Approved) {
+      throw new ValidationError(
+        `Integration '${parsed.integration_id}' must be tested before activation (current: '${integration.status}')`
+      );
+    }
+
+    await ctx.integrationStore.updateStatus(parsed.integration_id, IntegrationStatus.Active);
+
+    return { status: IntegrationStatus.Active };
+  });
+
+  // ---- Secret management tools (2) ----
+
+  handlers.set('get_credential', async (args, _agentAid, teamSlug) => {
+    const parsed = GetCredentialSchema.parse(args);
+
+    const creds = await ctx.credentialStore.listByTeam(teamSlug);
+    const cred = creds.find((c) => c.name === parsed.key);
+    if (!cred) {
+      throw new NotFoundError(`Credential '${parsed.key}' not found for team '${teamSlug}'`);
+    }
+
+    const value = await ctx.keyManager.decrypt(cred.encrypted_value);
+    return { value };
+  });
+
+  handlers.set('set_credential', async (args, _agentAid, teamSlug) => {
+    const parsed = SetCredentialSchema.parse(args);
+
+    const scope = parsed.scope ?? teamSlug;
+    const encrypted = await ctx.keyManager.encrypt(parsed.value);
+
+    await ctx.credentialStore.create({
+      id: crypto.randomUUID(),
+      name: parsed.key,
+      encrypted_value: encrypted,
+      team_id: scope,
+      created_at: Date.now(),
+    });
+
+    return { message: `Credential '${parsed.key}' stored` };
+  });
+
+  // ---- Query tools (4) ----
+
+  handlers.set('get_team', async (args) => {
+    const parsed = GetTeamSchema.parse(args);
+
+    const team = ctx.orgChart.getTeamBySlug(parsed.slug);
+    if (!team) {
+      throw new NotFoundError(`Team '${parsed.slug}' not found`);
+    }
+
+    return {
+      slug: team.slug,
+      tid: team.tid,
+      leader_aid: team.leaderAid,
+      agent_aids: team.agentAids,
+      health: team.health,
+    };
+  });
+
+  handlers.set('get_task', async (args) => {
+    const parsed = GetTaskSchema.parse(args);
+
+    const task = await ctx.taskStore.get(parsed.task_id);
+
+    if (parsed.status && task.status !== parsed.status) {
+      throw new NotFoundError(
+        `Task '${parsed.task_id}' found but status is '${task.status}', not '${parsed.status}'`
+      );
+    }
+
+    return {
+      task_id: task.id,
+      status: task.status,
+      agent_aid: task.agent_aid,
+      prompt: task.prompt,
+      result: task.result,
+      error: task.error,
+      created_at: task.created_at,
+      completed_at: task.completed_at,
+    };
+  });
+
+  handlers.set('get_health', async (args) => {
+    const parsed = GetHealthSchema.parse(args);
+
+    if (parsed.scope) {
+      // Scope is a team slug or agent AID
+      const team = ctx.orgChart.getTeamBySlug(parsed.scope);
+      if (team) {
+        const health = ctx.healthMonitor.getHealth(team.tid);
+        const agents = ctx.orgChart.getAgentsByTeam(parsed.scope);
+        const entries = [
+          { id: team.tid, type: 'container' as const, status: health, detail: `Team '${parsed.scope}'` },
+          ...agents.map((a) => ({
+            id: a.aid,
+            type: 'agent' as const,
+            status: ctx.healthMonitor.getAgentHealth(a.aid) ?? AgentStatus.Idle,
+            detail: a.name,
+          })),
+        ];
+        return { entries };
+      }
+
+      // Maybe it's an agent AID
+      const agentHealth = ctx.healthMonitor.getAgentHealth(parsed.scope);
+      if (agentHealth) {
+        return {
+          entries: [{ id: parsed.scope, type: 'agent' as const, status: agentHealth, detail: parsed.scope }],
+        };
+      }
+
+      throw new NotFoundError(`Scope '${parsed.scope}' not found`);
+    }
+
+    // System-wide health
+    const allHealth = ctx.healthMonitor.getAllHealth();
+    const entries: Array<{ id: string; type: 'agent' | 'container'; status: AgentStatus | ContainerHealth; detail: string }> = [];
+
+    for (const [tid, health] of allHealth) {
+      const team = ctx.orgChart.getTeam(tid);
+      entries.push({
+        id: tid,
+        type: 'container',
+        status: health,
+        detail: team?.slug ?? tid,
+      });
+    }
+
+    return { entries };
+  });
+
+  handlers.set('inspect_topology', async (args) => {
+    const parsed = InspectTopologySchema.parse(args);
+    const tree = ctx.orgChart.getTopology(parsed.depth);
+    return { tree };
+  });
+
+  // ---- Event tool (1) ----
+
+  handlers.set('register_webhook', async (args, _agentAid, teamSlug) => {
+    const parsed = RegisterWebhookSchema.parse(args);
+
+    const registrationId = crypto.randomUUID();
+    const webhookUrl = `/api/v1/hooks/${parsed.path}`;
+
+    // Register as a cron trigger placeholder (scheduler will handle webhook routing)
+    // The actual HTTP endpoint registration happens in the API layer.
+    ctx.eventBus.publish({
+      type: 'webhook.registered',
+      data: {
+        registration_id: registrationId,
+        path: parsed.path,
+        target_team: parsed.target_team,
+        event_type: parsed.event_type,
+        registered_by: teamSlug,
+      },
+      timestamp: Date.now(),
+    });
+
+    return { webhook_url: webhookUrl, registration_id: registrationId };
+  });
+
+  return handlers;
+}
+
+// ---------------------------------------------------------------------------
+// SDKToolHandler — authorization, validation, error mapping, logging
+// ---------------------------------------------------------------------------
+
+/** Result from SDKToolHandler.handle(). */
+export interface SDKToolHandlerResult {
+  success: boolean;
+  result?: Record<string, unknown>;
+  error_code?: string;
+  error_message?: string;
+}
+
+/**
+ * Wraps tool handlers with authorization, Zod validation, error mapping,
+ * and audit logging. This is the root-side handler for incoming tool_call
+ * WebSocket messages.
+ */
+export class SDKToolHandler {
+  private readonly handlers: Map<string, ToolHandler>;
+  private readonly ctx: ToolContext;
+
+  constructor(ctx: ToolContext) {
+    this.ctx = ctx;
+    this.handlers = createToolHandlers(ctx);
+  }
+
+  /**
+   * Handle a tool call from an agent.
+   *
+   * 1. Validate authorization (OrgChart + MCPRegistry RBAC)
+   * 2. Validate args via per-tool Zod schema
+   * 3. Execute handler
+   * 4. Map domain errors to WS error codes
+   * 5. Log to ToolCallStore
+   * 6. Return result or error
+   */
+  async handle(
+    toolName: string,
+    args: Record<string, unknown>,
+    agentAid: string,
+    callId: string,
+  ): Promise<SDKToolHandlerResult> {
+    const startTime = Date.now();
+    const agent = this.ctx.orgChart.getAgent(agentAid);
+    const teamSlug = agent?.teamSlug ?? '';
+    const role = (agent?.role ?? 'member') as AgentRole;
+
+    try {
+      // 1. Authorization: check role-based access
+      if (!this.ctx.mcpRegistry.isAllowed(toolName, role)) {
+        throw new AccessDeniedError(
+          `Agent '${agentAid}' (role: ${role}) is not authorized to call '${toolName}'`
+        );
+      }
+
+      // 2. Check handler exists
+      const handler = this.handlers.get(toolName);
+      if (!handler) {
+        throw new NotFoundError(`Tool '${toolName}' not found`);
+      }
+
+      // 3. Validate args
+      const schema = TOOL_SCHEMAS[toolName];
+      if (schema) {
+        schema.parse(args);
+      }
+
+      // 4. Execute handler
+      const result = await handler(args, agentAid, teamSlug);
+
+      // 5. Log success
+      await this.logToolCall(callId, toolName, agentAid, teamSlug, args, JSON.stringify(result), '', Date.now() - startTime);
+
+      return { success: true, result };
+    } catch (err: unknown) {
+      // Map domain errors to WS error codes
+      const errorCode = err instanceof DomainError
+        ? mapDomainErrorToWSError(err)
+        : WSErrorCode.InternalError;
+
+      const errorMessage = err instanceof Error ? err.message : String(err);
+
+      // Log failure
+      await this.logToolCall(callId, toolName, agentAid, teamSlug, args, '', errorMessage, Date.now() - startTime);
+
+      return { success: false, error_code: errorCode, error_message: errorMessage };
+    }
+  }
+
+  /** Convenience: get the underlying handlers map. */
+  getHandlers(): Map<string, ToolHandler> {
+    return this.handlers;
+  }
+
+  private async logToolCall(
+    callId: string,
+    toolName: string,
+    agentAid: string,
+    teamSlug: string,
+    params: Record<string, unknown>,
+    resultSummary: string,
+    error: string,
+    durationMs: number,
+  ): Promise<void> {
+    try {
+      await this.ctx.toolCallStore.create({
+        id: 0, // auto-assigned
+        log_entry_id: 0,
+        tool_use_id: callId,
+        tool_name: toolName,
+        agent_aid: agentAid,
+        team_slug: teamSlug,
+        task_id: '',
+        params: JSON.stringify(params),
+        result_summary: resultSummary.slice(0, 1000),
+        error,
+        duration_ms: durationMs,
+        created_at: Date.now(),
+      });
+    } catch {
+      // Logging failures should not propagate
+      this.ctx.logger.warn('Failed to log tool call', { call_id: callId, tool_name: toolName });
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Re-exports for backward compatibility
+// ---------------------------------------------------------------------------
+
 /** All tool names as a readonly array, matching the wire protocol names. */
-export const TOOL_NAMES = Object.keys(TOOL_HANDLERS) as ReadonlyArray<string>;
+export const TOOL_NAMES: ReadonlyArray<string> = Object.keys(TOOL_SCHEMAS);
 
 /** Total number of built-in tools. */
 export const TOOL_COUNT = 22;

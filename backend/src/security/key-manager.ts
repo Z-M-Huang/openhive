@@ -33,7 +33,41 @@
  * @module security/key-manager
  */
 
+import crypto from 'node:crypto';
+import argon2 from 'argon2';
 import type { KeyManager } from '../domain/index.js';
+import { EncryptionLockedError, ValidationError } from '../domain/index.js';
+
+const GCM_IV_BYTES = 12;
+const GCM_AUTH_TAG_BYTES = 16;
+const DERIVED_KEY_BYTES = 32; // AES-256
+
+/**
+ * Derives a deterministic salt from the master key using SHA-256.
+ * This allows the same master key to always produce the same derived encryption key.
+ */
+function deriveSalt(masterKey: string): Buffer {
+  return crypto.createHash('sha256').update(masterKey).digest().subarray(0, 16);
+}
+
+/**
+ * Derives an AES-256 encryption key from a master key using Argon2id.
+ * OWASP minimum parameters: 64MB memory, 3 iterations, 4 parallelism.
+ */
+async function deriveKey(masterKey: string): Promise<Buffer> {
+  const salt = deriveSalt(masterKey);
+  const derived = await argon2.hash(masterKey, {
+    type: argon2.argon2id,
+    memoryCost: 65536,  // 64 MB
+    timeCost: 3,
+    parallelism: 4,
+    salt,
+    raw: true,
+    hashLength: DERIVED_KEY_BYTES,
+  });
+  // argon2.hash with raw: true returns a Buffer
+  return Buffer.from(derived);
+}
 
 /**
  * Implementation of the KeyManager interface providing AES-256-GCM
@@ -43,68 +77,88 @@ import type { KeyManager } from '../domain/index.js';
  * Calling encrypt/decrypt while locked throws `EncryptionLockedError`.
  */
 export class KeyManagerImpl implements KeyManager {
-  /**
-   * Unlocks the credential vault by deriving an encryption key from the
-   * provided master key using Argon2id key derivation.
-   *
-   * @param _masterKey - The master key (from OPENHIVE_MASTER_KEY env var)
-   * @throws If the vault is already unlocked or the key is invalid
-   */
-  async unlock(_masterKey: string): Promise<void> {
-    throw new Error('Not implemented');
+  private derivedKey: Buffer | null = null;
+  private isUnlockedState = false;
+
+  async unlock(masterKey: string): Promise<void> {
+    this.derivedKey = await deriveKey(masterKey);
+    this.isUnlockedState = true;
   }
 
-  /**
-   * Locks the credential vault, securely wiping the derived key from memory.
-   *
-   * @throws If the vault is already locked
-   */
   async lock(): Promise<void> {
-    throw new Error('Not implemented');
+    if (this.derivedKey) {
+      this.derivedKey.fill(0);
+    }
+    this.derivedKey = null;
+    this.isUnlockedState = false;
   }
 
-  /**
-   * Re-encrypts all stored credentials with a new master key.
-   * Decrypts all values with the current key, derives a new key from
-   * `newMasterKey`, and re-encrypts all values.
-   *
-   * @param _newMasterKey - The new master key to derive the encryption key from
-   * @throws If the vault is locked (EncryptionLockedError)
-   */
-  async rekey(_newMasterKey: string): Promise<void> {
-    throw new Error('Not implemented');
+  async rekey(newMasterKey: string): Promise<void> {
+    this.guardLocked();
+    const newKey = await deriveKey(newMasterKey);
+    // Zero-fill old key before replacing
+    if (this.derivedKey) {
+      this.derivedKey.fill(0);
+    }
+    this.derivedKey = newKey;
   }
 
-  /**
-   * Encrypts plaintext using AES-256-GCM with a unique 12-byte IV/nonce.
-   * Each call generates a fresh nonce via `crypto.randomBytes(12)`.
-   *
-   * @param _plaintext - The string to encrypt
-   * @returns Ciphertext in the format `<base64(iv)>:<base64(ciphertext + authTag)>`
-   * @throws If the vault is locked (EncryptionLockedError)
-   */
-  async encrypt(_plaintext: string): Promise<string> {
-    throw new Error('Not implemented');
+  async encrypt(plaintext: string): Promise<string> {
+    this.guardLocked();
+    const iv = crypto.randomBytes(GCM_IV_BYTES);
+    const cipher = crypto.createCipheriv('aes-256-gcm', this.derivedKey!, iv);
+    const encrypted = Buffer.concat([
+      cipher.update(plaintext, 'utf8'),
+      cipher.final(),
+    ]);
+    const authTag = cipher.getAuthTag();
+    // Format: base64(iv):base64(ciphertext + authTag)
+    const payload = Buffer.concat([encrypted, authTag]);
+    return `${iv.toString('base64')}:${payload.toString('base64')}`;
   }
 
-  /**
-   * Decrypts ciphertext previously produced by `encrypt()`.
-   * Extracts the IV and auth tag, then decrypts using AES-256-GCM.
-   *
-   * @param _ciphertext - The encrypted string in `<base64(iv)>:<base64(ciphertext + authTag)>` format
-   * @returns The original plaintext
-   * @throws If the vault is locked (EncryptionLockedError)
-   * @throws If decryption fails (tampered data, wrong key, etc.)
-   */
-  async decrypt(_ciphertext: string): Promise<string> {
-    throw new Error('Not implemented');
+  async decrypt(ciphertext: string): Promise<string> {
+    this.guardLocked();
+    const colonIdx = ciphertext.indexOf(':');
+    if (colonIdx === -1) {
+      throw new ValidationError('Decryption failed: invalid ciphertext format');
+    }
+    const ivB64 = ciphertext.substring(0, colonIdx);
+    const payloadB64 = ciphertext.substring(colonIdx + 1);
+
+    const iv = Buffer.from(ivB64, 'base64');
+    const payload = Buffer.from(payloadB64, 'base64');
+
+    if (iv.length !== GCM_IV_BYTES) {
+      throw new ValidationError('Decryption failed: invalid IV length');
+    }
+    if (payload.length < GCM_AUTH_TAG_BYTES) {
+      throw new ValidationError('Decryption failed: payload too short');
+    }
+
+    const encryptedData = payload.subarray(0, payload.length - GCM_AUTH_TAG_BYTES);
+    const authTag = payload.subarray(payload.length - GCM_AUTH_TAG_BYTES);
+
+    try {
+      const decipher = crypto.createDecipheriv('aes-256-gcm', this.derivedKey!, iv);
+      decipher.setAuthTag(authTag);
+      const decrypted = Buffer.concat([
+        decipher.update(encryptedData),
+        decipher.final(),
+      ]);
+      return decrypted.toString('utf8');
+    } catch {
+      throw new ValidationError('Decryption failed: ciphertext tampered or wrong key');
+    }
   }
 
-  /**
-   * Returns whether the credential vault is currently unlocked and
-   * ready for encrypt/decrypt operations.
-   */
   isUnlocked(): boolean {
-    throw new Error('Not implemented');
+    return this.isUnlockedState;
+  }
+
+  private guardLocked(): void {
+    if (!this.isUnlockedState || !this.derivedKey) {
+      throw new EncryptionLockedError('Key manager is locked');
+    }
   }
 }

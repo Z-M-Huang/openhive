@@ -1,62 +1,40 @@
 /**
  * Log sinks — pluggable log output backends.
  *
- * Design (implemented in later layers):
- *
- * LogSink interface:
- *   Defined in domain/interfaces.ts. Each sink receives batched LogEntry
- *   arrays from the Logger and writes them to a destination.
- *
  * Built-in sinks:
- *   - SQLiteSink: Persists log entries to the SQLite database via LogStore.
- *     Used only in the root container (OPENHIVE_IS_ROOT=true). Accepts a
- *     LogStore instance in the constructor.
  *   - StdoutSink: Writes structured JSON log entries to stdout via pino.
- *     Used in all containers. Accepts an optional pino log-level filter
- *     in the constructor (defaults to LogLevel.Info).
+ *     Used in all containers. Respects a minimum log level filter.
+ *   - SQLiteSink: Persists log entries to the SQLite database via LogStore.
+ *     Root-only sink. Never throws from write() — errors are logged to stderr.
  *
  * Plugin system:
  *   - PluginManager loads custom sinks from workspace/plugins/sinks/.
- *   - Plugin contract: each .js file exports a factory function
- *     `createSink(config: Record<string, unknown>): LogSink`.
- *   - Optional .yaml file alongside the .js provides default config.
- *   - Hot-reload: PluginManager watches the sinks directory with a
- *     500ms debounce file watcher. On change, it reloads the affected
- *     plugin (close old sink, require new module, create new sink).
- *   - Plugins are loaded in alphabetical order by filename.
- *   - Plugin errors are isolated — a failing plugin does not affect
- *     other sinks or the logger.
+ *   - Currently ships as no-op stubs (sandboxing deferred — see ADR).
  */
 
+import pino from 'pino';
 import type { LogEntry } from '../domain/domain.js';
-import type { LogLevel } from '../domain/enums.js';
+import { LogLevel } from '../domain/enums.js';
 import type { LogSink, LogStore } from '../domain/interfaces.js';
 
-/**
- * SQLite log sink — persists log entries to the database.
- *
- * Root-only sink. Receives batched LogEntry arrays from the Logger
- * and writes them via LogStore.create(). The LogStore handles
- * the async write queue internally.
- */
-export class SQLiteSink implements LogSink {
-  /**
-   * @param _store - LogStore instance for database persistence.
-   */
-  constructor(private readonly _store: LogStore) {
-    void this._store;
-  }
+// ---------------------------------------------------------------------------
+// LogLevel → pino method mapping
+// ---------------------------------------------------------------------------
 
-  /** Write a batch of log entries to SQLite via LogStore. */
-  async write(_entries: LogEntry[]): Promise<void> {
-    throw new Error('Not implemented');
-  }
+type PinoLogMethod = 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal';
 
-  /** Flush any pending writes and release database resources. */
-  async close(): Promise<void> {
-    throw new Error('Not implemented');
-  }
-}
+const LEVEL_TO_PINO: Record<LogLevel, PinoLogMethod> = {
+  [LogLevel.Trace]: 'trace',
+  [LogLevel.Debug]: 'debug',
+  [LogLevel.Info]: 'info',
+  [LogLevel.Warn]: 'warn',
+  [LogLevel.Error]: 'error',
+  [LogLevel.Audit]: 'fatal', // pino has no audit level; fatal is closest
+};
+
+// ---------------------------------------------------------------------------
+// StdoutSink
+// ---------------------------------------------------------------------------
 
 /**
  * Stdout log sink — writes structured JSON to stdout via pino.
@@ -66,75 +44,124 @@ export class SQLiteSink implements LogSink {
  * the threshold are silently dropped).
  */
 export class StdoutSink implements LogSink {
+  private readonly minLevel: LogLevel;
+  private readonly pino: pino.Logger;
+
   /**
-   * @param _minLevel - Minimum log level to emit (entries below are dropped).
+   * @param minLevel - Minimum log level to emit (entries below are dropped).
    *   Defaults to LogLevel.Info (20).
    */
-  constructor(private readonly _minLevel?: LogLevel) {
-    void this._minLevel;
+  constructor(minLevel: LogLevel = LogLevel.Info) {
+    this.minLevel = minLevel;
+    // Let pino accept all levels; we filter ourselves based on LogLevel enum
+    this.pino = pino({ level: 'trace' });
   }
 
   /** Write a batch of log entries to stdout as structured JSON. */
-  async write(_entries: LogEntry[]): Promise<void> {
-    throw new Error('Not implemented');
+  async write(entries: LogEntry[]): Promise<void> {
+    for (const entry of entries) {
+      if (entry.level < this.minLevel) {
+        continue;
+      }
+      const method = LEVEL_TO_PINO[entry.level];
+      this.pino[method](
+        {
+          component: entry.component,
+          event_type: entry.event_type,
+          team_slug: entry.team_slug,
+          agent_aid: entry.agent_aid,
+          task_id: entry.task_id,
+          request_id: entry.request_id,
+          correlation_id: entry.correlation_id,
+          action: entry.action,
+          duration_ms: entry.duration_ms,
+          error: entry.error || undefined,
+        },
+        entry.message,
+      );
+    }
   }
 
   /** No-op for stdout (nothing to close). */
   async close(): Promise<void> {
-    throw new Error('Not implemented');
+    // pino stdout needs no cleanup
   }
 }
+
+// ---------------------------------------------------------------------------
+// SQLiteSink
+// ---------------------------------------------------------------------------
+
+/**
+ * SQLite log sink — persists log entries to the database.
+ *
+ * Root-only sink. Receives batched LogEntry arrays from the Logger
+ * and writes them via LogStore.create(). Never throws from write() —
+ * errors are caught and logged to console.error as a fallback.
+ */
+export class SQLiteSink implements LogSink {
+  constructor(private readonly store: LogStore) {}
+
+  /** Write a batch of log entries to SQLite via LogStore. */
+  async write(entries: LogEntry[]): Promise<void> {
+    try {
+      await this.store.create(entries);
+    } catch (err: unknown) {
+      // Never throw from a sink — fallback to console.error
+      console.error('SQLiteSink write failed:', err);
+    }
+  }
+
+  /** No-op — LogStore manages its own lifecycle. */
+  async close(): Promise<void> {
+    // LogStore handles cleanup; nothing to do here
+  }
+}
+
+// ---------------------------------------------------------------------------
+// PluginManager (no-op stubs — sandboxing deferred)
+// ---------------------------------------------------------------------------
+
+// TODO: Sandboxing deferred — plugins run in same process. See ADR for accepted risk.
 
 /**
  * Plugin manager — hot-reloads custom log sinks from the filesystem.
  *
- * Watches `<workspacePath>/plugins/sinks/` for .js plugin files.
- * Each plugin .js must export a factory: `createSink(config): LogSink`.
- * An optional companion .yaml file provides default config for the factory.
- *
- * File watcher uses 500ms debounce to batch rapid filesystem events.
- * Plugin lifecycle: load → createSink(config) → register → on change →
- * close old sink → reload module → createSink(config) → register.
- *
- * Plugin errors are isolated — a failing plugin logs a warning but
- * does not affect other sinks or the logger pipeline.
+ * Currently ships as no-op stubs per user decision #5 (deferred sandboxing).
+ * All methods are safe to call but perform no work.
  */
 export class PluginManager {
-  /**
-   * @param _workspacePath - Root workspace path. Plugins are loaded
-   *   from `<workspacePath>/plugins/sinks/`.
-   */
   constructor(private readonly _workspacePath: string) {
     void this._workspacePath;
   }
 
-  /** Load all plugins from the sinks directory and return their LogSink instances. */
+  /** Load all plugins from the sinks directory. Returns empty array (deferred). */
   async loadAll(): Promise<LogSink[]> {
-    throw new Error('Not implemented');
+    return [];
   }
 
-  /** Start watching the plugins directory for changes (500ms debounce). */
+  /** Start watching the plugins directory. No-op (deferred). */
   startWatching(): void {
-    throw new Error('Not implemented');
+    // no-op
   }
 
-  /** Stop the file watcher and close all loaded plugin sinks. */
+  /** Stop the file watcher. No-op (deferred). */
   async stopWatching(): Promise<void> {
-    throw new Error('Not implemented');
+    // no-op
   }
 
-  /** Get all currently loaded plugin sinks. */
+  /** Get all currently loaded plugin sinks. Returns empty array (deferred). */
   getLoadedSinks(): LogSink[] {
-    throw new Error('Not implemented');
+    return [];
   }
 
-  /** Reload a single plugin by filename. Closes old sink, loads new module. */
+  /** Reload a single plugin by filename. No-op (deferred). */
   async reloadPlugin(_filename: string): Promise<LogSink | undefined> {
-    throw new Error('Not implemented');
+    return undefined;
   }
 
-  /** Unload a single plugin by filename. Closes its sink and removes it. */
+  /** Unload a single plugin by filename. No-op (deferred). */
   async unloadPlugin(_filename: string): Promise<void> {
-    throw new Error('Not implemented');
+    // no-op
   }
 }

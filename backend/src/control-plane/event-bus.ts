@@ -1,64 +1,61 @@
+import { randomUUID } from 'node:crypto';
 import type { BusEvent, EventBus, EventFilter, EventHandler } from '../domain/index.js';
 
+interface Subscription {
+  handler: EventHandler;
+  filter?: EventFilter;
+}
+
 /**
- * In-memory pub/sub event bus for internal system events.
+ * In-memory pub/sub event bus with async delivery.
  *
- * **Event types:**
- * - `heartbeat` — periodic container health heartbeat
- * - `task.state_changed` — task status transitions (pending → assigned → running → completed/failed)
- * - `container.started` / `container.stopped` / `container.health_changed` — container lifecycle
- * - `trigger.fired` — trigger activation (future feature)
- * - `org_chart.updated` — agent or team added/removed/modified
- *
- * **Ordering guarantees:**
- * - Per-subscriber ordering is preserved: events are delivered to each subscriber
- *   in the order they were published.
- * - No global ordering guarantee across subscribers.
- *
- * **Lifecycle:**
- * - After {@link close} is called, no new subscriptions are accepted and no further
- *   events are published. Pending deliveries are drained before shutdown completes.
+ * Each handler is dispatched independently via `queueMicrotask`.
+ * A slow or throwing handler does not block or affect other handlers.
+ * No ordering guarantee across subscribers.
  */
 export class EventBusImpl implements EventBus {
-  /**
-   * Publish an event to all matching subscribers.
-   * Filtered subscribers only receive the event if their filter returns true.
-   * Delivery order per-subscriber matches publish order.
-   */
-  publish(_event: BusEvent): void {
-    throw new Error('Not implemented');
+  private readonly subscriptions = new Map<string, Subscription>();
+  private closed = false;
+
+  publish(event: BusEvent): void {
+    if (this.closed) return;
+
+    for (const [, sub] of this.subscriptions) {
+      if (sub.filter && !sub.filter(event)) continue;
+
+      const handler = sub.handler;
+      queueMicrotask(() => {
+        try {
+          handler(event);
+        } catch (err) {
+          console.error('EventBus handler error:', err);
+        }
+      });
+    }
   }
 
-  /**
-   * Subscribe to all events. Returns a unique subscription ID.
-   * The handler is called synchronously for each published event.
-   */
-  subscribe(_handler: EventHandler): string {
-    throw new Error('Not implemented');
+  subscribe(handler: EventHandler): string {
+    if (this.closed) return '';
+
+    const id = randomUUID();
+    this.subscriptions.set(id, { handler });
+    return id;
   }
 
-  /**
-   * Subscribe to events matching a filter predicate. Returns a unique subscription ID.
-   * The handler is only called when the filter returns true for the event.
-   */
-  filteredSubscribe(_filter: EventFilter, _handler: EventHandler): string {
-    throw new Error('Not implemented');
+  filteredSubscribe(filter: EventFilter, handler: EventHandler): string {
+    if (this.closed) return '';
+
+    const id = randomUUID();
+    this.subscriptions.set(id, { handler, filter });
+    return id;
   }
 
-  /**
-   * Remove a subscription by its ID. No-op if the subscription does not exist.
-   */
-  unsubscribe(_subscriptionId: string): void {
-    throw new Error('Not implemented');
+  unsubscribe(subscriptionId: string): void {
+    this.subscriptions.delete(subscriptionId);
   }
 
-  /**
-   * Close the event bus. After close:
-   * - New subscriptions are rejected.
-   * - New publishes are silently dropped.
-   * - Pending deliveries are drained.
-   */
   close(): void {
-    throw new Error('Not implemented');
+    this.closed = true;
+    this.subscriptions.clear();
   }
 }

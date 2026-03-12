@@ -64,6 +64,7 @@
  */
 
 import type { Logger } from '../domain/index.js';
+import { LogLevel } from '../domain/index.js';
 
 /**
  * Return type of {@link createSDKHooks}. Contains PreToolUse and PostToolUse
@@ -80,6 +81,23 @@ export interface SDKHooks {
   PostToolUse: unknown[];
 }
 
+/** Keys whose values are redacted before logging. */
+const SENSITIVE_KEYS = new Set(['api_key', 'token', 'secret', 'password']);
+
+/**
+ * Returns a shallow copy of `params` with sensitive values replaced by
+ * `'[REDACTED]'`. Only top-level keys are checked (case-insensitive).
+ */
+export function redactParams(
+  params: Record<string, unknown>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(params)) {
+    out[key] = SENSITIVE_KEYS.has(key.toLowerCase()) ? '[REDACTED]' : value;
+  }
+  return out;
+}
+
 /**
  * Creates PreToolUse and PostToolUse SDK hooks for automatic tool call logging.
  *
@@ -92,8 +110,8 @@ export interface SDKHooks {
  * `LogLevel.ERROR` (for failed tool calls). Parameters are redacted before
  * logging to prevent credential leakage.
  *
- * @param _logger - Logger instance for emitting structured tool call log entries
- * @param _agentAid - Agent ID to include in every log entry for attribution
+ * @param logger - Logger instance for emitting structured tool call log entries
+ * @param agentAid - Agent ID to include in every log entry for attribution
  * @returns An {@link SDKHooks} object with `PreToolUse` and `PostToolUse` arrays
  *
  * @example
@@ -103,6 +121,52 @@ export interface SDKHooks {
  * // session.init({ ...config, hooks });
  * ```
  */
-export function createSDKHooks(_logger: Logger, _agentAid: string): SDKHooks {
-  throw new Error('Not implemented');
+export function createSDKHooks(logger: Logger, agentAid: string): SDKHooks {
+  const startTimes = new Map<string, number>();
+
+  const preToolUse = async (input: {
+    tool_name: string;
+    tool_input: Record<string, unknown>;
+    tool_use_id: string;
+  }): Promise<Record<string, never>> => {
+    startTimes.set(input.tool_use_id, Date.now());
+    const redacted = redactParams(input.tool_input);
+    logger.log({
+      level: LogLevel.Info,
+      message: 'tool_call_start',
+      event_type: 'tool_call_start',
+      agent_aid: agentAid,
+      params: JSON.stringify({
+        tool_name: input.tool_name,
+        tool_use_id: input.tool_use_id,
+        tool_input: redacted,
+      }),
+    });
+    return {};
+  };
+
+  const postToolUse = async (input: {
+    tool_use_id: string;
+    error?: string;
+  }): Promise<Record<string, never>> => {
+    const startTime = startTimes.get(input.tool_use_id);
+    const durationMs = startTime != null ? Date.now() - startTime : 0;
+    startTimes.delete(input.tool_use_id);
+
+    logger.log({
+      level: input.error ? LogLevel.Error : LogLevel.Info,
+      message: 'tool_call_end',
+      event_type: 'tool_call_end',
+      agent_aid: agentAid,
+      duration_ms: durationMs,
+      error: input.error ?? '',
+      params: JSON.stringify({ tool_use_id: input.tool_use_id }),
+    });
+    return {};
+  };
+
+  return {
+    PreToolUse: [preToolUse],
+    PostToolUse: [postToolUse],
+  };
 }

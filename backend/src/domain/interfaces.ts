@@ -15,6 +15,9 @@ import type {
   ToolCall,
   Decision,
   MemoryEntry,
+  Integration,
+  Credential,
+  Provider,
 } from './domain.js';
 
 import type {
@@ -27,7 +30,10 @@ import type {
   ProviderType,
   ModelTier,
   EscalationReason,
+  IntegrationStatus,
 } from './enums.js';
+
+import type { MasterConfig } from '../config/defaults.js';
 
 // ---------------------------------------------------------------------------
 // Supporting Types (used by interfaces below)
@@ -188,7 +194,14 @@ export interface AgentDefinition {
   content: string;
 }
 
-/** WebSocket message on the wire. */
+/**
+ * WebSocket message on the wire.
+ *
+ * This is the structural supertype used in interface signatures (WSHub, WSConnection).
+ * The concrete discriminated union lives in `websocket/protocol.ts` as
+ * `RootToContainerMessage | ContainerToRootMessage` — that type is assignable to this
+ * interface without introducing a circular dependency.
+ */
 export interface WSMessage {
   type: string;
   data: Record<string, unknown>;
@@ -273,6 +286,25 @@ export interface SessionStore {
   listAll(): Promise<ChatSession[]>;
 }
 
+/** Integration configuration persistence. */
+export interface IntegrationStore {
+  create(integration: Integration): Promise<void>;
+  get(id: string): Promise<Integration>;
+  update(integration: Integration): Promise<void>;
+  delete(id: string): Promise<void>;
+  listByTeam(teamId: string): Promise<Integration[]>;
+  updateStatus(id: string, status: IntegrationStatus): Promise<void>;
+}
+
+/** Encrypted credential persistence (per-team). */
+export interface CredentialStore {
+  create(credential: Credential): Promise<void>;
+  get(id: string): Promise<Credential>;
+  update(credential: Credential): Promise<void>;
+  delete(id: string): Promise<void>;
+  listByTeam(teamId: string): Promise<Credential[]>;
+}
+
 /** Agent memory persistence with soft-delete. */
 export interface MemoryStore {
   save(entry: MemoryEntry): Promise<void>;
@@ -286,7 +318,7 @@ export interface MemoryStore {
 
 /** Transaction wrapper. If the callback throws, the transaction rolls back. */
 export type TxHandle = unknown;
-export type TransactionCallback<T = void> = (tx: TxHandle) => Promise<T>;
+export type TransactionCallback<T = void> = (tx: TxHandle) => T | Promise<T>;
 
 export interface Transactor {
   withTransaction<T = void>(fn: TransactionCallback<T>): Promise<T>;
@@ -580,18 +612,18 @@ export interface SessionManager {
 
 /** Loads and persists configuration files (openhive.yaml, providers.yaml, team.yaml). */
 export interface ConfigLoader {
-  loadMaster(): Promise<Record<string, unknown>>;
-  saveMaster(config: Record<string, unknown>): Promise<void>;
-  getMaster(): Record<string, unknown>;
-  loadProviders(): Promise<Record<string, unknown>>;
-  saveProviders(providers: Record<string, unknown>): Promise<void>;
-  loadTeam(slug: string): Promise<Record<string, unknown>>;
-  saveTeam(slug: string, team: Record<string, unknown>): Promise<void>;
+  loadMaster(): Promise<MasterConfig>;
+  saveMaster(config: MasterConfig): Promise<void>;
+  getMaster(): MasterConfig;
+  loadProviders(): Promise<Record<string, Provider>>;
+  saveProviders(providers: Record<string, Provider>): Promise<void>;
+  loadTeam(workspacePath: string): Promise<Team>;
+  saveTeam(workspacePath: string, team: Team): Promise<void>;
   createTeamDir(slug: string): Promise<void>;
   deleteTeamDir(slug: string): Promise<void>;
   listTeams(): Promise<string[]>;
-  watchMaster(callback: () => void): Promise<void>;
-  watchProviders(callback: () => void): Promise<void>;
-  watchTeam(slug: string, callback: () => void): Promise<void>;
+  watchMaster(callback: (cfg: MasterConfig) => void): void;
+  watchProviders(callback: (providers: Record<string, Provider>) => void): void;
+  watchTeam(workspacePath: string, callback: (team: Team) => void): void;
   stopWatching(): void;
 }

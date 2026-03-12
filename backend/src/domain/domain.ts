@@ -15,6 +15,8 @@ import {
   TaskStatus as TS,
 } from './enums.js';
 
+import { InvalidTransitionError } from './errors.js';
+
 // ---------------------------------------------------------------------------
 // Entity Types (12 total, matching DB schema)
 // ---------------------------------------------------------------------------
@@ -175,6 +177,16 @@ export interface Credential {
   created_at: number;
 }
 
+/** Provider preset loaded from providers.yaml. Name set from map key at load time. */
+export interface Provider {
+  name: string;
+  type: 'oauth' | 'anthropic_direct';
+  base_url?: string;
+  api_key?: string;
+  oauth_token?: string;
+  models?: Record<string, string>;
+}
+
 // ---------------------------------------------------------------------------
 // Task State Machine (AC7)
 // ---------------------------------------------------------------------------
@@ -208,13 +220,13 @@ export function isValidTransition(from: TaskStatus, to: TaskStatus): boolean {
  * Asserts that a task state transition is valid per AC7.
  * Throws a descriptive error identifying the invalid transition if it is not allowed.
  *
- * @throws {Error} If the transition from `from` to `to` is not in VALID_TRANSITIONS.
+ * @throws {InvalidTransitionError} If the transition from `from` to `to` is not in VALID_TRANSITIONS.
  */
 export function assertValidTransition(from: TaskStatus, to: TaskStatus): void {
   if (!isValidTransition(from, to)) {
     const allowed = VALID_TRANSITIONS[from];
     const allowedStr = allowed ? [...allowed].join(', ') : 'none';
-    throw new Error(
+    throw new InvalidTransitionError(
       `Invalid task state transition: ${from} → ${to}. ` +
       `Allowed transitions from '${from}': [${allowedStr}].`
     );

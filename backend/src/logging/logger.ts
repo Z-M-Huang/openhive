@@ -1,56 +1,154 @@
 /**
  * Logger implementation — structured logging with fan-out to sinks.
  *
- * Design (implemented in later layers):
- * - Pino-based structured logging with six log levels:
- *   trace=0, debug=10, info=20, warn=30, error=40, audit=50
+ * - Six log levels: trace=0, debug=10, info=20, warn=30, error=40, audit=50
  * - Audit level bypasses the minimum-level filter (always emitted)
- * - Batch writer: flushes every 50 entries or 100ms, whichever comes first
- * - Fan-out to all registered LogSink instances
- * - Redaction of sensitive keys in params (NFR09):
- *   api_key, master_key, oauth_token, token, authorization, secrets,
- *   password, credential, private_key, access_token, refresh_token,
- *   bearer, connection_string
+ * - Batch writer: flushes every batchSize entries or flushIntervalMs, whichever comes first
+ * - Fan-out to all registered LogSink instances via Promise.allSettled (sink error isolation)
+ * - Redaction of sensitive keys in params and message strings (NFR09)
  */
 
 import type { LogEntry } from '../domain/domain.js';
-import type { LogLevel } from '../domain/enums.js';
-import type { Logger } from '../domain/interfaces.js';
+import { LogLevel } from '../domain/enums.js';
+import type { Logger, LogSink } from '../domain/interfaces.js';
+import { redactMessage, redactParams } from './redaction.js';
+
+export interface LoggerOptions {
+  minLevel: LogLevel;
+  sinks: LogSink[];
+  batchSize?: number;
+  flushIntervalMs?: number;
+}
+
+let nextId = 1;
 
 export class LoggerImpl implements Logger {
-  log(_entry: Partial<LogEntry> & { level: LogLevel; message: string }): void {
-    throw new Error('Not implemented');
+  private readonly minLevel: LogLevel;
+  private readonly sinks: LogSink[];
+  private readonly batchSize: number;
+  private readonly flushIntervalMs: number;
+
+  private batch: LogEntry[] = [];
+  private flushTimer: ReturnType<typeof setInterval>;
+  private stopped = false;
+
+  constructor(options: LoggerOptions) {
+    this.minLevel = options.minLevel;
+    this.sinks = options.sinks;
+    this.batchSize = options.batchSize ?? 50;
+    this.flushIntervalMs = options.flushIntervalMs ?? 100;
+
+    this.flushTimer = setInterval(() => {
+      void this.flush();
+    }, this.flushIntervalMs);
   }
 
-  trace(_message: string, _params?: Record<string, unknown>): void {
-    throw new Error('Not implemented');
+  log(entry: Partial<LogEntry> & { level: LogLevel; message: string }): void {
+    if (this.stopped) {
+      return;
+    }
+
+    // Audit always passes; otherwise check minLevel
+    if (entry.level !== LogLevel.Audit && entry.level < this.minLevel) {
+      return;
+    }
+
+    // Build full LogEntry with defaults
+    const full: LogEntry = {
+      id: entry.id ?? nextId++,
+      level: entry.level,
+      event_type: entry.event_type ?? '',
+      component: entry.component ?? '',
+      action: entry.action ?? '',
+      message: redactMessage(entry.message),
+      params: entry.params != null
+        ? JSON.stringify(redactParams(JSON.parse(entry.params)))
+        : '{}',
+      team_slug: entry.team_slug ?? '',
+      task_id: entry.task_id ?? '',
+      agent_aid: entry.agent_aid ?? '',
+      request_id: entry.request_id ?? '',
+      correlation_id: entry.correlation_id ?? '',
+      error: entry.error ?? '',
+      duration_ms: entry.duration_ms ?? 0,
+      created_at: entry.created_at ?? Date.now(),
+    };
+
+    this.batch.push(full);
+
+    if (this.batch.length >= this.batchSize) {
+      void this.flush();
+    }
   }
 
-  debug(_message: string, _params?: Record<string, unknown>): void {
-    throw new Error('Not implemented');
+  trace(message: string, params?: Record<string, unknown>): void {
+    this.log({
+      level: LogLevel.Trace,
+      message,
+      params: params ? JSON.stringify(params) : undefined,
+    });
   }
 
-  info(_message: string, _params?: Record<string, unknown>): void {
-    throw new Error('Not implemented');
+  debug(message: string, params?: Record<string, unknown>): void {
+    this.log({
+      level: LogLevel.Debug,
+      message,
+      params: params ? JSON.stringify(params) : undefined,
+    });
   }
 
-  warn(_message: string, _params?: Record<string, unknown>): void {
-    throw new Error('Not implemented');
+  info(message: string, params?: Record<string, unknown>): void {
+    this.log({
+      level: LogLevel.Info,
+      message,
+      params: params ? JSON.stringify(params) : undefined,
+    });
   }
 
-  error(_message: string, _params?: Record<string, unknown>): void {
-    throw new Error('Not implemented');
+  warn(message: string, params?: Record<string, unknown>): void {
+    this.log({
+      level: LogLevel.Warn,
+      message,
+      params: params ? JSON.stringify(params) : undefined,
+    });
   }
 
-  audit(_message: string, _params?: Record<string, unknown>): void {
-    throw new Error('Not implemented');
+  error(message: string, params?: Record<string, unknown>): void {
+    this.log({
+      level: LogLevel.Error,
+      message,
+      params: params ? JSON.stringify(params) : undefined,
+    });
+  }
+
+  audit(message: string, params?: Record<string, unknown>): void {
+    this.log({
+      level: LogLevel.Audit,
+      message,
+      params: params ? JSON.stringify(params) : undefined,
+    });
   }
 
   async flush(): Promise<void> {
-    throw new Error('Not implemented');
+    // Swap-and-reset: atomic grab of pending entries
+    const pending = this.batch;
+    this.batch = [];
+
+    if (pending.length === 0) {
+      return;
+    }
+
+    await Promise.allSettled(
+      this.sinks.map((sink) => sink.write(pending)),
+    );
   }
 
   async stop(): Promise<void> {
-    throw new Error('Not implemented');
+    this.stopped = true;
+    clearInterval(this.flushTimer);
+    await this.flush();
+    await Promise.allSettled(
+      this.sinks.map((sink) => sink.close()),
+    );
   }
 }

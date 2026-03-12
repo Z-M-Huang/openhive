@@ -5,213 +5,301 @@ import type {
   TopologyNode,
 } from '../domain/index.js';
 
+import {
+  ConflictError,
+  NotFoundError,
+  ValidationError,
+} from '../domain/index.js';
+
 /**
  * In-memory org chart — tracks all agents and teams in the hierarchy.
  *
- * // INV-01: Team lead always in parent container.
- *
- * **Data structures:**
- * - `teamsByTid: Map<string, OrgChartTeam>` — constant-time TID lookup
- * - `teamsBySlug: Map<string, OrgChartTeam>` — constant-time slug lookup
- * - `agentsByAid: Map<string, OrgChartAgent>` — constant-time AID lookup
- * - `childrenByTid: Map<string, Set<string>>` — parent TID → child TIDs
- * - `agentsByTeam: Map<string, Set<string>>` — team slug → agent AIDs
- * - `leadToTeam: Map<string, string>` — leader AID → team slug (for teams the agent leads)
- *
- * **INV-01 enforcement:**
- * When {@link addTeam} is called, the leader AID must already exist as an agent
- * in the **parent** team (not in the team being added). The leader runs in the
- * parent container; the child team's container holds only its member agents.
- * {@link isAuthorized} checks that the source agent has visibility into the
- * target agent's team — an agent can see its own team, child teams (downward),
- * and can escalate to its team lead (upward one level).
- *
- * **Authorization scope:**
- * - An agent can interact with agents in its own team.
- * - A team lead can interact with agents in the team it leads and its child teams.
- * - Any agent can escalate to its own team lead (upward visibility).
- * - No cross-branch visibility: agents in sibling teams cannot interact directly.
- *
- * **Topology tree:**
- * {@link getTopology} returns a recursive tree of {@link TopologyNode} objects
- * starting from root teams (teams with no parent). The `depth` parameter limits
- * how deep the tree is traversed. Used by `inspect_topology` SDK tool.
- *
- * **Lifecycle:**
- * The org chart is rebuilt on startup from persisted team configs and live
- * container state. It is updated incrementally as teams and agents are
- * added/removed at runtime. All mutations publish `org_chart.updated` events
- * to the EventBus.
+ * Six Maps for O(1) lookups. INV-01 enforced in addTeam(): leader must
+ * exist in the parent team, not in the team being added.
  */
 export class OrgChartImpl implements OrgChart {
   // INV-01: Team lead always in parent container.
 
-  /**
-   * Register a team in the org chart.
-   *
-   * Adds the team to all internal indexes (by TID, by slug, parent-children).
-   * The team's `leaderAid` must reference an agent that exists in the parent
-   * team — not in this team's own agent list (INV-01 enforcement).
-   *
-   * @param team - The team node to add
-   * @throws ValidationError if a team with the same TID or slug already exists
-   * @throws ValidationError if the leader AID is not in the parent team (INV-01)
-   */
-  addTeam(_team: OrgChartTeam): void {
-    throw new Error('Not implemented');
+  private readonly teamsByTid = new Map<string, OrgChartTeam>();
+  private readonly teamsBySlug = new Map<string, OrgChartTeam>();
+  private readonly agentsByAid = new Map<string, OrgChartAgent>();
+  private readonly childrenByTid = new Map<string, Set<string>>();
+  private readonly agentsByTeam = new Map<string, Set<string>>();
+  private readonly leadToTeam = new Map<string, string>();
+
+  addTeam(team: OrgChartTeam): void {
+    if (this.teamsByTid.has(team.tid)) {
+      throw new ConflictError(`Team with TID '${team.tid}' already exists`);
+    }
+    if (this.teamsBySlug.has(team.slug)) {
+      throw new ConflictError(`Team with slug '${team.slug}' already exists`);
+    }
+
+    // INV-01: leader must already exist as an agent in the parent team
+    const leader = this.agentsByAid.get(team.leaderAid);
+    if (!leader) {
+      throw new ValidationError(
+        `Leader '${team.leaderAid}' not found in org chart (INV-01)`
+      );
+    }
+
+    // For root teams (no parent), the leader just needs to exist.
+    // For non-root teams, verify the leader is in the parent team.
+    if (team.parentTid) {
+      const parent = this.teamsByTid.get(team.parentTid);
+      if (!parent) {
+        throw new ValidationError(
+          `Parent team '${team.parentTid}' not found`
+        );
+      }
+      const parentAgents = this.agentsByTeam.get(parent.slug);
+      if (!parentAgents || !parentAgents.has(team.leaderAid)) {
+        throw new ValidationError(
+          `Leader '${team.leaderAid}' is not in parent team '${parent.slug}' (INV-01)`
+        );
+      }
+    }
+
+    this.teamsByTid.set(team.tid, team);
+    this.teamsBySlug.set(team.slug, team);
+
+    // Register parent->child relationship
+    if (team.parentTid) {
+      let children = this.childrenByTid.get(team.parentTid);
+      if (!children) {
+        children = new Set();
+        this.childrenByTid.set(team.parentTid, children);
+      }
+      children.add(team.tid);
+    }
+
+    // Initialize agent set for this team
+    if (!this.agentsByTeam.has(team.slug)) {
+      this.agentsByTeam.set(team.slug, new Set());
+    }
+
+    // Update lead->team mapping
+    this.leadToTeam.set(team.leaderAid, team.tid);
   }
 
-  /**
-   * Remove a team and its agents from the org chart.
-   *
-   * Removes the team from all indexes and detaches it from its parent's
-   * children list. Also removes all agents that belong to this team.
-   * Child teams must be removed before the parent (bottom-up teardown).
-   *
-   * @param tid - The TID of the team to remove
-   * @throws NotFoundError if no team with this TID exists
-   * @throws ValidationError if the team still has child teams
-   */
-  removeTeam(_tid: string): void {
-    throw new Error('Not implemented');
+  removeTeam(tid: string): void {
+    const team = this.teamsByTid.get(tid);
+    if (!team) {
+      throw new NotFoundError(`Team '${tid}' not found`);
+    }
+
+    const children = this.childrenByTid.get(tid);
+    if (children && children.size > 0) {
+      throw new ValidationError(
+        `Cannot remove team '${tid}': still has ${children.size} child team(s)`
+      );
+    }
+
+    // Remove all agents belonging to this team
+    const agentAids = this.agentsByTeam.get(team.slug);
+    if (agentAids) {
+      for (const aid of agentAids) {
+        this.agentsByAid.delete(aid);
+        // Clean up lead->team if this agent leads another team
+        this.leadToTeam.delete(aid);
+      }
+      this.agentsByTeam.delete(team.slug);
+    }
+
+    // Remove from parent's children set
+    if (team.parentTid) {
+      const parentChildren = this.childrenByTid.get(team.parentTid);
+      if (parentChildren) {
+        parentChildren.delete(tid);
+      }
+    }
+
+    // Clean up lead->team mapping for this team's leader
+    // (leader is in parent team, so the agent itself stays — just the mapping goes)
+    if (this.leadToTeam.get(team.leaderAid) === tid) {
+      this.leadToTeam.delete(team.leaderAid);
+    }
+
+    // Remove children set for this team
+    this.childrenByTid.delete(tid);
+
+    this.teamsByTid.delete(tid);
+    this.teamsBySlug.delete(team.slug);
   }
 
-  /**
-   * Look up a team by its TID. Returns undefined if not found.
-   * Constant-time lookup via the `teamsByTid` map.
-   */
-  getTeam(_tid: string): OrgChartTeam | undefined {
-    throw new Error('Not implemented');
+  getTeam(tid: string): OrgChartTeam | undefined {
+    return this.teamsByTid.get(tid);
   }
 
-  /**
-   * Look up a team by its slug. Returns undefined if not found.
-   * Constant-time lookup via the `teamsBySlug` map.
-   */
-  getTeamBySlug(_slug: string): OrgChartTeam | undefined {
-    throw new Error('Not implemented');
+  getTeamBySlug(slug: string): OrgChartTeam | undefined {
+    return this.teamsBySlug.get(slug);
   }
 
-  /**
-   * List all teams in the org chart.
-   * Returns a snapshot array — mutations to the returned array do not affect
-   * the internal state.
-   */
   listTeams(): OrgChartTeam[] {
-    throw new Error('Not implemented');
+    return [...this.teamsByTid.values()];
   }
 
-  /**
-   * Get all direct child teams of a parent team.
-   * Uses the `childrenByTid` index for constant-time lookup.
-   *
-   * @param tid - The parent team's TID
-   * @returns Array of child teams (empty if the team has no children or doesn't exist)
-   */
-  getChildren(_tid: string): OrgChartTeam[] {
-    throw new Error('Not implemented');
+  getChildren(tid: string): OrgChartTeam[] {
+    const childTids = this.childrenByTid.get(tid);
+    if (!childTids) return [];
+    const result: OrgChartTeam[] = [];
+    for (const childTid of childTids) {
+      const team = this.teamsByTid.get(childTid);
+      if (team) result.push(team);
+    }
+    return result;
   }
 
-  /**
-   * Get the parent team of a given team.
-   * Looks up the team's `parentTid` and resolves it via `teamsByTid`.
-   *
-   * @param tid - The child team's TID
-   * @returns The parent team, or undefined if this is a root team or team not found
-   */
-  getParent(_tid: string): OrgChartTeam | undefined {
-    throw new Error('Not implemented');
+  getParent(tid: string): OrgChartTeam | undefined {
+    const team = this.teamsByTid.get(tid);
+    if (!team || !team.parentTid) return undefined;
+    return this.teamsByTid.get(team.parentTid);
   }
 
-  /**
-   * Register an agent in the org chart.
-   *
-   * Adds the agent to the `agentsByAid` map and the team's agent set.
-   * If the agent leads a team (`leadsTeam` is set), updates the `leadToTeam` index.
-   *
-   * @param agent - The agent node to add
-   * @throws ValidationError if an agent with the same AID already exists
-   * @throws NotFoundError if the agent's team slug does not exist in the org chart
-   */
-  addAgent(_agent: OrgChartAgent): void {
-    throw new Error('Not implemented');
+  addAgent(agent: OrgChartAgent): void {
+    if (this.agentsByAid.has(agent.aid)) {
+      throw new ConflictError(`Agent with AID '${agent.aid}' already exists`);
+    }
+
+    if (!this.teamsBySlug.has(agent.teamSlug)) {
+      throw new NotFoundError(
+        `Team '${agent.teamSlug}' not found in org chart`
+      );
+    }
+
+    this.agentsByAid.set(agent.aid, agent);
+
+    let teamAgents = this.agentsByTeam.get(agent.teamSlug);
+    if (!teamAgents) {
+      teamAgents = new Set();
+      this.agentsByTeam.set(agent.teamSlug, teamAgents);
+    }
+    teamAgents.add(agent.aid);
+
+    if (agent.leadsTeam) {
+      const ledTeam = this.teamsBySlug.get(agent.leadsTeam);
+      if (ledTeam) {
+        this.leadToTeam.set(agent.aid, ledTeam.tid);
+      }
+    }
   }
 
-  /**
-   * Remove an agent from the org chart.
-   *
-   * Removes the agent from all indexes. If the agent leads a team, the team's
-   * leader reference becomes stale — callers must handle leader reassignment
-   * or team removal before removing a leader agent.
-   *
-   * @param aid - The AID of the agent to remove
-   * @throws NotFoundError if no agent with this AID exists
-   */
-  removeAgent(_aid: string): void {
-    throw new Error('Not implemented');
+  removeAgent(aid: string): void {
+    const agent = this.agentsByAid.get(aid);
+    if (!agent) {
+      throw new NotFoundError(`Agent '${aid}' not found`);
+    }
+
+    this.agentsByAid.delete(aid);
+
+    const teamAgents = this.agentsByTeam.get(agent.teamSlug);
+    if (teamAgents) {
+      teamAgents.delete(aid);
+    }
+
+    this.leadToTeam.delete(aid);
   }
 
-  /**
-   * Look up an agent by its AID. Returns undefined if not found.
-   * Constant-time lookup via the `agentsByAid` map.
-   */
-  getAgent(_aid: string): OrgChartAgent | undefined {
-    throw new Error('Not implemented');
+  getAgent(aid: string): OrgChartAgent | undefined {
+    return this.agentsByAid.get(aid);
   }
 
-  /**
-   * Get all agents belonging to a team.
-   * Uses the `agentsByTeam` index for constant-time lookup.
-   *
-   * @param teamSlug - The team's slug
-   * @returns Array of agents in the team (empty if team has no agents or doesn't exist)
-   */
-  getAgentsByTeam(_teamSlug: string): OrgChartAgent[] {
-    throw new Error('Not implemented');
+  getAgentsByTeam(teamSlug: string): OrgChartAgent[] {
+    const aids = this.agentsByTeam.get(teamSlug);
+    if (!aids) return [];
+    const result: OrgChartAgent[] = [];
+    for (const aid of aids) {
+      const agent = this.agentsByAid.get(aid);
+      if (agent) result.push(agent);
+    }
+    return result;
   }
 
-  /**
-   * Get the lead agent of a team.
-   *
-   * Resolves the team's `leaderAid` to an agent. Note that per INV-01,
-   * the leader agent belongs to the **parent** team, not this team.
-   *
-   * @param teamSlug - The team's slug
-   * @returns The lead agent, or undefined if the team or leader is not found
-   */
-  getLeadOf(_teamSlug: string): OrgChartAgent | undefined {
-    throw new Error('Not implemented');
+  getLeadOf(teamSlug: string): OrgChartAgent | undefined {
+    const team = this.teamsBySlug.get(teamSlug);
+    if (!team) return undefined;
+    return this.agentsByAid.get(team.leaderAid);
   }
 
-  /**
-   * Check if a source agent is authorized to interact with a target agent.
-   *
-   * Authorization rules (derived from the team hierarchy):
-   * 1. Same team: agents in the same team can always interact.
-   * 2. Downward: a team lead can interact with any agent in the team it leads,
-   *    and transitively with agents in descendant teams.
-   * 3. Upward (one level): any agent can interact with its own team lead
-   *    (for escalation).
-   * 4. Cross-branch: agents in sibling or unrelated teams cannot interact.
-   *
-   * @param sourceAid - The agent initiating the interaction
-   * @param targetAid - The agent being interacted with
-   * @returns true if the interaction is authorized
-   */
-  isAuthorized(_sourceAid: string, _targetAid: string): boolean {
-    throw new Error('Not implemented');
+  isAuthorized(sourceAid: string, targetAid: string): boolean {
+    if (sourceAid === targetAid) return true;
+
+    const source = this.agentsByAid.get(sourceAid);
+    const target = this.agentsByAid.get(targetAid);
+    if (!source || !target) return false;
+
+    // 1. Same team — always authorized
+    if (source.teamSlug === target.teamSlug) return true;
+
+    // 2. Downward — source leads a team that is an ancestor of target's team
+    const ledTeamTid = this.leadToTeam.get(sourceAid);
+    if (ledTeamTid) {
+      const targetTeam = this.teamsBySlug.get(target.teamSlug);
+      if (targetTeam && this.isAncestor(ledTeamTid, targetTeam.tid)) {
+        return true;
+      }
+    }
+
+    // 3. Upward one level — target is the lead of source's team
+    const sourceTeam = this.teamsBySlug.get(source.teamSlug);
+    if (sourceTeam && sourceTeam.leaderAid === targetAid) {
+      return true;
+    }
+
+    // 4. Cross-branch — denied
+    return false;
   }
 
-  /**
-   * Build a recursive topology tree for inspection.
-   *
-   * Starts from root teams (teams with no parent) and recurses into children.
-   * Each node includes the team's agents and health status.
-   *
-   * @param depth - Maximum depth to traverse (undefined = unlimited)
-   * @returns Array of root-level topology nodes with nested children
-   */
-  getTopology(_depth?: number): TopologyNode[] {
-    throw new Error('Not implemented');
+  getTopology(depth?: number): TopologyNode[] {
+    // Find root teams (no parentTid)
+    const roots: OrgChartTeam[] = [];
+    for (const team of this.teamsByTid.values()) {
+      if (!team.parentTid) {
+        roots.push(team);
+      }
+    }
+
+    return roots.map((root) => this.buildTopologyNode(root, depth, 0));
+  }
+
+  // ---- Private helpers ----
+
+  /** Check if ancestorTid is an ancestor of descendantTid (or equal). */
+  private isAncestor(ancestorTid: string, descendantTid: string): boolean {
+    if (ancestorTid === descendantTid) return true;
+
+    const children = this.childrenByTid.get(ancestorTid);
+    if (!children) return false;
+
+    for (const childTid of children) {
+      if (this.isAncestor(childTid, descendantTid)) return true;
+    }
+    return false;
+  }
+
+  /** Build a TopologyNode recursively. */
+  private buildTopologyNode(
+    team: OrgChartTeam,
+    maxDepth: number | undefined,
+    currentDepth: number
+  ): TopologyNode {
+    const agents = this.getAgentsByTeam(team.slug);
+
+    let children: TopologyNode[] = [];
+    if (maxDepth === undefined || currentDepth + 1 < maxDepth) {
+      const childTeams = this.getChildren(team.tid);
+      children = childTeams.map((child) =>
+        this.buildTopologyNode(child, maxDepth, currentDepth + 1)
+      );
+    }
+
+    return {
+      tid: team.tid,
+      slug: team.slug,
+      leaderAid: team.leaderAid,
+      health: team.health,
+      agents,
+      children,
+    };
   }
 }

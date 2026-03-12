@@ -57,9 +57,122 @@
  * @module containers/runtime
  */
 
+import * as path from 'node:path';
+import * as fs from 'node:fs';
+import Dockerode from 'dockerode';
 import type { ContainerRuntime, ContainerConfig, ContainerInfo } from '../domain/index.js';
+import { ContainerHealth } from '../domain/index.js';
+import { ValidationError } from '../domain/errors.js';
+import { validateSlug } from '../domain/domain.js';
 
 // INV-05: Root spawns all containers
+
+/** Characters that are never allowed in string inputs to Docker API. */
+const SHELL_METACHAR_PATTERN = /[;|&$`\n\r\0\x00-\x1f]/;
+
+/** Default allowed images (INV-06: same image everywhere). */
+const DEFAULT_ALLOWED_IMAGES: ReadonlySet<string> = new Set(['openhive']);
+
+/** Default memory limit: 512 MB in bytes. */
+const DEFAULT_MEMORY_BYTES = 512 * 1024 * 1024;
+
+/** Default CPU quota (50% of one core, period 100000us). */
+const DEFAULT_CPU_QUOTA = 50_000;
+
+/**
+ * Validates that a string does not contain shell metacharacters, null bytes,
+ * or control characters. Throws {@link ValidationError} on violation.
+ */
+export function sanitizeInput(value: string, fieldName: string): void {
+  if (SHELL_METACHAR_PATTERN.test(value)) {
+    throw new ValidationError(
+      `${fieldName} contains forbidden characters (shell metacharacters, null bytes, or control characters)`,
+    );
+  }
+}
+
+/**
+ * Validates that a host mount path is within the allowed workspace root,
+ * contains no path traversal, and is not a symlink.
+ *
+ * @param hostPath - The host path to validate
+ * @param workspaceRoot - The allowed workspace root directory
+ * @throws {ValidationError} If the path is outside the workspace or is a symlink
+ */
+export function validateMountPath(hostPath: string, workspaceRoot: string): void {
+  const resolved = path.resolve(hostPath);
+  const resolvedRoot = path.resolve(workspaceRoot);
+
+  // Must be under workspace root
+  if (!resolved.startsWith(resolvedRoot + path.sep) && resolved !== resolvedRoot) {
+    throw new ValidationError(
+      `Mount path "${hostPath}" resolves outside workspace root "${workspaceRoot}"`,
+    );
+  }
+
+  // Check for .. components even after resolve (defense-in-depth)
+  const relative = path.relative(resolvedRoot, resolved);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    throw new ValidationError(
+      `Mount path "${hostPath}" contains path traversal`,
+    );
+  }
+
+  // Reject symlinks
+  try {
+    const stat = fs.lstatSync(resolved);
+    if (stat.isSymbolicLink()) {
+      throw new ValidationError(
+        `Mount path "${hostPath}" is a symbolic link`,
+      );
+    }
+  } catch (err: unknown) {
+    // If lstat fails with ENOENT, the path doesn't exist yet — that's OK for
+    // workspace dirs that will be created. Rethrow ValidationError.
+    if (err instanceof ValidationError) {
+      throw err;
+    }
+    // Other fs errors (permission denied, etc) — allow; Docker will fail later
+    // with a more specific error if the path is truly invalid.
+  }
+}
+
+/**
+ * Parses a memory limit string (e.g. "512m", "1g") to bytes.
+ * Returns undefined if the string is not parseable.
+ */
+function parseMemoryLimit(limit: string): number | undefined {
+  const match = /^(\d+(?:\.\d+)?)\s*([kmgtKMGT])?[bB]?$/.exec(limit.trim());
+  if (!match) return undefined;
+  const value = parseFloat(match[1]);
+  const unit = (match[2] ?? '').toLowerCase();
+  const multipliers: Record<string, number> = { '': 1, k: 1024, m: 1024 ** 2, g: 1024 ** 3, t: 1024 ** 4 };
+  const multiplier = multipliers[unit];
+  if (multiplier === undefined) return undefined;
+  return Math.floor(value * multiplier);
+}
+
+/**
+ * Maps a Docker container state string to our ContainerHealth enum.
+ */
+function mapStateToHealth(state: string): ContainerHealth {
+  switch (state) {
+    case 'created':
+      return ContainerHealth.Starting;
+    case 'running':
+      return ContainerHealth.Running;
+    case 'paused':
+    case 'restarting':
+      return ContainerHealth.Degraded;
+    case 'removing':
+      return ContainerHealth.Stopping;
+    case 'exited':
+    case 'dead':
+      return ContainerHealth.Stopped;
+    default:
+      return ContainerHealth.Unhealthy;
+  }
+}
 
 /**
  * Low-level Docker container runtime backed by dockerode.
@@ -81,115 +194,146 @@ import type { ContainerRuntime, ContainerConfig, ContainerInfo } from '../domain
  * @see {@link ContainerInfo} for the inspection result shape
  */
 export class ContainerRuntimeImpl implements ContainerRuntime {
-  /**
-   * Creates a new Docker container for a team.
-   *
-   * Validates the container configuration against all AC26 security constraints
-   * before calling the Docker API:
-   * 1. Team slug format validation (container naming)
-   * 2. Image allowlist check (only `openhive` image permitted)
-   * 3. Mount path validation (no path traversal beyond workspace root)
-   * 4. Network mode enforcement (`openhive-network` only)
-   * 5. Privilege and capability restrictions applied
-   * 6. Memory and CPU limits set from config or defaults
-   *
-   * The container is created in a stopped state. Call {@link startContainer}
-   * to begin execution.
-   *
-   * @param _config - Container configuration specifying team, image, mounts, env, and limits
-   * @returns The Docker container ID (64-character hex string)
-   * @throws {ValidationError} If any security constraint is violated
-   * @throws {ContainerError} If Docker API call fails
-   *
-   * @security Never pass unsanitized input to Docker API.
-   * @security Container names validated against slug format.
-   * @security Mount paths validated against workspace tree (no path traversal).
-   * @security No privileged containers. No host networking. No extra capabilities.
-   */
-  async createContainer(_config: ContainerConfig): Promise<string> {
-    // INV-05: Root spawns all containers
-    throw new Error('Not implemented');
+  private readonly docker: Dockerode;
+  private readonly allowedImages: ReadonlySet<string>;
+
+  constructor(docker: Dockerode, allowedImages?: ReadonlySet<string>) {
+    this.docker = docker;
+    this.allowedImages = allowedImages ?? DEFAULT_ALLOWED_IMAGES;
   }
 
-  /**
-   * Starts a previously created container.
-   *
-   * The container transitions from `created` to `running` state. The
-   * orchestrator typically calls this after setting up the WebSocket
-   * auth token and container_init payload.
-   *
-   * @param _containerID - Docker container ID (64-character hex string)
-   * @throws {NotFoundError} If the container does not exist
-   * @throws {ContainerError} If the container is already running or Docker API fails
-   *
-   * @security Container ID is validated as a hex string before API call.
-   */
-  async startContainer(_containerID: string): Promise<void> {
-    throw new Error('Not implemented');
+  async createContainer(config: ContainerConfig): Promise<string> {
+    // Validate slug
+    validateSlug(config.teamSlug);
+    sanitizeInput(config.teamSlug, 'teamSlug');
+    sanitizeInput(config.tid, 'tid');
+
+    // INV-06: Only approved images
+    if (!this.allowedImages.has(config.image)) {
+      throw new ValidationError(
+        `Image "${config.image}" is not in the allowlist. Allowed: ${[...this.allowedImages].join(', ')}`,
+      );
+    }
+
+    // Reject host networking
+    if (config.networkMode === 'host') {
+      throw new ValidationError(
+        'Host networking is not allowed. Use "openhive-network"',
+      );
+    }
+
+    // Validate workspace path (used as a bind mount source)
+    sanitizeInput(config.workspacePath, 'workspacePath');
+
+    // Validate env vars
+    for (const [key, value] of Object.entries(config.env)) {
+      sanitizeInput(key, `env key "${key}"`);
+      sanitizeInput(value, `env value for "${key}"`);
+    }
+
+    // Parse memory limit
+    const memoryBytes = config.memoryLimit
+      ? parseMemoryLimit(config.memoryLimit)
+      : DEFAULT_MEMORY_BYTES;
+    if (memoryBytes === undefined) {
+      throw new ValidationError(
+        `Invalid memory limit format: "${config.memoryLimit}"`,
+      );
+    }
+
+    const cpuQuota = config.cpuLimit ?? DEFAULT_CPU_QUOTA;
+
+    const containerName = `openhive-${config.teamSlug}`;
+    const envArray = Object.entries(config.env).map(([k, v]) => `${k}=${v}`);
+
+    const createOpts: Dockerode.ContainerCreateOptions = {
+      name: containerName,
+      Image: config.image,
+      Env: envArray,
+      Labels: {
+        'openhive.managed': 'true',
+        'openhive.team': config.teamSlug,
+        'openhive.tid': config.tid,
+      },
+      HostConfig: {
+        Binds: [`${config.workspacePath}:/app/workspace`],
+        NetworkMode: config.networkMode,
+        CapDrop: ['ALL'],
+        Privileged: false,
+        ReadonlyRootfs: true,
+        Tmpfs: { '/tmp': 'rw,noexec,nosuid' },
+        Memory: memoryBytes,
+        CpuQuota: cpuQuota,
+      },
+    };
+
+    const container = await this.docker.createContainer(createOpts);
+    return container.id;
   }
 
-  /**
-   * Gracefully stops a running container with a timeout.
-   *
-   * Sends SIGTERM to the container's main process and waits up to
-   * `timeoutMs` for graceful shutdown. If the container does not stop
-   * within the timeout, Docker sends SIGKILL.
-   *
-   * @param _containerID - Docker container ID (64-character hex string)
-   * @param _timeoutMs - Maximum time to wait for graceful shutdown (milliseconds)
-   * @throws {NotFoundError} If the container does not exist
-   * @throws {ContainerError} If Docker API call fails
-   *
-   * @security Container ID is validated as a hex string before API call.
-   */
-  async stopContainer(_containerID: string, _timeoutMs: number): Promise<void> {
-    throw new Error('Not implemented');
+  async startContainer(containerID: string): Promise<void> {
+    sanitizeInput(containerID, 'containerID');
+    const container = this.docker.getContainer(containerID);
+    await container.start();
   }
 
-  /**
-   * Removes a stopped container and its associated anonymous volumes.
-   *
-   * The container must be in a stopped state. Attempting to remove a
-   * running container throws an error — call {@link stopContainer} first.
-   *
-   * @param _containerID - Docker container ID (64-character hex string)
-   * @throws {NotFoundError} If the container does not exist
-   * @throws {ContainerError} If the container is running or Docker API fails
-   *
-   * @security Container ID is validated as a hex string before API call.
-   */
-  async removeContainer(_containerID: string): Promise<void> {
-    throw new Error('Not implemented');
+  async stopContainer(containerID: string, timeoutMs: number): Promise<void> {
+    sanitizeInput(containerID, 'containerID');
+    const container = this.docker.getContainer(containerID);
+    const timeoutSec = Math.max(1, Math.floor(timeoutMs / 1000));
+    try {
+      await container.stop({ t: timeoutSec });
+    } catch (err: unknown) {
+      // If stop times out or container already stopped, try kill
+      const isTimeout =
+        err instanceof Error &&
+        (err.message.includes('timeout') || (err as unknown as Record<string, unknown>).statusCode === 304);
+      if (isTimeout) {
+        await container.kill();
+      } else {
+        throw err;
+      }
+    }
   }
 
-  /**
-   * Inspects a container and returns its current runtime information.
-   *
-   * Maps Docker's inspect response to the {@link ContainerInfo} domain type,
-   * including container state, health status, team association, and timestamps.
-   *
-   * @param _containerID - Docker container ID (64-character hex string)
-   * @returns Container runtime information
-   * @throws {NotFoundError} If the container does not exist
-   * @throws {ContainerError} If Docker API call fails
-   *
-   * @security Container ID is validated as a hex string before API call.
-   */
-  async inspectContainer(_containerID: string): Promise<ContainerInfo> {
-    throw new Error('Not implemented');
+  async removeContainer(containerID: string): Promise<void> {
+    sanitizeInput(containerID, 'containerID');
+    const container = this.docker.getContainer(containerID);
+    await container.remove({ force: true });
   }
 
-  /**
-   * Lists all OpenHive-managed containers (running and stopped).
-   *
-   * Filters Docker containers by the `openhive.managed=true` label to
-   * exclude non-OpenHive containers. Returns an array of {@link ContainerInfo}
-   * objects sorted by creation time (newest first).
-   *
-   * @returns Array of container runtime information for all managed containers
-   * @throws {ContainerError} If Docker API call fails
-   */
+  async inspectContainer(containerID: string): Promise<ContainerInfo> {
+    sanitizeInput(containerID, 'containerID');
+    const container = this.docker.getContainer(containerID);
+    const info = await container.inspect();
+
+    const labels = info.Config?.Labels ?? {};
+
+    return {
+      id: info.Id,
+      name: (info.Name ?? '').replace(/^\//, ''),
+      state: info.State?.Status ?? 'unknown',
+      teamSlug: labels['openhive.team'] ?? '',
+      tid: labels['openhive.tid'] ?? '',
+      health: mapStateToHealth(info.State?.Status ?? ''),
+      createdAt: new Date(info.Created).getTime(),
+    };
+  }
+
   async listContainers(): Promise<ContainerInfo[]> {
-    throw new Error('Not implemented');
+    const containers = await this.docker.listContainers({
+      all: true,
+      filters: { label: ['openhive.managed=true'] },
+    });
+
+    return containers.map((c) => ({
+      id: c.Id,
+      name: (c.Names[0] ?? '').replace(/^\//, ''),
+      state: c.State,
+      teamSlug: c.Labels['openhive.team'] ?? '',
+      tid: c.Labels['openhive.tid'] ?? '',
+      health: mapStateToHealth(c.State),
+      createdAt: c.Created * 1000, // Docker returns seconds, we use ms
+    }));
   }
 }

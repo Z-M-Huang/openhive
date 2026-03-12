@@ -1,93 +1,150 @@
+import { ConflictError, NotFoundError } from '../domain/errors.js';
 import type { InboundMessage, Router } from '../domain/index.js';
 
+/** Route match type in priority order: exact > prefix > regex. */
+export type RouteType = 'exact' | 'prefix' | 'regex';
+
+interface KnownRoute {
+  pattern: string;
+  type: RouteType;
+  teamSlug: string;
+  compiledRegex?: RegExp;
+}
+
+/** Priority score: lower = higher priority. */
+function typePriority(type: RouteType): number {
+  switch (type) {
+    case 'exact': return 0;
+    case 'prefix': return 1;
+    case 'regex': return 2;
+  }
+}
+
 /**
- * Two-tier message router — routes inbound channel messages to the correct team.
+ * Tier 2 callback — delegates routing to the main assistant (LLM judgment).
+ * Returns the team slug chosen by the LLM.
+ */
+export type Tier2Handler = (message: InboundMessage) => Promise<string>;
+
+/**
+ * Two-tier message router.
  *
- * **Tier 1: Deterministic routing (config-defined, instant, no LLM)**
- *
- * Known routes are pattern-based rules registered at runtime via {@link addKnownRoute}.
- * Patterns are matched against the inbound message content and/or chat JID.
- * When a message matches a known route, it is immediately dispatched to the
- * associated team — no LLM call is needed. This tier handles the common case
- * where the user has established teams with clear responsibilities.
- *
- * Examples of known route patterns:
- * - Chat JID exact match (a specific Discord channel → a specific team)
- * - Keyword prefix match (messages starting with "/deploy" → deploy-team)
- * - Regex patterns for structured commands
- *
- * Known routes are stored in-memory and rebuilt on startup from persisted
- * configuration. Routes are ordered by specificity — more specific patterns
- * are checked before broader ones.
- *
- * **Tier 2: LLM judgment (novel/ambiguous messages via main assistant)**
- *
- * When no Tier 1 route matches, the message is forwarded to the main assistant
- * agent for LLM-based routing. The main assistant analyzes the message content,
- * considers the current team topology and their purposes, and decides which
- * team should handle the request — or whether to handle it directly.
- *
- * The LLM routing path is slower (requires an inference call) but handles:
- * - Novel requests that don't match any existing pattern
- * - Ambiguous messages that could go to multiple teams
- * - Meta-requests (e.g., "create a new team for X")
- * - Conversational context that requires understanding prior messages
- *
- * After the LLM routes a message, the router may optionally learn from the
- * decision and add a new Tier 1 route for future similar messages (future feature).
- *
- * **Integration:**
- * - Used by the {@link MessageRouter} to determine the target team for inbound messages
- * - Tier 2 requires access to the main assistant's agent executor
- * - Route changes are published to the EventBus as `org_chart.updated` events
+ * Tier 1: Deterministic config-defined routes (exact > prefix > regex).
+ * Tier 2: LLM judgment via the main assistant (optional callback).
  */
 export class RouterImpl implements Router {
+  private readonly routes: KnownRoute[] = [];
+  private tier2Handler: Tier2Handler | undefined;
+
+  constructor(tier2Handler?: Tier2Handler) {
+    this.tier2Handler = tier2Handler;
+  }
+
   /**
-   * Route an inbound message to the appropriate team.
-   *
-   * Evaluation order:
-   * 1. Check Tier 1 known routes (pattern match against message content/JID)
-   * 2. If no match, fall through to Tier 2 (LLM judgment via main assistant)
-   * 3. Return the target team slug
-   *
-   * @param message - The inbound channel message to route
-   * @returns The team slug that should handle this message
-   * @throws NotFoundError if no route can be determined (neither tier matched)
+   * Set or replace the Tier 2 handler (LLM judgment fallback).
    */
-  route(_message: InboundMessage): Promise<string> {
-    throw new Error('Not implemented');
+  setTier2Handler(handler: Tier2Handler): void {
+    this.tier2Handler = handler;
   }
 
   /**
    * Register a deterministic Tier 1 route.
    *
-   * Patterns are matched in order of specificity (exact > prefix > regex).
-   * If a pattern already exists, its target team slug is updated.
+   * Routes are stored in priority order (exact > prefix > regex).
+   * If a pattern already exists, its target is updated.
    *
-   * @param pattern - The route pattern (exact string, prefix, or regex)
-   * @param teamSlug - The target team slug for messages matching this pattern
+   * @param pattern - The route pattern
+   * @param teamSlug - Target team slug
+   * @param type - Match type (default: 'exact')
    */
-  addKnownRoute(_pattern: string, _teamSlug: string): void {
-    throw new Error('Not implemented');
+  addKnownRoute(pattern: string, teamSlug: string, type: RouteType = 'exact'): void {
+    // Check for duplicate pattern
+    const existing = this.routes.find((r) => r.pattern === pattern);
+    if (existing) {
+      existing.teamSlug = teamSlug;
+      existing.type = type;
+      existing.compiledRegex = type === 'regex' ? new RegExp(pattern) : undefined;
+      return;
+    }
+
+    // Check for conflicts: overlapping prefix/regex with different teams
+    for (const route of this.routes) {
+      if (route.teamSlug === teamSlug) continue;
+
+      // prefix vs prefix overlap: one is a prefix of the other
+      if (type === 'prefix' && route.type === 'prefix') {
+        if (pattern.startsWith(route.pattern) || route.pattern.startsWith(pattern)) {
+          throw new ConflictError(
+            `Ambiguous route: prefix '${pattern}' overlaps with existing prefix '${route.pattern}' (team '${route.teamSlug}')`
+          );
+        }
+      }
+    }
+
+    const entry: KnownRoute = {
+      pattern,
+      type,
+      teamSlug,
+      compiledRegex: type === 'regex' ? new RegExp(pattern) : undefined,
+    };
+
+    // Insert in priority order
+    const priority = typePriority(type);
+    const insertIdx = this.routes.findIndex((r) => typePriority(r.type) > priority);
+    if (insertIdx === -1) {
+      this.routes.push(entry);
+    } else {
+      this.routes.splice(insertIdx, 0, entry);
+    }
   }
 
-  /**
-   * Remove a Tier 1 route by its pattern.
-   *
-   * No-op if the pattern does not exist.
-   *
-   * @param pattern - The route pattern to remove
-   */
-  removeKnownRoute(_pattern: string): void {
-    throw new Error('Not implemented');
+  removeKnownRoute(pattern: string): void {
+    const idx = this.routes.findIndex((r) => r.pattern === pattern);
+    if (idx !== -1) {
+      this.routes.splice(idx, 1);
+    }
   }
 
-  /**
-   * List all registered Tier 1 routes.
-   *
-   * @returns Array of known routes with their patterns and target team slugs
-   */
   listKnownRoutes(): Array<{ pattern: string; teamSlug: string }> {
-    throw new Error('Not implemented');
+    return this.routes.map((r) => ({ pattern: r.pattern, teamSlug: r.teamSlug }));
+  }
+
+  /**
+   * Route an inbound message.
+   *
+   * 1. Tier 1: check known routes in priority order (exact > prefix > regex).
+   *    Matches against message content and chatJid.
+   * 2. Tier 2: if no match, delegate to LLM handler.
+   * 3. Throws NotFoundError if neither tier resolves.
+   */
+  async route(message: InboundMessage): Promise<string> {
+    // Tier 1: deterministic routing
+    for (const route of this.routes) {
+      if (this.matches(route, message)) {
+        return route.teamSlug;
+      }
+    }
+
+    // Tier 2: LLM judgment
+    if (this.tier2Handler) {
+      return this.tier2Handler(message);
+    }
+
+    throw new NotFoundError(
+      `No route found for message '${message.id}' and no Tier 2 handler configured`
+    );
+  }
+
+  private matches(route: KnownRoute, message: InboundMessage): boolean {
+    switch (route.type) {
+      case 'exact':
+        return message.content === route.pattern || message.chatJid === route.pattern;
+      case 'prefix':
+        return message.content.startsWith(route.pattern) || message.chatJid.startsWith(route.pattern);
+      case 'regex':
+        return route.compiledRegex!.test(message.content);
+      default:
+        return false;
+    }
   }
 }
