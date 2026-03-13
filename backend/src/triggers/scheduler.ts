@@ -1,6 +1,14 @@
 import cron from 'node-cron';
 import type { BusEvent, EventBus, TriggerScheduler } from '../domain/index.js';
+import type { TriggerConfig } from '../domain/triggers.js';
 import { ValidationError } from '../domain/errors.js';
+import {
+  isTriggerEnabled,
+  isCronTrigger,
+  isWebhookTrigger,
+  isChannelEventTrigger,
+  isTaskCompletionTrigger,
+} from '../domain/triggers.js';
 
 type TriggerType = 'cron' | 'webhook' | 'channel_event' | 'task_completion';
 
@@ -34,18 +42,49 @@ export class TriggerSchedulerImpl implements TriggerScheduler {
   private readonly eventBus: EventBus | undefined;
   private readonly onFire: TriggerFireHandler | undefined;
   private started = false;
+  private triggerConfigs: TriggerConfig[] = [];
 
-  constructor(eventBus?: EventBus, onFire?: TriggerFireHandler) {
+  constructor(eventBus?: EventBus, onFire?: TriggerFireHandler, triggerConfigs?: TriggerConfig[]) {
     this.eventBus = eventBus;
     this.onFire = onFire;
+    this.triggerConfigs = triggerConfigs ?? [];
   }
 
   async loadTriggers(): Promise<void> {
     // Clears existing triggers and reloads from config.
-    // In the full system, this reads from ConfigLoader.
-    // For now, this resets to an empty state (config loading is wired in L8 orchestrator step).
     this.stopAll();
     this.triggers.clear();
+
+    // Register triggers from configuration
+    for (const trigger of this.triggerConfigs) {
+      // Skip disabled triggers
+      if (!isTriggerEnabled(trigger)) {
+        continue;
+      }
+
+      try {
+        if (isCronTrigger(trigger)) {
+          this.addCronTrigger(trigger.name, trigger.schedule, trigger.team_slug, trigger.prompt);
+        } else if (isWebhookTrigger(trigger)) {
+          this.addWebhookTrigger(trigger.name, trigger.path, trigger.team_slug);
+        } else if (isChannelEventTrigger(trigger)) {
+          // Channel event triggers use pattern as prompt (or empty string)
+          this.addEventTrigger(trigger.name, trigger.pattern, trigger.team_slug, trigger.pattern);
+        } else if (isTaskCompletionTrigger(trigger)) {
+          // Task completion triggers need a default prompt
+          this.addTaskCompletionTrigger(
+            trigger.name,
+            trigger.team_slug,
+            'Check task completion follow-up',
+            trigger.source_team,
+            trigger.status_filter,
+          );
+        }
+      } catch (err) {
+        // Log error but continue loading other triggers
+        console.error(`Failed to load trigger '${trigger.name}':`, err);
+      }
+    }
   }
 
   addCronTrigger(name: string, schedule: string, teamSlug: string, prompt: string): void {

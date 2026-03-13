@@ -28,10 +28,12 @@
  *
  * ## MEMORY.md Injection
  *
- * At task start, the session manager injects the contents of the team's
- * `MEMORY.md` file into the SDK session as initial context. This provides
- * agents with persistent knowledge accumulated across prior sessions —
- * project conventions, learned preferences, and operational notes.
+ * At task start, the session manager injects the contents of the agent's
+ * `MEMORY.md` file into the SDK session as initial context. The file is
+ * located at `<workspace>/memory/<agent-aid>/MEMORY.md` per the per-agent
+ * memory convention defined in Skill-Standards.md. This provides agents
+ * with persistent knowledge accumulated across prior sessions — project
+ * conventions, learned preferences, and operational notes.
  *
  * ## Working Directory Scoping
  *
@@ -44,7 +46,7 @@
  * @module executor/session
  */
 
-import { readFile } from 'node:fs/promises';
+import { readFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { SessionManager, SessionStore } from '../domain/index.js';
 import { ConflictError, NotFoundError } from '../domain/index.js';
@@ -90,10 +92,14 @@ export class SessionManagerImpl implements SessionManager {
 
     const sessionId = crypto.randomUUID();
 
-    // Read MEMORY.md at session creation for initial context injection
+    // Read MEMORY.md from per-agent path: <workspace>/memory/<agent-aid>/MEMORY.md
+    // Per Skill-Standards.md convention
     let memoryContent: string | null = null;
     try {
-      memoryContent = await readFile(join(this.workspacePath, 'MEMORY.md'), 'utf-8');
+      const memoryDir = join(this.workspacePath, 'memory', agentAid);
+      // Ensure directory exists (mkdir -p equivalent)
+      await mkdir(memoryDir, { recursive: true });
+      memoryContent = await readFile(join(memoryDir, 'MEMORY.md'), 'utf-8');
     } catch {
       // MEMORY.md is optional — no error if missing
     }

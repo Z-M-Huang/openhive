@@ -26,10 +26,10 @@ function createMockEventBus() {
 
 function createMockOrgChart() {
   return {
-    addTeam: vi.fn(), removeTeam: vi.fn(), getTeam: vi.fn(),
+    addTeam: vi.fn(), updateTeam: vi.fn(), removeTeam: vi.fn(), getTeam: vi.fn(),
     getTeamBySlug: vi.fn(), listTeams: vi.fn().mockReturnValue([]),
     getChildren: vi.fn(), getParent: vi.fn(),
-    addAgent: vi.fn(), removeAgent: vi.fn(), getAgent: vi.fn(),
+    addAgent: vi.fn(), updateAgent: vi.fn(), removeAgent: vi.fn(), getAgent: vi.fn(),
     getAgentsByTeam: vi.fn().mockReturnValue([]),
     getLeadOf: vi.fn(), isAuthorized: vi.fn(), getTopology: vi.fn(),
   };
@@ -38,6 +38,7 @@ function createMockOrgChart() {
 function createMockWSHub() {
   return {
     send: vi.fn(), broadcast: vi.fn(), isConnected: vi.fn().mockReturnValue(true),
+    setReady: vi.fn(), isReady: vi.fn().mockReturnValue(true),
     handleUpgrade: vi.fn(), close: vi.fn(), getConnectedTeams: vi.fn(),
   };
 }
@@ -61,7 +62,7 @@ function createMockTaskStore() {
 
 function createMockLogStore() {
   return {
-    create: vi.fn(), query: vi.fn(), deleteBefore: vi.fn(),
+    create: vi.fn(), createWithIds: vi.fn().mockResolvedValue([1]), query: vi.fn(), deleteBefore: vi.fn(),
     deleteByLevelBefore: vi.fn(), count: vi.fn(), getOldest: vi.fn(),
   };
 }

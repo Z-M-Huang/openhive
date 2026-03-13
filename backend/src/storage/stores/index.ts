@@ -458,13 +458,20 @@ export function newLogStore(db: Database): LogStore {
   return {
     async create(entries: LogEntry[]): Promise<void> {
       if (entries.length === 0) return;
+      // Delegate to createWithIds and discard the return value
+      await this.createWithIds(entries);
+    },
 
-      await db.enqueueWrite(() => {
+    async createWithIds(entries: LogEntry[]): Promise<number[]> {
+      if (entries.length === 0) return [];
+
+      return db.enqueueWrite(() => {
         // Batch insert in a single transaction for performance
         const conn = db.getConnection();
         const tx = conn.transaction(() => {
+          const ids: number[] = [];
           for (const entry of entries) {
-            db.getDB().insert(schema.logEntries).values({
+            const result = db.getDB().insert(schema.logEntries).values({
               level: entry.level,
               event_type: entry.event_type,
               component: entry.component,
@@ -480,9 +487,11 @@ export function newLogStore(db: Database): LogStore {
               duration_ms: entry.duration_ms,
               created_at: entry.created_at,
             }).run();
+            ids.push(Number(result.lastInsertRowid));
           }
+          return ids;
         });
-        tx();
+        return tx();
       });
     },
 

@@ -89,7 +89,8 @@ import { ContainerRuntimeImpl } from './containers/runtime.js';
 import { ContainerManagerImpl } from './containers/manager.js';
 import { ContainerProvisionerImpl } from './containers/provisioner.js';
 import { LogLevel, ChannelType } from './domain/enums.js';
-import type { Logger, OrgChartTeam, OrgChartAgent, SessionStore, MCPServerConfig } from './domain/interfaces.js';
+import { NotFoundError } from './domain/errors.js';
+import type { Logger, OrgChartTeam, OrgChartAgent, SessionStore, MCPServerConfig, TaskStore, MessageStore, LogStore, MemoryStore, IntegrationStore, CredentialStore, ToolCallStore } from './domain/interfaces.js';
 import { resolveSecretsTemplatesInObject } from './mcp/tools/index.js';
 
 // ---------------------------------------------------------------------------
@@ -111,6 +112,15 @@ interface ShutdownState {
   orchestrator: OrchestratorImpl | null;
   tokenManager: TokenManagerImpl | null;
   keyManager: KeyManagerImpl | null;
+  stores: {
+    taskStore: TaskStore | null;
+    messageStore: MessageStore | null;
+    logStore: LogStore | null;
+    memoryStore: MemoryStore | null;
+    integrationStore: IntegrationStore | null;
+    credentialStore: CredentialStore | null;
+    toolCallStore: ToolCallStore | null;
+  } | null;
 }
 
 const shutdownState: ShutdownState = {
@@ -128,6 +138,7 @@ const shutdownState: ShutdownState = {
   orchestrator: null,
   tokenManager: null,
   keyManager: null,
+  stores: null,
 };
 
 let isShuttingDown = false;
@@ -380,7 +391,7 @@ async function initializeRootMode(
 
   // 8. Initialize WebSocket server (WSServer implements WSHub with rate limiting and write queues)
   const wsServer = new WSServer(tokenManager, {
-    onMessage: (tid: string, message: { type: string; data: Record<string, unknown> }) => {
+    onMessage: async (tid: string, message: { type: string; data: Record<string, unknown> }) => {
       logger.debug('WS message received', { tid, type: message.type });
 
       switch (message.type) {
@@ -476,7 +487,123 @@ async function initializeRootMode(
             shutdownState.healthMonitor.recordHeartbeat(tid, []);
           }
 
+          // Mark the team as ready (for create_team polling)
+          if (shutdownState.wsServer) {
+            shutdownState.wsServer.setReady(tid);
+          }
+
           logger.info('Container ready', { tid, team_id, agent_count, protocol_version });
+          break;
+        }
+
+        case 'log_event': {
+          // Write log events from containers to the log store
+          // Protocol: { level: 'debug'|'info'|'warn'|'error', source_aid, message, metadata, timestamp }
+          const { level, source_aid, message: logMessage, metadata, timestamp } = message.data as {
+            level: 'debug' | 'info' | 'warn' | 'error';
+            source_aid: string;
+            message: string;
+            metadata?: Record<string, unknown>;
+            timestamp: string;
+          };
+          if (shutdownState.stores?.logStore) {
+            const team = orgChart.getTeam(tid);
+            // Map string level to numeric
+            const levelMap: Record<string, number> = { debug: 0, info: 10, warn: 30, error: 40 };
+            await shutdownState.stores.logStore.create([{
+              id: 0,
+              level: (levelMap[level] ?? 10) as LogLevel,
+              event_type: 'log_event',
+              component: '',
+              action: '',
+              message: logMessage,
+              params: metadata ? JSON.stringify(metadata) : '',
+              team_slug: team?.slug ?? '',
+              task_id: '',
+              agent_aid: source_aid,
+              request_id: '',
+              correlation_id: '',
+              error: '',
+              duration_ms: 0,
+              created_at: new Date(timestamp).getTime() || Date.now(),
+            }]);
+          }
+          break;
+        }
+
+        case 'status_update': {
+          // Update agent status in org chart
+          const { agent_aid, status, detail } = message.data as {
+            agent_aid: string;
+            status: string;
+            detail?: string;
+          };
+          logger.info('Agent status update', { agent_aid, status, detail });
+
+          // Update the agent's status in the org chart
+          const agent = orgChart.getAgent(agent_aid);
+          if (agent) {
+            const validStatuses = ['idle', 'busy', 'error', 'starting'] as const;
+            const newStatus = validStatuses.includes(status as typeof validStatuses[number])
+              ? (status as typeof validStatuses[number])
+              : agent.status;
+            orgChart.updateAgent({
+              ...agent,
+              status: newStatus,
+            });
+          }
+          break;
+        }
+
+        case 'agent_ready': {
+          // Hot-reload acknowledgment for dynamic agent addition
+          // Protocol: { aid: string }
+          const { aid } = message.data as { aid: string };
+          logger.info('Agent ready (hot-reload)', { aid, tid });
+
+          // Update agent status to idle in org chart
+          const agent = orgChart.getAgent(aid);
+          if (agent) {
+            orgChart.updateAgent({
+              ...agent,
+              status: 'idle',
+            });
+          }
+          break;
+        }
+
+        case 'org_chart_update': {
+          // Handle topology changes from containers (e.g., sub-team creation, agent addition)
+          const { action: updateAction, team_slug, agent_aid } = message.data as {
+            action: string;
+            team_slug?: string;
+            agent_aid?: string;
+          };
+          logger.info('Org chart update notification', { tid, action: updateAction, team_slug, agent_aid });
+
+          // Handle specific actions
+          switch (updateAction) {
+            case 'agent_added':
+              // Agent was added in container; already handled via agent_added message
+              break;
+            case 'team_created':
+              // Sub-team was created; update org chart if we have team info
+              if (team_slug) {
+                const childTeam = orgChart.getTeamBySlug(team_slug);
+                if (!childTeam) {
+                  logger.warn('org_chart_update: team not found for creation', { team_slug });
+                }
+              }
+              break;
+            case 'agent_removed':
+              // Agent was removed from container
+              if (agent_aid) {
+                orgChart.removeAgent(agent_aid);
+              }
+              break;
+            default:
+              logger.debug('org_chart_update: unhandled action', { action: updateAction });
+          }
           break;
         }
 
@@ -607,54 +734,58 @@ async function initializeRootMode(
   logger.info('Container manager initialized');
 
   // 11. Initialize trigger scheduler
-  const triggerScheduler = new TriggerSchedulerImpl(eventBus, async (teamSlug: string, prompt: string) => {
-    logger.info('Trigger fired', { team_slug: teamSlug, prompt });
+  const triggerScheduler = new TriggerSchedulerImpl(
+    eventBus,
+    async (teamSlug: string, prompt: string) => {
+      logger.info('Trigger fired', { team_slug: teamSlug, prompt });
 
-    // Get the team to find its lead
-    const team = orgChart.getTeamBySlug(teamSlug);
-    if (!team) {
-      logger.error('Trigger fired for unknown team', { team_slug: teamSlug });
-      return;
-    }
-
-    // Generate task ID
-    const taskId = `task-${Date.now().toString(16)}-${Math.random().toString(16).slice(2, 8)}`;
-
-    // Create the task
-    const task = {
-      id: taskId,
-      parent_id: '',
-      team_slug: teamSlug,
-      agent_aid: team.leaderAid,
-      title: `Triggered: ${prompt.slice(0, 50)}...`,
-      status: 'pending' as const,
-      prompt,
-      result: '',
-      error: '',
-      blocked_by: [],
-      priority: 5,
-      retry_count: 0,
-      max_retries: 3,
-      created_at: Date.now(),
-      updated_at: Date.now(),
-      completed_at: null,
-    };
-
-    try {
-      await taskStore.create(task);
-      logger.info('Trigger created task', { task_id: taskId, team_slug: teamSlug });
-
-      // Dispatch via orchestrator if available
-      if (shutdownState.orchestrator) {
-        await shutdownState.orchestrator.dispatchTask(task);
+      // Get the team to find its lead
+      const team = orgChart.getTeamBySlug(teamSlug);
+      if (!team) {
+        logger.error('Trigger fired for unknown team', { team_slug: teamSlug });
+        return;
       }
-    } catch (err) {
-      logger.error('Failed to create/dispatch trigger task', {
+
+      // Generate task ID
+      const taskId = `task-${Date.now().toString(16)}-${Math.random().toString(16).slice(2, 8)}`;
+
+      // Create the task
+      const task = {
+        id: taskId,
+        parent_id: '',
         team_slug: teamSlug,
-        error: err instanceof Error ? err.message : String(err),
+        agent_aid: team.leaderAid,
+        title: `Triggered: ${prompt.slice(0, 50)}...`,
+        status: 'pending' as const,
+        prompt,
+        result: '',
+        error: '',
+        blocked_by: [],
+        priority: 5,
+        retry_count: 0,
+        max_retries: 3,
+        created_at: Date.now(),
+        updated_at: Date.now(),
+        completed_at: null,
+      };
+
+      try {
+        await taskStore.create(task);
+        logger.info('Trigger created task', { task_id: taskId, team_slug: teamSlug });
+
+        // Dispatch via orchestrator if available
+        if (shutdownState.orchestrator) {
+          await shutdownState.orchestrator.dispatchTask(task);
+        }
+      } catch (err) {
+        logger.error('Failed to create/dispatch trigger task', {
+          team_slug: teamSlug,
+          error: err instanceof Error ? err.message : String(err),
       });
     }
-  });
+  },
+    masterConfig.triggers,
+  );
   await triggerScheduler.loadTriggers();
   triggerScheduler.start();
   shutdownState.triggerScheduler = triggerScheduler;
@@ -663,9 +794,6 @@ async function initializeRootMode(
 
   // 12. Initialize MCP registry
   const mcpRegistry = new MCPRegistryImpl();
-
-  // Register built-in tools (placeholder handlers)
-  registerBuiltinTools(mcpRegistry, logger);
 
   logger.info('MCP registry initialized');
 
@@ -703,6 +831,16 @@ async function initializeRootMode(
     mcpRegistry,
   }, true);
 
+  shutdownState.stores = {
+    taskStore,
+    messageStore,
+    logStore,
+    memoryStore,
+    integrationStore,
+    credentialStore,
+    toolCallStore,
+  };
+
   await orchestrator.start();
   shutdownState.orchestrator = orchestrator;
 
@@ -737,15 +875,33 @@ async function initializeRootMode(
     if (discordToken) {
       // Create the LLM-based router for Tier 2 routing
       // Tier 2 handler dispatches to main assistant for LLM judgment
+      const mainAssistantAid = masterConfig.assistant.aid;
       const llmRouter = new RouterImpl(async (msg) => {
         // Tier 2: LLM-based routing via main assistant
-        // For now, log and return a default team (main)
-        // TODO: Implement full LLM-based routing via main assistant
-        logger.info('Tier 2 routing: no known route, defaulting to main team', {
+        // TODO: Implement full LLM-based routing by dispatching a routing task
+        // to the main assistant and parsing its response.
+        // For now, log and return an intelligent default based on org chart.
+        const teams = orgChart.listTeams();
+        logger.info('Tier 2 routing: no known route, selecting default team', {
           chat_jid: msg.chatJid,
           content_preview: msg.content.slice(0, 50),
+          main_assistant_aid: mainAssistantAid,
+          available_teams: teams.map(t => t.slug),
         });
-        return 'main';
+
+        // Prefer 'main' team if it exists, otherwise use the first team
+        const mainTeam = teams.find(t => t.slug === 'main');
+        if (mainTeam) {
+          return 'main';
+        }
+
+        // Fall back to the first available team
+        if (teams.length > 0) {
+          return teams[0].slug;
+        }
+
+        // No teams available - this is an error state
+        throw new NotFoundError('No teams available for Tier 2 routing');
       });
 
       // Create the message router with two-tier routing
@@ -799,7 +955,6 @@ async function initializeNonRootMode(logger: Logger): Promise<void> {
 
   // 3. Initialize MCP registry
   const mcpRegistry = new MCPRegistryImpl();
-  registerBuiltinTools(mcpRegistry, logger);
 
   // 4. Initialize agent executor (session manager requires store, use no-op)
   const agentExecutor = new AgentExecutorImpl(eventBus, logger);
@@ -814,25 +969,9 @@ async function initializeNonRootMode(logger: Logger): Promise<void> {
     hubUrl,
   });
 
-  // Register message handler
-  wsConnection.onMessage((message) => {
-    logger.debug('Received message from root', { type: message.type });
-
-    if (message.type === 'container_init') {
-      // Store agent configs and signal ready
-      logger.info('Received container_init from root');
-    } else if (message.type === 'task_dispatch') {
-      // Handle task dispatch
-      logger.info('Received task_dispatch', {
-        task_id: message.data['task_id'] as string,
-      });
-    } else if (message.type === 'shutdown') {
-      logger.info('Received shutdown signal from root');
-      gracefulShutdown().catch((err) => {
-        logger.error('Shutdown failed', { error: String(err) });
-      });
-    }
-  });
+  // Note: Message handler is registered by OrchestratorImpl.startNonRoot()
+  // to avoid handler overwrite issues. All root-to-container messages are
+  // handled by the orchestrator.
 
   wsConnection.onClose((code, reason) => {
     logger.warn('WebSocket connection closed', { code, reason });
@@ -858,359 +997,6 @@ async function initializeNonRootMode(logger: Logger): Promise<void> {
   shutdownState.orchestrator = orchestrator;
 
   logger.info('Non-root mode initialization complete');
-}
-
-/**
- * Registers built-in MCP tools with placeholder handlers.
- */
-function registerBuiltinTools(mcpRegistry: MCPRegistryImpl, logger: Logger): void {
-  // Container tools
-  mcpRegistry.registerTool(
-    'spawn_container',
-    {
-      type: 'object',
-      properties: {
-        team_slug: { type: 'string', description: 'Team slug' },
-      },
-      required: ['team_slug'],
-    },
-    async (args) => {
-      logger.info('spawn_container called', { team_slug: args['team_slug'] });
-      return { status: 'not_implemented' };
-    }
-  );
-
-  mcpRegistry.registerTool(
-    'stop_container',
-    {
-      type: 'object',
-      properties: {
-        team_slug: { type: 'string', description: 'Team slug' },
-      },
-      required: ['team_slug'],
-    },
-    async (args) => {
-      logger.info('stop_container called', { team_slug: args['team_slug'] });
-      return { status: 'not_implemented' };
-    }
-  );
-
-  mcpRegistry.registerTool(
-    'list_containers',
-    { type: 'object', properties: {}, required: [] },
-    async () => {
-      return { containers: [] };
-    }
-  );
-
-  // Team tools
-  mcpRegistry.registerTool(
-    'create_team',
-    {
-      type: 'object',
-      properties: {
-        slug: { type: 'string', description: 'Team slug' },
-        leader_aid: { type: 'string', description: 'Leader AID' },
-        purpose: { type: 'string', description: 'Team purpose' },
-      },
-      required: ['slug', 'leader_aid', 'purpose'],
-    },
-    async (args) => {
-      logger.info('create_team called', args);
-      return { status: 'not_implemented' };
-    }
-  );
-
-  mcpRegistry.registerTool(
-    'create_agent',
-    {
-      type: 'object',
-      properties: {
-        aid: { type: 'string', description: 'Agent ID' },
-        name: { type: 'string', description: 'Agent name' },
-        team_slug: { type: 'string', description: 'Team slug' },
-      },
-      required: ['aid', 'name', 'team_slug'],
-    },
-    async (args) => {
-      logger.info('create_agent called', args);
-      return { status: 'not_implemented' };
-    }
-  );
-
-  // Task tools
-  mcpRegistry.registerTool(
-    'create_task',
-    {
-      type: 'object',
-      properties: {
-        team_slug: { type: 'string', description: 'Team slug' },
-        agent_aid: { type: 'string', description: 'Agent AID' },
-        title: { type: 'string', description: 'Task title' },
-        prompt: { type: 'string', description: 'Task prompt' },
-      },
-      required: ['team_slug', 'title', 'prompt'],
-    },
-    async (args) => {
-      logger.info('create_task called', args);
-      return { status: 'not_implemented' };
-    }
-  );
-
-  mcpRegistry.registerTool(
-    'dispatch_subtask',
-    {
-      type: 'object',
-      properties: {
-        parent_task_id: { type: 'string', description: 'Parent task ID' },
-        agent_aid: { type: 'string', description: 'Agent AID' },
-        prompt: { type: 'string', description: 'Subtask prompt' },
-      },
-      required: ['parent_task_id', 'agent_aid', 'prompt'],
-    },
-    async (args) => {
-      logger.info('dispatch_subtask called', args);
-      return { status: 'not_implemented' };
-    }
-  );
-
-  mcpRegistry.registerTool(
-    'update_task_status',
-    {
-      type: 'object',
-      properties: {
-        task_id: { type: 'string', description: 'Task ID' },
-        status: { type: 'string', description: 'New status' },
-        result: { type: 'string', description: 'Task result' },
-        error: { type: 'string', description: 'Error message' },
-      },
-      required: ['task_id', 'status'],
-    },
-    async (args) => {
-      logger.info('update_task_status called', args);
-      return { status: 'not_implemented' };
-    }
-  );
-
-  // Messaging tools
-  mcpRegistry.registerTool(
-    'send_message',
-    {
-      type: 'object',
-      properties: {
-        chat_jid: { type: 'string', description: 'Chat JID' },
-        content: { type: 'string', description: 'Message content' },
-      },
-      required: ['chat_jid', 'content'],
-    },
-    async (args) => {
-      logger.info('send_message called', args);
-      return { status: 'not_implemented' };
-    }
-  );
-
-  // Orchestration tools
-  mcpRegistry.registerTool(
-    'escalate',
-    {
-      type: 'object',
-      properties: {
-        task_id: { type: 'string', description: 'Task ID' },
-        reason: { type: 'string', description: 'Escalation reason' },
-        context: { type: 'object', description: 'Additional context' },
-      },
-      required: ['task_id', 'reason'],
-    },
-    async (args) => {
-      logger.info('escalate called', args);
-      return { status: 'not_implemented' };
-    }
-  );
-
-  // Memory tools
-  mcpRegistry.registerTool(
-    'save_memory',
-    {
-      type: 'object',
-      properties: {
-        agent_aid: { type: 'string', description: 'Agent AID' },
-        team_slug: { type: 'string', description: 'Team slug' },
-        content: { type: 'string', description: 'Memory content' },
-        memory_type: { type: 'string', description: 'Memory type' },
-      },
-      required: ['agent_aid', 'team_slug', 'content'],
-    },
-    async (args) => {
-      logger.info('save_memory called', args);
-      return { status: 'not_implemented' };
-    }
-  );
-
-  mcpRegistry.registerTool(
-    'recall_memory',
-    {
-      type: 'object',
-      properties: {
-        agent_aid: { type: 'string', description: 'Agent AID' },
-        query: { type: 'string', description: 'Search query' },
-        limit: { type: 'number', description: 'Max results' },
-      },
-      required: [],
-    },
-    async () => {
-      return { memories: [] };
-    }
-  );
-
-  // Integration tools
-  mcpRegistry.registerTool(
-    'create_integration',
-    {
-      type: 'object',
-      properties: {
-        team_slug: { type: 'string', description: 'Team slug' },
-        name: { type: 'string', description: 'Integration name' },
-        config: { type: 'object', description: 'Integration config' },
-      },
-      required: ['team_slug', 'name', 'config'],
-    },
-    async (args) => {
-      logger.info('create_integration called', args);
-      return { status: 'not_implemented' };
-    }
-  );
-
-  mcpRegistry.registerTool(
-    'test_integration',
-    {
-      type: 'object',
-      properties: {
-        integration_id: { type: 'string', description: 'Integration ID' },
-      },
-      required: ['integration_id'],
-    },
-    async (args) => {
-      logger.info('test_integration called', args);
-      return { status: 'not_implemented' };
-    }
-  );
-
-  mcpRegistry.registerTool(
-    'activate_integration',
-    {
-      type: 'object',
-      properties: {
-        integration_id: { type: 'string', description: 'Integration ID' },
-      },
-      required: ['integration_id'],
-    },
-    async (args) => {
-      logger.info('activate_integration called', args);
-      return { status: 'not_implemented' };
-    }
-  );
-
-  // Secret tools
-  mcpRegistry.registerTool(
-    'get_credential',
-    {
-      type: 'object',
-      properties: {
-        name: { type: 'string', description: 'Credential name' },
-        team_slug: { type: 'string', description: 'Team slug' },
-      },
-      required: ['name', 'team_slug'],
-    },
-    async (args) => {
-      logger.info('get_credential called', { name: args['name'] });
-      return { status: 'not_implemented' };
-    }
-  );
-
-  mcpRegistry.registerTool(
-    'set_credential',
-    {
-      type: 'object',
-      properties: {
-        name: { type: 'string', description: 'Credential name' },
-        team_slug: { type: 'string', description: 'Team slug' },
-        value: { type: 'string', description: 'Credential value' },
-      },
-      required: ['name', 'team_slug', 'value'],
-    },
-    async (args) => {
-      logger.info('set_credential called', { name: args['name'] });
-      return { status: 'not_implemented' };
-    }
-  );
-
-  // Query tools
-  mcpRegistry.registerTool(
-    'get_team',
-    {
-      type: 'object',
-      properties: {
-        slug: { type: 'string', description: 'Team slug' },
-      },
-      required: ['slug'],
-    },
-    async () => {
-      return { team: null };
-    }
-  );
-
-  mcpRegistry.registerTool(
-    'get_task',
-    {
-      type: 'object',
-      properties: {
-        task_id: { type: 'string', description: 'Task ID' },
-      },
-      required: ['task_id'],
-    },
-    async () => {
-      return { task: null };
-    }
-  );
-
-  mcpRegistry.registerTool(
-    'get_health',
-    { type: 'object', properties: {}, required: [] },
-    async () => {
-      return { health: 'unknown' };
-    }
-  );
-
-  mcpRegistry.registerTool(
-    'inspect_topology',
-    {
-      type: 'object',
-      properties: {
-        depth: { type: 'number', description: 'Max depth' },
-      },
-      required: [],
-    },
-    async () => {
-      return { topology: [] };
-    }
-  );
-
-  // Event tools
-  mcpRegistry.registerTool(
-    'register_webhook',
-    {
-      type: 'object',
-      properties: {
-        path: { type: 'string', description: 'Webhook path' },
-        team_slug: { type: 'string', description: 'Team slug' },
-      },
-      required: ['path', 'team_slug'],
-    },
-    async (args) => {
-      logger.info('register_webhook called', args);
-      return { status: 'not_implemented' };
-    }
-  );
 }
 
 /**

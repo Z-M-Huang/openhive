@@ -123,6 +123,7 @@ function createMockToolContext(overrides?: Partial<ToolContext>): ToolContext {
     } satisfies MessageStore,
     logStore: {
       create: vi.fn().mockResolvedValue(undefined),
+      createWithIds: vi.fn().mockResolvedValue([1]),
       query: vi.fn().mockResolvedValue([]),
       deleteBefore: vi.fn().mockResolvedValue(0),
       deleteByLevelBefore: vi.fn().mockResolvedValue(0),
@@ -199,6 +200,8 @@ function createMockToolContext(overrides?: Partial<ToolContext>): ToolContext {
       send: vi.fn(),
       broadcast: vi.fn(),
       isConnected: vi.fn().mockReturnValue(true),
+      setReady: vi.fn(),
+      isReady: vi.fn().mockReturnValue(true),
       getConnectedTeams: vi.fn().mockReturnValue([]),
       close: vi.fn().mockResolvedValue(undefined),
     } satisfies WSHub,

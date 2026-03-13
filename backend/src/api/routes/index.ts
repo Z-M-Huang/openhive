@@ -523,7 +523,7 @@ const webhookRegistry = new Map<string, WebhookRegistration>();
  * - `GET /api/v1/hooks` - List registered webhook endpoints
  * - `DELETE /api/v1/hooks/:registrationId` - Unregister a webhook endpoint
  */
-function registerWebhookRoutes(app: FastifyInstance, _ctx: RouteContext): void {
+function registerWebhookRoutes(app: FastifyInstance, ctx: RouteContext): void {
   // POST /api/v1/hooks/:path - Receive webhook
   app.post('/api/v1/hooks/:path', async (request: FastifyRequest, reply: FastifyReply) => {
     const { path } = request.params as { path: string };
@@ -543,13 +543,61 @@ function registerWebhookRoutes(app: FastifyInstance, _ctx: RouteContext): void {
       return;
     }
 
-    // In production, would dispatch to the team via orchestrator
-    reply.send({
-      received: true,
-      path: webhookPath,
-      teamSlug: registration.teamSlug,
-      timestamp: Date.now(),
-    });
+    // Get the team to find its lead
+    const team = ctx.orgChart?.getTeamBySlug(registration.teamSlug);
+    if (!team) {
+      reply.code(404).send({ error: `Team not found: ${registration.teamSlug}` });
+      return;
+    }
+
+    // Create task for the webhook payload
+    const taskId = `webhook-${Date.now().toString(16)}-${Math.random().toString(16).slice(2, 8)}`;
+    const payload = request.body as Record<string, unknown>;
+    const prompt = `Webhook received at ${webhookPath}:\n\n${JSON.stringify(payload, null, 2)}`;
+
+    const task = {
+      id: taskId,
+      parent_id: '',
+      team_slug: registration.teamSlug,
+      agent_aid: team.leaderAid,
+      title: `Webhook: ${webhookPath}`,
+      status: 'pending' as const,
+      prompt,
+      result: '',
+      error: '',
+      blocked_by: [],
+      priority: 5,
+      retry_count: 0,
+      max_retries: 3,
+      created_at: Date.now(),
+      updated_at: Date.now(),
+      completed_at: null,
+    };
+
+    try {
+      // Create task in store
+      if (ctx.taskStore) {
+        await ctx.taskStore.create(task);
+      }
+
+      // Dispatch via orchestrator if available
+      if (ctx.orchestrator) {
+        await ctx.orchestrator.dispatchTask(task);
+      }
+
+      reply.send({
+        received: true,
+        path: webhookPath,
+        teamSlug: registration.teamSlug,
+        taskId,
+        timestamp: Date.now(),
+      });
+    } catch (err) {
+      reply.code(500).send({
+        error: 'Failed to dispatch webhook task',
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
   });
 
   // GET /api/v1/hooks - List webhooks
@@ -603,9 +651,11 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
  * Called by MCP tool register_webhook.
  */
 export function registerWebhook(id: string, path: string, teamSlug: string): void {
+  // Normalize path to always have leading slash for consistent lookup
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
   webhookRegistry.set(id, {
     id,
-    path,
+    path: normalizedPath,
     teamSlug,
     createdAt: Date.now(),
   });

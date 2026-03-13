@@ -106,6 +106,7 @@ function makeTask(overrides: Partial<Task> = {}): Task {
 function createMockContext(): ToolContext {
   const orgChart: OrgChart = {
     addTeam: vi.fn(),
+    updateTeam: vi.fn(),
     removeTeam: vi.fn(),
     getTeam: vi.fn(() => makeTeam()),
     getTeamBySlug: vi.fn((slug: string) => makeTeam({ slug })),
@@ -113,6 +114,7 @@ function createMockContext(): ToolContext {
     getChildren: vi.fn(() => []),
     getParent: vi.fn(() => undefined),
     addAgent: vi.fn(),
+    updateAgent: vi.fn(),
     removeAgent: vi.fn(),
     getAgent: vi.fn((aid: string) => makeAgent({ aid })),
     getAgentsByTeam: vi.fn(() => [makeAgent()]),
@@ -145,6 +147,7 @@ function createMockContext(): ToolContext {
 
   const logStore: LogStore = {
     create: vi.fn(async () => {}),
+    createWithIds: vi.fn().mockResolvedValue([1]),
     query: vi.fn(async () => []),
     deleteBefore: vi.fn(async () => 0),
     deleteByLevelBefore: vi.fn(async () => 0),
@@ -253,6 +256,8 @@ function createMockContext(): ToolContext {
     send: vi.fn(),
     broadcast: vi.fn(),
     isConnected: vi.fn(() => true),
+    setReady: vi.fn(),
+    isReady: vi.fn(() => true),
     getConnectedTeams: vi.fn(() => []),
     close: vi.fn(async () => {}),
   };

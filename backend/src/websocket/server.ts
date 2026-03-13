@@ -448,6 +448,20 @@ export class WSServer implements WSHub {
   }
 
   /**
+   * Marks a container as having completed the ready handshake.
+   */
+  setReady(tid: string): void {
+    this._hub.setReady(tid);
+  }
+
+  /**
+   * Checks whether a container has completed the ready handshake.
+   */
+  isReady(tid: string): boolean {
+    return this._hub.isReady(tid);
+  }
+
+  /**
    * Returns the TIDs of all currently connected containers.
    */
   getConnectedTeams(): string[] {

@@ -46,12 +46,15 @@ import type {
   Logger,
 } from '../../domain/index.js';
 
+import { registerWebhook } from '../../api/routes/index.js';
+
 import {
   TaskStatus,
   IntegrationStatus,
   AgentStatus,
   ContainerHealth,
   WSErrorCode,
+  LogLevel,
 } from '../../domain/index.js';
 
 import type { AgentRole } from '../../domain/index.js';
@@ -398,21 +401,33 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
     const parentTid = parentTeam?.tid ?? '';
     const parentDepth = parentTeam?.depth ?? 0;
 
-    const tid = generateId('tid', parsed.slug);
-
     // Scaffold workspace
     const parentPath = parentTeam?.workspacePath ?? '/app/workspace';
     const workspacePath = await ctx.provisioner.scaffoldWorkspace(parentPath, parsed.slug);
 
-    // Add team to org chart
+    // Spawn container first - it generates the authoritative TID
+    let containerInfo;
+    let tid: string;
+    try {
+      containerInfo = await ctx.containerManager.spawnTeamContainer(parsed.slug);
+      tid = containerInfo.tid;
+    } catch (err) {
+      ctx.logger.error('Failed to spawn team container', {
+        slug: parsed.slug,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      throw err;
+    }
+
+    // Add team to org chart with the container's TID
     ctx.orgChart.addTeam({
       tid,
       slug: parsed.slug,
       leaderAid: parsed.leader_aid,
       parentTid,
       depth: parentDepth + 1,
-      containerId: '',
-      health: ContainerHealth.Starting,
+      containerId: containerInfo.id,
+      health: containerInfo.health,
       agentAids: [],
       workspacePath,
     });
@@ -424,7 +439,26 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
       source: agentAid,
     });
 
-    return { slug: parsed.slug, leader_aid: parsed.leader_aid, status: 'created' };
+    // Wait for container ready handshake (timeout: 60 seconds)
+    const timeoutMs = 60_000;
+    const pollIntervalMs = 500;
+    const startTime = Date.now();
+
+    while (Date.now() - startTime < timeoutMs) {
+      if (ctx.wsHub.isReady(tid)) {
+        ctx.logger.info('Team container ready', { tid, container_id: containerInfo.id });
+        return { slug: parsed.slug, tid, container_id: containerInfo.id, status: 'running' };
+      }
+      await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+    }
+
+    // Timeout - container started but not ready yet
+    ctx.logger.warn('Team container started but not ready within timeout', {
+      tid,
+      container_id: containerInfo.id,
+      timeout_ms: timeoutMs,
+    });
+    return { slug: parsed.slug, tid, container_id: containerInfo.id, status: 'starting' };
   });
 
   handlers.set('create_agent', async (args) => {
@@ -955,6 +989,9 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
       timestamp: Date.now(),
     });
 
+    // Register the webhook in the API layer for HTTP endpoint routing
+    registerWebhook(registrationId, parsed.path, parsed.target_team);
+
     return { webhook_url: webhookUrl, registration_id: registrationId };
   });
 
@@ -1090,9 +1127,29 @@ export class SDKToolHandler {
     durationMs: number,
   ): Promise<void> {
     try {
+      // Create log entry first to get a valid log_entry_id
+      const logEntry = {
+        id: 0, // auto-assigned
+        level: error ? LogLevel.Error : LogLevel.Info,
+        event_type: 'tool_call',
+        component: 'sdk_tool_handler',
+        action: toolName,
+        message: error ? 'tool_call_failed' : 'tool_call',
+        params: JSON.stringify(params),
+        team_slug: teamSlug,
+        task_id: '',
+        agent_aid: agentAid,
+        request_id: '',
+        correlation_id: callId,
+        error: error,
+        duration_ms: durationMs,
+        created_at: Date.now(),
+      };
+      const [logEntryId] = await this.ctx.logStore.createWithIds([logEntry]);
+
       await this.ctx.toolCallStore.create({
         id: 0, // auto-assigned
-        log_entry_id: 0,
+        log_entry_id: logEntryId,
         tool_use_id: callId,
         tool_name: toolName,
         agent_aid: agentAid,

@@ -82,6 +82,7 @@ interface ConnectionEntry {
   writeQueue: WSMessage[];
   rateLimiter: TokenBucket;
   draining: boolean;
+  ready: boolean; // true after protocol ready handshake completed
 }
 
 // ---------------------------------------------------------------------------
@@ -119,6 +120,7 @@ export class WSHubImpl implements WSHub {
       writeQueue: [],
       rateLimiter: new TokenBucket(RATE_LIMIT_MAX_TOKENS, RATE_LIMIT_REFILL_PER_SEC),
       draining: false,
+      ready: false,
     });
   }
 
@@ -229,6 +231,18 @@ export class WSHubImpl implements WSHub {
     const entry = this._entries.get(tid);
     if (!entry) return false;
     return entry.connection.isAlive();
+  }
+
+  setReady(tid: string): void {
+    const entry = this._entries.get(tid);
+    if (entry) {
+      entry.ready = true;
+    }
+  }
+
+  isReady(tid: string): boolean {
+    const entry = this._entries.get(tid);
+    return entry?.ready ?? false;
   }
 
   getConnectedTeams(): string[] {

@@ -76,6 +76,7 @@ function createMockLogger(): Logger {
 function createMockOrgChart(): OrgChart {
   return {
     addTeam: vi.fn(),
+    updateTeam: vi.fn(),
     removeTeam: vi.fn(),
     getTeam: vi.fn(),
     getTeamBySlug: vi.fn(),
@@ -83,6 +84,7 @@ function createMockOrgChart(): OrgChart {
     getChildren: vi.fn().mockReturnValue([]),
     getParent: vi.fn(),
     addAgent: vi.fn(),
+    updateAgent: vi.fn(),
     removeAgent: vi.fn(),
     getAgent: vi.fn(),
     getAgentsByTeam: vi.fn().mockReturnValue([]),
@@ -97,6 +99,8 @@ function createMockWSHub(): WSHub {
     send: vi.fn(),
     broadcast: vi.fn(),
     isConnected: vi.fn().mockReturnValue(true),
+    setReady: vi.fn(),
+    isReady: vi.fn().mockReturnValue(true),
     getConnectedTeams: vi.fn().mockReturnValue([]),
     close: vi.fn().mockResolvedValue(undefined),
     handleUpgrade: vi.fn(),
@@ -159,6 +163,7 @@ function createMockHealthMonitor(): HealthMonitor {
 function createMockLogStore(): LogStore {
   return {
     create: vi.fn().mockResolvedValue(undefined),
+    createWithIds: vi.fn().mockResolvedValue([1]),
     query: vi.fn().mockResolvedValue([]),
     deleteBefore: vi.fn().mockResolvedValue(0),
     deleteByLevelBefore: vi.fn().mockResolvedValue(0),
@@ -185,10 +190,12 @@ function createMockMemoryStore(): MemoryStore {
 
 describe('Layer 8: Orchestrator Integration', () => {
   let logger: Logger;
+  let logStore: LogStore;
   let eventBus: EventBusImpl;
 
   beforeEach(() => {
     logger = createMockLogger();
+    logStore = createMockLogStore();
     eventBus = new EventBusImpl();
   });
 
@@ -437,6 +444,7 @@ describe('Layer 8: Orchestrator Integration', () => {
       dispatcher = new ToolCallDispatcher({
         orgChart,
         mcpRegistry,
+        logStore,
         toolCallStore,
         logger,
         handlers,
@@ -521,6 +529,7 @@ describe('Layer 8: Orchestrator Integration', () => {
       dispatcher = new ToolCallDispatcher({
         orgChart,
         mcpRegistry,
+        logStore,
         toolCallStore,
         logger,
         handlers,
@@ -612,6 +621,7 @@ describe('Layer 8: Orchestrator Integration', () => {
       dispatcher = new ToolCallDispatcher({
         orgChart,
         mcpRegistry,
+        logStore,
         toolCallStore,
         logger,
         handlers,
@@ -636,6 +646,7 @@ describe('Layer 8: Orchestrator Integration', () => {
       dispatcher = new ToolCallDispatcher({
         orgChart,
         mcpRegistry,
+        logStore,
         toolCallStore,
         logger,
         handlers,
@@ -660,6 +671,7 @@ describe('Layer 8: Orchestrator Integration', () => {
       dispatcher = new ToolCallDispatcher({
         orgChart,
         mcpRegistry,
+        logStore,
         toolCallStore,
         logger,
         handlers,
@@ -1723,6 +1735,7 @@ describe('Layer 8: Orchestrator Integration', () => {
       const toolDispatcher = new ToolCallDispatcher({
         orgChart,
         mcpRegistry,
+        logStore,
         toolCallStore,
         logger,
         handlers,

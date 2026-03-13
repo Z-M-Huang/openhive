@@ -82,6 +82,17 @@ export class OrgChartImpl implements OrgChart {
     this.leadToTeam.set(team.leaderAid, team.tid);
   }
 
+  updateTeam(team: OrgChartTeam): void {
+    const existing = this.teamsByTid.get(team.tid);
+    if (!existing) {
+      throw new NotFoundError(`Team '${team.tid}' not found for update`);
+    }
+
+    // Update the team data
+    this.teamsByTid.set(team.tid, team);
+    this.teamsBySlug.set(team.slug, team);
+  }
+
   removeTeam(tid: string): void {
     const team = this.teamsByTid.get(tid);
     if (!team) {
@@ -180,6 +191,42 @@ export class OrgChartImpl implements OrgChart {
       const ledTeam = this.teamsBySlug.get(agent.leadsTeam);
       if (ledTeam) {
         this.leadToTeam.set(agent.aid, ledTeam.tid);
+      }
+    }
+  }
+
+  updateAgent(agent: OrgChartAgent): void {
+    const existing = this.agentsByAid.get(agent.aid);
+    if (!existing) {
+      throw new NotFoundError(`Agent '${agent.aid}' not found for update`);
+    }
+
+    // If team changed, update team membership
+    if (existing.teamSlug !== agent.teamSlug) {
+      const oldTeamAgents = this.agentsByTeam.get(existing.teamSlug);
+      if (oldTeamAgents) {
+        oldTeamAgents.delete(agent.aid);
+      }
+
+      let newTeamAgents = this.agentsByTeam.get(agent.teamSlug);
+      if (!newTeamAgents) {
+        newTeamAgents = new Set();
+        this.agentsByTeam.set(agent.teamSlug, newTeamAgents);
+      }
+      newTeamAgents.add(agent.aid);
+    }
+
+    // Update the agent
+    this.agentsByAid.set(agent.aid, agent);
+
+    // Update lead mapping if changed
+    if (agent.leadsTeam !== existing.leadsTeam) {
+      this.leadToTeam.delete(agent.aid);
+      if (agent.leadsTeam) {
+        const ledTeam = this.teamsBySlug.get(agent.leadsTeam);
+        if (ledTeam) {
+          this.leadToTeam.set(agent.aid, ledTeam.tid);
+        }
       }
     }
   }

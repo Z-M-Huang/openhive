@@ -248,6 +248,8 @@ export interface MessageStore {
 /** Structured log persistence. create() accepts an array for batch insert. */
 export interface LogStore {
   create(entries: LogEntry[]): Promise<void>;
+  /** Insert log entries and return their IDs. Non-breaking extension for FK relationships. */
+  createWithIds(entries: LogEntry[]): Promise<number[]>;
   query(opts: LogQueryOpts): Promise<LogEntry[]>;
   deleteBefore(before: Date): Promise<number>;
   deleteByLevelBefore(level: number, before: Date): Promise<number>;
@@ -379,6 +381,10 @@ export interface WSHub {
   send(tid: string, message: WSMessage): void;
   broadcast(message: WSMessage): void;
   isConnected(tid: string): boolean;
+  /** Mark a team as having completed the ready handshake. */
+  setReady(tid: string): void;
+  /** Check if a team has completed the ready handshake. */
+  isReady(tid: string): boolean;
   getConnectedTeams(): string[];
   close(): Promise<void>;
 }
@@ -423,6 +429,7 @@ export interface EventBus {
 /** In-memory org chart tracking all agents and teams. */
 export interface OrgChart {
   addTeam(team: OrgChartTeam): void;
+  updateTeam(team: OrgChartTeam): void;
   removeTeam(tid: string): void;
   getTeam(tid: string): OrgChartTeam | undefined;
   getTeamBySlug(slug: string): OrgChartTeam | undefined;
@@ -431,6 +438,7 @@ export interface OrgChart {
   getParent(tid: string): OrgChartTeam | undefined;
 
   addAgent(agent: OrgChartAgent): void;
+  updateAgent(agent: OrgChartAgent): void;
   removeAgent(aid: string): void;
   getAgent(aid: string): OrgChartAgent | undefined;
   getAgentsByTeam(teamSlug: string): OrgChartAgent[];

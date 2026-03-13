@@ -23,6 +23,7 @@ import type {
   MCPRegistry,
   AgentInitConfig,
   BusEvent,
+  ResolvedProvider,
 } from '../domain/interfaces.js';
 import type { Task } from '../domain/domain.js';
 import type { TaskStatus, EscalationReason, AgentStatus } from '../domain/enums.js';
@@ -159,11 +160,16 @@ export class OrchestratorImpl implements Orchestrator {
       this.initResolve = resolve;
     });
 
-    // Send ready message
+    // Send ready message with protocol-compliant payload
     if (this.deps.wsConnection) {
+      // Agent count is 0 initially; will be updated when agents are added
       this.deps.wsConnection.send({
         type: 'ready',
-        data: { tid: this.deps.wsConnection.tid },
+        data: {
+          team_id: this.deps.wsConnection.tid,
+          agent_count: 0,
+          protocol_version: '1.0.0',
+        },
       });
     }
 
@@ -215,6 +221,7 @@ export class OrchestratorImpl implements Orchestrator {
     this.toolCallDispatcher = new ToolCallDispatcher({
       orgChart,
       mcpRegistry,
+      logStore: stores.logStore,
       toolCallStore: stores.toolCallStore,
       logger: this.logger,
       handlers,
@@ -542,9 +549,100 @@ export class OrchestratorImpl implements Orchestrator {
       case 'shutdown':
         this.handleShutdown();
         break;
-      case 'escalation_response':
-        // Handled by MCPBridge
+      case 'agent_added': {
+        // Notification that a new agent was added to this team
+        // Root sends this after create_agent tool; non-root should start the agent
+        const { agent } = message.data as {
+          agent: { aid: string; name: string; description: string; model: string; role?: string; tools?: string[]; provider?: unknown; systemPrompt?: string };
+        };
+        this.logger.info('Agent added notification', { aid: agent.aid, name: agent.name });
+        // Add to local org chart
+        const team = this.deps.orgChart?.listTeams()[0];
+        if (team) {
+          this.deps.orgChart?.addAgent({
+            aid: agent.aid,
+            name: agent.name,
+            teamSlug: team.slug,
+            role: (agent.role as 'main_assistant' | 'team_lead' | 'member') || 'member',
+            status: 'idle',
+          });
+        }
+        // Start the agent in this container
+        if (this.deps.agentExecutor) {
+          const agentConfig: AgentInitConfig = {
+            aid: agent.aid,
+            name: agent.name,
+            description: agent.description,
+            role: agent.role || 'member',
+            model: agent.model,
+            tools: agent.tools || [],
+            provider: agent.provider as ResolvedProvider || { type: 'anthropic_direct', models: {} },
+            systemPrompt: agent.systemPrompt,
+          };
+          this.deps.agentExecutor.start(agentConfig, '/app/workspace')
+            .then(() => {
+              this.logger.info('agent.started from agent_added', { aid: agent.aid });
+            })
+            .catch((err: Error) => {
+              this.logger.error('agent.start.failed from agent_added', {
+                aid: agent.aid,
+                error: err.message,
+              });
+            });
+        }
         break;
+      }
+      case 'escalation_response': {
+        // Response to an escalation from this container
+        const { correlation_id, task_id, agent_aid, resolution, context } = message.data as {
+          correlation_id: string;
+          task_id: string;
+          agent_aid: string;
+          resolution: string;
+          context: Record<string, unknown>;
+        };
+        this.logger.info('Received escalation_response', { correlation_id, task_id, agent_aid, resolution });
+        // Publish to event bus for MCPBridge to handle
+        this.deps.eventBus?.publish({
+          type: 'escalation.response',
+          data: { correlation_id, task_id, agent_aid, resolution, context },
+          timestamp: Date.now(),
+        });
+        break;
+      }
+      case 'task_cancel': {
+        // Cancel a running task
+        const { task_id, cascade, reason } = message.data as {
+          task_id: string;
+          cascade: boolean;
+          reason?: string;
+        };
+        this.logger.info('Received task_cancel', { task_id, cascade, reason });
+        // Publish to event bus for handling
+        this.deps.eventBus?.publish({
+          type: 'task.cancel',
+          data: { task_id, cascade, reason },
+          timestamp: Date.now(),
+        });
+        break;
+      }
+      case 'tool_result': {
+        // Result of a tool call made by this container
+        const { call_id, result, error_code, error_message } = message.data as {
+          call_id: string;
+          result?: unknown;
+          error_code?: string;
+          error_message?: string;
+        };
+        this.logger.debug('Received tool_result', { call_id, hasResult: result !== undefined, error_code });
+        // Publish to event bus for MCPBridge to handle
+        this.deps.eventBus?.publish({
+          type: 'tool.result',
+          data: { call_id, result, error_code, error_message },
+          timestamp: Date.now(),
+        });
+        break;
+      }
       default:
         this.logger.debug('ws.message.unhandled', { type: message.type });
     }

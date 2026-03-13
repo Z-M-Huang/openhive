@@ -2,9 +2,11 @@ import type {
   OrgChart,
   MCPRegistry,
   ToolCallStore,
+  LogStore,
   Logger,
 } from '../domain/interfaces.js';
 import type { AgentRole } from '../domain/enums.js';
+import { LogLevel } from '../domain/enums.js';
 import {
   AccessDeniedError,
   NotFoundError,
@@ -44,6 +46,7 @@ const DEDUP_MAX_SIZE = 50_000;
 export class ToolCallDispatcher {
   private readonly orgChart: OrgChart;
   private readonly mcpRegistry: MCPRegistry;
+  private readonly logStore: LogStore;
   private readonly toolCallStore: ToolCallStore;
   private readonly logger: Logger;
   private readonly handlers: Map<string, (args: Record<string, unknown>, agentAid: string, teamSlug: string) => Promise<Record<string, unknown>>>;
@@ -57,12 +60,14 @@ export class ToolCallDispatcher {
   constructor(deps: {
     orgChart: OrgChart;
     mcpRegistry: MCPRegistry;
+    logStore: LogStore;
     toolCallStore: ToolCallStore;
     logger: Logger;
     handlers: Map<string, (args: Record<string, unknown>, agentAid: string, teamSlug: string) => Promise<Record<string, unknown>>>;
   }) {
     this.orgChart = deps.orgChart;
     this.mcpRegistry = deps.mcpRegistry;
+    this.logStore = deps.logStore;
     this.toolCallStore = deps.toolCallStore;
     this.logger = deps.logger;
     this.handlers = deps.handlers;
@@ -113,12 +118,32 @@ export class ToolCallDispatcher {
     // 5. Cache result
     this.cacheResult(callId, result);
 
-    // 6. Log to ToolCallStore
+    // 6. Log to ToolCallStore (two-step: log entry first, then tool call with FK)
     const durationMs = Date.now() - startTime;
     try {
+      // Create log entry first to get a valid log_entry_id
+      const logEntry = {
+        id: 0, // auto-assigned
+        level: LogLevel.Info,
+        event_type: 'tool_call',
+        component: 'tool_call_dispatcher',
+        action: toolName,
+        message: 'tool_call',
+        params: JSON.stringify(args),
+        team_slug: agent.teamSlug,
+        task_id: '',
+        agent_aid: agentAid,
+        request_id: '',
+        correlation_id: callId,
+        error: '',
+        duration_ms: durationMs,
+        created_at: Date.now(),
+      };
+      const [logEntryId] = await this.logStore.createWithIds([logEntry]);
+
       await this.toolCallStore.create({
-        id: 0,
-        log_entry_id: 0,
+        id: 0, // auto-assigned
+        log_entry_id: logEntryId,
         tool_use_id: callId,
         tool_name: toolName,
         agent_aid: agentAid,

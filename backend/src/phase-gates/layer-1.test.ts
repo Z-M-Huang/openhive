@@ -64,6 +64,7 @@ function makeMockLogStore(): LogStore & { createCalls: LogEntry[][] } {
     create: vi.fn(async (entries: LogEntry[]) => {
       createCalls.push([...entries]);
     }),
+    createWithIds: vi.fn().mockResolvedValue([1]),
     query: vi.fn().mockResolvedValue([]),
     deleteBefore: vi.fn().mockResolvedValue(0),
     deleteByLevelBefore: vi.fn().mockResolvedValue(0),

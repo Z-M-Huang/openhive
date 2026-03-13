@@ -18,7 +18,7 @@ import { RateLimitedError, AccessDeniedError } from '../domain/errors.js';
 // Mock factory functions
 function createMockOrgChart() {
   return {
-    addTeam: vi.fn(), removeTeam: vi.fn(), addAgent: vi.fn(), removeAgent: vi.fn(),
+    addTeam: vi.fn(), updateTeam: vi.fn(), removeTeam: vi.fn(), addAgent: vi.fn(), updateAgent: vi.fn(), removeAgent: vi.fn(),
     getTeam: vi.fn(), getParent: vi.fn(), getLeadOf: vi.fn(),
     getTeamBySlug: vi.fn(), getTeamByTid: vi.fn(), getAgent: vi.fn(),
     getAgentsByTeam: vi.fn(), getTeamLead: vi.fn(), getParentTeam: vi.fn(),
@@ -31,6 +31,7 @@ function createMockWSHub() {
   return {
     register: vi.fn(), unregister: vi.fn(), route: vi.fn(), send: vi.fn(),
     broadcast: vi.fn(), handleUpgrade: vi.fn(), isConnected: vi.fn(),
+    setReady: vi.fn(), isReady: vi.fn(),
     close: vi.fn(), getConnectedTeams: vi.fn(),
   };
 }
@@ -82,7 +83,9 @@ function createMockHealthMonitor() {
 
 function createMockLogStore() {
   return {
-    create: vi.fn(), batchCreate: vi.fn(), list: vi.fn(), deleteByIds: vi.fn(),
+    create: vi.fn().mockResolvedValue(undefined),
+    createWithIds: vi.fn().mockResolvedValue([1]),
+    list: vi.fn(), deleteByIds: vi.fn(),
     count: vi.fn(), getOldest: vi.fn(), deleteByLevelBefore: vi.fn(), deleteBefore: vi.fn(),
     query: vi.fn(),
   };
@@ -100,11 +103,13 @@ describe('ToolCallDispatcher', () => {
   let dispatcher: ToolCallDispatcher;
   let orgChart: ReturnType<typeof createMockOrgChart>;
   let mcpRegistry: ReturnType<typeof createMockMCPRegistry>;
+  let logStore: ReturnType<typeof createMockLogStore>;
   let toolCallStore: ReturnType<typeof createMockToolCallStore>;
 
   beforeEach(() => {
     orgChart = createMockOrgChart();
     mcpRegistry = createMockMCPRegistry();
+    logStore = createMockLogStore();
     toolCallStore = createMockToolCallStore();
 
     const handlers = new Map<string, (args: Record<string, unknown>) => Promise<Record<string, unknown>>>();
@@ -113,6 +118,7 @@ describe('ToolCallDispatcher', () => {
     dispatcher = new ToolCallDispatcher({
       orgChart,
       mcpRegistry,
+      logStore,
       toolCallStore,
       logger: createMockLogger(),
       handlers,
@@ -153,6 +159,7 @@ describe('ToolCallDispatcher', () => {
     const disp = new ToolCallDispatcher({
       orgChart,
       mcpRegistry,
+      logStore,
       toolCallStore,
       logger: createMockLogger(),
       handlers,

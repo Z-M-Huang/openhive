@@ -53,6 +53,7 @@ function makeEntry(overrides: Partial<LogEntry> = {}): LogEntry {
 function makeLogStore(): LogStore {
   return {
     create: vi.fn<(entries: LogEntry[]) => Promise<void>>().mockResolvedValue(undefined),
+    createWithIds: vi.fn().mockResolvedValue([1]),
     query: vi.fn().mockResolvedValue([]),
     deleteBefore: vi.fn().mockResolvedValue(0),
     deleteByLevelBefore: vi.fn().mockResolvedValue(0),
