@@ -124,7 +124,7 @@ describe('AgentExecutorImpl', () => {
 
       expect(spawnArgs).toBeDefined();
       expect(spawnArgs!.command).toBe('node');
-      expect(spawnArgs!.args).toEqual(['dist/agent-entry.js']);
+      expect(spawnArgs!.args).toEqual(['/app/backend/dist/agent-entry.js']);
       expect(spawnArgs!.opts.cwd).toBe('/app/workspace');
       expect(spawnArgs!.opts.stdio).toBe('pipe');
 

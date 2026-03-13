@@ -74,21 +74,23 @@ import { EventBusImpl } from './control-plane/event-bus.js';
 import { OrgChartImpl } from './control-plane/org-chart.js';
 import { WSServer } from './websocket/server.js';
 import { WSConnectionImpl } from './websocket/connection.js';
-import { WSHubImpl } from './websocket/hub.js';
 import { TokenManagerImpl } from './websocket/token-manager.js';
 import { APIServer } from './api/server.js';
 import { HealthMonitorImpl } from './containers/health.js';
 import { DiscordAdapter } from './channels/discord.js';
+import { MessageRouterImpl } from './channels/router.js';
 import { TriggerSchedulerImpl } from './triggers/scheduler.js';
 import { OrchestratorImpl } from './control-plane/orchestrator.js';
+import { RouterImpl } from './control-plane/router.js';
 import { AgentExecutorImpl } from './executor/executor.js';
 import { SessionManagerImpl } from './executor/session.js';
 import { MCPRegistryImpl } from './mcp/registry.js';
 import { ContainerRuntimeImpl } from './containers/runtime.js';
 import { ContainerManagerImpl } from './containers/manager.js';
 import { ContainerProvisionerImpl } from './containers/provisioner.js';
-import { LogLevel } from './domain/enums.js';
-import type { Logger, OrgChartTeam, OrgChartAgent, SessionStore } from './domain/interfaces.js';
+import { LogLevel, ChannelType } from './domain/enums.js';
+import type { Logger, OrgChartTeam, OrgChartAgent, SessionStore, MCPServerConfig } from './domain/interfaces.js';
+import { resolveSecretsTemplatesInObject } from './mcp/tools/index.js';
 
 // ---------------------------------------------------------------------------
 // Global State (for shutdown handling)
@@ -104,6 +106,7 @@ interface ShutdownState {
   apiServer: APIServer | null;
   healthMonitor: HealthMonitorImpl | null;
   discordAdapter: DiscordAdapter | null;
+  messageRouter: MessageRouterImpl | null;
   triggerScheduler: TriggerSchedulerImpl | null;
   orchestrator: OrchestratorImpl | null;
   tokenManager: TokenManagerImpl | null;
@@ -120,6 +123,7 @@ const shutdownState: ShutdownState = {
   apiServer: null,
   healthMonitor: null,
   discordAdapter: null,
+  messageRouter: null,
   triggerScheduler: null,
   orchestrator: null,
   tokenManager: null,
@@ -312,7 +316,7 @@ async function initializeRootMode(
   void messageStore;
   void decisionStore;
   void integrationStore;
-  void credentialStore;
+  // credentialStore is used in onConnect for secrets resolution
 
   // Add SQLite sink to logger for persistence
   const sqliteSink = new SQLiteSink(logStore);
@@ -374,25 +378,196 @@ async function initializeRootMode(
 
   logger.info('Token manager started');
 
-  // 8. Initialize WebSocket hub
-  const wsHub = new WSHubImpl();
+  // 8. Initialize WebSocket server (WSServer implements WSHub with rate limiting and write queues)
   const wsServer = new WSServer(tokenManager, {
     onMessage: (tid: string, message: { type: string; data: Record<string, unknown> }) => {
       logger.debug('WS message received', { tid, type: message.type });
-      // Forward to orchestrator for processing
-      if (message.type === 'heartbeat') {
-        const agents = message.data['agents'] as Array<{ aid: string; status: string; detail: string }>;
-        if (agents) {
-          shutdownState.healthMonitor?.recordHeartbeat(tid, agents.map(a => ({
-            aid: a.aid,
-            status: a.status as 'idle' | 'busy' | 'error' | 'starting',
-            detail: a.detail,
-          })));
+
+      switch (message.type) {
+        case 'heartbeat': {
+          const agents = message.data['agents'] as Array<{ aid: string; status: string; detail: string }>;
+          if (agents) {
+            shutdownState.healthMonitor?.recordHeartbeat(tid, agents.map(a => ({
+              aid: a.aid,
+              status: a.status as 'idle' | 'busy' | 'error' | 'starting',
+              detail: a.detail,
+            })));
+          }
+          break;
         }
+
+        case 'tool_call': {
+          // Forward tool calls from containers to orchestrator
+          const { call_id, tool_name, arguments: args, agent_aid } = message.data as {
+            call_id: string;
+            tool_name: string;
+            arguments: Record<string, unknown>;
+            agent_aid: string;
+          };
+          if (shutdownState.orchestrator) {
+            shutdownState.orchestrator.handleToolCall(agent_aid, tool_name, args, call_id).catch((err) => {
+              logger.error('tool_call handler failed', { call_id, error: String(err) });
+            });
+          }
+          break;
+        }
+
+        case 'task_result': {
+          // Forward task results to orchestrator
+          const { task_id, agent_aid, status, result, error } = message.data as {
+            task_id: string;
+            agent_aid: string;
+            status: 'completed' | 'failed';
+            result?: string;
+            error?: string;
+          };
+          const taskStatus = status === 'completed' ? 'completed' : 'failed';
+          if (shutdownState.orchestrator) {
+            shutdownState.orchestrator.handleTaskResult(task_id, agent_aid, taskStatus, result, error).catch((err) => {
+              logger.error('task_result handler failed', { task_id, error: String(err) });
+            });
+          }
+          break;
+        }
+
+        case 'escalation': {
+          // Forward escalations to orchestrator
+          const { task_id, agent_aid, reason, context } = message.data as {
+            task_id: string;
+            agent_aid: string;
+            reason: string;
+            context: Record<string, unknown>;
+          };
+          if (shutdownState.orchestrator) {
+            shutdownState.orchestrator.handleEscalation(agent_aid, task_id, reason as any, context).catch((err) => {
+              logger.error('escalation handler failed', { task_id, error: String(err) });
+            });
+          }
+          break;
+        }
+
+        case 'ready': {
+          // Container ready notification - validate protocol and update state
+          const { team_id, agent_count, protocol_version } = message.data as {
+            team_id: string;
+            agent_count: number;
+            protocol_version: string;
+          };
+
+          // Validate protocol version (major version must match)
+          // Wiki: "Root validates protocol_version -- major mismatch causes rejection"
+          const expectedMajor = '1';
+          const receivedMajor = protocol_version.split('.')[0];
+          if (receivedMajor !== expectedMajor) {
+            logger.error('Protocol version mismatch - disconnecting container', {
+              tid,
+              expected: expectedMajor,
+              received: protocol_version,
+            });
+            // Disconnect the container with protocol error (1002)
+            if (shutdownState.wsServer) {
+              shutdownState.wsServer.disconnect(tid, 1002, `Protocol version mismatch: expected ${expectedMajor}.x, got ${protocol_version}`);
+            }
+            break;
+          }
+
+          // Update health monitor to mark container as running
+          if (shutdownState.healthMonitor) {
+            shutdownState.healthMonitor.recordHeartbeat(tid, []);
+          }
+
+          logger.info('Container ready', { tid, team_id, agent_count, protocol_version });
+          break;
+        }
+
+        default:
+          logger.debug('Unhandled WS message type', { type: message.type });
       }
     },
-    onConnect: (tid: string) => {
+    onConnect: async (tid: string) => {
       logger.info('Container connected', { tid });
+
+      // Send container_init with resolved secrets templates (AC-L6-11)
+      const team = orgChart.getTeam(tid);
+      if (!team) {
+        logger.warn('Connected team not found in org chart', { tid });
+        return;
+      }
+
+      try {
+        // Load raw team.yaml content for agents and mcp_servers
+        const teamYamlPath = resolve(team.workspacePath, 'team.yaml');
+        let rawTeamConfig: Record<string, unknown> = {};
+        try {
+          const yaml = await import('yaml');
+          const fs = await import('node:fs/promises');
+          const raw = await fs.readFile(teamYamlPath, 'utf-8');
+          rawTeamConfig = yaml.parse(raw) as Record<string, unknown>;
+        } catch (yamlError) {
+          logger.warn('Failed to load team.yaml', { path: teamYamlPath, error: String(yamlError) });
+        }
+
+        // Load credentials for this team
+        const credentials = await credentialStore.listByTeam(team.slug);
+        const secrets: Record<string, string> = {};
+
+        // Decrypt credentials
+        for (const cred of credentials) {
+          try {
+            const decrypted = await keyManager.decrypt(cred.encrypted_value);
+            secrets[cred.name] = decrypted;
+          } catch (decryptError) {
+            logger.warn('Failed to decrypt credential', {
+              name: cred.name,
+              team: team.slug,
+              error: String(decryptError),
+            });
+          }
+        }
+
+        // Resolve {secrets.XXX} templates in MCP servers
+        let mcpServers: MCPServerConfig[] | undefined;
+        const rawMcpServers = rawTeamConfig['mcp_servers'];
+        if (rawMcpServers && Array.isArray(rawMcpServers)) {
+          mcpServers = rawMcpServers.map((server: Record<string, unknown>) => ({
+            name: String(server['name'] || ''),
+            command: String(server['command'] || ''),
+            args: (server['args'] as string[]) || [],
+            env: resolveSecretsTemplatesInObject(
+              (server['env'] as Record<string, string>) || {},
+              secrets
+            ),
+          }));
+        }
+
+        // Build agent configs from team config
+        const rawAgents = rawTeamConfig['agents'];
+        const agents = Array.isArray(rawAgents) ? rawAgents : [];
+
+        // Build container_init message
+        const containerInitData = {
+          protocol_version: '1.0',
+          is_main_assistant: team.slug === 'main',
+          team_config: rawTeamConfig as unknown,
+          agents: agents.map((a: Record<string, unknown>) => ({
+            aid: String(a['aid'] || ''),
+            name: String(a['name'] || ''),
+            role: String(a['role'] || 'member'),
+            model_tier: String(a['model_tier'] || 'sonnet'),
+            skills: (a['skills'] as string[]) || [],
+            system_prompt: a['system_prompt'] ? String(a['system_prompt']) : undefined,
+          })),
+          secrets,
+          mcp_servers: mcpServers,
+        };
+
+        // Send container_init via hub
+        const messageStr = JSON.stringify({ type: 'container_init', data: containerInitData });
+        wsServer.send(tid, JSON.parse(messageStr));
+        logger.info('Sent container_init to team', { tid, team_slug: team.slug, agent_count: agents.length });
+      } catch (initError) {
+        logger.error('Failed to send container_init', { tid, error: String(initError) });
+      }
     },
     onDisconnect: (tid: string) => {
       logger.info('Container disconnected', { tid });
@@ -432,9 +607,53 @@ async function initializeRootMode(
   logger.info('Container manager initialized');
 
   // 11. Initialize trigger scheduler
-  const triggerScheduler = new TriggerSchedulerImpl(eventBus, (teamSlug: string, prompt: string) => {
+  const triggerScheduler = new TriggerSchedulerImpl(eventBus, async (teamSlug: string, prompt: string) => {
     logger.info('Trigger fired', { team_slug: teamSlug, prompt });
-    // TODO: Dispatch task to team
+
+    // Get the team to find its lead
+    const team = orgChart.getTeamBySlug(teamSlug);
+    if (!team) {
+      logger.error('Trigger fired for unknown team', { team_slug: teamSlug });
+      return;
+    }
+
+    // Generate task ID
+    const taskId = `task-${Date.now().toString(16)}-${Math.random().toString(16).slice(2, 8)}`;
+
+    // Create the task
+    const task = {
+      id: taskId,
+      parent_id: '',
+      team_slug: teamSlug,
+      agent_aid: team.leaderAid,
+      title: `Triggered: ${prompt.slice(0, 50)}...`,
+      status: 'pending' as const,
+      prompt,
+      result: '',
+      error: '',
+      blocked_by: [],
+      priority: 5,
+      retry_count: 0,
+      max_retries: 3,
+      created_at: Date.now(),
+      updated_at: Date.now(),
+      completed_at: null,
+    };
+
+    try {
+      await taskStore.create(task);
+      logger.info('Trigger created task', { task_id: taskId, team_slug: teamSlug });
+
+      // Dispatch via orchestrator if available
+      if (shutdownState.orchestrator) {
+        await shutdownState.orchestrator.dispatchTask(task);
+      }
+    } catch (err) {
+      logger.error('Failed to create/dispatch trigger task', {
+        team_slug: teamSlug,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   });
   await triggerScheduler.loadTriggers();
   triggerScheduler.start();
@@ -465,16 +684,20 @@ async function initializeRootMode(
     eventBus,
     orgChart,
     wsServer,
-    wsHub,
+    wsHub: wsServer, // WSServer implements WSHub
     containerManager,
+    provisioner,
     healthMonitor,
     triggerScheduler,
     agentExecutor,
     sessionManager,
     stores: {
       taskStore,
+      messageStore,
       logStore,
       memoryStore,
+      integrationStore,
+      credentialStore,
       toolCallStore,
     },
     mcpRegistry,
@@ -512,11 +735,35 @@ async function initializeRootMode(
   if (masterConfig.channels.discord.enabled) {
     const discordToken = process.env['DISCORD_BOT_TOKEN'];
     if (discordToken) {
+      // Create the LLM-based router for Tier 2 routing
+      // Tier 2 handler dispatches to main assistant for LLM judgment
+      const llmRouter = new RouterImpl(async (msg) => {
+        // Tier 2: LLM-based routing via main assistant
+        // For now, log and return a default team (main)
+        // TODO: Implement full LLM-based routing via main assistant
+        logger.info('Tier 2 routing: no known route, defaulting to main team', {
+          chat_jid: msg.chatJid,
+          content_preview: msg.content.slice(0, 50),
+        });
+        return 'main';
+      });
+
+      // Create the message router with two-tier routing
+      const messageRouter = new MessageRouterImpl(
+        messageStore,
+        llmRouter,
+        orchestrator,
+        orgChart
+      );
+      shutdownState.messageRouter = messageRouter;
+
+      // Create and register Discord adapter
       const discordAdapter = new DiscordAdapter();
       try {
         await discordAdapter.connect();
+        messageRouter.registerChannel(ChannelType.Discord, discordAdapter);
         shutdownState.discordAdapter = discordAdapter;
-        logger.info('Discord adapter connected');
+        logger.info('Discord adapter connected and registered with message router');
       } catch (err) {
         logger.error('Failed to connect Discord adapter', {
           error: err instanceof Error ? err.message : String(err),

@@ -71,8 +71,67 @@ import {
 } from '../../domain/errors.js';
 
 // ---------------------------------------------------------------------------
+// Secrets template resolution (AC-L6-11)
+// ---------------------------------------------------------------------------
+
+const SECRETS_TEMPLATE_REGEX = /\{secrets\.([A-Za-z0-9_]+)\}/g;
+
+/**
+ * Resolves `{secrets.XXX}` template patterns in a string.
+ * Replaces each pattern with the corresponding value from the secrets object.
+ * AC-L6-11: Template resolution for container_init and MCP server env.
+ *
+ * @param value - The string containing `{secrets.XXX}` patterns
+ * @param secrets - The secrets object mapping keys to values
+ * @returns The resolved string with all patterns replaced
+ */
+export function resolveSecretsTemplate(value: string, secrets: Record<string, string>): string {
+  return value.replace(SECRETS_TEMPLATE_REGEX, (_match, key: string) => {
+    if (secrets[key] !== undefined) {
+      return secrets[key];
+    }
+    // Return original pattern if secret not found (allows graceful degradation)
+    return `{secrets.${key}}`;
+  });
+}
+
+/**
+ * Recursively resolves `{secrets.XXX}` templates in an object.
+ * Walks through all string values and replaces templates.
+ */
+export function resolveSecretsTemplatesInObject<T>(obj: T, secrets: Record<string, string>): T {
+  if (typeof obj === 'string') {
+    return resolveSecretsTemplate(obj, secrets) as T;
+  }
+  if (Array.isArray(obj)) {
+    return obj.map((item) => resolveSecretsTemplatesInObject(item, secrets)) as T;
+  }
+  if (obj && typeof obj === 'object') {
+    const result: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(obj)) {
+      result[key] = resolveSecretsTemplatesInObject(value, secrets);
+    }
+    return result as T;
+  }
+  return obj;
+}
+
+// ---------------------------------------------------------------------------
 // ToolContext — dependency injection for all handlers
 // ---------------------------------------------------------------------------
+
+/** Pending memory write for retry on reconnection (AC-L6-07). */
+export interface PendingMemoryWrite {
+  id: number;
+  agent_aid: string;
+  team_slug: string;
+  content: string;
+  memory_type: 'curated' | 'daily';
+  created_at: number;
+  deleted_at: number | null;
+  retries: number;
+  lastError: string;
+}
 
 /** Dependency bag injected into every tool handler via the factory. */
 export interface ToolContext {
@@ -100,6 +159,8 @@ export interface ToolContext {
     memory_type: 'curated' | 'daily';
     created_at: number;
   }) => Promise<void>;
+  /** Pending memory writes queue for retry on reconnection (AC-L6-07). */
+  pendingMemoryWrites?: PendingMemoryWrite[];
 }
 
 // ---------------------------------------------------------------------------
@@ -617,31 +678,50 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
       created_at: createdAt,
     };
 
-    // AC-L6-06: DUAL-WRITE - file first (source of truth), then SQLite index
-    // This ensures workspace portability and durability
+    // AC-L6-06: DUAL-WRITE - file FIRST (source of truth), then SQLite index
+    // Workspace file is the authoritative source; SQLite is just a search index.
+    // File write failure = operation failure (don't create orphaned index entries)
     if (ctx.memoryFileWriter) {
-      try {
-        await ctx.memoryFileWriter(agentAid, teamSlug, entry);
-      } catch (fileErr) {
-        // Log but continue - SQLite is still the primary query interface
-        ctx.logger.warn('Memory file write failed, continuing with SQLite only', {
-          agent_aid: agentAid,
-          memory_id: memoryId,
-          error: fileErr instanceof Error ? fileErr.message : String(fileErr),
-        });
-      }
+      await ctx.memoryFileWriter(agentAid, teamSlug, entry);
     }
 
-    // Index in SQLite for fast search/recall
-    await ctx.memoryStore.save({
-      id: memoryId,
-      agent_aid: agentAid,
-      team_slug: teamSlug,
-      content: parsed.content,
-      memory_type: parsed.memory_type,
-      created_at: createdAt,
-      deleted_at: null,
-    });
+    // AC-L6-07: Index in SQLite for fast search/recall
+    // On SQLite failure, queue for retry on reconnection
+    try {
+      await ctx.memoryStore.save({
+        id: memoryId,
+        agent_aid: agentAid,
+        team_slug: teamSlug,
+        content: parsed.content,
+        memory_type: parsed.memory_type,
+        created_at: createdAt,
+        deleted_at: null,
+      });
+    } catch (sqliteErr) {
+      // Queue for retry on reconnection (non-blocking)
+      if (ctx.pendingMemoryWrites) {
+        ctx.pendingMemoryWrites.push({
+          id: memoryId,
+          agent_aid: agentAid,
+          team_slug: teamSlug,
+          content: parsed.content,
+          memory_type: parsed.memory_type,
+          created_at: createdAt,
+          deleted_at: null,
+          retries: 0,
+          lastError: sqliteErr instanceof Error ? sqliteErr.message : String(sqliteErr),
+        });
+        ctx.logger.warn('SQLite index write failed, queued for retry', {
+          agent_aid: agentAid,
+          memory_id: memoryId,
+          queue_size: ctx.pendingMemoryWrites.length,
+          error: sqliteErr instanceof Error ? sqliteErr.message : String(sqliteErr),
+        });
+      } else {
+        // No retry queue available - re-throw
+        throw sqliteErr;
+      }
+    }
 
     return { memory_id: memoryId, status: 'saved' };
   });

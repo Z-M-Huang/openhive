@@ -577,7 +577,7 @@ describe('Layer 7: Executor', () => {
 
       expect(spawnArgs).toBeDefined();
       expect(spawnArgs!.command).toBe('node');
-      expect(spawnArgs!.args).toEqual(['dist/agent-entry.js']);
+      expect(spawnArgs!.args).toEqual(['/app/backend/dist/agent-entry.js']);
       expect(spawnArgs!.opts.cwd).toBe('/app/workspace');
 
       const env = spawnArgs!.opts.env as Record<string, string>;

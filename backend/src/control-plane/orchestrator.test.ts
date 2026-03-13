@@ -79,6 +79,34 @@ function createMockToolCallStore() {
   };
 }
 
+function createMockMessageStore() {
+  return {
+    create: vi.fn(), getByChat: vi.fn(), getLatest: vi.fn(),
+    deleteByChat: vi.fn(), deleteBefore: vi.fn(),
+  };
+}
+
+function createMockIntegrationStore() {
+  return {
+    create: vi.fn(), get: vi.fn(), update: vi.fn(), delete: vi.fn(),
+    listByTeam: vi.fn(), updateStatus: vi.fn(),
+  };
+}
+
+function createMockCredentialStore() {
+  return {
+    create: vi.fn(), get: vi.fn(), update: vi.fn(), delete: vi.fn(), listByTeam: vi.fn(),
+  };
+}
+
+function createMockProvisioner() {
+  return {
+    scaffoldWorkspace: vi.fn(), writeTeamConfig: vi.fn(),
+    writeAgentDefinition: vi.fn(), writeSettings: vi.fn(),
+    deleteWorkspace: vi.fn(), archiveWorkspace: vi.fn(),
+  };
+}
+
 function createMockHealthMonitor() {
   return {
     recordHeartbeat: vi.fn(), getHealth: vi.fn(), getAgentHealth: vi.fn(),
@@ -130,8 +158,11 @@ function createMockConfigLoader() {
 function createMockStores(): AllStores {
   return {
     taskStore: createMockTaskStore(),
+    messageStore: createMockMessageStore(),
     logStore: createMockLogStore(),
     memoryStore: createMockMemoryStore(),
+    integrationStore: createMockIntegrationStore(),
+    credentialStore: createMockCredentialStore(),
     toolCallStore: createMockToolCallStore(),
   };
 }
@@ -144,7 +175,10 @@ function createRootDeps(): OrchestratorDeps {
     orgChart: createMockOrgChart(),
     wsHub: createMockWSHub(),
     containerManager: createMockContainerManager(),
+    provisioner: createMockProvisioner(),
     healthMonitor: createMockHealthMonitor(),
+    keyManager: { unlock: vi.fn(), lock: vi.fn(), encrypt: vi.fn(), decrypt: vi.fn(), rekey: vi.fn(), isUnlocked: vi.fn().mockReturnValue(true) },
+    triggerScheduler: { loadTriggers: vi.fn(), addCronTrigger: vi.fn(), removeTrigger: vi.fn(), listTriggers: vi.fn(), start: vi.fn(), stop: vi.fn() },
     agentExecutor: createMockAgentExecutor(),
     sessionManager: createMockSessionManager(),
     stores: createMockStores(),

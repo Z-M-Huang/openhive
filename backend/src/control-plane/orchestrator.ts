@@ -6,7 +6,14 @@ import type {
   WSHub,
   WSConnection,
   TaskStore,
+  MessageStore,
+  LogStore,
+  MemoryStore,
+  IntegrationStore,
+  CredentialStore,
+  ToolCallStore,
   ContainerManager,
+  ContainerProvisioner,
   HealthMonitor,
   TriggerScheduler,
   AgentExecutor,
@@ -14,9 +21,6 @@ import type {
   ConfigLoader,
   KeyManager,
   MCPRegistry,
-  ToolCallStore,
-  LogStore,
-  MemoryStore,
   AgentInitConfig,
   BusEvent,
 } from '../domain/interfaces.js';
@@ -28,12 +32,16 @@ import { TaskDAGManager } from './task-dag-manager.js';
 import { EscalationRouter } from './escalation-router.js';
 import { ProactiveScheduler } from './proactive-scheduler.js';
 import { RetentionWorker } from './retention-worker.js';
+import { createToolHandlers, type ToolContext } from '../mcp/tools/index.js';
 
 /** All store interfaces combined for convenience. */
 export interface AllStores {
   taskStore: TaskStore;
+  messageStore: MessageStore;
   logStore: LogStore;
   memoryStore: MemoryStore;
+  integrationStore: IntegrationStore;
+  credentialStore: CredentialStore;
   toolCallStore: ToolCallStore;
 }
 
@@ -49,6 +57,7 @@ export interface OrchestratorDeps {
   wsConnection?: WSConnection; // non-root only
   wsHub?: WSHub; // root only
   containerManager?: ContainerManager; // root only
+  provisioner?: ContainerProvisioner; // root only
   healthMonitor?: HealthMonitor; // root only
   triggerScheduler?: TriggerScheduler; // root only
   router?: unknown; // root only - Router type
@@ -91,6 +100,9 @@ export class OrchestratorImpl implements Orchestrator {
 
   // Agent configs received in container_init
   private agentConfigs: AgentInitConfig[] = [];
+
+  // Stuck agent check timer (root only)
+  private stuckAgentTimer?: ReturnType<typeof setInterval>;
 
   constructor(deps: OrchestratorDeps, isRoot: boolean = true) {
     this.deps = deps;
@@ -169,14 +181,35 @@ export class OrchestratorImpl implements Orchestrator {
   }
 
   private initCollaborators(): void {
-    const { stores, mcpRegistry, orgChart, wsHub, eventBus, healthMonitor } = this.deps;
+    const { stores, mcpRegistry, orgChart, wsHub, eventBus, healthMonitor, keyManager, containerManager, provisioner, triggerScheduler } = this.deps;
 
-    if (!stores || !wsHub || !healthMonitor) {
+    if (!stores || !wsHub || !healthMonitor || !keyManager || !containerManager || !provisioner || !triggerScheduler) {
       return; // Non-root doesn't have these
     }
 
-    // Tool handlers map (populated externally or defaults)
-    const handlers = new Map<string, (args: Record<string, unknown>, agentAid: string, teamSlug: string) => Promise<Record<string, unknown>>>();
+    // Build ToolContext for createToolHandlers
+    const toolContext: ToolContext = {
+      orgChart,
+      taskStore: stores.taskStore,
+      messageStore: stores.messageStore,
+      logStore: stores.logStore,
+      memoryStore: stores.memoryStore,
+      integrationStore: stores.integrationStore,
+      credentialStore: stores.credentialStore,
+      toolCallStore: stores.toolCallStore,
+      containerManager,
+      provisioner,
+      keyManager,
+      wsHub,
+      eventBus,
+      triggerScheduler,
+      mcpRegistry,
+      healthMonitor,
+      logger: this.logger,
+    };
+
+    // Create all 22 tool handlers with proper authorization and validation
+    const handlers = createToolHandlers(toolContext);
 
     // ToolCallDispatcher
     this.toolCallDispatcher = new ToolCallDispatcher({
@@ -226,6 +259,67 @@ export class OrchestratorImpl implements Orchestrator {
         this.logger.debug('archive.write', { size: entries.length });
       },
     });
+
+    // Stuck agent detection timer (check every 30 seconds, default 30 min timeout)
+    const STUCK_CHECK_INTERVAL_MS = 30_000;
+    const STUCK_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+    this.stuckAgentTimer = setInterval(() => {
+      this.checkStuckAgents(STUCK_TIMEOUT_MS);
+    }, STUCK_CHECK_INTERVAL_MS);
+  }
+
+  /**
+   * Check for stuck agents (busy longer than timeout) and kill them.
+   * Per wiki: SIGTERM -> 5s grace -> SIGKILL -> mark task failed, escalate.
+   */
+  private async checkStuckAgents(timeoutMs: number): Promise<void> {
+    const { healthMonitor, agentExecutor, stores, orgChart, wsHub } = this.deps;
+    if (!healthMonitor || !agentExecutor || !stores) return;
+
+    const stuckAgents = healthMonitor.getStuckAgents(timeoutMs);
+    if (stuckAgents.length === 0) return;
+
+    this.logger.warn('Detected stuck agents, stopping them', {
+      count: stuckAgents.length,
+      timeout_ms: timeoutMs,
+    });
+
+    for (const aid of stuckAgents) {
+      try {
+        // Stop the agent process with grace period (SIGTERM -> 5s -> SIGKILL)
+        await agentExecutor.stop(aid, 5000);
+        this.logger.info('Stopped stuck agent', { aid });
+
+        // Find and fail any active tasks for this agent
+        const activeTasks = await stores.taskStore.listByStatus(TS.Active);
+        for (const task of activeTasks) {
+          if (task.agent_aid === aid) {
+            const updatedTask = {
+              ...task,
+              status: TS.Failed,
+              error: 'Agent timed out (stuck)',
+              updated_at: Date.now(),
+            };
+            await stores.taskStore.update(updatedTask);
+            this.logger.info('Marked task as failed due to stuck agent', {
+              task_id: task.id,
+              aid,
+            });
+
+            // Escalate to team lead
+            const team = orgChart.getTeamBySlug(task.team_slug);
+            if (team && wsHub) {
+              await this.handleEscalation(aid, task.id, 'timeout' as EscalationReason, {
+                original_error: 'Agent timed out (stuck)',
+                team_slug: task.team_slug,
+              });
+            }
+          }
+        }
+      } catch (err) {
+        this.logger.error('Failed to stop stuck agent', { aid, error: String(err) });
+      }
+    }
   }
 
   private subscribeToEvents(): void {
@@ -311,6 +405,12 @@ export class OrchestratorImpl implements Orchestrator {
    */
   async stop(): Promise<void> {
     this.logger.info('Orchestrator stopping', { is_root: this.isRoot });
+
+    // Stop stuck agent timer
+    if (this.stuckAgentTimer) {
+      clearInterval(this.stuckAgentTimer);
+      this.stuckAgentTimer = undefined;
+    }
 
     // Stop ProactiveScheduler
     this.proactiveScheduler?.stop();

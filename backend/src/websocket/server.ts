@@ -16,9 +16,10 @@ import type { Duplex } from 'node:stream';
 import { URL } from 'node:url';
 import { z } from 'zod';
 import { WebSocketServer, type WebSocket } from 'ws';
-import type { WSHub, WSMessage, TokenManager } from '../domain/interfaces.js';
-import { NotFoundError, ValidationError } from '../domain/errors.js';
+import type { WSHub, WSMessage, WSConnection, TokenManager } from '../domain/interfaces.js';
+import { ValidationError } from '../domain/errors.js';
 import { parseMessage } from './protocol.js';
+import { WSHubImpl } from './hub.js';
 
 // ---------------------------------------------------------------------------
 // Per-message-type Zod schemas (RISK-27 mitigation)
@@ -224,6 +225,70 @@ export function validateMessagePayload(message: WSMessage): void {
 }
 
 // ---------------------------------------------------------------------------
+// WebSocket Connection Adapter
+// ---------------------------------------------------------------------------
+
+/**
+ * Adapter that wraps a raw ws.WebSocket to implement the WSConnection interface.
+ *
+ * This allows WSHubImpl to work with WebSocket connections from the server
+ * while providing the rate limiting and write queue features.
+ */
+class WebSocketConnectionAdapter implements WSConnection {
+  readonly tid: string;
+  private readonly _ws: WebSocket;
+  private _lastPong: number = Date.now();
+
+  constructor(tid: string, ws: WebSocket) {
+    this.tid = tid;
+    this._ws = ws;
+
+    // Track pong responses for isAlive()
+    ws.on('pong', () => {
+      this._lastPong = Date.now();
+    });
+  }
+
+  send(message: WSMessage): void {
+    if (this._ws.readyState === 1) {
+      this._ws.send(JSON.stringify({ type: message.type, data: message.data }));
+    }
+  }
+
+  close(code?: number, reason?: string): void {
+    if (this._ws.readyState === 1) {
+      this._ws.close(code ?? 1000, reason ?? '');
+    }
+  }
+
+  onMessage(handler: (message: WSMessage) => void): void {
+    this._ws.on('message', (data: Buffer | ArrayBuffer | Buffer[]) => {
+      try {
+        const raw = data.toString();
+        const parsed = parseMessage(raw);
+        const msg: WSMessage = { type: parsed.type, data: parsed.data as unknown as Record<string, unknown> };
+        handler(msg);
+      } catch {
+        // Malformed message — close with policy violation
+        this._ws.close(1008, 'Invalid message');
+      }
+    });
+  }
+
+  onClose(handler: (code: number, reason: string) => void): void {
+    this._ws.on('close', (code: number, reason: Buffer) => {
+      handler(code, reason.toString());
+    });
+  }
+
+  isAlive(): boolean {
+    // Consider alive if we've received a pong within last 60 seconds
+    // and the socket is in OPEN state
+    return this._ws.readyState === 1 && (Date.now() - this._lastPong) < 60000;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // WSServer callbacks
 // ---------------------------------------------------------------------------
 
@@ -246,17 +311,32 @@ export interface WSServerCallbacks {
  * the one-time token from the query string during the upgrade handshake
  * before accepting the connection.
  *
+ * Internally uses WSHubImpl for:
+ * - Per-connection rate limiting (100 msgs/sec)
+ * - Write queue management (256 msg capacity)
+ * - INV-02/03 routing validation
+ *
  * Upgrade path: /ws/container?token=<one-time-token>&team=<team-id>
  */
 export class WSServer implements WSHub {
   private readonly _tokenManager: TokenManager;
   private readonly _callbacks: WSServerCallbacks;
-  private readonly _connections: Map<string, WebSocket> = new Map();
+  private readonly _hub: WSHubImpl;
+  private readonly _adapters: Map<string, WebSocketConnectionAdapter> = new Map();
   private _wss: WebSocketServer | undefined;
 
   constructor(tokenManager: TokenManager, callbacks: WSServerCallbacks) {
     this._tokenManager = tokenManager;
     this._callbacks = callbacks;
+    this._hub = new WSHubImpl();
+  }
+
+  /**
+   * Returns the underlying WSHubImpl for direct access to routing features.
+   * Used when root needs to route messages between containers.
+   */
+  get hub(): WSHubImpl {
+    return this._hub;
   }
 
   /**
@@ -275,10 +355,10 @@ export class WSServer implements WSHub {
    * with a 1001 (Going Away) code and drains pending messages.
    */
   async close(): Promise<void> {
-    for (const [tid, ws] of this._connections) {
-      ws.close(1001, 'Server shutting down');
-      this._connections.delete(tid);
-    }
+    // Close the hub (drains write queues and closes all connections)
+    await this._hub.close();
+    this._adapters.clear();
+
     if (this._wss) {
       await new Promise<void>((resolve, reject) => {
         this._wss!.close((err) => {
@@ -343,44 +423,65 @@ export class WSServer implements WSHub {
 
   /**
    * Sends a typed message to a specific connected container identified by TID.
-   * Serializes the message to wire format before sending.
+   * Delegates to WSHubImpl which provides rate limiting and write queue management.
    *
    * @throws NotFoundError if no connection exists for the given TID.
+   * @throws RateLimitedError if the rate limit has been exceeded for this connection.
    */
   send(tid: string, message: WSMessage): void {
-    const ws = this._connections.get(tid);
-    if (!ws) {
-      throw new NotFoundError(`No connection for TID: ${tid}`);
-    }
-    ws.send(JSON.stringify({ type: message.type, data: message.data }));
+    this._hub.send(tid, message);
   }
 
   /**
    * Broadcasts a message to all connected containers.
-   * Serializes the message to wire format and sends to every active connection.
-   * Skips connections that are not in OPEN state.
+   * Delegates to WSHubImpl which enqueues messages in per-connection write queues.
    */
   broadcast(message: WSMessage): void {
-    const data = JSON.stringify({ type: message.type, data: message.data });
-    for (const [, ws] of this._connections) {
-      if (ws.readyState === 1) {
-        ws.send(data);
-      }
-    }
+    this._hub.broadcast(message);
   }
 
   /**
    * Checks whether a container with the given TID has an active WebSocket connection.
    */
   isConnected(tid: string): boolean {
-    return this._connections.has(tid);
+    return this._hub.isConnected(tid);
   }
 
   /**
    * Returns the TIDs of all currently connected containers.
    */
   getConnectedTeams(): string[] {
-    return Array.from(this._connections.keys());
+    return this._hub.getConnectedTeams();
+  }
+
+  /**
+   * Routes a message between containers with INV-02/03 validation.
+   * One of sourceTid or targetTid must be 'root'.
+   *
+   * @throws ValidationError if INV-02/03 is violated
+   * @throws NotFoundError if target connection not found
+   */
+  route(sourceTid: string, targetTid: string, message: WSMessage): void {
+    this._hub.route(sourceTid, targetTid, message);
+  }
+
+  /**
+   * Disconnects a specific container's WebSocket connection.
+   *
+   * Used for protocol violations or when a container needs to be forcibly
+   * disconnected (e.g., major protocol version mismatch on ready message).
+   *
+   * @param tid - The team ID of the container to disconnect.
+   * @param code - WebSocket close code (default: 1002 for protocol error).
+   * @param reason - Human-readable reason for disconnection.
+   */
+  disconnect(tid: string, code: number = 1002, reason: string = 'Protocol error'): void {
+    const adapter = this._adapters.get(tid);
+    if (adapter) {
+      adapter.close(code, reason);
+      this._hub.unregister(tid);
+      this._adapters.delete(tid);
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -388,25 +489,23 @@ export class WSServer implements WSHub {
   // -------------------------------------------------------------------------
 
   /**
-   * Registers a newly upgraded WebSocket connection, wiring up message
-   * and close handlers.
+   * Registers a newly upgraded WebSocket connection with the hub.
+   * Creates a WSConnection adapter and wires up message/close handlers.
    */
   private _registerConnection(tid: string, ws: WebSocket): void {
-    // Close existing connection for this TID if any
-    const existing = this._connections.get(tid);
-    if (existing) {
-      existing.close(1001, 'Replaced by new connection');
-    }
+    // Create adapter for this connection
+    const adapter = new WebSocketConnectionAdapter(tid, ws);
 
-    this._connections.set(tid, ws);
+    // Register with the hub (handles rate limiting, write queue, etc.)
+    this._hub.register(tid, adapter);
+    this._adapters.set(tid, adapter);
+
+    // Notify callback of new connection
     this._callbacks.onConnect(tid);
 
-    ws.on('message', (data: Buffer | ArrayBuffer | Buffer[]) => {
+    // Wire up message handling (validation + callback)
+    adapter.onMessage((msg) => {
       try {
-        const raw = data.toString();
-        const parsed = parseMessage(raw);
-        // Convert protocol discriminated union to interface WSMessage
-        const msg: WSMessage = { type: parsed.type, data: parsed.data as unknown as Record<string, unknown> };
         validateMessagePayload(msg);
         this._callbacks.onMessage(tid, msg);
       } catch {
@@ -415,8 +514,10 @@ export class WSServer implements WSHub {
       }
     });
 
-    ws.on('close', () => {
-      this._connections.delete(tid);
+    // Wire up disconnect handling
+    adapter.onClose(() => {
+      this._hub.unregister(tid);
+      this._adapters.delete(tid);
       this._callbacks.onDisconnect(tid);
     });
   }

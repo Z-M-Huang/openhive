@@ -42,6 +42,7 @@ import type {
   MessageStore,
   Router,
   Orchestrator,
+  OrgChart,
 } from '../domain/interfaces.js';
 import type { ChannelType } from '../domain/enums.js';
 import type { Message } from '../domain/domain.js';
@@ -63,11 +64,13 @@ export class MessageRouterImpl implements MessageRouter {
    * @param messageStore - Store for persisting inbound messages
    * @param router - Orchestrator-level router for LLM fallback (Tier 2)
    * @param orchestrator - Orchestrator for dispatching messages to teams (optional for testing)
+   * @param orgChart - Org chart for resolving team leads (optional for testing)
    */
   constructor(
     private readonly messageStore: MessageStore,
     private readonly router: Router,
-    private readonly orchestrator?: Orchestrator
+    private readonly orchestrator?: Orchestrator,
+    private readonly orgChart?: OrgChart
   ) {}
 
   /**
@@ -205,13 +208,21 @@ export class MessageRouterImpl implements MessageRouter {
    */
   private async dispatchToTeam(msg: InboundMessage, teamSlug: string): Promise<void> {
     if (this.orchestrator) {
+      // Resolve the team lead's agent_aid
+      let leadAid = '';
+      if (this.orgChart) {
+        const team = this.orgChart.getTeamBySlug(teamSlug);
+        if (team) {
+          leadAid = team.leaderAid;
+        }
+      }
+
       // Create a task for the team's lead agent
-      // The orchestrator will handle finding and dispatching to the lead
       await this.orchestrator.dispatchTask({
         id: `msg-${msg.id}-${Date.now()}`,
         parent_id: '',
         team_slug: teamSlug,
-        agent_aid: '', // Orchestrator will resolve to lead
+        agent_aid: leadAid,
         title: `Process message from ${msg.chatJid}`,
         status: 'pending',
         prompt: msg.content,

@@ -84,7 +84,9 @@ export class AgentExecutorImpl implements AgentExecutor {
       delete env['CLAUDE_CODE_OAUTH_TOKEN'];
     }
 
-    const child = spawn('node', ['dist/agent-entry.js'], {
+    // Spawn the agent entry point from the container's built output
+    // The agent-entry.js is compiled from backend/src/agent-entry.ts
+    const child = spawn('node', ['/app/backend/dist/agent-entry.js'], {
       cwd: workspacePath,
       env,
       stdio: 'pipe',
