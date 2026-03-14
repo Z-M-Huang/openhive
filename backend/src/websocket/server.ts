@@ -113,6 +113,13 @@ const taskCancelSchema = z.object({
   reason: z.string().optional(),
 });
 
+const agentMessageSchema = z.object({
+  correlation_id: z.string(),
+  source_aid: z.string(),
+  target_aid: z.string(),
+  content: z.string().max(100000),
+});
+
 // Container-to-Root schemas
 const readySchema = z.object({
   team_id: z.string(),
@@ -196,6 +203,7 @@ const MESSAGE_SCHEMAS: Record<string, z.ZodType<unknown>> = {
   agent_added: agentAddedSchema,
   escalation_response: escalationResponseSchema,
   task_cancel: taskCancelSchema,
+  agent_message: agentMessageSchema,
   ready: readySchema,
   heartbeat: heartbeatSchema,
   task_result: taskResultMsgSchema,

@@ -24,6 +24,8 @@ import { EscalationRouter } from '../control-plane/escalation-router.js';
 import { ProactiveScheduler } from '../control-plane/proactive-scheduler.js';
 import { RetentionWorker } from '../control-plane/retention-worker.js';
 import { EventBusImpl } from '../control-plane/event-bus.js';
+import { OrchestratorImpl } from '../control-plane/orchestrator.js';
+import type { OrchestratorDeps } from '../control-plane/orchestrator.js';
 
 import {
   TaskStatus,
@@ -33,11 +35,14 @@ import {
   ChannelType,
 } from '../domain/enums.js';
 import {
+  DomainError,
   RateLimitedError,
   AccessDeniedError,
   NotFoundError,
   ValidationError,
+  mapDomainErrorToWSError,
 } from '../domain/errors.js';
+import { WSErrorCode } from '../domain/enums.js';
 import type {
   InboundMessage,
   OrgChart,
@@ -52,6 +57,9 @@ import type {
   LogStore,
   MemoryStore,
   BusEvent,
+  ContainerManager,
+  AgentExecutor,
+  ConfigLoader,
 } from '../domain/interfaces.js';
 import type { Task } from '../domain/domain.js';
 
@@ -770,6 +778,72 @@ describe('Layer 8: Orchestrator Integration', () => {
       );
     });
 
+    it('AC05: task_dispatch wire format has blocked_by (not parent_task_id)', async () => {
+      // Verifies the exact task_dispatch data payload shape per the wire protocol spec.
+      // The field must be `blocked_by: []`, never `parent_task_id`.
+      const task: Task = {
+        id: 'task-wire-fmt',
+        parent_id: '',
+        team_slug: 'team-a',
+        agent_aid: 'aid-worker',
+        title: 'Wire format test',
+        status: TaskStatus.Pending,
+        prompt: 'Test wire format',
+        result: '',
+        error: '',
+        blocked_by: [],
+        priority: 0,
+        retry_count: 0,
+        max_retries: 3,
+        created_at: Date.now(),
+        updated_at: Date.now(),
+        completed_at: null,
+      };
+
+      vi.mocked(taskStore.validateDependencies).mockResolvedValue(undefined);
+      vi.mocked(taskStore.getBlockedBy).mockResolvedValue([]);
+      vi.mocked(orgChart.getAgent).mockReturnValue({
+        aid: 'aid-worker',
+        teamSlug: 'team-a',
+        name: 'Worker',
+        role: AgentRole.Member,
+        status: AgentStatus.Idle,
+      } as OrgChartAgent);
+      vi.mocked(orgChart.getTeamBySlug).mockReturnValue({
+        tid: 'tid-a',
+        slug: 'team-a',
+        leaderAid: 'aid-lead',
+        parentTid: '',
+        depth: 0,
+        containerId: 'container-1',
+        health: 'running' as never,
+        agentAids: ['aid-worker'],
+        workspacePath: '/workspace/team-a',
+      } as OrgChartTeam);
+
+      await dagManager.dispatchTask(task);
+
+      // Verify exact data payload shape: must use blocked_by, not parent_task_id
+      expect(wsHub.send).toHaveBeenCalledWith(
+        'tid-a',
+        {
+          type: 'task_dispatch',
+          data: {
+            task_id: 'task-wire-fmt',
+            agent_aid: 'aid-worker',
+            prompt: 'Test wire format',
+            blocked_by: [],
+          },
+        },
+      );
+      // Verify parent_task_id is NOT present in the payload
+      const sentPayload = vi.mocked(wsHub.send).mock.calls[0][1] as {
+        type: string;
+        data: Record<string, unknown>;
+      };
+      expect('parent_task_id' in sentPayload.data).toBe(false);
+    });
+
     it('defers dispatch when blocked', async () => {
       const task: Task = {
         id: 'task-2',
@@ -1120,15 +1194,18 @@ describe('Layer 8: Orchestrator Integration', () => {
       );
 
       expect(correlationId).toMatch(/^[0-9a-f-]{36}$/);
-      // Escalation response sent to the target lead's team
+      // Escalation response sent to the target lead's team with all 7 protocol fields
       expect(wsHub.send).toHaveBeenCalledWith(
         'tid-a',
         expect.objectContaining({
           type: 'escalation_response',
           data: expect.objectContaining({
-            source_aid: 'aid-member',
+            correlation_id: correlationId,
             task_id: 'task-1',
-            reason: 'error',
+            agent_aid: 'aid-lead',
+            source_team: 'team-a',
+            destination_team: 'team-a',
+            resolution: 'pending',
           }),
         }),
       );
@@ -1229,14 +1306,18 @@ describe('Layer 8: Orchestrator Integration', () => {
       );
 
       expect(correlationId).toMatch(/^[0-9a-f-]{36}$/);
-      // Escalation should be sent to the lead's team
+      // Escalation should be sent to the lead's team with all 7 protocol fields
       expect(wsHub.send).toHaveBeenCalledWith(
         'tid-child', // The team where the target lead (aid-lead-child) belongs
         expect.objectContaining({
           type: 'escalation_response',
           data: expect.objectContaining({
-            source_aid: 'aid-member-grandchild',
+            correlation_id: correlationId,
             task_id: 'task-1',
+            agent_aid: 'aid-lead-child',
+            source_team: 'team-grandchild',
+            destination_team: 'team-child',
+            resolution: 'pending',
           }),
         }),
       );
@@ -1315,6 +1396,74 @@ describe('Layer 8: Orchestrator Integration', () => {
       await expect(
         router.handleEscalationResponse(correlationId, 'retry', {}),
       ).rejects.toThrow(ValidationError);
+    });
+
+    it('AC09/AC10: handleEscalationResponse sends all 7 fields with reversed source/destination (Sender B)', async () => {
+      // Set up member in team-a, lead is in team-lead-home.
+      // After escalation: sourceTeam='team-a', destinationTeam='team-lead-home'.
+      // On response: source and destination are swapped (supervisor -> original agent).
+      vi.mocked(orgChart.getAgent).mockImplementation((aid: string) => {
+        if (aid === 'aid-member') {
+          return { aid: 'aid-member', teamSlug: 'team-a', role: AgentRole.Member } as OrgChartAgent;
+        }
+        if (aid === 'aid-lead') {
+          return { aid: 'aid-lead', teamSlug: 'team-lead-home', role: AgentRole.TeamLead } as OrgChartAgent;
+        }
+        return undefined;
+      });
+      vi.mocked(orgChart.getTeamBySlug).mockImplementation((slug: string) => {
+        if (slug === 'team-a') {
+          return { tid: 'tid-a', slug: 'team-a', leaderAid: 'aid-lead' } as OrgChartTeam;
+        }
+        if (slug === 'team-lead-home') {
+          return { tid: 'tid-lead', slug: 'team-lead-home', leaderAid: 'aid-lead' } as OrgChartTeam;
+        }
+        return undefined;
+      });
+      vi.mocked(taskStore.get).mockResolvedValue({
+        id: 'task-esc',
+        status: TaskStatus.Active,
+      } as Task);
+      vi.mocked(taskStore.update).mockResolvedValue(undefined);
+
+      // Escalate member to lead — Sender A fires here (already tested above)
+      const correlationId = await router.handleEscalation(
+        'aid-member',
+        'task-esc',
+        'error' as never,
+        { reason: 'needs decision' },
+      );
+
+      // Reset call history to isolate Sender B assertions
+      vi.mocked(wsHub.send).mockClear();
+
+      // Transition task to Escalated for the response path
+      vi.mocked(taskStore.get).mockResolvedValue({
+        id: 'task-esc',
+        status: TaskStatus.Escalated,
+      } as Task);
+
+      // Sender B: supervisor responds, escalation_response goes back to original agent
+      await router.handleEscalationResponse(correlationId, 'retry', { guidance: 'try again' });
+
+      expect(wsHub.send).toHaveBeenCalledOnce();
+      expect(wsHub.send).toHaveBeenCalledWith(
+        'tid-a', // original member's container
+        {
+          type: 'escalation_response',
+          data: {
+            correlation_id: correlationId,
+            task_id: 'task-esc',
+            agent_aid: 'aid-member',
+            // Source/destination are REVERSED on the return trip:
+            // escalation went team-a -> team-lead-home, response goes team-lead-home -> team-a
+            source_team: 'team-lead-home',
+            destination_team: 'team-a',
+            resolution: 'retry',
+            context: { guidance: 'try again' },
+          },
+        },
+      );
     });
   });
 
@@ -1767,6 +1916,258 @@ describe('Layer 8: Orchestrator Integration', () => {
           result: 'pong',
         }),
       );
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // 8. tool_call -> tool_result response loop (AC18, AC19, AC20)
+  // -------------------------------------------------------------------------
+
+  describe('tool_call -> tool_result response', () => {
+    /**
+     * Simulates the onMessage handler's tool_call branch from index.ts.
+     *
+     * The real implementation (index.ts lines 444-453) reads:
+     *
+     *   orchestrator.handleToolCall(agent_aid, tool_name, args, call_id)
+     *     .then((result) => {
+     *       wsServer.send(tid, { type: 'tool_result', data: { call_id, result } });
+     *     })
+     *     .catch((err) => {
+     *       const isDomainError = err instanceof DomainError;
+     *       const errorCode = isDomainError ? mapDomainErrorToWSError(err) : 'INTERNAL_ERROR';
+     *       const errorMessage = isDomainError ? err.message : 'Internal error processing tool call';
+     *       wsServer.send(tid, { type: 'tool_result', data: { call_id, error_code: errorCode, error_message: errorMessage } });
+     *       logger.error('tool_call handler failed', { call_id, error: String(err) });
+     *     });
+     *
+     * This helper replicates that exact branching so tests can verify the
+     * wsServer.send calls for all three paths without booting index.ts.
+     */
+    async function simulateToolCallHandler(opts: {
+      tid: string;
+      call_id: string;
+      agent_aid: string;
+      tool_name: string;
+      args: Record<string, unknown>;
+      handleToolCall: (agentAid: string, toolName: string, args: Record<string, unknown>, callId: string) => Promise<Record<string, unknown>>;
+      wsServerSend: ReturnType<typeof vi.fn>;
+      loggerError: ReturnType<typeof vi.fn>;
+    }): Promise<void> {
+      const { tid, call_id, agent_aid, tool_name, args, handleToolCall, wsServerSend, loggerError } = opts;
+
+      await handleToolCall(agent_aid, tool_name, args, call_id).then((result) => {
+        wsServerSend(tid, { type: 'tool_result', data: { call_id, result } });
+      }).catch((err: unknown) => {
+        const isDomainError = err instanceof DomainError;
+        const errorCode = isDomainError ? mapDomainErrorToWSError(err) : 'INTERNAL_ERROR';
+        const errorMessage = isDomainError ? (err as DomainError).message : 'Internal error processing tool call';
+        wsServerSend(tid, { type: 'tool_result', data: { call_id, error_code: errorCode, error_message: errorMessage } });
+        loggerError('tool_call handler failed', { call_id, error: String(err) });
+      });
+    }
+
+    it('AC18: success path sends tool_result with result payload', async () => {
+      const wsServerSend = vi.fn();
+      const loggerError = vi.fn();
+      const resultPayload = { status: 'ok', value: 42 };
+      const handleToolCall = vi.fn().mockResolvedValue(resultPayload);
+
+      await simulateToolCallHandler({
+        tid: 'tid-container-1',
+        call_id: 'call-abc-123',
+        agent_aid: 'aid-worker-abc1',
+        tool_name: 'send_message',
+        args: { content: 'hello' },
+        handleToolCall,
+        wsServerSend,
+        loggerError,
+      });
+
+      expect(wsServerSend).toHaveBeenCalledOnce();
+      expect(wsServerSend).toHaveBeenCalledWith('tid-container-1', {
+        type: 'tool_result',
+        data: {
+          call_id: 'call-abc-123',
+          result: resultPayload,
+        },
+      });
+      // No error logging on success path
+      expect(loggerError).not.toHaveBeenCalled();
+    });
+
+    it('AC19: DomainError path uses mapDomainErrorToWSError for error_code, not class name', async () => {
+      const wsServerSend = vi.fn();
+      const loggerError = vi.fn();
+      const domainError = new NotFoundError('agent aid-missing not found');
+      const handleToolCall = vi.fn().mockRejectedValue(domainError);
+
+      await simulateToolCallHandler({
+        tid: 'tid-container-2',
+        call_id: 'call-def-456',
+        agent_aid: 'aid-worker-def4',
+        tool_name: 'get_task',
+        args: { task_id: 'task-missing' },
+        handleToolCall,
+        wsServerSend,
+        loggerError,
+      });
+
+      expect(wsServerSend).toHaveBeenCalledOnce();
+      const sentMessage = vi.mocked(wsServerSend).mock.calls[0][1] as {
+        type: string;
+        data: { call_id: string; error_code: string; error_message: string };
+      };
+
+      expect(sentMessage.type).toBe('tool_result');
+      expect(sentMessage.data.call_id).toBe('call-def-456');
+
+      // Must use WSErrorCode value ('NOT_FOUND'), not class name ('NotFoundError')
+      expect(sentMessage.data.error_code).toBe(WSErrorCode.NotFound);
+      expect(sentMessage.data.error_code).toBe('NOT_FOUND');
+      expect(sentMessage.data.error_code).not.toBe('NotFoundError');
+
+      // Error message is the domain error's own message
+      expect(sentMessage.data.error_message).toBe('agent aid-missing not found');
+
+      // Error is logged
+      expect(loggerError).toHaveBeenCalledWith(
+        'tool_call handler failed',
+        expect.objectContaining({ call_id: 'call-def-456' }),
+      );
+    });
+
+    it('AC20: unexpected error path uses INTERNAL_ERROR and sanitized message, raw error not echoed', async () => {
+      const wsServerSend = vi.fn();
+      const loggerError = vi.fn();
+      const rawError = new Error('kaboom: internal db state corrupted at offset 0xDEAD');
+      const handleToolCall = vi.fn().mockRejectedValue(rawError);
+
+      await simulateToolCallHandler({
+        tid: 'tid-container-3',
+        call_id: 'call-ghi-789',
+        agent_aid: 'aid-worker-ghi7',
+        tool_name: 'create_task',
+        args: { title: 'test' },
+        handleToolCall,
+        wsServerSend,
+        loggerError,
+      });
+
+      expect(wsServerSend).toHaveBeenCalledOnce();
+      const sentMessage = vi.mocked(wsServerSend).mock.calls[0][1] as {
+        type: string;
+        data: { call_id: string; error_code: string; error_message: string };
+      };
+
+      expect(sentMessage.type).toBe('tool_result');
+      expect(sentMessage.data.call_id).toBe('call-ghi-789');
+
+      // Must use literal 'INTERNAL_ERROR', not the raw error class name
+      expect(sentMessage.data.error_code).toBe('INTERNAL_ERROR');
+
+      // Must use sanitized message, NOT the raw err.message
+      expect(sentMessage.data.error_message).toBe('Internal error processing tool call');
+      expect(sentMessage.data.error_message).not.toContain('kaboom');
+      expect(sentMessage.data.error_message).not.toContain('0xDEAD');
+
+      // Raw error details must NOT appear anywhere in the sent message
+      const sentJson = JSON.stringify(sentMessage);
+      expect(sentJson).not.toContain('kaboom');
+      expect(sentJson).not.toContain('0xDEAD');
+
+      // Error IS logged internally (for debugging), but not echoed to client
+      expect(loggerError).toHaveBeenCalledWith(
+        'tool_call handler failed',
+        expect.objectContaining({ call_id: 'call-ghi-789' }),
+      );
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // AC17: rebuildState() must NOT send heartbeat to containers
+  // -------------------------------------------------------------------------
+
+  describe('rebuildState() heartbeat direction (AC17)', () => {
+    it('AC17: rebuildState() never calls wsHub.send with type heartbeat', async () => {
+      // Protocol: heartbeat is container-to-root only (INV-02 direction enforcement).
+      // Prior to step 20, rebuildState() sent { type: 'heartbeat', data: { request: true } }
+      // to each running container. That violates the protocol. Verify it is removed.
+      const wsHub = createMockWSHub();
+      const orgChart = createMockOrgChart();
+      const taskStore = createMockTaskStore();
+
+      const mockContainerManager: ContainerManager = {
+        spawnTeamContainer: vi.fn(),
+        stopTeamContainer: vi.fn(),
+        restartTeamContainer: vi.fn(),
+        getContainerByTeam: vi.fn(),
+        listRunningContainers: vi.fn().mockResolvedValue([
+          { id: 'container-1', name: 'team-a', tid: 'tid-a', teamSlug: 'team-a', state: 'running', health: 'running' },
+          { id: 'container-2', name: 'team-b', tid: 'tid-b', teamSlug: 'team-b', state: 'running', health: 'running' },
+        ]),
+        cleanupStoppedContainers: vi.fn().mockResolvedValue(0),
+      };
+
+      const mockAgentExecutor: AgentExecutor = {
+        start: vi.fn(),
+        stop: vi.fn(),
+        kill: vi.fn(),
+        isRunning: vi.fn().mockReturnValue(false),
+        getStatus: vi.fn().mockReturnValue(undefined),
+      };
+
+      const mockConfigLoader: ConfigLoader = {
+        loadMaster: vi.fn(),
+        saveMaster: vi.fn(),
+        getMaster: vi.fn().mockReturnValue({ limits: {}, channels: {}, assistant: {} }),
+        loadProviders: vi.fn(),
+        saveProviders: vi.fn(),
+        loadTeam: vi.fn(),
+        saveTeam: vi.fn(),
+        createTeamDir: vi.fn(),
+        deleteTeamDir: vi.fn(),
+        listTeams: vi.fn().mockResolvedValue([]),
+        watchMaster: vi.fn(),
+        watchProviders: vi.fn(),
+        watchTeam: vi.fn(),
+        stopWatching: vi.fn(),
+      };
+
+      // Set up task store so recoverTasks() finds no active tasks
+      vi.mocked(taskStore.listByStatus).mockResolvedValue([]);
+
+      const deps: OrchestratorDeps = {
+        configLoader: mockConfigLoader,
+        logger,
+        eventBus,
+        orgChart,
+        wsHub,
+        containerManager: mockContainerManager,
+        agentExecutor: mockAgentExecutor,
+        stores: {
+          taskStore,
+          // These stores are not touched by rebuildState() / recoverTasks()
+          messageStore: {} as never,
+          logStore: createMockLogStore(),
+          memoryStore: createMockMemoryStore(),
+          integrationStore: {} as never,
+          credentialStore: {} as never,
+          toolCallStore: createMockToolCallStore(),
+        },
+        mcpRegistry: createMockMCPRegistry(),
+      };
+
+      const orchestrator = new OrchestratorImpl(deps, true /* isRoot */);
+
+      await orchestrator.rebuildState();
+
+      // wsHub.send must NOT have been called with type 'heartbeat' at any point
+      const sendCalls = vi.mocked(wsHub.send).mock.calls;
+      const heartbeatCalls = sendCalls.filter(
+        ([, payload]) => (payload as { type: string }).type === 'heartbeat',
+      );
+      expect(heartbeatCalls).toHaveLength(0);
     });
   });
 });

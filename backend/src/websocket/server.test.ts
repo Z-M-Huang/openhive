@@ -476,7 +476,7 @@ describe('validateMessagePayload', () => {
     expect(() => validateMessagePayload(msg)).toThrow(ValidationError);
   });
 
-  it('accepts all 16 message types with valid payloads', () => {
+  it('accepts all 17 message types with valid payloads', () => {
     const messages: WSMessage[] = [
       {
         type: 'container_init',
@@ -511,6 +511,15 @@ describe('validateMessagePayload', () => {
         },
       },
       { type: 'task_cancel', data: { task_id: 't1', cascade: false } },
+      {
+        type: 'agent_message',
+        data: {
+          correlation_id: 'corr-1',
+          source_aid: 'aid-alpha-abc123',
+          target_aid: 'aid-beta-def456',
+          content: 'Hello from agent alpha',
+        },
+      },
       { type: 'ready', data: { team_id: 'tid-1', agent_count: 1, protocol_version: '1.0' } },
       {
         type: 'heartbeat',
@@ -552,6 +561,57 @@ describe('validateMessagePayload', () => {
     for (const msg of messages) {
       expect(() => validateMessagePayload(msg)).not.toThrow();
     }
+  });
+
+  it('accepts a valid agent_message', () => {
+    const msg: WSMessage = {
+      type: 'agent_message',
+      data: {
+        correlation_id: 'corr-abc',
+        source_aid: 'aid-src-001',
+        target_aid: 'aid-tgt-002',
+        content: 'Hello, target agent!',
+      },
+    };
+    expect(() => validateMessagePayload(msg)).not.toThrow();
+  });
+
+  it('rejects agent_message missing required fields', () => {
+    const msg: WSMessage = {
+      type: 'agent_message',
+      data: {
+        correlation_id: 'corr-abc',
+        source_aid: 'aid-src-001',
+        // target_aid and content are missing
+      },
+    };
+    expect(() => validateMessagePayload(msg)).toThrow(ValidationError);
+  });
+
+  it('rejects agent_message with content exceeding 100000 chars', () => {
+    const msg: WSMessage = {
+      type: 'agent_message',
+      data: {
+        correlation_id: 'corr-abc',
+        source_aid: 'aid-src-001',
+        target_aid: 'aid-tgt-002',
+        content: 'x'.repeat(100001),
+      },
+    };
+    expect(() => validateMessagePayload(msg)).toThrow(ValidationError);
+  });
+
+  it('accepts agent_message with content of exactly 100000 chars', () => {
+    const msg: WSMessage = {
+      type: 'agent_message',
+      data: {
+        correlation_id: 'corr-abc',
+        source_aid: 'aid-src-001',
+        target_aid: 'aid-tgt-002',
+        content: 'x'.repeat(100000),
+      },
+    };
+    expect(() => validateMessagePayload(msg)).not.toThrow();
   });
 
   it('throws for unknown message type', () => {

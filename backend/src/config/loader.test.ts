@@ -39,6 +39,16 @@ describe('ConfigLoaderImpl', () => {
       expect(config.assistant.name).toBe(defaults.assistant.name);
     });
 
+    it('AC01: default token_ttl is 5m (not 24h) to match TokenManager 300,000ms TTL', async () => {
+      const config = await loader.loadMaster();
+      expect(config.security.token_ttl).toBe('5m');
+    });
+
+    it('AC02: default docker image is openhive (not openhive:latest) to match allowedImages check', async () => {
+      const config = await loader.loadMaster();
+      expect(config.docker.image).toBe('openhive');
+    });
+
     it('three-layer resolution: defaults + YAML + env var', async () => {
       // Write YAML with partial overrides
       const yamlContent = YAML.stringify({

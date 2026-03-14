@@ -1,7 +1,7 @@
 /**
  * Tests for WebSocket protocol toWireFormat() and parseMessage() functions.
  *
- * Tests round-trip serialization/deserialization for all 16 message types
+ * Tests round-trip serialization/deserialization for all 17 message types
  * plus trust boundary validation and security tests.
  *
  * @module websocket/protocol.test
@@ -17,6 +17,7 @@ import {
   type AgentAddedMsg,
   type EscalationResponseMsg,
   type TaskCancelMsg,
+  type AgentMessageMsg,
   type ReadyMsg,
   type HeartbeatMsg,
   type TaskResultMsg,
@@ -27,6 +28,7 @@ import {
   type AgentReadyMsg,
   type OrgChartUpdateMsg,
   OrgChartAction,
+  RootToContainerType,
   toWireFormat,
   parseMessage,
 } from './protocol.js';
@@ -55,6 +57,7 @@ describe('protocol toWireFormat() and parseMessage()', () => {
       'agent_added',
       'escalation_response',
       'task_cancel',
+      'agent_message',
     ];
 
     it('round-trips container_init message', () => {
@@ -185,9 +188,65 @@ describe('protocol toWireFormat() and parseMessage()', () => {
       assertRoundTrip(message);
     });
 
+    it('round-trips agent_message message', () => {
+      const message: WSMessage = {
+        type: 'agent_message',
+        data: {
+          correlation_id: 'corr-msg-001',
+          source_aid: 'aid-sender-001',
+          target_aid: 'aid-receiver-002',
+          content: 'Hello from agent A to agent B',
+        } as AgentMessageMsg,
+      };
+      assertRoundTrip(message);
+    });
+
+    it('round-trips agent_message with max-length content boundary', () => {
+      const message: WSMessage = {
+        type: 'agent_message',
+        data: {
+          correlation_id: 'corr-msg-002',
+          source_aid: 'aid-sender-001',
+          target_aid: 'aid-receiver-002',
+          content: 'x'.repeat(100000),
+        } as AgentMessageMsg,
+      };
+      assertRoundTrip(message);
+    });
+
+    it('rejects agent_message with content exceeding 100000 chars', () => {
+      const overLimitMsg = JSON.stringify({
+        type: 'agent_message',
+        data: {
+          correlation_id: 'corr-msg-003',
+          source_aid: 'aid-sender-001',
+          target_aid: 'aid-receiver-002',
+          content: 'x'.repeat(100001),
+        },
+      });
+      expect(() => parseMessage(overLimitMsg)).toThrow(ValidationError);
+    });
+
+    it('rejects agent_message missing required fields', () => {
+      const missingFields = JSON.stringify({
+        type: 'agent_message',
+        data: {
+          correlation_id: 'corr-msg-004',
+          // source_aid missing
+          target_aid: 'aid-receiver-002',
+          content: 'Hello',
+        },
+      });
+      expect(() => parseMessage(missingFields)).toThrow(ValidationError);
+    });
+
+    it('agent_message is classified as root-to-container direction', () => {
+      expect(Object.values(RootToContainerType)).toContain('agent_message');
+    });
+
     it('all root-to-container types have round-trip tests', () => {
-      // Verify we have tests for all 7 types
-      expect(rootToContainerTypes).toHaveLength(7);
+      // Verify we have tests for all 8 types
+      expect(rootToContainerTypes).toHaveLength(8);
       expect(rootToContainerTypes).toContain('container_init');
       expect(rootToContainerTypes).toContain('task_dispatch');
       expect(rootToContainerTypes).toContain('shutdown');
@@ -195,6 +254,7 @@ describe('protocol toWireFormat() and parseMessage()', () => {
       expect(rootToContainerTypes).toContain('agent_added');
       expect(rootToContainerTypes).toContain('escalation_response');
       expect(rootToContainerTypes).toContain('task_cancel');
+      expect(rootToContainerTypes).toContain('agent_message');
     });
   });
 

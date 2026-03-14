@@ -1,9 +1,9 @@
 /**
  * WebSocket protocol types for OpenHive.
  *
- * Defines all 16 message types from WebSocket-Protocol.md:
- *   7 root-to-container: container_init, task_dispatch, shutdown, tool_result,
- *                        agent_added, escalation_response, task_cancel
+ * Defines all 17 message types from WebSocket-Protocol.md:
+ *   8 root-to-container: container_init, task_dispatch, shutdown, tool_result,
+ *                        agent_added, escalation_response, task_cancel, agent_message
  *   9 container-to-root: ready, heartbeat, task_result, escalation, log_event,
  *                        tool_call, status_update, agent_ready, org_chart_update
  *
@@ -89,6 +89,13 @@ export const EscalationResponseSchema = z.object({
   destination_team: z.string().min(1),
   resolution: z.string(),
   context: z.record(JsonValueSchema),
+});
+
+export const AgentMessageSchema = z.object({
+  correlation_id: z.string().min(1),
+  source_aid: z.string().min(1),
+  target_aid: z.string().min(1),
+  content: z.string().max(100000),
 });
 
 export const TaskCancelSchema = z.object({
@@ -180,6 +187,7 @@ const MESSAGE_SCHEMAS: Record<string, z.ZodType> = {
   tool_result: ToolResultSchema,
   agent_added: AgentAddedSchema,
   escalation_response: EscalationResponseSchema,
+  agent_message: AgentMessageSchema,
   task_cancel: TaskCancelSchema,
   ready: ReadySchema,
   heartbeat: HeartbeatSchema,
@@ -206,7 +214,7 @@ export const OrgChartAction = {
 export type OrgChartAction = (typeof OrgChartAction)[keyof typeof OrgChartAction];
 
 // ---------------------------------------------------------------------------
-// Root-to-Container message payloads (7 types)
+// Root-to-Container message payloads (8 types)
 // ---------------------------------------------------------------------------
 
 /** container_init -- sent once after WS establishment. */
@@ -257,6 +265,14 @@ export interface EscalationResponseMsg {
   destination_team: string;
   resolution: string;
   context: Record<string, JsonValue>;
+}
+
+/** agent_message -- inter-agent message routed through root. */
+export interface AgentMessageMsg {
+  correlation_id: string;
+  source_aid: string;
+  target_aid: string;
+  content: string;
 }
 
 /** task_cancel -- cancel a specific task. */
@@ -365,6 +381,7 @@ export const RootToContainerType = {
   AgentAdded: 'agent_added',
   EscalationResponse: 'escalation_response',
   TaskCancel: 'task_cancel',
+  AgentMessage: 'agent_message',
 } as const;
 
 export type RootToContainerType = (typeof RootToContainerType)[keyof typeof RootToContainerType];
@@ -394,7 +411,8 @@ export type RootToContainerMessage =
   | { type: 'tool_result'; data: ToolResultMsg }
   | { type: 'agent_added'; data: AgentAddedMsg }
   | { type: 'escalation_response'; data: EscalationResponseMsg }
-  | { type: 'task_cancel'; data: TaskCancelMsg };
+  | { type: 'task_cancel'; data: TaskCancelMsg }
+  | { type: 'agent_message'; data: AgentMessageMsg };
 
 export type ContainerToRootMessage =
   | { type: 'ready'; data: ReadyMsg }

@@ -225,6 +225,12 @@ function createMockToolContext(overrides?: Partial<ToolContext>): ToolContext {
       stop: vi.fn(),
     } satisfies HealthMonitor,
     logger: createMockLogger(),
+    limits: Object.freeze({
+      max_depth: 3,
+      max_teams: 10,
+      max_agents_per_team: 5,
+      max_concurrent_tasks: 50,
+    }),
     ...overrides,
   };
 }

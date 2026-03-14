@@ -300,7 +300,7 @@ describe('Layer 11: Integration + E2E', () => {
 
         const server = createServer();
         await new Promise<void>((resolve) => {
-          server.listen(0, () => resolve());
+          server.listen(0, '127.0.0.1', () => resolve());
         });
 
         const address = server.address() as { port: number };
@@ -308,10 +308,11 @@ describe('Layer 11: Integration + E2E', () => {
 
         await relay.start(server);
 
-        const client = new WebSocket(`ws://localhost:${port}/ws/portal`);
+        const client = new WebSocket(`ws://127.0.0.1:${port}/ws/portal`);
 
-        await new Promise<void>((resolve) => {
+        await new Promise<void>((resolve, reject) => {
           client.on('open', () => resolve());
+          client.on('error', (err) => reject(err));
         });
 
         const messages: BusEvent[] = [];
@@ -324,7 +325,7 @@ describe('Layer 11: Integration + E2E', () => {
         });
 
         const event: BusEvent = {
-          type: 'task',
+          type: 'task.completed',
           data: { taskId: 'task-123', status: 'completed' },
           timestamp: Date.now(),
         };
@@ -332,10 +333,13 @@ describe('Layer 11: Integration + E2E', () => {
 
         await sleep(100);
 
-        const taskMessages = messages.filter((m) => m.type === 'task');
+        const taskMessages = messages.filter((m) => m.type === 'task.completed');
         expect(taskMessages.length).toBeGreaterThan(0);
 
-        client.close();
+        await new Promise<void>((resolve) => {
+          client.on('close', () => resolve());
+          client.close();
+        });
         await relay.stop();
         await new Promise<void>((resolve) => {
           server.close(() => resolve());

@@ -406,6 +406,27 @@ describe('OrchestratorImpl', () => {
 
       await orchestrator.stop();
     });
+
+    it('does not send heartbeat to containers during rebuildState (AC17: direction is container-to-root only)', async () => {
+      const deps = createRootDeps();
+
+      // Simulate one running container so the loop body executes
+      vi.mocked(deps.containerManager!.listRunningContainers).mockResolvedValue([
+        { tid: 'tid-team-a', teamSlug: 'team-a', health: 'healthy' } as any,
+      ]);
+      vi.mocked(deps.wsHub!.isConnected).mockReturnValue(true);
+
+      const orchestrator = new OrchestratorImpl(deps, true);
+      await orchestrator.start();
+
+      // wsHub.send must never be called with type 'heartbeat' -- that direction is forbidden
+      const heartbeatCalls = vi.mocked(deps.wsHub!.send).mock.calls.filter(
+        (args) => (args[1] as { type: string }).type === 'heartbeat'
+      );
+      expect(heartbeatCalls).toHaveLength(0);
+
+      await orchestrator.stop();
+    });
   });
 
   describe('Dual-mode', () => {
@@ -507,6 +528,90 @@ describe('OrchestratorImpl', () => {
 
       // Verify subscriptions cleared
       expect((orchestrator as any).eventSubscriptions).toEqual([]);
+    });
+  });
+
+  describe('agent_message handling (non-root)', () => {
+    it('publishes agent.message event to EventBus with all 4 fields', async () => {
+      const deps = createNonRootDeps();
+      const orchestrator = new OrchestratorImpl(deps, false);
+
+      // Start will wait for container_init
+      const startPromise = orchestrator.start();
+
+      // Grab the onMessage callback registered during startNonRoot
+      const onMessageCallback = vi.mocked(deps.wsConnection!.onMessage).mock.calls[0][0];
+
+      // Resolve start() by sending container_init first
+      onMessageCallback({
+        type: 'container_init',
+        data: { agents: [] },
+      });
+      await startPromise;
+
+      // Now simulate an agent_message arriving from root
+      onMessageCallback({
+        type: 'agent_message',
+        data: {
+          correlation_id: 'corr-abc123',
+          source_aid: 'aid-sender-abc',
+          target_aid: 'aid-target-def',
+          content: 'Hello from another agent',
+        },
+      });
+
+      // EventBus should have received an agent.message publish
+      expect(deps.eventBus.publish).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'agent.message',
+          data: {
+            correlation_id: 'corr-abc123',
+            source_aid: 'aid-sender-abc',
+            target_aid: 'aid-target-def',
+            content: 'Hello from another agent',
+          },
+        })
+      );
+
+      // Debug log should have been emitted
+      expect(deps.logger.debug).toHaveBeenCalledWith(
+        'Received agent_message',
+        expect.objectContaining({
+          correlation_id: 'corr-abc123',
+          source_aid: 'aid-sender-abc',
+          target_aid: 'aid-target-def',
+        })
+      );
+
+      await orchestrator.stop();
+    });
+
+    it('does not throw when eventBus is absent (optional dep)', async () => {
+      const deps = createNonRootDeps();
+      // Remove eventBus to confirm optional chaining protects publish
+      deps.eventBus = undefined as any;
+
+      const orchestrator = new OrchestratorImpl(deps, false);
+      const startPromise = orchestrator.start();
+
+      const onMessageCallback = vi.mocked(deps.wsConnection!.onMessage).mock.calls[0][0];
+      onMessageCallback({ type: 'container_init', data: { agents: [] } });
+      await startPromise;
+
+      // Should not throw even with no eventBus
+      expect(() =>
+        onMessageCallback({
+          type: 'agent_message',
+          data: {
+            correlation_id: 'corr-xyz',
+            source_aid: 'aid-a',
+            target_aid: 'aid-b',
+            content: 'test',
+          },
+        })
+      ).not.toThrow();
+
+      await orchestrator.stop();
     });
   });
 

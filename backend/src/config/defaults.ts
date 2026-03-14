@@ -202,7 +202,7 @@ export function defaultMasterConfig(): MasterConfig {
       },
     },
     docker: {
-      image: 'openhive:latest',
+      image: 'openhive',
       network: 'openhive-network',
       resource_limits: {
         max_memory: '1024m',
@@ -212,7 +212,7 @@ export function defaultMasterConfig(): MasterConfig {
     },
     security: {
       encryption_key_path: 'data/master.key',
-      token_ttl: '24h',
+      token_ttl: '5m',
       allowed_origins: ['http://localhost:8080'],
     },
     limits: {

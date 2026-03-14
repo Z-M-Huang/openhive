@@ -88,9 +88,9 @@ import { MCPRegistryImpl } from './mcp/registry.js';
 import { ContainerRuntimeImpl } from './containers/runtime.js';
 import { ContainerManagerImpl } from './containers/manager.js';
 import { ContainerProvisionerImpl } from './containers/provisioner.js';
-import { LogLevel, ChannelType } from './domain/enums.js';
-import { NotFoundError } from './domain/errors.js';
-import type { Logger, OrgChartTeam, OrgChartAgent, SessionStore, MCPServerConfig, TaskStore, MessageStore, LogStore, MemoryStore, IntegrationStore, CredentialStore, ToolCallStore } from './domain/interfaces.js';
+import { LogLevel, ChannelType, ProviderType } from './domain/enums.js';
+import { DomainError, NotFoundError, mapDomainErrorToWSError } from './domain/errors.js';
+import type { Logger, OrgChartTeam, OrgChartAgent, SessionStore, MCPServerConfig, TaskStore, MessageStore, LogStore, MemoryStore, IntegrationStore, CredentialStore, ToolCallStore, ResolvedProvider } from './domain/interfaces.js';
 import { resolveSecretsTemplatesInObject } from './mcp/tools/index.js';
 
 // ---------------------------------------------------------------------------
@@ -284,7 +284,7 @@ async function initializeRootMode(
   configLoader: ConfigLoaderImpl,
   logger: Logger,
   masterConfig: Awaited<ReturnType<typeof configLoader.loadMaster>>,
-  _providers: Record<string, unknown>,
+  providers: Record<string, unknown>,
   listenHost: string,
   listenPort: number,
 ): Promise<void> {
@@ -389,6 +389,32 @@ async function initializeRootMode(
 
   logger.info('Token manager started');
 
+  // Helper: resolve a named provider preset from providers.yaml into a ResolvedProvider.
+  // The providers map has shape: Record<string, Provider> (Provider from domain.ts).
+  // Falls back to a safe oauth default if the preset is not found.
+  function resolveProviderPreset(presetName: string): ResolvedProvider {
+    const preset = (providers as Record<string, Record<string, unknown>>)[presetName];
+    if (!preset) {
+      // Safe default: no credentials, empty models — container will fall back to env vars
+      return { type: ProviderType.OAuth, models: {} as ResolvedProvider['models'] };
+    }
+    return {
+      type: (preset['type'] as string) === ProviderType.AnthropicDirect
+        ? ProviderType.AnthropicDirect
+        : ProviderType.OAuth,
+      ...(preset['api_key'] !== undefined ? { apiKey: String(preset['api_key']) } : {}),
+      ...(preset['base_url'] !== undefined ? { baseUrl: String(preset['base_url']) } : {}),
+      ...(preset['oauth_token'] !== undefined ? { oauthToken: String(preset['oauth_token']) } : {}),
+      models: ((preset['models'] as Record<string, string>) ?? {}) as ResolvedProvider['models'],
+    };
+  }
+
+  // Helper: resolve a model tier string to a concrete model ID using the resolved provider.
+  // Falls back to the tier string itself if not mapped (allows passthrough of explicit model IDs).
+  function resolveModel(tier: string, resolvedProvider: ResolvedProvider): string {
+    return (resolvedProvider.models as Record<string, string | undefined>)[tier] ?? tier;
+  }
+
   // 8. Initialize WebSocket server (WSServer implements WSHub with rate limiting and write queues)
   const wsServer = new WSServer(tokenManager, {
     onMessage: async (tid: string, message: { type: string; data: Record<string, unknown> }) => {
@@ -416,7 +442,13 @@ async function initializeRootMode(
             agent_aid: string;
           };
           if (shutdownState.orchestrator) {
-            shutdownState.orchestrator.handleToolCall(agent_aid, tool_name, args, call_id).catch((err) => {
+            shutdownState.orchestrator.handleToolCall(agent_aid, tool_name, args, call_id).then((result) => {
+              wsServer.send(tid, { type: 'tool_result', data: { call_id, result } });
+            }).catch((err) => {
+              const isDomainError = err instanceof DomainError;
+              const errorCode = isDomainError ? mapDomainErrorToWSError(err) : 'INTERNAL_ERROR';
+              const errorMessage = isDomainError ? err.message : 'Internal error processing tool call';
+              wsServer.send(tid, { type: 'tool_result', data: { call_id, error_code: errorCode, error_message: errorMessage } });
               logger.error('tool_call handler failed', { call_id, error: String(err) });
             });
           }
@@ -676,19 +708,27 @@ async function initializeRootMode(
           protocol_version: '1.0',
           is_main_assistant: team.slug === 'main',
           team_config: rawTeamConfig as unknown,
-          agents: agents.map((a: Record<string, unknown>) => ({
-            aid: String(a['aid'] || ''),
-            name: String(a['name'] || ''),
-            role: String(a['role'] || 'member'),
-            model_tier: String(a['model_tier'] || 'sonnet'),
-            skills: (a['skills'] as string[]) || [],
-            system_prompt: a['system_prompt'] ? String(a['system_prompt']) : undefined,
-          })),
+          agents: agents.map((a: Record<string, unknown>) => {
+            // Resolve the provider preset for this agent (fall back to 'default')
+            const resolvedProvider = resolveProviderPreset(String(a['provider'] || 'default'));
+            return {
+              aid: String(a['aid'] || ''),
+              name: String(a['name'] || ''),
+              description: String(a['description'] || ''),
+              role: String(a['role'] || 'member'),
+              model: resolveModel(String(a['model_tier'] || 'sonnet'), resolvedProvider),
+              tools: (a['tools'] as string[]) || [],
+              provider: resolvedProvider,
+              ...(a['system_prompt'] ? { systemPrompt: String(a['system_prompt']) } : {}),
+            };
+          }),
           secrets,
           mcp_servers: mcpServers,
         };
 
         // Send container_init via hub
+        // NOTE: Do NOT log containerInitData — it contains API keys in each agent's provider field.
+        // The log below intentionally omits the payload (AC16).
         const messageStr = JSON.stringify({ type: 'container_init', data: containerInitData });
         wsServer.send(tid, JSON.parse(messageStr));
         logger.info('Sent container_init to team', { tid, team_slug: team.slug, agent_count: agents.length });
@@ -829,6 +869,9 @@ async function initializeRootMode(
       toolCallStore,
     },
     mcpRegistry,
+    limits: masterConfig.limits,
+    archiveDir: masterConfig.server.log_archive.archive_dir,
+    dataDir: masterConfig.server.data_dir,
   }, true);
 
   shutdownState.stores = {

@@ -164,6 +164,13 @@ export interface ToolContext {
   }) => Promise<void>;
   /** Pending memory writes queue for retry on reconnection (AC-L6-07). */
   pendingMemoryWrites?: PendingMemoryWrite[];
+  /** Frozen configurable limits (CON-01, CON-02, CON-03). Object.freeze() applied at construction site (orchestrator.ts). */
+  limits: Readonly<{
+    max_depth: number;
+    max_teams: number;
+    max_agents_per_team: number;
+    max_concurrent_tasks: number;
+  }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -401,6 +408,33 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
     const parentTid = parentTeam?.tid ?? '';
     const parentDepth = parentTeam?.depth ?? 0;
 
+    // CON-01: Enforce max nesting depth
+    if (parentDepth + 1 > ctx.limits.max_depth) {
+      ctx.logger.audit('security.limit_breach', {
+        type: 'max_depth',
+        attempted: parentDepth + 1,
+        limit: ctx.limits.max_depth,
+        agent_aid: agentAid,
+      });
+      throw new ValidationError(
+        `Team nesting depth ${parentDepth + 1} exceeds maximum of ${ctx.limits.max_depth}`
+      );
+    }
+
+    // CON-02: Enforce max child teams per parent
+    const siblings = ctx.orgChart.getChildren(parentTid);
+    if (siblings.length >= ctx.limits.max_teams) {
+      ctx.logger.audit('security.limit_breach', {
+        type: 'max_teams',
+        current: siblings.length,
+        limit: ctx.limits.max_teams,
+        agent_aid: agentAid,
+      });
+      throw new ValidationError(
+        `Parent team already has ${siblings.length} child teams (max: ${ctx.limits.max_teams})`
+      );
+    }
+
     // Scaffold workspace
     const parentPath = parentTeam?.workspacePath ?? '/app/workspace';
     const workspacePath = await ctx.provisioner.scaffoldWorkspace(parentPath, parsed.slug);
@@ -461,12 +495,27 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
     return { slug: parsed.slug, tid, container_id: containerInfo.id, status: 'starting' };
   });
 
-  handlers.set('create_agent', async (args) => {
+  handlers.set('create_agent', async (args, agentAid) => {
     const parsed = CreateAgentSchema.parse(args);
 
     const team = ctx.orgChart.getTeamBySlug(parsed.team_slug);
     if (!team) {
       throw new NotFoundError(`Team '${parsed.team_slug}' not found`);
+    }
+
+    // CON-03: Enforce max agents per team
+    const existingAgents = ctx.orgChart.getAgentsByTeam(parsed.team_slug);
+    if (existingAgents.length >= ctx.limits.max_agents_per_team) {
+      ctx.logger.audit('security.limit_breach', {
+        type: 'max_agents_per_team',
+        current: existingAgents.length,
+        limit: ctx.limits.max_agents_per_team,
+        team_slug: parsed.team_slug,
+        agent_aid: agentAid,
+      });
+      throw new ValidationError(
+        `Team '${parsed.team_slug}' already has ${existingAgents.length} agents (max: ${ctx.limits.max_agents_per_team})`
+      );
     }
 
     const aid = generateId('aid', parsed.name);
@@ -581,7 +630,7 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
             task_id: taskId,
             agent_aid: parsed.agent_aid,
             prompt: parsed.prompt,
-            parent_task_id: parsed.parent_task_id,
+            blocked_by: parsed.blocked_by ?? [],
           },
         });
       }
@@ -623,9 +672,12 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
       throw new NotFoundError(`Target agent '${parsed.target_aid}' not found`);
     }
 
+    // Compute correlation ID once — reuse for both store and WS message
+    const correlationId = parsed.correlation_id ?? crypto.randomUUID();
+
     // Store message
     await ctx.messageStore.create({
-      id: parsed.correlation_id ?? crypto.randomUUID(),
+      id: correlationId,
       chat_jid: `${agentAid}:${parsed.target_aid}`,
       role: 'agent',
       content: parsed.content,
@@ -637,12 +689,12 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
     const targetTeam = ctx.orgChart.getTeamBySlug(targetAgent.teamSlug);
     if (targetTeam) {
       ctx.wsHub.send(targetTeam.tid, {
-        type: 'task_dispatch',
+        type: 'agent_message',
         data: {
-          target_aid: parsed.target_aid,
+          correlation_id: correlationId,
           source_aid: agentAid,
+          target_aid: parsed.target_aid,
           content: parsed.content,
-          correlation_id: parsed.correlation_id,
         },
       });
     }
@@ -847,10 +899,24 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
     return { value };
   });
 
-  handlers.set('set_credential', async (args, _agentAid, teamSlug) => {
+  handlers.set('set_credential', async (args, agentAid, teamSlug) => {
     const parsed = SetCredentialSchema.parse(args);
 
+    // AC25/AC26: Enforce scope === caller's teamSlug. An agent may not write
+    // credentials to another team's scope, even if the optional scope param is provided.
     const scope = parsed.scope ?? teamSlug;
+    if (scope !== teamSlug) {
+      ctx.logger.audit('security.scope_violation', {
+        type: 'set_credential',
+        requested_scope: scope,
+        caller_team: teamSlug,
+        agent_aid: agentAid,
+      });
+      throw new AccessDeniedError(
+        `Cannot set credential for team '${scope}' -- caller belongs to team '${teamSlug}'`
+      );
+    }
+
     const encrypted = await ctx.keyManager.encrypt(parsed.value);
 
     await ctx.credentialStore.create({

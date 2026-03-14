@@ -481,6 +481,7 @@ describe('Layer 4: WebSocket', () => {
       expect(validateDirection('container_init', 'root_to_container')).toBe(true);
       expect(validateDirection('task_dispatch', 'root_to_container')).toBe(true);
       expect(validateDirection('shutdown', 'root_to_container')).toBe(true);
+      expect(validateDirection('agent_message', 'root_to_container')).toBe(true);
     });
 
     it('should validate container-to-root message types', () => {
@@ -492,6 +493,7 @@ describe('Layer 4: WebSocket', () => {
     it('should reject root-to-container types sent in container-to-root direction', () => {
       expect(validateDirection('container_init', 'container_to_root')).toBe(false);
       expect(validateDirection('shutdown', 'container_to_root')).toBe(false);
+      expect(validateDirection('agent_message', 'container_to_root')).toBe(false);
     });
 
     it('should reject container-to-root types sent in root-to-container direction', () => {

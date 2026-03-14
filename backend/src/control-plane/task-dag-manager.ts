@@ -107,7 +107,7 @@ export class TaskDAGManager {
             task_id: task.id,
             agent_aid: task.agent_aid,
             prompt: task.prompt,
-            parent_task_id: task.parent_id,
+            blocked_by: task.blocked_by ?? [],
           },
         });
       }

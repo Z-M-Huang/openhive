@@ -425,7 +425,7 @@ describe('Layer 10: API + Portal', () => {
       await relay.start(server);
 
       // Connect a client
-      const client = new WebSocket(`ws://localhost:${port}/ws/portal`);
+      const client = new WebSocket(`ws://127.0.0.1:${port}/ws/portal`);
 
       await new Promise<void>((resolve) => {
         client.on('open', () => resolve());
@@ -441,10 +441,12 @@ describe('Layer 10: API + Portal', () => {
         }
       });
 
-      // Publish an event
+      // Publish a dotted event type that matches the prefix filter ('task.' prefix).
+      // The relay uses prefix-based matching so 'task.dispatched' passes through;
+      // a bare 'task' type would be filtered out.
       const event: BusEvent = {
-        type: 'task',
-        data: { taskId: 'task-123', status: 'completed' },
+        type: 'task.dispatched',
+        data: { taskId: 'task-123', status: 'pending' },
         timestamp: Date.now(),
       };
       eventBus.publish(event);
@@ -453,8 +455,128 @@ describe('Layer 10: API + Portal', () => {
       await new Promise<void>((resolve) => setTimeout(resolve, 100));
 
       // Check that the event was received
-      const taskMessages = messages.filter((m) => m.type === 'task');
+      const taskMessages = messages.filter((m) => m.type === 'task.dispatched');
       expect(taskMessages.length).toBeGreaterThan(0);
+
+      // Cleanup
+      client.close();
+      await relay.stop();
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
+      });
+    });
+
+    it('filters out events with unrecognized prefixes', async () => {
+      const relay = new PortalWSRelay({
+        eventBus,
+        path: '/ws/portal',
+      });
+
+      const server = createServer();
+      await new Promise<void>((resolve) => {
+        server.listen(0, '127.0.0.1', () => resolve());
+      });
+
+      const address = server.address() as { port: number };
+      const port = address.port;
+
+      await relay.start(server);
+
+      const client = new WebSocket(`ws://127.0.0.1:${port}/ws/portal`);
+      await new Promise<void>((resolve) => {
+        client.on('open', () => resolve());
+      });
+
+      // Collect messages (skip the 'connected' welcome message)
+      const messages: BusEvent[] = [];
+      client.on('message', (data) => {
+        try {
+          const parsed = JSON.parse(data.toString()) as BusEvent;
+          if (parsed.type !== 'connected') {
+            messages.push(parsed);
+          }
+        } catch {
+          // Ignore
+        }
+      });
+
+      // Publish events that should be filtered out (unrecognized prefixes)
+      eventBus.publish({ type: 'internal.debug', data: { msg: 'secret' }, timestamp: Date.now() });
+      eventBus.publish({ type: 'org-chart.update', data: {}, timestamp: Date.now() });
+      eventBus.publish({ type: 'debug', data: {}, timestamp: Date.now() });
+      eventBus.publish({ type: 'system.boot', data: {}, timestamp: Date.now() });
+
+      // Wait for propagation
+      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+
+      // None of the unrecognized events should have been received
+      expect(messages.filter((m) => m.type === 'internal.debug').length).toBe(0);
+      expect(messages.filter((m) => m.type === 'org-chart.update').length).toBe(0);
+      expect(messages.filter((m) => m.type === 'debug').length).toBe(0);
+      expect(messages.filter((m) => m.type === 'system.boot').length).toBe(0);
+      expect(messages.length).toBe(0);
+
+      // Cleanup
+      client.close();
+      await relay.stop();
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
+      });
+    });
+
+    it('forwards dotted event names matching known prefixes', async () => {
+      const relay = new PortalWSRelay({
+        eventBus,
+        path: '/ws/portal',
+      });
+
+      const server = createServer();
+      await new Promise<void>((resolve) => {
+        server.listen(0, '127.0.0.1', () => resolve());
+      });
+
+      const address = server.address() as { port: number };
+      const port = address.port;
+
+      await relay.start(server);
+
+      const client = new WebSocket(`ws://127.0.0.1:${port}/ws/portal`);
+      await new Promise<void>((resolve) => {
+        client.on('open', () => resolve());
+      });
+
+      // Collect messages (skip the 'connected' welcome message)
+      const messages: BusEvent[] = [];
+      client.on('message', (data) => {
+        try {
+          const parsed = JSON.parse(data.toString()) as BusEvent;
+          if (parsed.type !== 'connected') {
+            messages.push(parsed);
+          }
+        } catch {
+          // Ignore
+        }
+      });
+
+      // Publish events with known prefixes that should all be forwarded
+      const eventsToPublish: BusEvent[] = [
+        { type: 'container.spawned', data: { containerId: 'c-1' }, timestamp: Date.now() },
+        { type: 'health.state_changed', data: { state: 'degraded' }, timestamp: Date.now() },
+        { type: 'escalation.resolved', data: { escalationId: 'esc-1' }, timestamp: Date.now() },
+      ];
+
+      for (const event of eventsToPublish) {
+        eventBus.publish(event);
+      }
+
+      // Wait for propagation
+      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+
+      // All three events should have been received
+      expect(messages.filter((m) => m.type === 'container.spawned').length).toBe(1);
+      expect(messages.filter((m) => m.type === 'health.state_changed').length).toBe(1);
+      expect(messages.filter((m) => m.type === 'escalation.resolved').length).toBe(1);
+      expect(messages.length).toBe(3);
 
       // Cleanup
       client.close();
@@ -473,7 +595,7 @@ describe('Layer 10: API + Portal', () => {
 
       const server = createServer();
       await new Promise<void>((resolve) => {
-        server.listen(0, () => resolve());
+        server.listen(0, '127.0.0.1', () => resolve());
       });
 
       const address = server.address() as { port: number };
@@ -482,7 +604,7 @@ describe('Layer 10: API + Portal', () => {
       await relay.start(server);
 
       // Try to connect with disallowed origin
-      const client = new WebSocket(`ws://localhost:${port}/ws/portal`, {
+      const client = new WebSocket(`ws://127.0.0.1:${port}/ws/portal`, {
         headers: { Origin: 'http://evil.com' },
       });
 

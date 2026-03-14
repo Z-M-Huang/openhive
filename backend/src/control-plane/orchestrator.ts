@@ -28,6 +28,7 @@ import type {
 import type { Task } from '../domain/domain.js';
 import type { TaskStatus, EscalationReason, AgentStatus } from '../domain/enums.js';
 import { TaskStatus as TS } from '../domain/enums.js';
+import { ValidationError } from '../domain/errors.js';
 import { ToolCallDispatcher } from './tool-call-dispatcher.js';
 import { TaskDAGManager } from './task-dag-manager.js';
 import { EscalationRouter } from './escalation-router.js';
@@ -66,6 +67,17 @@ export interface OrchestratorDeps {
   sessionManager?: SessionManager; // optional - not used directly by orchestrator
   stores?: AllStores; // root only
   mcpRegistry: MCPRegistry;
+  /** Configurable limits from master config (CON-01, CON-02, CON-03). Frozen in ToolContext. */
+  limits?: {
+    max_depth: number;
+    max_teams: number;
+    max_agents_per_team: number;
+    max_concurrent_tasks: number;
+  };
+  /** Directory to write gzip-compressed NDJSON log archives (AC21). */
+  archiveDir?: string;
+  /** Base data directory used to validate archiveDir is within bounds (AC22). */
+  dataDir?: string;
 }
 
 /**
@@ -212,6 +224,12 @@ export class OrchestratorImpl implements Orchestrator {
       mcpRegistry,
       healthMonitor,
       logger: this.logger,
+      limits: Object.freeze({
+        max_depth: this.deps.limits?.max_depth ?? 3,
+        max_teams: this.deps.limits?.max_teams ?? 10,
+        max_agents_per_team: this.deps.limits?.max_agents_per_team ?? 5,
+        max_concurrent_tasks: this.deps.limits?.max_concurrent_tasks ?? 50,
+      }),
     };
 
     // Create all 22 tool handlers with proper authorization and validation
@@ -251,8 +269,100 @@ export class OrchestratorImpl implements Orchestrator {
       healthMonitor,
       logger: this.logger,
       dispatcher: async (agentAid: string, checkId: string) => {
-        this.logger.debug('proactive.dispatch', { agent_aid: agentAid, check_id: checkId });
-        // Dispatch a proactive task - will be implemented in tool handlers
+        // 1. Look up agent in orgChart
+        const agent = this.deps.orgChart.getAgent(agentAid);
+        if (!agent) {
+          this.logger.debug('proactive.skip.no_agent', { agent_aid: agentAid });
+          return;
+        }
+
+        // 2. Look up team in orgChart
+        const team = this.deps.orgChart.getTeamBySlug(agent.teamSlug);
+        if (!team) {
+          this.logger.debug('proactive.skip.no_team', { agent_aid: agentAid, team_slug: agent.teamSlug });
+          return;
+        }
+
+        // 3. Resolve PROACTIVE.md and read with error discrimination
+        let prompt = 'Perform routine health check and report status.';
+        try {
+          const fs = await import('node:fs/promises');
+          const nodePath = await import('node:path');
+          const proactivePath = nodePath.resolve(team.workspacePath, '.claude', 'skills', 'PROACTIVE.md');
+          const content = await fs.readFile(proactivePath, 'utf8');
+
+          // 4. Enforce CON-12: 500 line limit
+          const lines = content.split('\n');
+          if (lines.length > 500) {
+            this.logger.warn('proactive.truncated', {
+              agent_aid: agentAid,
+              lines: lines.length,
+              max: 500,
+            });
+            prompt = lines.slice(0, 500).join('\n') + '\n\n[Truncated: original had ' + lines.length + ' lines, CON-12 limit is 500]';
+          } else {
+            prompt = content;
+          }
+        } catch (err) {
+          const errno = (err as NodeJS.ErrnoException).code;
+          if (errno === 'ENOENT') {
+            // Expected: no PROACTIVE.md defined — use default prompt (AC24)
+            this.logger.debug('proactive.no_proactive_md', {
+              agent_aid: agentAid,
+              team_slug: agent.teamSlug,
+            });
+            // Fall through — use default prompt
+          } else {
+            // Unexpected I/O error (EACCES, EIO, etc.) — skip dispatch (AC24)
+            this.logger.warn('proactive.read_error', {
+              agent_aid: agentAid,
+              team_slug: agent.teamSlug,
+              error_code: errno,
+              error: String(err),
+            });
+            return;
+          }
+        }
+
+        // 5. Log prompt hash for audit
+        const crypto = await import('node:crypto');
+        const promptHash = crypto.createHash('sha256').update(prompt).digest('hex').slice(0, 16);
+        this.logger.info('proactive.dispatch', {
+          agent_aid: agentAid,
+          check_id: checkId,
+          prompt_hash: promptHash,
+        });
+
+        // 6. Create task record
+        const taskStores = this.deps.stores;
+        if (!taskStores) return;
+
+        const taskId = `proactive-${checkId}`;
+        const now = Date.now();
+        const task = {
+          id: taskId,
+          parent_id: '',
+          team_slug: agent.teamSlug,
+          agent_aid: agentAid,
+          title: `Proactive: ${checkId}`,
+          status: TS.Pending,
+          prompt,
+          result: '',
+          error: '',
+          blocked_by: [] as string[],
+          priority: 1,
+          retry_count: 0,
+          max_retries: 0,
+          created_at: now,
+          updated_at: now,
+          completed_at: null,
+        };
+        await taskStores.taskStore.create(task);
+
+        // 7. Dispatch task via TaskDAGManager
+        if (this.taskDAGManager) {
+          await this.taskDAGManager.dispatchTask(task);
+        }
       },
     });
 
@@ -261,9 +371,32 @@ export class OrchestratorImpl implements Orchestrator {
       logStore: stores.logStore,
       memoryStore: stores.memoryStore,
       logger: this.logger,
-      archiveWriter: async (entries: string, _copyIndex: number) => {
-        // Archive writer - writes to file system (will be implemented later)
-        this.logger.debug('archive.write', { size: entries.length });
+      archiveWriter: async (entries: string, copyIndex: number) => {
+        const nodePath = await import('node:path');
+        const archiveDir = nodePath.resolve(this.deps.archiveDir ?? 'data/archives');
+        const expectedBase = nodePath.resolve(this.deps.dataDir ?? 'data');
+
+        // Segment-aware path validation: reject sibling-prefix attacks like /data-evil
+        // (bare startsWith('/data') would incorrectly allow /data-evil).
+        if (archiveDir !== expectedBase && !archiveDir.startsWith(expectedBase + nodePath.sep)) {
+          this.logger.error('archive.path_traversal', {
+            archive_dir: archiveDir,
+            expected_base: expectedBase,
+          });
+          throw new ValidationError(
+            `Archive directory '${archiveDir}' is outside allowed base '${expectedBase}'`
+          );
+        }
+
+        const fs = await import('node:fs/promises');
+        await fs.mkdir(archiveDir, { recursive: true });
+
+        const filename = `logs-archive-${copyIndex}.ndjson.gz`;
+        const filePath = nodePath.resolve(archiveDir, filename);
+        // entries is a base64-encoded gzip buffer produced by RetentionWorker
+        await fs.writeFile(filePath, Buffer.from(entries, 'base64'));
+
+        this.logger.info('archive.written', { path: filePath, copy_index: copyIndex });
       },
     });
 
@@ -441,7 +574,7 @@ export class OrchestratorImpl implements Orchestrator {
    * 1. Query Docker API for running containers with openhive labels
    * 2. For each container, re-establish WebSocket connection
    * 3. Send container_init to re-sync agent configurations
-   * 4. Request heartbeat to rebuild health state in HealthMonitor
+   * 4. Wait for containers to send heartbeat naturally (CON-05: within 30s)
    * 5. Rebuild org chart from persisted team configs + live container state
    * 6. Task recovery: mark active tasks as failed (recovery), retry or escalate
    */
@@ -454,7 +587,7 @@ export class OrchestratorImpl implements Orchestrator {
     const containers = await this.deps.containerManager?.listRunningContainers() ?? [];
     this.logger.info('Found running containers', { count: containers.length });
 
-    // 2-4. For each container, re-establish connection and request heartbeat
+    // 2-4. For each container, log recovery state (heartbeat arrives naturally)
     for (const container of containers) {
       this.logger.debug('container.recovery', {
         tid: container.tid,
@@ -462,13 +595,8 @@ export class OrchestratorImpl implements Orchestrator {
         health: container.health,
       });
 
-      // Request heartbeat via WS (connection already established by WS server)
-      if (this.deps.wsHub?.isConnected(container.tid)) {
-        this.deps.wsHub.send(container.tid, {
-          type: 'heartbeat',
-          data: { request: true },
-        });
-      }
+      // Container heartbeat will arrive naturally within 30s (CON-05).
+      // Protocol forbids root-to-container heartbeat -- direction is container-to-root only.
     }
 
     // 5. Rebuild org chart from stored state
@@ -639,6 +767,23 @@ export class OrchestratorImpl implements Orchestrator {
         this.deps.eventBus?.publish({
           type: 'tool.result',
           data: { call_id, result, error_code, error_message },
+          timestamp: Date.now(),
+        });
+        break;
+      }
+      case 'agent_message': {
+        // Inter-agent message routed through root, delivered to target agent via EventBus
+        const { correlation_id, source_aid, target_aid, content } = message.data as {
+          correlation_id: string;
+          source_aid: string;
+          target_aid: string;
+          content: string;
+        };
+        this.logger.debug('Received agent_message', { correlation_id, source_aid, target_aid });
+        // Publish to event bus for MCPBridge / agent SDK to deliver to target agent
+        this.deps.eventBus?.publish({
+          type: 'agent.message',
+          data: { correlation_id, source_aid, target_aid, content },
           timestamp: Date.now(),
         });
         break;

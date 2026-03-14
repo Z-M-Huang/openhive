@@ -6,10 +6,16 @@
  * hub-and-spoke protocol), this relay bridges internal {@link EventBus} events
  * to browser clients over standard WebSocket frames.
  *
- * **Relayed event types:**
- * - `heartbeat` — container/agent health status updates
- * - `task` — task lifecycle state transitions (created, started, completed, failed, escalated)
- * - `org-chart` — team/agent topology changes (team created/removed, agent added/removed)
+ * **Relayed event prefixes:**
+ * - `heartbeat` — container/agent health status updates (exact match, e.g. `heartbeat`)
+ * - `task.` — task lifecycle transitions (e.g. `task.dispatched`, `task.completed`, `task.failed`)
+ * - `container.` — container lifecycle events (e.g. `container.spawned`, `container.stopped`)
+ * - `agent.` — agent lifecycle events (e.g. `agent.added`, `agent.removed`, `agent.ready`)
+ * - `team.` — team topology changes (e.g. `team.created`, `team.removed`)
+ * - `health.` — health status updates (e.g. `health.degraded`, `health.recovered`)
+ * - `escalation.` — escalation lifecycle events (e.g. `escalation.raised`, `escalation.resolved`)
+ * - `webhook.` — webhook trigger events (e.g. `webhook.received`)
+ * - `tool.` — tool call events (e.g. `tool.called`, `tool.result`)
  *
  * **Connection lifecycle:**
  * 1. Browser opens a WebSocket to `/ws/portal` on the API server
@@ -34,6 +40,29 @@ import { WebSocketServer, WebSocket } from 'ws';
 import type { IncomingMessage } from 'node:http';
 import type { Socket } from 'node:net';
 import type { BusEvent, EventBus } from '../domain/index.js';
+
+/**
+ * Event type prefixes relayed to portal WebSocket clients.
+ *
+ * Each entry is either:
+ * - An exact type name (e.g. `heartbeat`) — matched with `===`
+ * - A dotted prefix (e.g. `task.`) — matched with `startsWith`
+ *
+ * The filter predicate accepts an event when its type equals a prefix exactly
+ * OR starts with the prefix, so both `heartbeat` and `task.dispatched` are
+ * correctly forwarded to browser clients.
+ */
+export const PORTAL_EVENT_PREFIXES = [
+  'heartbeat',
+  'task.',
+  'container.',
+  'agent.',
+  'team.',
+  'health.',
+  'escalation.',
+  'webhook.',
+  'tool.',
+] as const;
 
 /**
  * Configuration options for the portal WebSocket relay.
@@ -193,12 +222,14 @@ export class PortalWSRelay {
       });
     });
 
-    // Subscribe to EventBus for relevant events
+    // Subscribe to EventBus for relevant events using prefix-based filter.
+    // Dotted event types (e.g. 'task.dispatched') are matched via startsWith;
+    // bare types (e.g. 'heartbeat') are matched with exact equality.
     this.subscriptionId = this._config.eventBus.filteredSubscribe(
-      (event: BusEvent) => {
-        // Filter for events we care about
-        return ['heartbeat', 'task', 'org-chart', 'container', 'agent'].includes(event.type);
-      },
+      (event: BusEvent) =>
+        PORTAL_EVENT_PREFIXES.some(
+          (p) => event.type === p || event.type.startsWith(p)
+        ),
       (event: BusEvent) => {
         this.broadcast(event);
       }

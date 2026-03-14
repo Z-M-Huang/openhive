@@ -15,6 +15,10 @@ import type {
 interface EscalationRecord {
   correlationId: string;
   sourceAid: string;
+  /** Team slug of the escalating agent (captured at construction time). */
+  sourceTeam: string;
+  /** Team slug of the escalation target, or 'user' when forced to the user (captured at construction time). */
+  destinationTeam: string;
   taskId: string;
   targetAid: string;
   reason: EscalationReason;
@@ -132,9 +136,33 @@ export class EscalationRouter {
         }
       : context;
 
+    // Derive team slugs for the wire payload. Both must be resolved here while the
+    // data is fresh. Storing them in the record means handleEscalationResponse() can
+    // use the stored values rather than repeating org-chart lookups (which could fail
+    // by the time the response arrives).
+    const sourceAgent = this.orgChart.getAgent(agentAid);
+    if (!sourceAgent) {
+      throw new NotFoundError(`Escalation source agent '${agentAid}' not found in org chart`);
+    }
+    const sourceTeamSlug = sourceAgent.teamSlug;
+
+    let destinationTeamSlug: string;
+    if (targetAid) {
+      const targetAgentEntry = this.orgChart.getAgent(targetAid);
+      if (!targetAgentEntry) {
+        throw new NotFoundError(`Escalation target agent '${targetAid}' not found in org chart`);
+      }
+      destinationTeamSlug = targetAgentEntry.teamSlug;
+    } else {
+      // No agent target — escalation is forced to the user.
+      destinationTeamSlug = 'user';
+    }
+
     const record: EscalationRecord = {
       correlationId,
       sourceAid: agentAid,
+      sourceTeam: sourceTeamSlug,
+      destinationTeam: destinationTeamSlug,
       taskId,
       targetAid: targetAid ?? 'user',
       reason,
@@ -145,7 +173,9 @@ export class EscalationRouter {
     };
     this.escalations.set(correlationId, record);
 
-    // Deliver via WS if target is an agent
+    // Deliver via WS if target is an agent.
+    // targetAgentEntry was already resolved above (stored in record). Re-fetch the team
+    // here only to obtain the TID for WS routing — the data payload uses stored slugs.
     if (targetAid) {
       const targetAgent = this.orgChart.getAgent(targetAid);
       if (targetAgent) {
@@ -155,9 +185,11 @@ export class EscalationRouter {
             type: 'escalation_response',
             data: {
               correlation_id: correlationId,
-              source_aid: agentAid,
               task_id: taskId,
-              reason,
+              agent_aid: targetAid,
+              source_team: record.sourceTeam,
+              destination_team: record.destinationTeam,
+              resolution: 'pending',
               context: escalationContext,
             },
           });
@@ -226,7 +258,11 @@ export class EscalationRouter {
       updated_at: Date.now(),
     });
 
-    // Deliver resolution to the original agent
+    // Deliver resolution to the original agent.
+    // Source/destination are reversed on the return trip: the supervisor who handled
+    // the escalation is now the source, the original agent is the destination.
+    // record.sourceTeam and record.destinationTeam were captured at escalation time;
+    // use them directly rather than repeating org-chart lookups.
     const sourceAgent = this.orgChart.getAgent(record.sourceAid);
     if (sourceAgent) {
       const sourceTeam = this.orgChart.getTeamBySlug(sourceAgent.teamSlug);
@@ -235,6 +271,10 @@ export class EscalationRouter {
           type: 'escalation_response',
           data: {
             correlation_id: correlationId,
+            task_id: record.taskId,
+            agent_aid: record.sourceAid,
+            source_team: record.destinationTeam,
+            destination_team: record.sourceTeam,
             resolution,
             context,
           },

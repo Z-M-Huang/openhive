@@ -328,6 +328,12 @@ function createMockContext(): ToolContext {
     mcpRegistry,
     healthMonitor,
     logger,
+    limits: Object.freeze({
+      max_depth: 3,
+      max_teams: 10,
+      max_agents_per_team: 5,
+      max_concurrent_tasks: 50,
+    }),
   };
 }
 
@@ -529,6 +535,48 @@ describe('SDKToolHandler', () => {
       expect(result.result?.task_id).toBeDefined();
       expect(ctx.taskStore.get).toHaveBeenCalledWith('task-001');
     });
+
+    it('sends task_dispatch wire message with blocked_by (not parent_task_id)', async () => {
+      const result = await handler.handle(
+        'dispatch_subtask',
+        {
+          agent_aid: 'aid-alice-001',
+          prompt: 'Sub-work',
+          parent_task_id: 'task-001',
+          blocked_by: ['task-002', 'task-003'],
+        },
+        'aid-alice-001',
+        'call-014b',
+      );
+
+      expect(result.success).toBe(true);
+      expect(ctx.wsHub.send).toHaveBeenCalledOnce();
+
+      const [_tid, message] = vi.mocked(ctx.wsHub.send).mock.calls[0];
+      expect(message.type).toBe('task_dispatch');
+      const data = (message as { type: string; data: Record<string, unknown> }).data;
+      expect(data['blocked_by']).toEqual(['task-002', 'task-003']);
+      expect(data).not.toHaveProperty('parent_task_id');
+    });
+
+    it('sends blocked_by as empty array when not provided', async () => {
+      await handler.handle(
+        'dispatch_subtask',
+        {
+          agent_aid: 'aid-alice-001',
+          prompt: 'Sub-work',
+          parent_task_id: 'task-001',
+        },
+        'aid-alice-001',
+        'call-014c',
+      );
+
+      expect(ctx.wsHub.send).toHaveBeenCalledOnce();
+      const [_tid, message] = vi.mocked(ctx.wsHub.send).mock.calls[0];
+      const data = (message as { type: string; data: Record<string, unknown> }).data;
+      expect(data['blocked_by']).toEqual([]);
+      expect(data).not.toHaveProperty('parent_task_id');
+    });
   });
 
   // -----------------------------------------------------------------------
@@ -591,7 +639,7 @@ describe('SDKToolHandler', () => {
   // -----------------------------------------------------------------------
 
   describe('send_message', () => {
-    it('stores message and sends via WS', async () => {
+    it('stores message and sends agent_message via WS', async () => {
       const result = await handler.handle(
         'send_message',
         { target_aid: 'aid-bob-002', content: 'Hello!' },
@@ -602,7 +650,56 @@ describe('SDKToolHandler', () => {
       expect(result.success).toBe(true);
       expect(result.result?.delivered).toBe(true);
       expect(ctx.messageStore.create).toHaveBeenCalledOnce();
-      expect(ctx.wsHub.send).toHaveBeenCalled();
+      expect(ctx.wsHub.send).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          type: 'agent_message',
+          data: expect.objectContaining({
+            source_aid: 'aid-alice-001',
+            target_aid: 'aid-bob-002',
+            content: 'Hello!',
+          }),
+        }),
+      );
+    });
+
+    it('sends agent_message with provided correlation_id', async () => {
+      const result = await handler.handle(
+        'send_message',
+        { target_aid: 'aid-bob-002', content: 'Hi', correlation_id: 'corr-xyz-123' },
+        'aid-alice-001',
+        'call-032',
+      );
+
+      expect(result.success).toBe(true);
+      expect(ctx.wsHub.send).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          type: 'agent_message',
+          data: expect.objectContaining({
+            correlation_id: 'corr-xyz-123',
+          }),
+        }),
+      );
+    });
+
+    it('generates correlation_id when not provided', async () => {
+      await handler.handle(
+        'send_message',
+        { target_aid: 'aid-bob-002', content: 'Hi' },
+        'aid-alice-001',
+        'call-033',
+      );
+
+      expect(ctx.wsHub.send).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          type: 'agent_message',
+          data: expect.objectContaining({
+            correlation_id: expect.any(String),
+          }),
+        }),
+      );
     });
 
     it('returns error for unknown target agent', async () => {
@@ -772,6 +869,43 @@ describe('SDKToolHandler', () => {
       expect(ctx.keyManager.encrypt).toHaveBeenCalledWith('my-secret');
       expect(ctx.credentialStore.create).toHaveBeenCalledOnce();
     });
+
+    it('rejects cross-team scope (AC25/AC26)', async () => {
+      // aid-alice-001 belongs to 'test-team' (from makeAgent default).
+      // Requesting scope='other-team' must be rejected as a security violation.
+      const result = await handler.handle(
+        'set_credential',
+        { key: 'api-key', value: 'secret', scope: 'other-team' },
+        'aid-alice-001',
+        'call-063',
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error_code).toBe(WSErrorCode.AccessDenied);
+      expect(ctx.logger.audit).toHaveBeenCalledWith(
+        'security.scope_violation',
+        expect.objectContaining({
+          type: 'set_credential',
+          requested_scope: 'other-team',
+          caller_team: 'test-team',
+          agent_aid: 'aid-alice-001',
+        }),
+      );
+      expect(ctx.credentialStore.create).not.toHaveBeenCalled();
+    });
+
+    it('allows own-team scope (AC25/AC26)', async () => {
+      // Explicitly passing scope matching the caller's team must succeed.
+      const result = await handler.handle(
+        'set_credential',
+        { key: 'api-key', value: 'secret', scope: 'test-team' },
+        'aid-alice-001',
+        'call-064',
+      );
+
+      expect(result.success).toBe(true);
+      expect(ctx.credentialStore.create).toHaveBeenCalledOnce();
+    });
   });
 
   // -----------------------------------------------------------------------
@@ -872,6 +1006,55 @@ describe('SDKToolHandler', () => {
         expect.objectContaining({ type: 'team.created' }),
       );
     });
+
+    it('rejects when depth exceeds max_depth (CON-01)', async () => {
+      // Parent team is at depth 3, so new team would be depth 4 which exceeds max_depth=3
+      vi.mocked(ctx.orgChart.getTeamBySlug).mockReturnValue(
+        makeTeam({ depth: 3 }),
+      );
+
+      const result = await handler.handle(
+        'create_team',
+        { slug: 'deep-team', leader_aid: 'aid-alice-001', purpose: 'Too deep' },
+        'aid-alice-001',
+        'call-082',
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error_code).toBe(WSErrorCode.ValidationError);
+      expect(result.error_message).toContain('exceeds maximum of 3');
+      expect(ctx.logger.audit).toHaveBeenCalledWith(
+        'security.limit_breach',
+        expect.objectContaining({ type: 'max_depth', attempted: 4, limit: 3 }),
+      );
+      // Workspace must NOT be scaffolded when limit is breached
+      expect(ctx.provisioner.scaffoldWorkspace).not.toHaveBeenCalled();
+    });
+
+    it('rejects when parent already has max_teams children (CON-02)', async () => {
+      // Parent at depth 0, sibling count already at the limit (10)
+      const fullSiblingList = Array.from({ length: 10 }, (_, i) =>
+        makeTeam({ tid: `tid-child-00${i}`, slug: `child-${i}` }),
+      );
+      vi.mocked(ctx.orgChart.getChildren).mockReturnValue(fullSiblingList);
+
+      const result = await handler.handle(
+        'create_team',
+        { slug: 'one-too-many', leader_aid: 'aid-alice-001', purpose: 'Overflow' },
+        'aid-alice-001',
+        'call-083',
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error_code).toBe(WSErrorCode.ValidationError);
+      expect(result.error_message).toContain('already has 10 child teams (max: 10)');
+      expect(ctx.logger.audit).toHaveBeenCalledWith(
+        'security.limit_breach',
+        expect.objectContaining({ type: 'max_teams', current: 10, limit: 10 }),
+      );
+      // Workspace must NOT be scaffolded when limit is breached
+      expect(ctx.provisioner.scaffoldWorkspace).not.toHaveBeenCalled();
+    });
   });
 
   describe('create_agent', () => {
@@ -888,6 +1071,31 @@ describe('SDKToolHandler', () => {
       expect((result.result?.aid as string).startsWith('aid-')).toBe(true);
       expect(ctx.provisioner.writeAgentDefinition).toHaveBeenCalled();
       expect(ctx.orgChart.addAgent).toHaveBeenCalled();
+    });
+
+    it('rejects when team has max agents (CON-03)', async () => {
+      // Team already has 5 agents (the default max_agents_per_team limit)
+      const fullAgentList = Array.from({ length: 5 }, (_, i) =>
+        makeAgent({ aid: `aid-member-00${i}`, name: `member-${i}` }),
+      );
+      vi.mocked(ctx.orgChart.getAgentsByTeam).mockReturnValue(fullAgentList);
+
+      const result = await handler.handle(
+        'create_agent',
+        { name: 'overflow', description: 'One too many', team_slug: 'test-team' },
+        'aid-alice-001',
+        'call-082',
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error_code).toBe(WSErrorCode.ValidationError);
+      expect(result.error_message).toContain("already has 5 agents (max: 5)");
+      expect(ctx.logger.audit).toHaveBeenCalledWith(
+        'security.limit_breach',
+        expect.objectContaining({ type: 'max_agents_per_team', current: 5, limit: 5 }),
+      );
+      // Agent definition must NOT be written when limit is breached
+      expect(ctx.provisioner.writeAgentDefinition).not.toHaveBeenCalled();
     });
   });
 
