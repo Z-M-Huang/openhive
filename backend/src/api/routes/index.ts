@@ -38,6 +38,7 @@ import type {
   Task,
   OrgChart,
   ContainerManager,
+  ContainerProvisioner,
   HealthMonitor,
   TriggerScheduler,
   Orchestrator,
@@ -163,6 +164,7 @@ function getRestartCount(manager: ContainerManager, slug: string): number {
 export interface RouteContext {
   orgChart?: OrgChart;
   containerManager?: ContainerManager;
+  provisioner?: ContainerProvisioner;
   healthMonitor?: HealthMonitor;
   triggerScheduler?: TriggerScheduler;
   orchestrator?: Orchestrator;
@@ -315,9 +317,45 @@ function registerTeamRoutes(app: FastifyInstance, ctx: RouteContext): void {
     const body = parseResult.data;
 
     try {
+      // Scaffold workspace for the team
+      if (ctx.provisioner) {
+        const parentPath = '/app/workspace';
+        await ctx.provisioner.scaffoldWorkspace(parentPath, body.slug);
+      }
+
       const container = await ctx.containerManager.spawnTeamContainer(body.slug);
+
+      // Register team in org chart so root recognizes the child container
+      if (ctx.orgChart) {
+        // Resolve leader: use provided leaderAid, or default to main assistant
+        const leaderAid = body.leaderAid ?? ctx.orgChart.listTeams()[0]?.leaderAid ?? '';
+        const parentTeam = ctx.orgChart.getTeamBySlug('main');
+        ctx.orgChart.addTeam({
+          tid: container.tid,
+          slug: body.slug,
+          leaderAid,
+          parentTid: parentTeam?.tid ?? '',
+          depth: (parentTeam?.depth ?? 0) + 1,
+          containerId: container.id,
+          health: container.health ?? 'starting',
+          agentAids: [],
+          workspacePath: `/app/workspace/teams/${body.slug}`,
+        });
+      }
+
+      // Publish lifecycle event
+      if (ctx.eventBus) {
+        ctx.eventBus.publish({
+          type: 'team.created',
+          data: { tid: container.tid, slug: body.slug },
+          timestamp: Date.now(),
+          source: 'api',
+        });
+      }
+
       reply.code(201).send({
         slug: body.slug,
+        tid: container.tid,
         containerId: container.id,
         status: 'created',
       });

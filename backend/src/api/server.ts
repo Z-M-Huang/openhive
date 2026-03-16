@@ -38,7 +38,7 @@ import { createServer } from 'node:http';
 import { existsSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { WSHub, EventBus, OrgChart, ContainerManager, HealthMonitor, TriggerScheduler, Orchestrator, TaskStore, LogStore, TaskEventStore, IntegrationStore, CredentialStore, ConfigLoader, Logger, MessageRouter } from '../domain/index.js';
+import type { WSHub, EventBus, OrgChart, ContainerManager, ContainerProvisioner, HealthMonitor, TriggerScheduler, Orchestrator, TaskStore, LogStore, TaskEventStore, IntegrationStore, CredentialStore, ConfigLoader, Logger, MessageRouter } from '../domain/index.js';
 import { registerRoutes, registerMiddleware, type RouteContext } from './routes/index.js';
 import { PortalWSRelay } from './portal-ws.js';
 import { CLIWSRelay } from './cli-ws.js';
@@ -91,6 +91,11 @@ export interface APIServerConfig {
    * ContainerManager for container operations.
    */
   containerManager?: ContainerManager;
+
+  /**
+   * ContainerProvisioner for workspace scaffolding.
+   */
+  provisioner?: ContainerProvisioner;
 
   /**
    * HealthMonitor for health status.
@@ -275,6 +280,7 @@ export class APIServer {
     const routeContext: RouteContext = {
       orgChart: this._config.orgChart,
       containerManager: this._config.containerManager,
+      provisioner: this._config.provisioner,
       healthMonitor: this._config.healthMonitor,
       triggerScheduler: this._config.triggerScheduler,
       orchestrator: this._config.orchestrator,

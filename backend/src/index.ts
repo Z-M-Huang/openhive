@@ -1093,6 +1093,7 @@ async function initializeRootMode(
     eventBus,
     orgChart,
     containerManager,
+    provisioner,
     healthMonitor,
     triggerScheduler,
     orchestrator,
