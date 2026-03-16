@@ -70,7 +70,7 @@ RUN npm install -g bun@1.3.10
 # Claude Code refuses --dangerously-skip-permissions when running as root.
 USER node
 RUN curl -fsSL https://claude.ai/install.sh | bash
-ENV PATH="/home/node/.claude/bin:$PATH"
+ENV PATH="/home/node/.local/bin:$PATH"
 
 USER root
 WORKDIR /app
