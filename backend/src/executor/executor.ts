@@ -16,7 +16,9 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
-import type { AgentExecutor, AgentInitConfig, EventBus, Logger } from '../domain/index.js';
+import { readFile, mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
+import type { AgentExecutor, AgentInitConfig, EventBus, Logger, TaskStore } from '../domain/index.js';
 import { AgentStatus, ProviderType } from '../domain/index.js';
 import { ConflictError, NotFoundError } from '../domain/errors.js';
 import type { ToolHandler } from '../mcp/tools/index.js';
@@ -25,6 +27,9 @@ import {
   runAgentQuery,
   type AgentQueryResult,
 } from './sdk-runner.js';
+
+/** Default query timeout: 5 minutes. */
+const DEFAULT_QUERY_TIMEOUT_MS = 300_000;
 
 // ---------------------------------------------------------------------------
 // Tracked agent state
@@ -68,6 +73,7 @@ export class AgentExecutorImpl implements AgentExecutor {
   private readonly eventBus: EventBus;
   private readonly logger: Logger;
   private toolHandlers?: Map<string, ToolHandler>;
+  private taskStore?: TaskStore;
 
   constructor(eventBus: EventBus, logger: Logger, toolHandlers?: Map<string, ToolHandler>) {
     this.eventBus = eventBus;
@@ -83,6 +89,14 @@ export class AgentExecutorImpl implements AgentExecutor {
    */
   setToolHandlers(handlers: Map<string, ToolHandler>): void {
     this.toolHandlers = handlers;
+  }
+
+  /**
+   * Sets the task store for Tier 3 memory (recent history injection).
+   * Called post-construction when stores are initialized after the executor.
+   */
+  setTaskStore(store: TaskStore): void {
+    this.taskStore = store;
   }
 
   /**
@@ -196,19 +210,64 @@ export class AgentExecutorImpl implements AgentExecutor {
       }
       sdkEnv['CLAUDE_CODE_SUBAGENT_MODEL'] = modelAlias;
 
+      // --- Tier 1: Session continuity ---
+      // Use `continue: true` to resume the most recent SDK session in the
+      // agent's working directory. This is provider-agnostic (local state).
+      const shouldContinue = tracked.sessionId !== undefined;
+
+      // --- Tier 2: MEMORY.md auto-injection + memory management instructions ---
+      let enrichedSystemPrompt = tracked.config.systemPrompt ?? '';
+      const memoryPath = join(tracked.workspacePath, 'memory', agentAid, 'MEMORY.md');
+      try {
+        await mkdir(join(tracked.workspacePath, 'memory', agentAid), { recursive: true });
+        const memoryContent = await readFile(memoryPath, 'utf-8');
+        if (memoryContent.trim().length > 0) {
+          enrichedSystemPrompt = `## Your Memory\n${memoryContent}\n\n${enrichedSystemPrompt}`;
+        }
+      } catch {
+        // MEMORY.md is optional — no error if missing
+      }
+
+      // --- Tier 3: Recent history (new sessions only) ---
+      if (!shouldContinue && this.taskStore) {
+        try {
+          const recentHistory = await this._getRecentHistory(agentAid);
+          if (recentHistory) {
+            enrichedSystemPrompt = `${enrichedSystemPrompt}\n\n${recentHistory}`;
+          }
+        } catch (err) {
+          this.logger.debug('Failed to load recent history for agent', {
+            aid: agentAid,
+            error: String(err),
+          });
+        }
+      }
+
+      // --- Fix 4: Memory management instructions ---
+      enrichedSystemPrompt += `\n\n## Memory Management
+- When users share personal information, preferences, or important facts, IMMEDIATELY save them using the save_memory tool.
+- Periodically review the conversation for key context worth preserving.
+- When the conversation gets long, save a summary of important decisions and facts.
+- Always check your memory (above) before asking the user to repeat information.`;
+
+      // --- Fix 3A: 5-minute query timeout via AbortController ---
+      const timeoutId = setTimeout(() => {
+        tracked.abortController?.abort();
+      }, DEFAULT_QUERY_TIMEOUT_MS);
+
       const result: AgentQueryResult = await runAgentQuery({
         prompt,
         mcpServer: tracked.mcpServer,
         model: modelAlias,
         cwd: tracked.workspacePath,
-        systemPrompt: tracked.config.systemPrompt,
-        // Don't resume sessions — each query starts fresh to avoid conflicts
-        // with non-Anthropic providers that may not support session continuation.
-        sessionId: undefined,
+        systemPrompt: enrichedSystemPrompt,
+        continue: shouldContinue,
         maxTurns: 200,
         abortController: tracked.abortController,
         env: sdkEnv,
       });
+
+      clearTimeout(timeoutId);
 
       // Store session ID for future conversation resumption
       if (result.sessionId) {
@@ -334,6 +393,36 @@ export class AgentExecutorImpl implements AgentExecutor {
   // ---------------------------------------------------------------------------
   // Private helpers
   // ---------------------------------------------------------------------------
+
+  /**
+   * Queries the last 5 completed tasks for this agent and formats them
+   * as a "Recent Conversation History" section for the system prompt (Tier 3).
+   */
+  private async _getRecentHistory(agentAid: string): Promise<string | null> {
+    if (!this.taskStore) return null;
+
+    // TaskStore doesn't have a listByAgent method, so we query by status
+    // and filter. Use listByStatus('completed') with a post-filter.
+    // For efficiency, get all completed tasks and filter by agent.
+    const completedTasks = await this.taskStore.listByStatus('completed' as import('../domain/enums.js').TaskStatus);
+    const agentTasks = completedTasks
+      .filter(t => t.agent_aid === agentAid && t.result)
+      .sort((a, b) => b.completed_at! - a.completed_at!)
+      .slice(0, 5);
+
+    if (agentTasks.length === 0) return null;
+
+    const lines = ['## Recent Conversation History'];
+    for (const task of agentTasks.reverse()) {
+      const promptSnippet = task.prompt.length > 200 ? task.prompt.slice(0, 200) + '...' : task.prompt;
+      const resultSnippet = task.result.length > 300 ? task.result.slice(0, 300) + '...' : task.result;
+      lines.push(`User: ${promptSnippet}`);
+      lines.push(`Assistant: ${resultSnippet}`);
+      lines.push('');
+    }
+
+    return lines.join('\n');
+  }
 
   /** Extracts team slug from agent config or defaults to 'main'. */
   private _resolveTeamSlug(_agent: AgentInitConfig): string {

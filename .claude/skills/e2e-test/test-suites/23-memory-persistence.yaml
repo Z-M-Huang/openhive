@@ -1,0 +1,76 @@
+name: Memory Persistence
+description: Verify the assistant remembers facts across messages (same session) and across sessions (MEMORY.md + task history injection).
+
+setup:
+  - command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+    description: "Clean start -- remove all containers and volumes"
+  - command: "rm -rf /app/openhive/.run/workspace/memory 2>/dev/null; mkdir -p /app/openhive/.run/workspace"
+    description: "Clear any stale memory files"
+  - command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml up -d --build 2>&1 &"
+    description: "Build and start the server"
+  - command: "for i in $(seq 1 60); do curl -sf http://localhost:8080/api/health && exit 0; sleep 5; done; echo 'Health check timed out'; exit 1"
+    description: "Wait for health check (exits 1 on timeout)"
+
+teardown:
+  - command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+    description: "Clean up"
+
+test_cases:
+  - name: Same-session memory (Tier 1)
+    description: Within a single CLI session, the assistant should remember what was said earlier without needing save_memory. This tests SDK session continuity.
+    steps:
+      - action: "Send two messages in one CLI session -- first introduce yourself, then ask the assistant to recall. Use a script that sends both messages over the same WebSocket connection."
+        command: "timeout 120 bun -e \"
+          const ws = new WebSocket('ws://localhost:8080/ws/cli');
+          let responses = [];
+          ws.onopen = () => {
+            ws.send(JSON.stringify({type:'message',content:'Hello, my name is Mark. Remember that.'}));
+          };
+          ws.onmessage = (e) => {
+            const d = JSON.parse(e.data);
+            if (d.type === 'response') {
+              responses.push(d.content);
+              if (responses.length === 1) {
+                setTimeout(() => ws.send(JSON.stringify({type:'message',content:'What is my name?'})), 2000);
+              } else {
+                console.log('[Response 1]', responses[0].substring(0,100));
+                console.log('[Response 2]', responses[1].substring(0,100));
+                ws.close(); process.exit(0);
+              }
+            }
+          };
+          ws.onerror = () => process.exit(1);
+          setTimeout(() => { console.log('TIMEOUT'); process.exit(1); }, 110000);
+        \" 2>&1"
+        expected: "Mark"
+    expected_outcome: "The second response mentions 'Mark' — the assistant remembers from the same session without needing save_memory"
+
+  - name: Cross-session memory via save_memory (Tier 2)
+    description: Tell the assistant to remember a fact, disconnect, reconnect, and verify the fact is recalled from MEMORY.md.
+    steps:
+      - action: "Tell assistant to remember a specific fact using save_memory"
+        command: "echo 'Remember this important fact: My favorite color is blue. Use the save_memory tool to store it permanently.' | timeout 120 bun run cli/index.ts 2>&1"
+        expected: "[Assistant]"
+      - action: "Wait for memory file to be written, then reconnect and ask about the fact"
+        command: "sleep 5 && echo 'What is my favorite color?' | timeout 120 bun run cli/index.ts 2>&1"
+        expected: "blue"
+    expected_outcome: "After reconnecting, the assistant knows the favorite color is blue — retrieved from MEMORY.md injection"
+
+  - name: MEMORY.md file exists on disk (Tier 2 verification)
+    description: After save_memory is called, verify the MEMORY.md file was created in the workspace
+    steps:
+      - action: "Check for memory files in the workspace"
+        command: "find /app/openhive/.run/workspace/memory -name 'MEMORY.md' -o -name '*.md' 2>/dev/null | head -5"
+        expected: "MEMORY.md"
+    expected_outcome: "At least one MEMORY.md file exists under .run/workspace/memory/<agent-aid>/"
+
+  - name: Recent history context on reconnect (Tier 3)
+    description: Send several messages, disconnect, reconnect, and ask about previous topics. The assistant should reference recent conversation from task history.
+    steps:
+      - action: "Send a message about a specific topic"
+        command: "echo 'I am planning a trip to Japan next month. What should I know?' | timeout 120 bun run cli/index.ts 2>&1"
+        expected: "[Assistant]"
+      - action: "Reconnect and ask about recent conversation"
+        command: "sleep 3 && echo 'What were we talking about earlier?' | timeout 120 bun run cli/index.ts 2>&1"
+        expected: "Japan"
+    expected_outcome: "The assistant references the Japan trip discussion from the prior session — retrieved from task history injection"

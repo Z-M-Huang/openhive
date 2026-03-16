@@ -1,0 +1,49 @@
+name: INV-01 Lead Agent Placement
+description: Verify team lead agent definition is written to the parent workspace (not the team's workspace) per INV-01.
+
+setup:
+  - command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+    description: "Clean start"
+  - command: "rm -rf /app/openhive/.run/workspace/teams 2>/dev/null; mkdir -p /app/openhive/.run/workspace"
+    description: "Clear stale team workspaces"
+  - command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml up -d --build 2>&1 &"
+    description: "Build and start the server"
+  - command: "for i in $(seq 1 60); do curl -sf http://localhost:8080/api/health && exit 0; sleep 5; done; echo 'Health check timed out'; exit 1"
+    description: "Wait for health check"
+  - command: "echo 'Create a team called placement-test with a team lead and one member agent. Use create_team and create_agent tools.' | timeout 300 bun run cli/index.ts 2>&1"
+    description: "Create test team with lead and member via CLI"
+
+teardown:
+  - command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+    description: "Clean up"
+
+test_cases:
+  - name: Lead definition in parent workspace
+    description: The team lead's .md file should be in the root workspace (.run/workspace/.claude/agents/), not in the team's workspace
+    steps:
+      - action: "Check for agent definition files in the parent (root) workspace"
+        command: "find /app/openhive/.run/workspace/.claude/agents/ -name '*.md' -not -path '*/teams/*' 2>/dev/null | head -5"
+        expected: ".md"
+      - action: "Verify the lead file is NOT in the team's workspace"
+        command: "find /app/openhive/.run/workspace/teams/placement-test/.claude/agents/ -name '*lead*' -o -name '*Lead*' 2>/dev/null | wc -l"
+        expected: "0"
+    expected_outcome: "Lead agent's .md file found in root workspace, NOT in teams/placement-test/.claude/agents/"
+
+  - name: Member definition in team workspace
+    description: Member agents' .md files should be in the team's own workspace
+    steps:
+      - action: "Check for agent definition files in the team workspace"
+        command: "find /app/openhive/.run/workspace/teams/placement-test/.claude/agents/ -name '*.md' 2>/dev/null | head -5"
+        expected: ".md"
+    expected_outcome: "At least one member agent .md file found in teams/placement-test/.claude/agents/"
+
+  - name: Lead executes in root container
+    description: Verify via the teams API that the lead agent is assigned to the root container per INV-01
+    steps:
+      - action: "Query teams API and check the leader assignment"
+        command: "curl -sf http://localhost:8080/api/teams 2>&1"
+        expected: "leaderAid"
+      - action: "Query agents API to find the lead agent's team association"
+        command: "curl -sf http://localhost:8080/api/agents 2>&1"
+        expected: "leadsTeam"
+    expected_outcome: "The lead agent appears in the agents list with leadsTeam set, confirming it is registered as the team lead. Per INV-01, it executes in the parent (root) container."

@@ -108,6 +108,10 @@ ws.addEventListener('message', (event: MessageEvent) => {
         process.exit(0);
       }
       rl?.prompt();
+    } else if (data.type === 'progress') {
+      // Display processing indicator without breaking the prompt
+      process.stdout.write('\r\x1b[K');
+      process.stdout.write('Processing...\r');
     } else if (data.type === 'connected') {
       // Server acknowledged connection — no action needed
     }

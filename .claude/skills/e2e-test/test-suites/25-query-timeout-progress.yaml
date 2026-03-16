@@ -1,0 +1,92 @@
+name: Query Timeout and Progress Pings
+description: Verify queries don't hang indefinitely and the CLI receives progress pings during long-running operations.
+
+setup:
+  - command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+    description: "Clean start"
+  - command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml up -d --build 2>&1 &"
+    description: "Build and start the server"
+  - command: "for i in $(seq 1 60); do curl -sf http://localhost:8080/api/health && exit 0; sleep 5; done; echo 'Health check timed out'; exit 1"
+    description: "Wait for health check"
+
+teardown:
+  - command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+    description: "Clean up"
+
+test_cases:
+  - name: Progress pings during processing
+    description: When a task is being processed, the CLI should receive progress ping messages via WebSocket so the user knows the system is working
+    steps:
+      - action: "Send a message and listen for progress pings. Use a WebSocket script that captures both progress and response messages."
+        command: "timeout 120 bun -e \"
+          const ws = new WebSocket('ws://localhost:8080/ws/cli');
+          const msgs = [];
+          ws.onopen = () => {
+            ws.send(JSON.stringify({type:'message',content:'Hello, give me a detailed explanation of quantum computing'}));
+          };
+          ws.onmessage = (e) => {
+            const d = JSON.parse(e.data);
+            msgs.push(d.type);
+            if (d.type === 'progress') console.log('PROGRESS_PING');
+            if (d.type === 'response') {
+              console.log('RESPONSE_RECEIVED');
+              console.log('Message types seen:', msgs.join(','));
+              ws.close(); process.exit(0);
+            }
+          };
+          ws.onerror = () => process.exit(1);
+          setTimeout(() => { console.log('Messages seen:', msgs.join(',')); ws.close(); process.exit(0); }, 110000);
+        \" 2>&1"
+        expected: "PROGRESS_PING"
+    expected_outcome: "The CLI receives at least one { type: 'progress' } message before the final response, indicating the system is actively processing"
+
+  - name: Timeout on stuck query
+    description: When a request can't be fulfilled (e.g., requires unavailable external service), the query should timeout and return an error rather than hang forever
+    steps:
+      - action: "Send a request that will likely hang (requires external service configuration). Verify it doesn't hang longer than 5 minutes."
+        command: "timeout 330 bun -e \"
+          const start = Date.now();
+          const ws = new WebSocket('ws://localhost:8080/ws/cli');
+          ws.onopen = () => {
+            ws.send(JSON.stringify({type:'message',content:'Configure and connect to a Loggly logging service at loggly.example.com with token abc123. Set it up now.'}));
+          };
+          ws.onmessage = (e) => {
+            const d = JSON.parse(e.data);
+            if (d.type === 'response' || d.type === 'error') {
+              const elapsed = Math.round((Date.now() - start) / 1000);
+              console.log('GOT_RESPONSE in ' + elapsed + 's');
+              console.log('Type:', d.type);
+              ws.close(); process.exit(0);
+            }
+          };
+          ws.onerror = () => process.exit(1);
+          setTimeout(() => { console.log('HARD_TIMEOUT_330s'); ws.close(); process.exit(1); }, 320000);
+        \" 2>&1"
+        expected: "GOT_RESPONSE"
+    expected_outcome: "The query returns a response (success or error) within 5 minutes instead of hanging indefinitely. The response indicates the request couldn't be completed."
+
+  - name: Normal queries still fast
+    description: Simple queries should respond quickly (under 30 seconds), not affected by the timeout mechanism
+    steps:
+      - action: "Send a simple greeting and measure response time"
+        command: "timeout 60 bun -e \"
+          const start = Date.now();
+          const ws = new WebSocket('ws://localhost:8080/ws/cli');
+          ws.onopen = () => {
+            ws.send(JSON.stringify({type:'message',content:'Say pong'}));
+          };
+          ws.onmessage = (e) => {
+            const d = JSON.parse(e.data);
+            if (d.type === 'response') {
+              const elapsed = Math.round((Date.now() - start) / 1000);
+              console.log('RESPONSE in ' + elapsed + 's');
+              if (elapsed < 30) console.log('FAST');
+              else console.log('SLOW');
+              ws.close(); process.exit(0);
+            }
+          };
+          ws.onerror = () => process.exit(1);
+          setTimeout(() => { console.log('TIMEOUT'); process.exit(1); }, 55000);
+        \" 2>&1"
+        expected: "FAST"
+    expected_outcome: "Simple greeting responds in under 30 seconds — the timeout mechanism doesn't slow down normal queries"

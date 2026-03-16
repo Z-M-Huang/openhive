@@ -561,13 +561,27 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
 
     const aid = generateId('aid', parsed.name);
 
-    // Write agent definition file — acquire lock on the team's workspace path
+    // INV-01: Team lead definition goes in the PARENT workspace, not the team's own.
+    // Members write to the team workspace as before.
+    const agentRole = parsed.role ?? 'member';
+    let definitionPath = team.workspacePath;
+    if (agentRole === 'team_lead' && team.parentTid) {
+      const parentTeam = ctx.orgChart.getTeam(team.parentTid);
+      if (parentTeam) {
+        definitionPath = parentTeam.workspacePath;
+      } else {
+        // Fallback to root workspace if parent can't be resolved
+        definitionPath = '/app/workspace';
+      }
+    }
+
+    // Write agent definition file — acquire lock on the target workspace path
     // to prevent races with create_team or stop_container on the same directory.
     if (ctx.workspaceLock) {
-      await ctx.workspaceLock.acquire(team.workspacePath);
+      await ctx.workspaceLock.acquire(definitionPath);
     }
     try {
-      await ctx.provisioner.writeAgentDefinition(team.workspacePath, {
+      await ctx.provisioner.writeAgentDefinition(definitionPath, {
         name: parsed.name,
         description: parsed.description,
         model: parsed.model,
@@ -576,12 +590,9 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
       });
     } finally {
       if (ctx.workspaceLock) {
-        ctx.workspaceLock.release(team.workspacePath);
+        ctx.workspaceLock.release(definitionPath);
       }
     }
-
-    // Add to org chart with requested role (default: member)
-    const agentRole = parsed.role ?? 'member';
     ctx.orgChart.addAgent({
       aid,
       name: parsed.name,

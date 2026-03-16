@@ -102,6 +102,9 @@ class CLIWSAdapter extends BaseChannelAdapter {
    *
    * @throws Error if the chatJid does not match `cli:ws:*` format
    */
+  /** Optional callback invoked when a response is sent, for clearing progress intervals. */
+  onResponseSent?: (sessionId: string) => void;
+
   async sendMessage(msg: OutboundMessage): Promise<void> {
     // Only handle cli:ws: prefixed JIDs
     if (!msg.chatJid.startsWith('cli:ws:')) {
@@ -121,6 +124,9 @@ class CLIWSAdapter extends BaseChannelAdapter {
     });
 
     ws.send(response);
+
+    // Notify relay to clear progress intervals for this session
+    this.onResponseSent?.(sessionId);
   }
 
   /**
@@ -196,6 +202,18 @@ export class CLIWSRelay {
     this.adapter = new CLIWSAdapter();
     this._config.messageRouter.registerChannel(ChannelType.Api, this.adapter);
 
+    // Per-session progress interval tracking (cleared when response arrives)
+    const sessionProgressIntervals = new Map<string, Set<ReturnType<typeof setInterval>>>();
+
+    // Wire up response-sent callback to clear progress intervals
+    this.adapter.onResponseSent = (sid: string) => {
+      const intervals = sessionProgressIntervals.get(sid);
+      if (intervals) {
+        for (const id of intervals) clearInterval(id);
+        intervals.clear();
+      }
+    };
+
     // Handle new connections
     this.wss.on('connection', (ws: WebSocket) => {
       const sessionId = crypto.randomUUID();
@@ -222,6 +240,19 @@ export class CLIWSRelay {
               timestamp: Date.now(),
             };
 
+            // Start progress pings every 30s while processing
+            const intervalId = setInterval(() => {
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'progress', status: 'processing' }));
+              }
+            }, 30_000);
+
+            // Track interval for cleanup on response or disconnect
+            if (!sessionProgressIntervals.has(sessionId)) {
+              sessionProgressIntervals.set(sessionId, new Set());
+            }
+            sessionProgressIntervals.get(sessionId)!.add(intervalId);
+
             // Route through message router (async, don't block WebSocket)
             void this.adapter!.emitInbound(inbound);
           }
@@ -232,11 +263,22 @@ export class CLIWSRelay {
 
       // Handle disconnect
       ws.on('close', () => {
+        // Clear any active progress intervals
+        const intervals = sessionProgressIntervals.get(sessionId);
+        if (intervals) {
+          for (const id of intervals) clearInterval(id);
+          sessionProgressIntervals.delete(sessionId);
+        }
         this.adapter!.removeConnection(sessionId);
       });
 
       // Handle errors
       ws.on('error', () => {
+        const intervals = sessionProgressIntervals.get(sessionId);
+        if (intervals) {
+          for (const id of intervals) clearInterval(id);
+          sessionProgressIntervals.delete(sessionId);
+        }
         this.adapter!.removeConnection(sessionId);
       });
     });

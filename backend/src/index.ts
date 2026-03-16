@@ -1054,12 +1054,13 @@ async function initializeRootMode(
 
   logger.info('Orchestrator started');
 
-  // 14b. Wire tool handlers to agent executor and start main assistant
+  // 14b. Wire tool handlers and task store to agent executor and start main assistant
   const toolHandlers = orchestrator.getToolHandlers();
   if (toolHandlers) {
     agentExecutor.setToolHandlers(toolHandlers);
     logger.info('Tool handlers injected into agent executor', { handlerCount: toolHandlers.size });
   }
+  agentExecutor.setTaskStore(taskStore);
 
   // Build AgentInitConfig for the main assistant
   const mainAssistantProvider = resolveProviderPreset(assistantConfig.provider);
