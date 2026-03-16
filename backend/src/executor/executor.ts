@@ -173,15 +173,41 @@ export class AgentExecutorImpl implements AgentExecutor {
       // Use model tier alias ('sonnet') so the SDK resolves via ANTHROPIC_DEFAULT_*_MODEL
       // env vars. This works for both Anthropic-native and proxy providers.
       const modelAlias = tracked.config.modelTier ?? 'sonnet';
+
+      // Build explicit env for the SDK subprocess — ensures credentials and model
+      // mappings are always passed, regardless of process.env mutation timing.
+      const sdkEnv: Record<string, string> = {};
+      for (const [k, v] of Object.entries(process.env)) {
+        if (v !== undefined) sdkEnv[k] = v;
+      }
+      const provider = tracked.config.provider;
+      if (provider.type === 'oauth' && provider.oauthToken) {
+        sdkEnv['CLAUDE_CODE_OAUTH_TOKEN'] = provider.oauthToken;
+        delete sdkEnv['ANTHROPIC_API_KEY'];
+      } else if (provider.type === 'anthropic_direct' && provider.apiKey) {
+        sdkEnv['ANTHROPIC_API_KEY'] = provider.apiKey;
+        if (provider.baseUrl) sdkEnv['ANTHROPIC_BASE_URL'] = provider.baseUrl;
+        delete sdkEnv['CLAUDE_CODE_OAUTH_TOKEN'];
+      }
+      if (provider.models) {
+        if (provider.models.haiku) sdkEnv['ANTHROPIC_DEFAULT_HAIKU_MODEL'] = provider.models.haiku;
+        if (provider.models.sonnet) sdkEnv['ANTHROPIC_DEFAULT_SONNET_MODEL'] = provider.models.sonnet;
+        if (provider.models.opus) sdkEnv['ANTHROPIC_DEFAULT_OPUS_MODEL'] = provider.models.opus;
+      }
+      sdkEnv['CLAUDE_CODE_SUBAGENT_MODEL'] = modelAlias;
+
       const result: AgentQueryResult = await runAgentQuery({
         prompt,
         mcpServer: tracked.mcpServer,
         model: modelAlias,
         cwd: tracked.workspacePath,
         systemPrompt: tracked.config.systemPrompt,
-        sessionId: tracked.sessionId,
+        // Don't resume sessions — each query starts fresh to avoid conflicts
+        // with non-Anthropic providers that may not support session continuation.
+        sessionId: undefined,
         maxTurns: 200,
         abortController: tracked.abortController,
+        env: sdkEnv,
       });
 
       // Store session ID for future conversation resumption

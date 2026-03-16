@@ -157,10 +157,12 @@ export interface RunAgentQueryOptions {
   prompt: string;
   /** MCP server config from createOpenHiveMcpServer(). */
   mcpServer: unknown;
-  /** Claude model ID (e.g., 'claude-sonnet-4-6'). */
+  /** Claude model ID or tier alias (e.g., 'sonnet'). */
   model: string;
   /** Working directory for the agent. */
   cwd: string;
+  /** Environment variables for the SDK subprocess. Defaults to process.env. */
+  env?: Record<string, string>;
   /** System prompt for the agent. */
   systemPrompt?: string;
   /** Session ID to resume a previous conversation. */
@@ -213,6 +215,7 @@ export async function runAgentQuery(opts: RunAgentQueryOptions): Promise<AgentQu
         permissionMode: 'bypassPermissions',
         mcpServers: mcpServers as Record<string, import('@anthropic-ai/claude-agent-sdk').McpServerConfig>,
         abortController: opts.abortController,
+        ...(opts.env ? { env: opts.env } : {}),
       },
     });
 

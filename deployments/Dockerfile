@@ -66,11 +66,8 @@ RUN apt-get update && \
 # Install bun runtime (pinned)
 RUN npm install -g bun@1.3.10
 
-# Install Claude Code CLI as non-root 'node' user (UID 1000).
-# Claude Code refuses --dangerously-skip-permissions when running as root.
-USER node
-RUN curl -fsSL https://claude.ai/install.sh | bash
-ENV PATH="/home/node/.local/bin:$PATH"
+# Install Claude Code CLI via npm (faster than the install.sh script).
+RUN npm install -g @anthropic-ai/claude-code@latest
 
 USER root
 WORKDIR /app
