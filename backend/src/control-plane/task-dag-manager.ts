@@ -128,10 +128,14 @@ export class TaskDAGManager {
               result: `Local dispatch failed: ${String(err)}`,
               updated_at: Date.now(),
             });
-            this.eventBus.publish('task_result', {
-              task_id: task.id,
-              status: TaskStatus.Failed,
-              result: `Local dispatch failed: ${String(err)}`,
+            this.eventBus.publish({
+              type: 'task_result',
+              data: {
+                task_id: task.id,
+                status: TaskStatus.Failed,
+                result: `Local dispatch failed: ${String(err)}`,
+              },
+              timestamp: Date.now(),
             });
           } catch (updateErr: unknown) {
             this.logger.error('Failed to transition task to Failed after dispatch error', {
