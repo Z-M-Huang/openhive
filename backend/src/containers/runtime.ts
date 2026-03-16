@@ -258,7 +258,9 @@ export class ContainerRuntimeImpl implements ContainerRuntime {
       HostConfig: {
         Binds: [`${config.hostWorkspacePath ?? config.workspacePath}:/app/workspace`],
         NetworkMode: config.networkMode,
+        CapDrop: ['ALL'],
         Privileged: false,
+        ReadonlyRootfs: true,
         Tmpfs: { '/tmp': 'rw,noexec,nosuid' },
         Memory: memoryBytes,
         CpuQuota: cpuQuota,
