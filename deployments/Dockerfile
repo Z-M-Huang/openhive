@@ -14,6 +14,14 @@ FROM node:22-bookworm-slim AS builder
 
 WORKDIR /build
 
+# Install native build tools for better-sqlite3 and bun runtime
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        python3 \
+        make \
+        g++ && \
+    rm -rf /var/lib/apt/lists/*
+
 # Install bun (pinned for reproducible builds)
 RUN npm install -g bun@1.3.10
 
@@ -31,10 +39,10 @@ COPY web/ web/
 COPY common/ common/
 
 # Compile backend TypeScript -> JS
-RUN cd backend && bun run build
+RUN cd backend && ./node_modules/.bin/tsc --project tsconfig.build.json
 
 # Build web SPA (vite)
-RUN cd web && bun run build
+RUN cd web && ./node_modules/.bin/tsc --project tsconfig.build.json && ./node_modules/.bin/vite build
 
 # Prune devDependencies for production image
 RUN bun install --frozen-lockfile --production
@@ -84,6 +92,14 @@ COPY common/ /app/common/
 
 # Ensure non-root user owns app directories
 RUN chown -R node:node /app
+
+# Add node user to docker group for Docker socket access.
+# The GID must match the host's docker socket group.
+# Default to 1001; override with --build-arg DOCKER_GID=<host-gid> if different.
+ARG DOCKER_GID=1001
+RUN groupadd -g ${DOCKER_GID} docker 2>/dev/null || true && \
+    usermod -aG docker node 2>/dev/null || \
+    usermod -aG ${DOCKER_GID} node 2>/dev/null || true
 
 # Switch to non-root user for runtime
 USER node

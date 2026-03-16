@@ -13,8 +13,8 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ../.run/workspace:/app/workspace
-      - ../data:/app/data
+      - ${HOST_PROJECT_DIR:-..}/.run/workspace:/app/workspace
+      - ${HOST_PROJECT_DIR:-..}/data:/app/data
       - /var/run/docker.sock:/var/run/docker.sock
     env_file:
       - ../.env

@@ -91,7 +91,7 @@ import { ContainerManagerImpl } from './containers/manager.js';
 import { ContainerProvisionerImpl } from './containers/provisioner.js';
 import { WorkspaceLockImpl } from './control-plane/workspace-lock.js';
 import { PluginManagerImpl } from './plugins/manager.js';
-import { LogLevel, ChannelType, ProviderType, AgentStatus, ContainerHealth } from './domain/enums.js';
+import { LogLevel, ChannelType, ProviderType } from './domain/enums.js';
 import { DomainError, NotFoundError, mapDomainErrorToWSError } from './domain/errors.js';
 import type { Logger, LogSink, OrgChartTeam, OrgChartAgent, SessionStore, MCPServerConfig, TaskStore, MessageStore, LogStore, MemoryStore, IntegrationStore, CredentialStore, ToolCallStore, ResolvedProvider, AgentInitConfig } from './domain/interfaces.js';
 import { resolveSecretsTemplatesInObject } from './mcp/tools/index.js';
@@ -1357,3 +1357,11 @@ async function gracefulShutdown(): Promise<void> {
     await logger.stop();
   }
 }
+
+// ---------------------------------------------------------------------------
+// Entry point — invoke main() when run directly
+// ---------------------------------------------------------------------------
+main().catch((err) => {
+  console.error('Fatal startup error:', err);
+  process.exit(1);
+});

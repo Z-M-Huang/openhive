@@ -159,7 +159,11 @@ export class ConfigLoaderImpl implements ConfigLoader {
     const yamlPath = join(this.dataDir, 'providers.yaml');
     const raw = await readFile(yamlPath, 'utf-8');
     const parsed: unknown = YAML.parse(raw);
-    const validated = validateProviders(parsed);
+    // providers.yaml may have a top-level 'providers' key wrapping the map
+    const providersMap = (parsed && typeof parsed === 'object' && 'providers' in parsed)
+      ? (parsed as Record<string, unknown>)['providers']
+      : parsed;
+    const validated = validateProviders(providersMap);
     // Map to Provider objects (add name from key)
     const result: Record<string, Provider> = {};
     for (const [key, value] of Object.entries(validated)) {
