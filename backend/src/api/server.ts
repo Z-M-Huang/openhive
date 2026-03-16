@@ -226,6 +226,25 @@ export class APIServer {
       logger: false, // We use Pino separately
     });
 
+    // Global error handler: convert known errors to appropriate HTTP status codes
+    this.app.setErrorHandler((error: { statusCode?: number; code?: string; message?: string }, _request: FastifyRequest, reply: FastifyReply) => {
+      // JSON parse errors from malformed request bodies
+      if (error.statusCode === 400 || error.code === 'FST_ERR_CTP_INVALID_MEDIA_TYPE' ||
+          (error.message && error.message.includes('is not valid JSON'))) {
+        reply.code(400).send({ error: 'Bad Request', message: error.message });
+        return;
+      }
+      // Unhandled domain errors
+      if (error.message && (error.message.includes('Invalid task state transition') ||
+          error.message.includes('Reserved slug') ||
+          error.message.includes('Invalid slug'))) {
+        reply.code(400).send({ error: error.message });
+        return;
+      }
+      // Default: 500
+      reply.code(500).send({ error: 'Internal Server Error' });
+    });
+
     // Register CORS plugin
     await this.app.register(cors, {
       origin: ['http://localhost:3000', 'http://localhost:5173', 'http://127.0.0.1:3000', 'http://127.0.0.1:5173'],

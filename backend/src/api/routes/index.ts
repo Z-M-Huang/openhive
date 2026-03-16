@@ -53,7 +53,7 @@ import type {
   BusEvent,
 } from '../../domain/index.js';
 import { ContainerHealth } from '../../domain/enums.js';
-import { NotFoundError, ValidationError, ConflictError } from '../../domain/errors.js';
+import { NotFoundError, ValidationError, ConflictError, InvalidTransitionError } from '../../domain/errors.js';
 import type { MasterConfig } from '../../config/defaults.js';
 
 /** Slug regex: lowercase alphanumeric segments separated by hyphens, 3-63 chars. */
@@ -322,9 +322,18 @@ function registerTeamRoutes(app: FastifyInstance, ctx: RouteContext): void {
         status: 'created',
       });
     } catch (err) {
-      // Do not expose internal error details. Let the onError hook log and sanitize (AC-G15).
-      if (err instanceof ValidationError) {
-        reply.code(400).send({ error: (err as ValidationError).message });
+      // Catch validation/domain errors as 400, not 500
+      if (err instanceof ValidationError || err instanceof ConflictError) {
+        reply.code(400).send({ error: (err as Error).message });
+        return;
+      }
+      // validateSlug throws plain Error for reserved slugs, format issues
+      if (err instanceof Error && (
+        err.message.includes('Reserved slug') ||
+        err.message.includes('Invalid slug') ||
+        err.message.includes('Slug too')
+      )) {
+        reply.code(400).send({ error: err.message });
         return;
       }
       throw err;
@@ -527,8 +536,8 @@ function registerTaskRoutes(app: FastifyInstance, ctx: RouteContext): void {
         reply.code(404).send({ error: `Task not found: ${id}` });
         return;
       }
-      if (err instanceof ValidationError) {
-        reply.code(400).send({ error: err.message });
+      if (err instanceof InvalidTransitionError || err instanceof ValidationError) {
+        reply.code(400).send({ error: (err as Error).message });
         return;
       }
       throw err;
