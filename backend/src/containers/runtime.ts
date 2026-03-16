@@ -71,7 +71,7 @@ import { validateSlug } from '../domain/domain.js';
 const SHELL_METACHAR_PATTERN = /[;|&$`\n\r\0\x00-\x1f]/;
 
 /** Default allowed images (INV-06: same image everywhere). */
-const DEFAULT_ALLOWED_IMAGES: ReadonlySet<string> = new Set(['openhive']);
+const DEFAULT_ALLOWED_IMAGES: ReadonlySet<string> = new Set(['openhive', 'openhive:latest']);
 
 /** Default memory limit: 512 MB in bytes. */
 const DEFAULT_MEMORY_BYTES = 512 * 1024 * 1024;
