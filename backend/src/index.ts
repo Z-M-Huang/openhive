@@ -1060,6 +1060,7 @@ async function initializeRootMode(
     description: assistantConfig.name,
     role: 'main_assistant',
     model: resolveModel(assistantConfig.model_tier, mainAssistantProvider),
+    modelTier: assistantConfig.model_tier ?? 'sonnet',
     tools: [], // Empty = all tools allowed (main assistant has full access)
     provider: mainAssistantProvider,
   };

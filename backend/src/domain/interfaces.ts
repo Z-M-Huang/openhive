@@ -103,6 +103,8 @@ export interface AgentInitConfig {
   description: string;
   role: string;
   model: string;
+  /** Model tier alias ('haiku' | 'sonnet' | 'opus') for SDK query resolution. */
+  modelTier?: string;
   tools: string[];
   provider: ResolvedProvider;
   systemPrompt?: string;

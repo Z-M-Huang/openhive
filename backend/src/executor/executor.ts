@@ -170,10 +170,13 @@ export class AgentExecutorImpl implements AgentExecutor {
     });
 
     try {
+      // Use model tier alias ('sonnet') so the SDK resolves via ANTHROPIC_DEFAULT_*_MODEL
+      // env vars. This works for both Anthropic-native and proxy providers.
+      const modelAlias = tracked.config.modelTier ?? 'sonnet';
       const result: AgentQueryResult = await runAgentQuery({
         prompt,
         mcpServer: tracked.mcpServer,
-        model: tracked.config.model,
+        model: modelAlias,
         cwd: tracked.workspacePath,
         systemPrompt: tracked.config.systemPrompt,
         sessionId: tracked.sessionId,
@@ -326,6 +329,23 @@ export class AgentExecutorImpl implements AgentExecutor {
       }
       delete process.env['CLAUDE_CODE_OAUTH_TOKEN'];
     }
+
+    // Set model tier mappings so the SDK resolves tier aliases (haiku/sonnet/opus)
+    // to the provider's actual model names. This is required for non-Anthropic
+    // providers like MiniMax that use custom model identifiers.
+    if (agent.provider.models) {
+      const models = agent.provider.models;
+      if (models.haiku) process.env['ANTHROPIC_DEFAULT_HAIKU_MODEL'] = models.haiku;
+      if (models.sonnet) process.env['ANTHROPIC_DEFAULT_SONNET_MODEL'] = models.sonnet;
+      if (models.opus) process.env['ANTHROPIC_DEFAULT_OPUS_MODEL'] = models.opus;
+    } else {
+      // Fallback: map all tiers to the agent's configured model
+      process.env['ANTHROPIC_DEFAULT_HAIKU_MODEL'] = agent.model;
+      process.env['ANTHROPIC_DEFAULT_SONNET_MODEL'] = agent.model;
+      process.env['ANTHROPIC_DEFAULT_OPUS_MODEL'] = agent.model;
+    }
+    // Tell the SDK to use 'sonnet' as the default subagent model alias
+    process.env['CLAUDE_CODE_SUBAGENT_MODEL'] = 'sonnet';
   }
 
   /** Legacy: spawns agent-entry.ts as a child process. */
