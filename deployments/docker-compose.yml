@@ -32,5 +32,7 @@ networks:
   openhive-network:
     name: openhive-network
     driver: bridge
-    driver_opts:
-      com.docker.network.bridge.enable_icc: "false"
+    # Note: ICC must be enabled so child containers can reach root via WebSocket (INV-02).
+    # Container isolation is enforced at the application layer: all tool calls validated
+    # at root (INV-10), no direct container-to-container messaging (INV-03 enforced via
+    # hub-and-spoke routing, not network-level ICC).
