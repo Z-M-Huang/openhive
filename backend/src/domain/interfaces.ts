@@ -70,6 +70,8 @@ export interface ContainerConfig {
   tid: string;
   image: string;
   workspacePath: string;
+  /** Host-side workspace path for Docker bind mounts. Falls back to workspacePath if not set. */
+  hostWorkspacePath?: string;
   env: Record<string, string>;
   networkMode: string;
   memoryLimit?: string;

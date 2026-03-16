@@ -6,6 +6,7 @@
 
 services:
   openhive:
+    container_name: openhive-root
     build:
       context: ..
       dockerfile: deployments/Dockerfile
@@ -21,6 +22,7 @@ services:
     environment:
       OPENHIVE_IS_ROOT: "true"
       OPENHIVE_SYSTEM_LISTEN_ADDRESS: "0.0.0.0"
+      HOST_PROJECT_DIR: "${HOST_PROJECT_DIR:-}"
     networks:
       - openhive-network
     stdin_open: true
@@ -28,6 +30,7 @@ services:
 
 networks:
   openhive-network:
+    name: openhive-network
     driver: bridge
     driver_opts:
       com.docker.network.bridge.enable_icc: "false"

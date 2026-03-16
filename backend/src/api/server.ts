@@ -241,8 +241,9 @@ export class APIServer {
         reply.code(400).send({ error: error.message });
         return;
       }
-      // Default: 500
-      reply.code(500).send({ error: 'Internal Server Error' });
+      // Default: 500 — log for debugging
+      console.error('[API Error]', error.message ?? error);
+      reply.code(500).send({ error: 'Internal Server Error', message: error.message });
     });
 
     // Register CORS plugin

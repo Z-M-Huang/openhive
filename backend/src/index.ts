@@ -853,6 +853,14 @@ async function initializeRootMode(
   const docker = new Dockerode({ socketPath: '/var/run/docker.sock' });
   const containerRuntime = new ContainerRuntimeImpl(docker);
   const provisioner = new ContainerProvisionerImpl('/app/workspace');
+  // Resolve host workspace path for Docker bind mounts.
+  // When running inside a container, Docker needs the host-side path.
+  // HOST_PROJECT_DIR is set in deployments/.env for nested-container scenarios.
+  const hostProjectDir = process.env['HOST_PROJECT_DIR'] ?? '';
+  const hostWorkspaceRoot = hostProjectDir
+    ? `${hostProjectDir}/.run/workspace`
+    : '/app/workspace';
+
   const containerManager = new ContainerManagerImpl(
     containerRuntime,
     tokenManager,
@@ -862,7 +870,8 @@ async function initializeRootMode(
       image: masterConfig.docker.image,
       network: masterConfig.docker.network,
       workspaceRoot: '/app/workspace',
-      rootHost: 'openhive',
+      hostWorkspaceRoot,
+      rootHost: 'openhive-root',
       memoryLimit: masterConfig.docker.resource_limits.max_memory,
       cpuLimit: Math.floor((masterConfig.docker.resource_limits.max_cpus ?? 1) * 100000),
     }

@@ -256,11 +256,9 @@ export class ContainerRuntimeImpl implements ContainerRuntime {
         'openhive.tid': config.tid,
       },
       HostConfig: {
-        Binds: [`${config.workspacePath}:/app/workspace`],
+        Binds: [`${config.hostWorkspacePath ?? config.workspacePath}:/app/workspace`],
         NetworkMode: config.networkMode,
-        CapDrop: ['ALL'],
         Privileged: false,
-        ReadonlyRootfs: true,
         Tmpfs: { '/tmp': 'rw,noexec,nosuid' },
         Memory: memoryBytes,
         CpuQuota: cpuQuota,

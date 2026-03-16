@@ -46,8 +46,11 @@ export interface ContainerManagerConfig {
   image?: string;
   /** Docker network name (default: 'openhive-network'). */
   network?: string;
-  /** Base workspace path on the host (default: '/app/workspace'). */
+  /** Base workspace path inside the root container (default: '/app/workspace'). */
   workspaceRoot?: string;
+  /** Base workspace path on the Docker host for bind mounts. When running in a container,
+   *  Docker needs the host path, not the container path. Falls back to workspaceRoot. */
+  hostWorkspaceRoot?: string;
   /** Root container host address for WS connections (default: 'root'). */
   rootHost?: string;
   /** Memory limit string (e.g., '512m'). */
@@ -98,6 +101,7 @@ export class ContainerManagerImpl implements ContainerManager {
       image: config?.image ?? 'openhive',
       network: config?.network ?? 'openhive-network',
       workspaceRoot: config?.workspaceRoot ?? '/app/workspace',
+      hostWorkspaceRoot: config?.hostWorkspaceRoot ?? config?.workspaceRoot ?? '/app/workspace',
       rootHost: config?.rootHost ?? 'root',
       memoryLimit: config?.memoryLimit ?? '512m',
       cpuLimit: config?.cpuLimit ?? 50_000,
@@ -118,8 +122,9 @@ export class ContainerManagerImpl implements ContainerManager {
     // Generate TID for container identification
     const tid = `tid-${teamSlug}-${randomHex(6)}`;
 
-    // Resolve workspace path
+    // Resolve workspace paths — internal (inside containers) and host (for Docker bind mounts)
     const workspacePath = `${this.config.workspaceRoot}/teams/${teamSlug}`;
+    const hostWorkspacePath = `${this.config.hostWorkspaceRoot}/teams/${teamSlug}`;
 
     // Generate one-time WS auth token bound to this TID
     const wsToken = this.tokenManager.generate(tid);
@@ -130,6 +135,7 @@ export class ContainerManagerImpl implements ContainerManager {
       tid,
       image: this.config.image,
       workspacePath,
+      hostWorkspacePath,
       env: {
         OPENHIVE_WS_TOKEN: wsToken,
         OPENHIVE_TEAM_TID: tid,
