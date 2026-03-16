@@ -194,11 +194,13 @@ export class AgentExecutorImpl implements AgentExecutor {
       tracked.abortController = undefined;
 
       if (!result.success) {
-        this.logger.error('Agent query failed', {
+        this.logger.error(`Agent query failed: ${result.error ?? 'unknown error'}`, {
           aid: agentAid,
           taskId,
-          error: result.error,
+          error: String(result.error ?? 'unknown'),
         });
+        // Also log to stderr for immediate visibility
+        console.error(`[AgentExecutor] Query failed for ${agentAid}: ${result.error}`);
 
         this.eventBus.publish({
           type: 'task_result',
