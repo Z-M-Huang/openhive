@@ -389,6 +389,15 @@ function registerTeamRoutes(app: FastifyInstance, ctx: RouteContext): void {
 
     try {
       await ctx.containerManager.stopTeamContainer(slug, 'api_delete');
+
+      // Remove team from org chart
+      if (ctx.orgChart) {
+        const team = ctx.orgChart.getTeamBySlug(slug);
+        if (team) {
+          ctx.orgChart.removeTeam(team.tid);
+        }
+      }
+
       reply.send({ slug, status: 'removed' });
     } catch (err) {
       if (err instanceof NotFoundError) {
