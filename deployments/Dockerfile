@@ -107,6 +107,6 @@ USER node
 EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-    CMD curl -sf http://localhost:8080/api/v1/health || exit 1
+    CMD curl -sf http://localhost:8080/api/health || exit 1
 
 CMD ["node", "backend/dist/index.js"]
