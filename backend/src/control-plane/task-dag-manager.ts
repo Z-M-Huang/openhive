@@ -8,6 +8,7 @@ import type {
   WSHub,
   EventBus,
   Logger,
+  AgentExecutor,
 } from '../domain/interfaces.js';
 
 /**
@@ -49,6 +50,7 @@ export class TaskDAGManager {
   private readonly eventBus: EventBus;
   private readonly logger: Logger;
   private readonly onEscalation: (agentAid: string, taskId: string, reason: EscalationReason, context: Record<string, unknown>) => Promise<string>;
+  private readonly agentExecutor?: AgentExecutor;
 
   private readonly mutex = new MutexMap();
 
@@ -59,6 +61,7 @@ export class TaskDAGManager {
     eventBus: EventBus;
     logger: Logger;
     onEscalation: (agentAid: string, taskId: string, reason: EscalationReason, context: Record<string, unknown>) => Promise<string>;
+    agentExecutor?: AgentExecutor;
   }) {
     this.taskStore = deps.taskStore;
     this.orgChart = deps.orgChart;
@@ -66,12 +69,18 @@ export class TaskDAGManager {
     this.eventBus = deps.eventBus;
     this.logger = deps.logger;
     this.onEscalation = deps.onEscalation;
+    this.agentExecutor = deps.agentExecutor;
   }
 
   /**
    * Dispatch a task: validate DAG, check not blocked, transition pending->active, send via WS.
+   *
+   * @param task - The task to dispatch
+   * @param sessionId - Optional SDK session ID to include in the WS message (AC-C1).
+   *   When provided, the receiving container can pass it to the agent SDK to resume
+   *   prior conversation context.
    */
-  async dispatchTask(task: Task): Promise<void> {
+  async dispatchTask(task: Task, sessionId?: string): Promise<void> {
     // Validate dependencies exist
     if (task.blocked_by && task.blocked_by.length > 0) {
       await this.taskStore.validateDependencies(task.id, task.blocked_by);
@@ -96,11 +105,43 @@ export class TaskDAGManager {
       updated_at: now,
     });
 
-    // Send to target container via WS
+    // Dispatch to target agent — local executor for root-resident agents, WS for containers
     const targetAgent = this.orgChart.getAgent(task.agent_aid);
     if (targetAgent) {
       const targetTeam = this.orgChart.getTeamBySlug(targetAgent.teamSlug);
-      if (targetTeam && targetTeam.containerId) {
+      const isRootLocal = !targetTeam?.containerId || targetTeam.containerId === 'root' || targetTeam.containerId === '';
+
+      if (isRootLocal && this.agentExecutor) {
+        // Root-resident agent: dispatch locally via executor (fire-and-forget —
+        // the executor publishes task_result events via eventBus)
+        void this.agentExecutor.dispatchTask(task.agent_aid, task.prompt, task.id).catch(async (err: unknown) => {
+          this.logger.error('Local agent dispatch failed', {
+            task_id: task.id,
+            agent_aid: task.agent_aid,
+            error: String(err),
+          });
+          // Transition task to Failed so it doesn't remain stuck in Active
+          try {
+            await this.taskStore.update({
+              ...task,
+              status: TaskStatus.Failed,
+              result: `Local dispatch failed: ${String(err)}`,
+              updated_at: Date.now(),
+            });
+            this.eventBus.publish('task_result', {
+              task_id: task.id,
+              status: TaskStatus.Failed,
+              result: `Local dispatch failed: ${String(err)}`,
+            });
+          } catch (updateErr: unknown) {
+            this.logger.error('Failed to transition task to Failed after dispatch error', {
+              task_id: task.id,
+              error: String(updateErr),
+            });
+          }
+        });
+      } else if (targetTeam && targetTeam.containerId) {
+        // Container agent: dispatch via WebSocket
         this.wsHub.send(targetTeam.tid, {
           type: 'task_dispatch',
           data: {
@@ -108,6 +149,7 @@ export class TaskDAGManager {
             agent_aid: task.agent_aid,
             prompt: task.prompt,
             blocked_by: task.blocked_by ?? [],
+            ...(sessionId !== undefined && { session_id: sessionId }),
           },
         });
       }

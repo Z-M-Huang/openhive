@@ -39,6 +39,8 @@ export interface Task {
   created_at: number;
   updated_at: number;
   completed_at: number | null;
+  /** Origin channel JID for routing responses back to user (e.g., "cli:local:0", "discord:guild:channel"). */
+  origin_chat_jid?: string | null;
 }
 
 /** agents — runtime agent config derived from agent definition files. */
@@ -104,6 +106,8 @@ export interface ChatSession {
   last_agent_timestamp: number;
   session_id: string;
   agent_aid: string;
+  /** Team TID this session is bound to (AC-C2). Empty string for legacy rows. */
+  tid: string;
 }
 
 /** task_events table — task lifecycle events (one per state transition). */
@@ -165,6 +169,8 @@ export interface Integration {
   name: string;
   config_path: string;
   status: IntegrationStatus;
+  /** Error details for failed or rolled_back integrations (AC-G8). Empty string when not applicable. */
+  error_message: string;
   created_at: number;
 }
 

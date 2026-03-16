@@ -64,7 +64,7 @@ describe('Config Validation', () => {
         triggers: [
           {
             name: 'test-trigger',
-            team_slug: 'test-team',
+            target_team: 'test-team',
             type: 'cron',
             schedule: '0 * * * *',
             prompt: 'Run hourly',
@@ -361,7 +361,7 @@ describe('Config Validation', () => {
         triggers: [
           {
             name: 'daily-trigger',
-            team_slug: 'test-team',
+            target_team: 'test-team',
             type: 'cron',
             schedule: '0 0 * * *',
             prompt: 'Daily check',
@@ -382,6 +382,249 @@ describe('Config Validation', () => {
         unknown_field: 'should fail',
       };
       expect(() => validateTeam(team)).toThrow(ZodError);
+    });
+  });
+
+  describe('Trigger target_team / team_slug backward compatibility (AC-E1, AC-CROSS-5)', () => {
+    it('accepts trigger with target_team field', () => {
+      const team = {
+        slug: 'test-team',
+        leader_aid: 'aid-lead-001',
+        triggers: [
+          {
+            name: 'new-trigger',
+            target_team: 'my-team',
+            type: 'cron',
+            schedule: '0 * * * *',
+            prompt: 'Hourly check',
+          },
+        ],
+      };
+      expect(() => validateTeam(team)).not.toThrow();
+      const result = validateTeam(team);
+      expect(result.triggers![0]!.target_team).toBe('my-team');
+    });
+
+    it('accepts legacy team_slug and maps it to target_team', () => {
+      const team = {
+        slug: 'test-team',
+        leader_aid: 'aid-lead-001',
+        triggers: [
+          {
+            name: 'legacy-trigger',
+            team_slug: 'legacy-team',
+            type: 'cron',
+            schedule: '0 * * * *',
+            prompt: 'Legacy check',
+          },
+        ],
+      };
+      expect(() => validateTeam(team)).not.toThrow();
+      const result = validateTeam(team);
+      expect(result.triggers![0]!.target_team).toBe('legacy-team');
+    });
+
+    it('when both team_slug and target_team provided, target_team wins', () => {
+      const team = {
+        slug: 'test-team',
+        leader_aid: 'aid-lead-001',
+        triggers: [
+          {
+            name: 'both-fields',
+            team_slug: 'old-team',
+            target_team: 'new-team',
+            type: 'cron',
+            schedule: '0 * * * *',
+            prompt: 'Check',
+          },
+        ],
+      };
+      expect(() => validateTeam(team)).not.toThrow();
+      const result = validateTeam(team);
+      expect(result.triggers![0]!.target_team).toBe('new-team');
+    });
+
+    it('trigger missing both team_slug and target_team fails validation', () => {
+      const team = {
+        slug: 'test-team',
+        leader_aid: 'aid-lead-001',
+        triggers: [
+          {
+            name: 'bad-trigger',
+            type: 'cron',
+            schedule: '0 * * * *',
+            prompt: 'Check',
+          },
+        ],
+      };
+      expect(() => validateTeam(team)).toThrow();
+    });
+
+    it('accepts webhook trigger with target_team', () => {
+      const team = {
+        slug: 'test-team',
+        leader_aid: 'aid-lead-001',
+        triggers: [
+          {
+            name: 'wh-trigger',
+            target_team: 'webhook-team',
+            type: 'webhook',
+            path: 'my-hook',
+          },
+        ],
+      };
+      expect(() => validateTeam(team)).not.toThrow();
+    });
+
+    it('accepts legacy team_slug on webhook trigger', () => {
+      const team = {
+        slug: 'test-team',
+        leader_aid: 'aid-lead-001',
+        triggers: [
+          {
+            name: 'wh-legacy',
+            team_slug: 'legacy-team',
+            type: 'webhook',
+            path: 'my-hook',
+          },
+        ],
+      };
+      expect(() => validateTeam(team)).not.toThrow();
+      const result = validateTeam(team);
+      expect(result.triggers![0]!.target_team).toBe('legacy-team');
+    });
+  });
+
+  describe('Cron trigger action field and agent field (AC-E2)', () => {
+    it('accepts nested action object on cron trigger', () => {
+      const team = {
+        slug: 'test-team',
+        leader_aid: 'aid-lead-001',
+        triggers: [
+          {
+            name: 'action-trigger',
+            target_team: 'my-team',
+            type: 'cron',
+            schedule: '0 * * * *',
+            action: { title: 'Hourly report', prompt: 'Generate hourly report', priority: 'P1' },
+          },
+        ],
+      };
+      expect(() => validateTeam(team)).not.toThrow();
+      const result = validateTeam(team);
+      const trigger = result.triggers![0]!;
+      expect(trigger.type).toBe('cron');
+      if (trigger.type === 'cron') {
+        const action = trigger.action;
+        expect(typeof action).toBe('object');
+        if (typeof action === 'object') {
+          expect(action.title).toBe('Hourly report');
+          expect(action.prompt).toBe('Generate hourly report');
+          expect(action.priority).toBe('P1');
+        }
+      }
+    });
+
+    it('normalizes flat prompt string to action object', () => {
+      const team = {
+        slug: 'test-team',
+        leader_aid: 'aid-lead-001',
+        triggers: [
+          {
+            name: 'flat-trigger',
+            target_team: 'my-team',
+            type: 'cron',
+            schedule: '0 * * * *',
+            prompt: 'Legacy prompt text',
+          },
+        ],
+      };
+      expect(() => validateTeam(team)).not.toThrow();
+      const result = validateTeam(team);
+      const trigger = result.triggers![0]!;
+      expect(trigger.type).toBe('cron');
+      if (trigger.type === 'cron') {
+        const action = trigger.action;
+        expect(typeof action).toBe('object');
+        if (typeof action === 'object') {
+          expect(action.prompt).toBe('Legacy prompt text');
+          expect(action.title).toBe('Triggered task');
+          expect(action.priority).toBe('P2');
+        }
+      }
+    });
+
+    it('accepts optional agent field with valid AID on cron trigger', () => {
+      const team = {
+        slug: 'test-team',
+        leader_aid: 'aid-lead-001',
+        triggers: [
+          {
+            name: 'agent-trigger',
+            target_team: 'my-team',
+            agent: 'aid-worker-abc',
+            type: 'cron',
+            schedule: '0 * * * *',
+            action: { title: 'Worker job', prompt: 'Run task', priority: 'P0' },
+          },
+        ],
+      };
+      expect(() => validateTeam(team)).not.toThrow();
+      const result = validateTeam(team);
+      const trigger = result.triggers![0]!;
+      expect(trigger.agent).toBe('aid-worker-abc');
+    });
+
+    it('rejects agent field with invalid AID format', () => {
+      const team = {
+        slug: 'test-team',
+        leader_aid: 'aid-lead-001',
+        triggers: [
+          {
+            name: 'bad-agent-trigger',
+            target_team: 'my-team',
+            agent: 'not-a-valid-aid',
+            type: 'cron',
+            schedule: '0 * * * *',
+            action: { title: 'Job', prompt: 'Run task', priority: 'P0' },
+          },
+        ],
+      };
+      expect(() => validateTeam(team)).toThrow();
+    });
+
+    it('rejects action with invalid priority value', () => {
+      const team = {
+        slug: 'test-team',
+        leader_aid: 'aid-lead-001',
+        triggers: [
+          {
+            name: 'bad-priority-trigger',
+            target_team: 'my-team',
+            type: 'cron',
+            schedule: '0 * * * *',
+            action: { title: 'Job', prompt: 'Run task', priority: 'P3' },
+          },
+        ],
+      };
+      expect(() => validateTeam(team)).toThrow();
+    });
+
+    it('cron trigger without action or prompt fails validation', () => {
+      const team = {
+        slug: 'test-team',
+        leader_aid: 'aid-lead-001',
+        triggers: [
+          {
+            name: 'no-action-trigger',
+            target_team: 'my-team',
+            type: 'cron',
+            schedule: '0 * * * *',
+            // no action, no prompt
+          },
+        ],
+      };
+      expect(() => validateTeam(team)).toThrow();
     });
   });
 

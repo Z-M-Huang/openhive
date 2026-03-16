@@ -83,6 +83,7 @@ function rowToTask(row: typeof schema.tasks.$inferSelect): Task {
     created_at: row.created_at,
     updated_at: row.updated_at,
     completed_at: row.completed_at ?? null,
+    origin_chat_jid: (row as Record<string, unknown>).origin_chat_jid as string | null ?? null,
   };
 }
 
@@ -164,6 +165,7 @@ export function newTaskStore(db: Database): TaskStore {
           created_at: task.created_at,
           updated_at: task.updated_at,
           completed_at: task.completed_at,
+          origin_chat_jid: task.origin_chat_jid ?? null,
         }).run();
       });
     },
@@ -804,6 +806,7 @@ export function newSessionStore(db: Database): SessionStore {
               last_agent_timestamp: session.last_agent_timestamp,
               session_id: session.session_id,
               agent_aid: session.agent_aid,
+              tid: session.tid,
             })
             .where(eq(schema.chatSessions.chat_jid, session.chat_jid))
             .run();
@@ -815,6 +818,7 @@ export function newSessionStore(db: Database): SessionStore {
             last_agent_timestamp: session.last_agent_timestamp,
             session_id: session.session_id,
             agent_aid: session.agent_aid,
+            tid: session.tid,
           }).run();
         }
       });
@@ -978,6 +982,7 @@ export function newIntegrationStore(db: Database): IntegrationStore {
           name: integration.name,
           config_path: integration.config_path,
           status: integration.status,
+          error_message: integration.error_message,
           created_at: integration.created_at,
         }).run();
       });
@@ -1012,6 +1017,7 @@ export function newIntegrationStore(db: Database): IntegrationStore {
             name: integration.name,
             config_path: integration.config_path,
             status: integration.status,
+            error_message: integration.error_message,
           })
           .where(eq(schema.integrations.id, integration.id))
           .run();
@@ -1035,7 +1041,7 @@ export function newIntegrationStore(db: Database): IntegrationStore {
       return rows as Integration[];
     },
 
-    async updateStatus(id: string, status: IntegrationStatus): Promise<void> {
+    async updateStatus(id: string, status: IntegrationStatus, errorMessage?: string): Promise<void> {
       const existing = db.getDB()
         .select({ status: schema.integrations.status })
         .from(schema.integrations)
@@ -1054,7 +1060,10 @@ export function newIntegrationStore(db: Database): IntegrationStore {
 
       await db.enqueueWrite(() => {
         db.getDB().update(schema.integrations)
-          .set({ status })
+          .set({
+            status,
+            ...(errorMessage !== undefined ? { error_message: errorMessage } : {}),
+          })
           .where(eq(schema.integrations.id, id))
           .run();
       });

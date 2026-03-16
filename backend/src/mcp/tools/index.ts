@@ -44,6 +44,7 @@ import type {
   MCPRegistry,
   HealthMonitor,
   Logger,
+  WorkspaceLock,
 } from '../../domain/index.js';
 
 import { registerWebhook } from '../../api/routes/index.js';
@@ -164,6 +165,12 @@ export interface ToolContext {
   }) => Promise<void>;
   /** Pending memory writes queue for retry on reconnection (AC-L6-07). */
   pendingMemoryWrites?: PendingMemoryWrite[];
+  /**
+   * Advisory workspace-level lock for concurrent workspace operations (AC-D2, AC-D3).
+   * Optional — only wired in root mode. Handlers that modify the workspace
+   * (create_team, create_agent, stop_container) acquire/release this lock.
+   */
+  workspaceLock?: WorkspaceLock;
   /** Frozen configurable limits (CON-01, CON-02, CON-03). Object.freeze() applied at construction site (orchestrator.ts). */
   limits: Readonly<{
     max_depth: number;
@@ -212,6 +219,7 @@ const CreateAgentSchema = z.object({
   team_slug: z.string().min(1),
   model: z.string().optional(),
   skills: z.array(z.string()).optional(),
+  role: z.enum(['member', 'team_lead']).optional(),
 });
 
 const CreateTaskSchema = z.object({
@@ -220,6 +228,7 @@ const CreateTaskSchema = z.object({
   priority: z.number().int().optional(),
   blocked_by: z.array(z.string()).optional(),
   max_retries: z.number().int().min(0).optional(),
+  origin_chat_jid: z.string().optional(),
 });
 
 const DispatchSubtaskSchema = z.object({
@@ -371,7 +380,28 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
 
   handlers.set('stop_container', async (args) => {
     const parsed = StopContainerSchema.parse(args);
+
+    // Look up workspace path before stopping (org chart entry may be removed after)
+    const stoppingTeam = ctx.orgChart.getTeamBySlug(parsed.team_slug);
+    const teamWorkspacePath = stoppingTeam?.workspacePath;
+
     await ctx.containerManager.stopTeamContainer(parsed.team_slug, 'Tool: stop_container');
+
+    // Delete workspace — acquire lock to prevent race with concurrent create_team
+    // or create_agent targeting the same or overlapping paths (AC-D2, AC-D3).
+    if (teamWorkspacePath) {
+      if (ctx.workspaceLock) {
+        await ctx.workspaceLock.acquire(teamWorkspacePath);
+      }
+      try {
+        await ctx.provisioner.deleteWorkspace(teamWorkspacePath);
+      } finally {
+        if (ctx.workspaceLock) {
+          ctx.workspaceLock.release(teamWorkspacePath);
+        }
+      }
+    }
+
     return {
       message: `Container for team '${parsed.team_slug}' stopped`,
       final_status: 'stopped',
@@ -435,9 +465,20 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
       );
     }
 
-    // Scaffold workspace
+    // Scaffold workspace — acquire lock on parent path to prevent concurrent
+    // create_team / create_agent / stop_container races on the same directory tree.
     const parentPath = parentTeam?.workspacePath ?? '/app/workspace';
-    const workspacePath = await ctx.provisioner.scaffoldWorkspace(parentPath, parsed.slug);
+    if (ctx.workspaceLock) {
+      await ctx.workspaceLock.acquire(parentPath);
+    }
+    let workspacePath: string;
+    try {
+      workspacePath = await ctx.provisioner.scaffoldWorkspace(parentPath, parsed.slug);
+    } finally {
+      if (ctx.workspaceLock) {
+        ctx.workspaceLock.release(parentPath);
+      }
+    }
 
     // Spawn container first - it generates the authoritative TID
     let containerInfo;
@@ -520,25 +561,37 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
 
     const aid = generateId('aid', parsed.name);
 
-    // Write agent definition file
-    await ctx.provisioner.writeAgentDefinition(team.workspacePath, {
-      name: parsed.name,
-      description: parsed.description,
-      model: parsed.model,
-      tools: [],
-      content: parsed.description,
-    });
+    // Write agent definition file — acquire lock on the team's workspace path
+    // to prevent races with create_team or stop_container on the same directory.
+    if (ctx.workspaceLock) {
+      await ctx.workspaceLock.acquire(team.workspacePath);
+    }
+    try {
+      await ctx.provisioner.writeAgentDefinition(team.workspacePath, {
+        name: parsed.name,
+        description: parsed.description,
+        model: parsed.model,
+        tools: [],
+        content: parsed.description,
+      });
+    } finally {
+      if (ctx.workspaceLock) {
+        ctx.workspaceLock.release(team.workspacePath);
+      }
+    }
 
-    // Add to org chart
+    // Add to org chart with requested role (default: member)
+    const agentRole = parsed.role ?? 'member';
     ctx.orgChart.addAgent({
       aid,
       name: parsed.name,
       teamSlug: parsed.team_slug,
-      role: 'member',
+      role: agentRole,
       status: AgentStatus.Idle,
+      modelTier: parsed.model,
     });
 
-    return { aid };
+    return { aid, role: agentRole };
   });
 
   // ---- Task tools (3) ----
@@ -576,6 +629,7 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
       created_at: Date.now(),
       updated_at: Date.now(),
       completed_at: null,
+      origin_chat_jid: parsed.origin_chat_jid ?? null,
     });
 
     return { task_id: taskId };
@@ -846,6 +900,7 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
       name: parsed.name,
       config_path: configPath,
       status: IntegrationStatus.Proposed,
+      error_message: '',
       created_at: Date.now(),
     });
 

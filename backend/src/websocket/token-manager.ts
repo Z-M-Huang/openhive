@@ -1,9 +1,18 @@
 /**
- * One-time WebSocket authentication token manager.
+ * WebSocket authentication token manager.
  *
- * Generates cryptographically secure, single-use tokens for WebSocket
- * upgrade authentication. Each token is bound to a specific team (TID)
- * and expires after a configurable TTL.
+ * Manages two distinct token types:
+ *
+ * **One-time tokens** (via {@link generate} / {@link validate}):
+ * - Used for initial container authentication during WS upgrade.
+ * - Single-use: consumed atomically on first successful validate call.
+ * - TTL: 5 minutes (configurable).
+ *
+ * **Session tokens** (via {@link generateSession} / {@link validateSession}):
+ * - Used for reconnect authentication after initial handshake.
+ * - Reusable: survive successful validation (not consumed).
+ * - TID-bound and TTL-checked on every validate call.
+ * - Stored in a separate internal Map from one-time tokens.
  *
  * **Token format:**
  * - 32 bytes from crypto.randomBytes, hex-encoded (64 characters).
@@ -12,20 +21,28 @@
  * **Security properties (NFR10):**
  * - Generation: crypto.randomBytes (CSPRNG) for unpredictable tokens.
  * - Comparison: crypto.timingSafeEqual to prevent timing side-channels.
- * - Single-use: validate-then-delete atomically consumes the token.
- * - TTL: 5-minute expiry (configurable via constructor).
- * - Cleanup: periodic sweep (configurable) removes expired tokens.
+ * - Single-use: validate-then-delete atomically consumes one-time tokens.
+ * - TTL: 5-minute expiry (configurable via constructor), checked for both types.
+ * - Cleanup: periodic sweep removes expired tokens from both maps.
  *
- * **Lifecycle:**
+ * **Lifecycle (one-time):**
  * 1. Root generates a token for a team via {@link generate}.
  * 2. Token is passed to the child container (e.g., via env var or container_init).
  * 3. Child connects to WS hub with the token in the query string.
  * 4. Hub calls {@link validate} which atomically checks and deletes the token.
  * 5. If valid and not expired, the upgrade proceeds. Otherwise, 401.
  *
+ * **Lifecycle (session):**
+ * 1. Root generates a session token via {@link generateSession} after initial auth.
+ * 2. Session token is delivered to the container via `container_init` message.
+ * 3. On reconnect, container authenticates with the session token.
+ * 4. Hub calls {@link validateSession}: valid if TID matches and not expired/revoked.
+ * 5. Token is NOT consumed — container may reconnect multiple times.
+ *
  * @remarks
- * - Internal storage: Map<token, { tid, createdAt }>.
- * - Cleanup interval is managed via setInterval; call {@link stopCleanup} on shutdown.
+ * - One-time storage: Map<token, { tid, createdAt }> (_tokens).
+ * - Session storage: Map<token, { tid, createdAt }> (_sessions, separate Map).
+ * - Cleanup interval sweeps both maps; call {@link stopCleanup} on shutdown.
  * - Token-to-TID binding is enforced: a token generated for team A cannot authenticate team B.
  */
 
@@ -84,14 +101,22 @@ export interface TokenManagerConfig {
  */
 export class TokenManagerImpl implements TokenManager {
   /**
-   * Internal token registry.
+   * One-time token registry.
    * Maps hex-encoded token string to its bound team and creation time.
    * Entries are removed on validate (single-use) or by the cleanup sweep.
    */
   private readonly _tokens: Map<string, TokenEntry> = new Map();
 
   /**
+   * Session token registry (separate from one-time tokens).
+   * Session tokens are reusable: they are NOT consumed on validateSession.
+   * They are removed by revokeSession, revokeSessionsForTid, or the cleanup sweep.
+   */
+  private readonly _sessions: Map<string, TokenEntry> = new Map();
+
+  /**
    * Token TTL in milliseconds. Defaults to 5 minutes (300,000 ms).
+   * Applied to both one-time tokens and session tokens.
    */
   private readonly _ttlMs: number;
 
@@ -221,6 +246,11 @@ export class TokenManagerImpl implements TokenManager {
           this._tokens.delete(token);
         }
       }
+      for (const [token, entry] of this._sessions) {
+        if (now - entry.createdAt > this._ttlMs) {
+          this._sessions.delete(token);
+        }
+      }
     }, intervalMs);
   }
 
@@ -234,6 +264,95 @@ export class TokenManagerImpl implements TokenManager {
     if (this._cleanupTimer !== undefined) {
       clearInterval(this._cleanupTimer);
       this._cleanupTimer = undefined;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Session token management
+  // -------------------------------------------------------------------------
+
+  /**
+   * Generates a long-lived session token for reconnect purposes.
+   *
+   * Session tokens are stored in a separate registry (_sessions) from one-time
+   * tokens. They survive successful validateSession calls (reusable), but are
+   * still TTL-checked on every validation.
+   *
+   * @param tid - Team identifier the session token is bound to.
+   * @returns A 64-character hex string session token.
+   */
+  generateSession(tid: string): string {
+    const token = randomBytes(32).toString('hex');
+    this._sessions.set(token, { tid, createdAt: Date.now() });
+    return token;
+  }
+
+  /**
+   * Validates a session token without consuming it.
+   *
+   * Unlike one-time tokens, session tokens are NOT deleted on successful
+   * validation (reusable). The token must be bound to the given TID and
+   * within TTL. Uses crypto.timingSafeEqual for constant-time TID comparison.
+   *
+   * @param token - Session token to validate.
+   * @param tid - Team identifier the token should be bound to.
+   * @returns true if the session token is valid, bound to the TID, and not expired.
+   */
+  validateSession(token: string, tid: string): boolean {
+    const entry = this._sessions.get(token);
+    if (!entry) {
+      return false;
+    }
+
+    // Timing-safe TID comparison
+    const storedBuf = Buffer.from(entry.tid);
+    const providedBuf = Buffer.from(tid);
+    if (storedBuf.length !== providedBuf.length || !timingSafeEqual(storedBuf, providedBuf)) {
+      return false;
+    }
+
+    // Check TTL expiry — expired sessions are removed and rejected
+    if (Date.now() - entry.createdAt > this._ttlMs) {
+      this._sessions.delete(token);
+      return false;
+    }
+
+    // Valid and not expired — session token is NOT consumed (reusable)
+    return true;
+  }
+
+  /**
+   * Revokes a single session token.
+   *
+   * No-op if the token does not exist in the session registry.
+   * Does not affect one-time tokens.
+   *
+   * @param token - The session token string to revoke.
+   */
+  revokeSession(token: string): void {
+    this._sessions.delete(token);
+  }
+
+  /**
+   * Revokes all tokens (both one-time and session) bound to the given TID.
+   *
+   * Iterates both the one-time token map (_tokens) and the session token map
+   * (_sessions), removing all entries whose tid matches. Used during container
+   * restart/stop to invalidate stale auth before issuing new tokens.
+   * Idempotent: no-op if no tokens exist for the TID.
+   *
+   * @param tid - Team identifier whose tokens should be revoked.
+   */
+  revokeSessionsForTid(tid: string): void {
+    for (const [token, entry] of this._tokens) {
+      if (entry.tid === tid) {
+        this._tokens.delete(token);
+      }
+    }
+    for (const [token, entry] of this._sessions) {
+      if (entry.tid === tid) {
+        this._sessions.delete(token);
+      }
     }
   }
 }

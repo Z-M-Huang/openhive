@@ -1,0 +1,83 @@
+name: Task State Machine
+description: Verify task state machine enforcement -- valid transitions (pending->active, active->completed, active->failed, active->escalated, any->cancelled) succeed, invalid transitions (completed->active, cancelled->pending) are rejected with 400.
+
+setup:
+  - command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+    description: "Clean start -- remove all containers and volumes from any previous run"
+  - command: "cd /app/openhive && bun run docker 2>&1 &"
+    description: "Build the Docker image and start the server in the background"
+  - command: "for i in $(seq 1 60); do curl -sf http://localhost:8080/api/health && exit 0; sleep 5; done; echo 'Health check timed out'; exit 1"
+    description: "Wait up to 5 minutes for the health check endpoint to respond (exits 1 on timeout)"
+  - command: "echo 'Create a team called state-test for testing task state transitions' | timeout 300 bun run cli/index.ts 2>&1"
+    description: "Create a team via CLI for task context since POST /api/tasks requires a valid team_slug"
+
+teardown:
+  - command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+    description: "Clean up -- remove all containers and volumes"
+
+test_cases:
+  - name: "Valid: pending to active"
+    description: Task can transition from pending to active
+    steps:
+      - action: "Create task in pending state"
+        command: "RESP=$(curl -sf -X POST http://localhost:8080/api/tasks -H 'Content-Type: application/json' -d '{\"team_slug\": \"state-test\", \"title\": \"State Test 1\", \"prompt\": \"Test pending to active\"}' 2>&1); echo $RESP; TASK_ID=$(echo $RESP | grep -o '\"id\":\"[^\"]*\"' | head -1 | cut -d'\"' -f4); echo \"TASK_ID=$TASK_ID\" > /tmp/state-test-1.txt; echo $RESP"
+        expected: "\"status\":\"pending\""
+      - action: "Transition to active"
+        command: "TASK_ID=$(cat /tmp/state-test-1.txt | cut -d= -f2); curl -sf -X PATCH http://localhost:8080/api/tasks/$TASK_ID -H 'Content-Type: application/json' -d '{\"status\": \"active\"}' 2>&1"
+        expected: "\"status\":\"active\""
+    expected_outcome: "Task status successfully updated from pending to active"
+
+  - name: "Valid: active to completed"
+    description: Task can transition from active to completed with result
+    steps:
+      - action: "Create and activate task"
+        command: "RESP=$(curl -sf -X POST http://localhost:8080/api/tasks -H 'Content-Type: application/json' -d '{\"team_slug\": \"state-test\", \"title\": \"State Test 2\", \"prompt\": \"Test active to completed\"}' 2>&1); TASK_ID=$(echo $RESP | grep -o '\"id\":\"[^\"]*\"' | head -1 | cut -d'\"' -f4); curl -sf -X PATCH http://localhost:8080/api/tasks/$TASK_ID -H 'Content-Type: application/json' -d '{\"status\": \"active\"}' 2>&1; echo \"TASK_ID=$TASK_ID\" > /tmp/state-test-2.txt"
+        expected: "\"status\":\"active\""
+      - action: "Complete the task"
+        command: "TASK_ID=$(cat /tmp/state-test-2.txt | cut -d= -f2); curl -sf -X PATCH http://localhost:8080/api/tasks/$TASK_ID -H 'Content-Type: application/json' -d '{\"status\": \"completed\", \"result\": \"Success\"}' 2>&1"
+        expected: "\"status\":\"completed\""
+    expected_outcome: "Task status updated from active to completed with result field set"
+
+  - name: "Valid: active to failed"
+    description: Task can transition from active to failed with error
+    steps:
+      - action: "Create and activate task"
+        command: "RESP=$(curl -sf -X POST http://localhost:8080/api/tasks -H 'Content-Type: application/json' -d '{\"team_slug\": \"state-test\", \"title\": \"State Test 3\", \"prompt\": \"Test active to failed\"}' 2>&1); TASK_ID=$(echo $RESP | grep -o '\"id\":\"[^\"]*\"' | head -1 | cut -d'\"' -f4); curl -sf -X PATCH http://localhost:8080/api/tasks/$TASK_ID -H 'Content-Type: application/json' -d '{\"status\": \"active\"}' 2>&1; echo \"TASK_ID=$TASK_ID\" > /tmp/state-test-3.txt"
+        expected: "\"status\":\"active\""
+      - action: "Fail the task"
+        command: "TASK_ID=$(cat /tmp/state-test-3.txt | cut -d= -f2); curl -sf -X PATCH http://localhost:8080/api/tasks/$TASK_ID -H 'Content-Type: application/json' -d '{\"status\": \"failed\", \"error\": \"Test error\"}' 2>&1"
+        expected: "\"status\":\"failed\""
+    expected_outcome: "Task status updated from active to failed with error field set"
+
+  - name: "Valid: active to escalated"
+    description: Task can transition from active to escalated
+    steps:
+      - action: "Create and activate task"
+        command: "RESP=$(curl -sf -X POST http://localhost:8080/api/tasks -H 'Content-Type: application/json' -d '{\"team_slug\": \"state-test\", \"title\": \"State Test 4\", \"prompt\": \"Test active to escalated\"}' 2>&1); TASK_ID=$(echo $RESP | grep -o '\"id\":\"[^\"]*\"' | head -1 | cut -d'\"' -f4); curl -sf -X PATCH http://localhost:8080/api/tasks/$TASK_ID -H 'Content-Type: application/json' -d '{\"status\": \"active\"}' 2>&1; echo \"TASK_ID=$TASK_ID\" > /tmp/state-test-4.txt"
+        expected: "\"status\":\"active\""
+      - action: "Escalate the task"
+        command: "TASK_ID=$(cat /tmp/state-test-4.txt | cut -d= -f2); curl -sf -X PATCH http://localhost:8080/api/tasks/$TASK_ID -H 'Content-Type: application/json' -d '{\"status\": \"escalated\"}' 2>&1"
+        expected: "\"status\":\"escalated\""
+    expected_outcome: "Task status updated from active to escalated"
+
+  - name: "Invalid: completed to active rejected"
+    description: Cannot transition from completed back to active -- should return 400
+    steps:
+      - action: "Create, activate, and complete a task"
+        command: "RESP=$(curl -sf -X POST http://localhost:8080/api/tasks -H 'Content-Type: application/json' -d '{\"team_slug\": \"state-test\", \"title\": \"State Test 5\", \"prompt\": \"Test invalid completed to active\"}' 2>&1); TASK_ID=$(echo $RESP | grep -o '\"id\":\"[^\"]*\"' | head -1 | cut -d'\"' -f4); curl -sf -X PATCH http://localhost:8080/api/tasks/$TASK_ID -H 'Content-Type: application/json' -d '{\"status\": \"active\"}' 2>&1; curl -sf -X PATCH http://localhost:8080/api/tasks/$TASK_ID -H 'Content-Type: application/json' -d '{\"status\": \"completed\", \"result\": \"Done\"}' 2>&1; echo \"TASK_ID=$TASK_ID\" > /tmp/state-test-5.txt"
+        expected: "\"status\":\"completed\""
+      - action: "Attempt invalid transition completed -> active and verify 400"
+        command: "TASK_ID=$(cat /tmp/state-test-5.txt | cut -d= -f2); curl -sf -o /dev/null -w '%{http_code}' -X PATCH http://localhost:8080/api/tasks/$TASK_ID -H 'Content-Type: application/json' -d '{\"status\": \"active\"}' 2>&1"
+        expected: "400"
+    expected_outcome: "400 Bad Request with validation error about invalid state transition (completed -> active)"
+
+  - name: "Invalid: cancelled to pending rejected"
+    description: Cannot transition from cancelled back to pending -- should return 400
+    steps:
+      - action: "Create and cancel a task"
+        command: "RESP=$(curl -sf -X POST http://localhost:8080/api/tasks -H 'Content-Type: application/json' -d '{\"team_slug\": \"state-test\", \"title\": \"State Test 6\", \"prompt\": \"Test invalid cancelled to pending\"}' 2>&1); TASK_ID=$(echo $RESP | grep -o '\"id\":\"[^\"]*\"' | head -1 | cut -d'\"' -f4); curl -sf -X PATCH http://localhost:8080/api/tasks/$TASK_ID -H 'Content-Type: application/json' -d '{\"status\": \"cancelled\"}' 2>&1; echo \"TASK_ID=$TASK_ID\" > /tmp/state-test-6.txt"
+        expected: "\"status\":\"cancelled\""
+      - action: "Attempt invalid transition cancelled -> pending and verify 400"
+        command: "TASK_ID=$(cat /tmp/state-test-6.txt | cut -d= -f2); curl -sf -o /dev/null -w '%{http_code}' -X PATCH http://localhost:8080/api/tasks/$TASK_ID -H 'Content-Type: application/json' -d '{\"status\": \"pending\"}' 2>&1"
+        expected: "400"
+    expected_outcome: "400 Bad Request with validation error about invalid state transition (cancelled -> pending)"

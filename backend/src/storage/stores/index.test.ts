@@ -93,6 +93,7 @@ function makeSession(overrides: Partial<ChatSession> = {}): ChatSession {
     last_agent_timestamp: now,
     session_id: 'sess-1',
     agent_aid: 'aid-test-abc123',
+    tid: 'tid-team-abc1',
     ...overrides,
   };
 }

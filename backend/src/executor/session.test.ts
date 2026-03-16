@@ -44,7 +44,7 @@ describe('SessionManagerImpl', () => {
 
   describe('create/resume/end lifecycle', () => {
     it('createSession returns a UUID session ID and persists via store', async () => {
-      const sessionId = await manager.createSession('aid-test-abc1', 'task-001');
+      const sessionId = await manager.createSession('aid-test-abc1', 'task-001', 'tid-team-0001');
 
       expect(sessionId).toMatch(/^[0-9a-f-]{36}$/);
       expect(store.upsert).toHaveBeenCalledOnce();
@@ -58,7 +58,7 @@ describe('SessionManagerImpl', () => {
     });
 
     it('getSessionByAgent returns session ID after creation', async () => {
-      const sessionId = await manager.createSession('aid-test-abc2', 'task-002');
+      const sessionId = await manager.createSession('aid-test-abc2', 'task-002', 'tid-team-0001');
 
       expect(manager.getSessionByAgent('aid-test-abc2')).toBe(sessionId);
     });
@@ -68,7 +68,7 @@ describe('SessionManagerImpl', () => {
     });
 
     it('endSession removes session from active map and store', async () => {
-      const sessionId = await manager.createSession('aid-test-abc3', 'task-003');
+      const sessionId = await manager.createSession('aid-test-abc3', 'task-003', 'tid-team-0001');
 
       await manager.endSession(sessionId);
 
@@ -77,7 +77,7 @@ describe('SessionManagerImpl', () => {
     });
 
     it('resumeSession restores session into active map', async () => {
-      const sessionId = await manager.createSession('aid-test-abc4', 'task-004');
+      const sessionId = await manager.createSession('aid-test-abc4', 'task-004', 'tid-team-0001');
       // Simulate process restart — clear in-memory state but store still has it
       await manager.endSession(sessionId);
 
@@ -89,6 +89,7 @@ describe('SessionManagerImpl', () => {
         last_agent_timestamp: Date.now(),
         session_id: sessionId,
         agent_aid: 'aid-test-abc4',
+        tid: 'tid-team-0001',
       });
 
       await manager.resumeSession(sessionId);
@@ -97,12 +98,28 @@ describe('SessionManagerImpl', () => {
     });
   });
 
+  describe('tid binding (AC-C2)', () => {
+    it('session is created with the provided tid', async () => {
+      const sessionId = await manager.createSession('aid-test-tid1', 'task-tid-001', 'tid-team-xyz');
+      // Session is active for the agent
+      expect(manager.getSessionByAgent('aid-test-tid1')).toBe(sessionId);
+    });
+
+    it('different tids for different agents do not conflict', async () => {
+      const sid1 = await manager.createSession('aid-test-tid2', 'task-tid-002', 'tid-team-aaa');
+      const sid2 = await manager.createSession('aid-test-tid3', 'task-tid-003', 'tid-team-bbb');
+      expect(sid1).not.toBe(sid2);
+      expect(manager.getSessionByAgent('aid-test-tid2')).toBe(sid1);
+      expect(manager.getSessionByAgent('aid-test-tid3')).toBe(sid2);
+    });
+  });
+
   describe('one-per-agent constraint', () => {
     it('throws ConflictError when creating a second session for the same agent', async () => {
-      await manager.createSession('aid-test-abc5', 'task-005');
+      await manager.createSession('aid-test-abc5', 'task-005', 'tid-team-0001');
 
       await expect(
-        manager.createSession('aid-test-abc5', 'task-006'),
+        manager.createSession('aid-test-abc5', 'task-006', 'tid-team-0001'),
       ).rejects.toThrow(ConflictError);
     });
   });
@@ -110,7 +127,7 @@ describe('SessionManagerImpl', () => {
   describe('MEMORY.md injection', () => {
     it('reads MEMORY.md at creation (not on resume)', async () => {
       // Creation with non-existent workspace — memoryContent is null (no throw)
-      const sessionId = await manager.createSession('aid-test-abc6', 'task-007');
+      const sessionId = await manager.createSession('aid-test-abc6', 'task-007', 'tid-team-0001');
       expect(sessionId).toBeDefined();
 
       // Resume should not attempt MEMORY.md re-injection — just store lookup
@@ -123,6 +140,7 @@ describe('SessionManagerImpl', () => {
         last_agent_timestamp: Date.now(),
         session_id: sessionId,
         agent_aid: 'aid-test-abc6',
+        tid: 'tid-team-0001',
       });
 
       // resumeSession should succeed without reading MEMORY.md
@@ -133,10 +151,10 @@ describe('SessionManagerImpl', () => {
 
   describe('end then recreate', () => {
     it('can create a new session after ending the previous one', async () => {
-      const firstId = await manager.createSession('aid-test-abc7', 'task-008');
+      const firstId = await manager.createSession('aid-test-abc7', 'task-008', 'tid-team-0001');
       await manager.endSession(firstId);
 
-      const secondId = await manager.createSession('aid-test-abc7', 'task-009');
+      const secondId = await manager.createSession('aid-test-abc7', 'task-009', 'tid-team-0001');
       expect(secondId).not.toBe(firstId);
       expect(manager.getSessionByAgent('aid-test-abc7')).toBe(secondId);
     });

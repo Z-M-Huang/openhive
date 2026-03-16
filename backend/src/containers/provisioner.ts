@@ -94,7 +94,7 @@ export class ContainerProvisionerImpl implements ContainerProvisioner {
     this.workspaceRoot = resolve(workspaceRoot);
   }
 
-  async scaffoldWorkspace(parentPath: string, teamSlug: string): Promise<string> {
+  async scaffoldWorkspace(parentPath: string, teamSlug: string, agents?: AgentDefinition[]): Promise<string> {
     // Validate slug format (throws generic Error on invalid)
     try {
       validateSlug(teamSlug);
@@ -119,10 +119,15 @@ export class ContainerProvisionerImpl implements ContainerProvisioner {
       await mkdir(resolve(fullPath, dir), { recursive: true });
     }
 
+    // Build agent references for team.yaml (names only; full definitions go in .md files)
+    const agentRefs = agents && agents.length > 0
+      ? agents.map(a => ({ name: a.name, description: a.description }))
+      : [];
+
     // Write default files
     await writeFile(
       resolve(fullPath, 'team.yaml'),
-      yamlStringify({ slug: teamSlug, agents: [] }),
+      yamlStringify({ slug: teamSlug, agents: agentRefs }),
       'utf-8',
     );
 
@@ -137,6 +142,13 @@ export class ContainerProvisionerImpl implements ContainerProvisioner {
       JSON.stringify({ allowedTools: [] }, null, 2) + '\n',
       'utf-8',
     );
+
+    // Write each agent definition as an .md file (INV-01: lead is in parent, members go here)
+    if (agents && agents.length > 0) {
+      for (const agent of agents) {
+        await this.writeAgentDefinition(fullPath, agent);
+      }
+    }
 
     return fullPath;
   }

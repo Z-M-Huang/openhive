@@ -171,4 +171,158 @@ describe('TokenManagerImpl', () => {
     // Should not throw
     manager.stopCleanup();
   });
+
+  // -------------------------------------------------------------------------
+  // generateSession / validateSession
+  // -------------------------------------------------------------------------
+
+  it('generateSession returns a 64-character hex token', () => {
+    const token = manager.generateSession('tid-abc-123');
+    expect(token).toHaveLength(64);
+    expect(token).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('generateSession produces unique tokens', () => {
+    const t1 = manager.generateSession('tid-abc-123');
+    const t2 = manager.generateSession('tid-abc-123');
+    expect(t1).not.toBe(t2);
+  });
+
+  it('validateSession returns true for a freshly generated session token', () => {
+    const token = manager.generateSession('tid-abc-123');
+    expect(manager.validateSession(token, 'tid-abc-123')).toBe(true);
+  });
+
+  it('validateSession is reusable — second call still returns true', () => {
+    const token = manager.generateSession('tid-abc-123');
+    expect(manager.validateSession(token, 'tid-abc-123')).toBe(true);
+    expect(manager.validateSession(token, 'tid-abc-123')).toBe(true);
+  });
+
+  it('validateSession returns false for wrong TID', () => {
+    const token = manager.generateSession('tid-abc-123');
+    expect(manager.validateSession(token, 'tid-xyz-999')).toBe(false);
+  });
+
+  it('validateSession with wrong TID does NOT consume the session token', () => {
+    const token = manager.generateSession('tid-abc-123');
+    manager.validateSession(token, 'tid-xyz-999');
+    // Session token still valid for correct TID
+    expect(manager.validateSession(token, 'tid-abc-123')).toBe(true);
+  });
+
+  it('validateSession returns false after TTL expires', () => {
+    const token = manager.generateSession('tid-abc-123');
+    vi.advanceTimersByTime(300_001);
+    expect(manager.validateSession(token, 'tid-abc-123')).toBe(false);
+  });
+
+  it('validateSession returns true just before TTL expires', () => {
+    const token = manager.generateSession('tid-abc-123');
+    vi.advanceTimersByTime(299_999);
+    expect(manager.validateSession(token, 'tid-abc-123')).toBe(true);
+  });
+
+  it('validateSession returns false for unknown session token', () => {
+    expect(manager.validateSession('deadbeef'.repeat(8), 'tid-abc-123')).toBe(false);
+  });
+
+  it('one-time token and session token do not share storage', () => {
+    // Generating a session token should NOT allow it to pass validate (one-time check)
+    const sessionToken = manager.generateSession('tid-abc-123');
+    expect(manager.validate(sessionToken, 'tid-abc-123')).toBe(false);
+
+    // Generating a one-time token should NOT allow it to pass validateSession
+    const oneTimeToken = manager.generate('tid-abc-123');
+    expect(manager.validateSession(oneTimeToken, 'tid-abc-123')).toBe(false);
+  });
+
+  // -------------------------------------------------------------------------
+  // revokeSession
+  // -------------------------------------------------------------------------
+
+  it('revokeSession makes a session token invalid', () => {
+    const token = manager.generateSession('tid-abc-123');
+    manager.revokeSession(token);
+    expect(manager.validateSession(token, 'tid-abc-123')).toBe(false);
+  });
+
+  it('revokeSession is a no-op for unknown tokens', () => {
+    // Should not throw
+    manager.revokeSession('nonexistent');
+  });
+
+  it('revokeSession does not affect one-time tokens', () => {
+    const oneTime = manager.generate('tid-abc-123');
+    const session = manager.generateSession('tid-abc-123');
+    manager.revokeSession(session);
+    // One-time token should still be valid
+    expect(manager.validate(oneTime, 'tid-abc-123')).toBe(true);
+  });
+
+  // -------------------------------------------------------------------------
+  // revokeSessionsForTid
+  // -------------------------------------------------------------------------
+
+  it('revokeSessionsForTid removes session tokens for the given TID', () => {
+    const token = manager.generateSession('tid-abc-123');
+    manager.revokeSessionsForTid('tid-abc-123');
+    expect(manager.validateSession(token, 'tid-abc-123')).toBe(false);
+  });
+
+  it('revokeSessionsForTid removes one-time tokens for the given TID', () => {
+    const token = manager.generate('tid-abc-123');
+    manager.revokeSessionsForTid('tid-abc-123');
+    expect(manager.validate(token, 'tid-abc-123')).toBe(false);
+  });
+
+  it('revokeSessionsForTid does not affect tokens for other TIDs', () => {
+    const otherSession = manager.generateSession('tid-other-456');
+    const otherOneTime = manager.generate('tid-other-456');
+    manager.generateSession('tid-abc-123');
+    manager.generate('tid-abc-123');
+
+    manager.revokeSessionsForTid('tid-abc-123');
+
+    expect(manager.validateSession(otherSession, 'tid-other-456')).toBe(true);
+    expect(manager.validate(otherOneTime, 'tid-other-456')).toBe(true);
+  });
+
+  it('revokeSessionsForTid revokes all session tokens for the TID (multiple)', () => {
+    const s1 = manager.generateSession('tid-abc-123');
+    const s2 = manager.generateSession('tid-abc-123');
+    manager.revokeSessionsForTid('tid-abc-123');
+    expect(manager.validateSession(s1, 'tid-abc-123')).toBe(false);
+    expect(manager.validateSession(s2, 'tid-abc-123')).toBe(false);
+  });
+
+  it('revokeSessionsForTid is idempotent', () => {
+    manager.generateSession('tid-abc-123');
+    manager.revokeSessionsForTid('tid-abc-123');
+    // Second call should not throw
+    manager.revokeSessionsForTid('tid-abc-123');
+  });
+
+  // -------------------------------------------------------------------------
+  // Cleanup sweep covers session tokens
+  // -------------------------------------------------------------------------
+
+  it('cleanup sweep removes expired session tokens', () => {
+    const token = manager.generateSession('tid-abc-123');
+
+    vi.advanceTimersByTime(300_001);
+    manager.startCleanup(1_000);
+    vi.advanceTimersByTime(1_000);
+
+    expect(manager.validateSession(token, 'tid-abc-123')).toBe(false);
+  });
+
+  it('cleanup sweep keeps non-expired session tokens', () => {
+    const token = manager.generateSession('tid-abc-123');
+
+    manager.startCleanup(1_000);
+    vi.advanceTimersByTime(1_000); // sweep runs but token is fresh
+
+    expect(manager.validateSession(token, 'tid-abc-123')).toBe(true);
+  });
 });

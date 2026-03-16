@@ -28,6 +28,28 @@ export class LoggerImpl implements Logger {
   private readonly batchSize: number;
   private readonly flushIntervalMs: number;
 
+  /**
+   * Dynamically add a sink to the live logging pipeline.
+   * Used by PluginManager hot-reload so newly loaded plugins receive log entries
+   * without requiring a restart (AC-F3).
+   */
+  addSink(sink: LogSink): void {
+    if (!this.sinks.includes(sink)) {
+      this.sinks.push(sink);
+    }
+  }
+
+  /**
+   * Remove a previously added sink from the logging pipeline.
+   * Called when a plugin is unloaded or replaced during hot-reload (AC-F3).
+   */
+  removeSink(sink: LogSink): void {
+    const idx = this.sinks.indexOf(sink);
+    if (idx !== -1) {
+      this.sinks.splice(idx, 1);
+    }
+  }
+
   private batch: LogEntry[] = [];
   private flushTimer: ReturnType<typeof setInterval>;
   private stopped = false;

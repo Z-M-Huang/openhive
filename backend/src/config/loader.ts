@@ -430,4 +430,110 @@ export class ConfigLoaderImpl implements ConfigLoader {
       ...(team.parent_tid ? { parent_slug: team.parent_tid } : {}),
     };
   }
+
+  // -----------------------------------------------------------------------
+  // Config with sources (full implementation — step 16)
+  // -----------------------------------------------------------------------
+
+  /**
+   * Returns the resolved config annotated with provenance information.
+   *
+   * Each leaf field is annotated with its source:
+   * - 'env'     — value comes from an OPENHIVE_* environment variable
+   * - 'yaml'    — key is explicitly present in data/openhive.yaml (even if equal to default)
+   * - 'default' — value comes from compiled defaults only
+   *
+   * Secret fields (matching /key|token|secret|password|oauth/i) have their
+   * value replaced with '********' and carry isSecret: true.
+   *
+   * The returned Record uses dot-separated key paths (e.g. "limits.max_depth").
+   */
+  async getConfigWithSources(): Promise<Record<string, { value: unknown; source: 'default' | 'yaml' | 'env'; isSecret?: boolean }>> {
+    const config = this.cachedMaster ?? (await this.loadMaster());
+
+    // Read raw YAML object so we can check which keys are explicitly present,
+    // even when the YAML value equals the compiled default.
+    let rawYaml: Record<string, unknown> = {};
+    const yamlPath = join(this.dataDir, 'openhive.yaml');
+    try {
+      const raw = await readFile(yamlPath, 'utf-8');
+      const parsed: unknown = YAML.parse(raw);
+      if (isPlainObject(parsed)) {
+        rawYaml = parsed;
+      }
+    } catch (err: unknown) {
+      // File missing is fine — rawYaml stays empty (all fields from defaults)
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+
+    // Env-var mappings: env var name -> dot-path in MasterConfig
+    const envMappings: Record<string, string> = {
+      'OPENHIVE_LOG_LEVEL': 'server.log_level',
+      'OPENHIVE_SYSTEM_LISTEN_ADDRESS': 'server.listen_address',
+      'OPENHIVE_DATA_DIR': 'server.data_dir',
+    };
+    // Invert to get path -> source mapping for env-overridden fields
+    const envPaths = new Set<string>();
+    for (const [envVar, dotPath] of Object.entries(envMappings)) {
+      if (process.env[envVar] !== undefined) {
+        envPaths.add(dotPath);
+      }
+    }
+
+    const result: Record<string, { value: unknown; source: 'default' | 'yaml' | 'env'; isSecret?: boolean }> = {};
+    this.flattenWithSources(config as unknown as Record<string, unknown>, '', result, rawYaml, envPaths);
+    return result;
+  }
+
+  /** Regex for identifying secret fields by key name. */
+  private static readonly SECRET_PATTERN = /key|token|secret|password|oauth/i;
+
+  /**
+   * Recursively flattens a config object into dot-separated key paths,
+   * determining provenance (env > yaml > default) for each leaf field.
+   *
+   * @param obj        - The resolved config object subtree
+   * @param prefix     - Dot-separated path prefix for this subtree
+   * @param result     - Accumulator written in-place
+   * @param rawYaml    - Raw parsed YAML object (NOT merged) — used for key-path existence check
+   * @param envPaths   - Set of dot-paths whose values came from env vars
+   */
+  private flattenWithSources(
+    obj: Record<string, unknown>,
+    prefix: string,
+    result: Record<string, { value: unknown; source: 'default' | 'yaml' | 'env'; isSecret?: boolean }>,
+    rawYaml: Record<string, unknown>,
+    envPaths: Set<string>,
+  ): void {
+    for (const [key, value] of Object.entries(obj)) {
+      const path = prefix ? `${prefix}.${key}` : key;
+      // Navigate rawYaml to the same depth as this key
+      const rawYamlChild = isPlainObject(rawYaml[key]) ? rawYaml[key] as Record<string, unknown> : {};
+
+      if (isPlainObject(value)) {
+        this.flattenWithSources(value, path, result, rawYamlChild, envPaths);
+      } else {
+        // Determine source
+        let source: 'default' | 'yaml' | 'env';
+        if (envPaths.has(path)) {
+          source = 'env';
+        } else if (key in rawYaml) {
+          // Key explicitly present in the raw YAML object at this level
+          source = 'yaml';
+        } else {
+          source = 'default';
+        }
+
+        // Determine if this field is a secret
+        const isSecret = ConfigLoaderImpl.SECRET_PATTERN.test(key);
+        const displayValue = isSecret ? '********' : value;
+
+        if (isSecret) {
+          result[path] = { value: displayValue, source, isSecret: true };
+        } else {
+          result[path] = { value: displayValue, source };
+        }
+      }
+    }
+  }
 }

@@ -1,0 +1,70 @@
+name: Logs and Settings API
+description: Verify log querying with filters, SSE log streaming, settings retrieval with source metadata, settings update via PUT, and config reload via POST.
+
+setup:
+  - command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+    description: "Clean start -- remove all containers and volumes from any previous run"
+  - command: "cd /app/openhive && bun run docker 2>&1 &"
+    description: "Build the Docker image and start the server in the background"
+  - command: "for i in $(seq 1 60); do curl -sf http://localhost:8080/api/health && exit 0; sleep 5; done; echo 'Health check timed out'; exit 1"
+    description: "Wait up to 5 minutes for the health check endpoint to respond (exits 1 on timeout)"
+
+teardown:
+  - command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+    description: "Clean up -- remove all containers and volumes"
+
+test_cases:
+  - name: Query logs with filters
+    description: GET /api/logs returns entries array, supports level, component, limit, offset filters
+    steps:
+      - action: "Query logs without filters and verify entries array"
+        command: "curl -sf http://localhost:8080/api/logs 2>&1"
+        expected: "\"entries\":["
+      - action: "Query logs with level filter (30=warn in Pino numeric levels) and verify entries array"
+        command: "curl -sf 'http://localhost:8080/api/logs?level=30' 2>&1"
+        expected: "\"entries\":["
+      - action: "Query logs with component filter and verify entries array"
+        command: "curl -sf 'http://localhost:8080/api/logs?component=api' 2>&1"
+        expected: "\"entries\":["
+      - action: "Query logs with pagination and verify entries array"
+        command: "curl -sf 'http://localhost:8080/api/logs?limit=10&offset=0' 2>&1"
+        expected: "\"entries\":["
+    expected_outcome: "Log query returns entries array filtered by level, component, and paginated by limit/offset"
+
+  - name: SSE log stream connection
+    description: GET /api/logs/stream establishes SSE connection and sends initial connected event
+    steps:
+      - action: "Connect to SSE log stream and verify initial data event"
+        command: "timeout 10 curl -sf http://localhost:8080/api/logs/stream 2>&1 | head -3"
+        expected: "data: {\"type\":\"connected\"}"
+    expected_outcome: "SSE connection established with Content-Type: text/event-stream and initial data: {\"type\":\"connected\"} event"
+
+  - name: Get settings with source metadata
+    description: GET /api/settings returns nested config with per-field value and source tracking
+    steps:
+      - action: "Query settings endpoint"
+        command: "curl -sf http://localhost:8080/api/settings 2>&1"
+        expected: "server"
+      - action: "Verify source metadata present"
+        command: "curl -sf http://localhost:8080/api/settings 2>&1"
+        expected: "source"
+      - action: "Verify limits section present"
+        command: "curl -sf http://localhost:8080/api/settings 2>&1"
+        expected: "limits"
+    expected_outcome: "Settings returns nested JSON with sections (server, limits) where each field has 'value' and 'source' (default/yaml/env)"
+
+  - name: Update settings via PUT
+    description: PUT /api/settings merges config, persists to YAML, and returns updated config
+    steps:
+      - action: "Update a configuration value"
+        command: "curl -sf -X PUT http://localhost:8080/api/settings -H 'Content-Type: application/json' -d '{\"limits\": {\"max_depth\": 5}}' 2>&1"
+        expected: "limits"
+    expected_outcome: "Settings updated successfully and response contains the merged config"
+
+  - name: Reload settings from disk
+    description: POST /api/settings/reload re-reads config file from disk and returns current config
+    steps:
+      - action: "Trigger config reload"
+        command: "curl -sf -X POST http://localhost:8080/api/settings/reload 2>&1"
+        expected: "server"
+    expected_outcome: "Config reloaded from disk successfully, returns current config state"

@@ -3,16 +3,42 @@
  * Uses discriminated union pattern for type-safe trigger configuration.
  */
 
+/**
+ * Structured action payload for a trigger.
+ * Provides a title, prompt, and priority for the dispatched task.
+ */
+export interface TriggerAction {
+  title: string;
+  prompt: string;
+  priority: 'P0' | 'P1' | 'P2';
+}
+
 export interface TriggerBase {
   name: string;
-  team_slug: string;
+  /** The target team slug for this trigger. */
+  target_team: string;
+  /**
+   * @deprecated Use target_team instead. Kept for backward compatibility.
+   * Will be removed in a future version.
+   */
+  team_slug?: string;
+  /**
+   * Optional AID of a specific agent to assign the triggered task to.
+   * If omitted, the task is assigned to the team lead.
+   */
+  agent?: string;
   enabled?: boolean;
 }
 
 export interface CronTrigger extends TriggerBase {
   type: 'cron';
   schedule: string;
-  prompt: string;
+  /**
+   * Action to execute when the trigger fires.
+   * Accepts either a structured TriggerAction or a plain prompt string
+   * (the latter is normalized to a TriggerAction with default title and P2 priority).
+   */
+  action: TriggerAction | string;
 }
 
 export interface WebhookTrigger extends TriggerBase {

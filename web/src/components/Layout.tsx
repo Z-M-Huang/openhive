@@ -3,14 +3,19 @@
  */
 
 import { Link, useLocation } from 'react-router-dom';
-import { Activity, Users, ListChecks, FileText } from 'lucide-react';
+import { LayoutDashboard, Users, Bot, Server, CheckSquare, FileText, Puzzle, Cog } from 'lucide-react';
 
-const navItems = [
-  { path: '/', label: 'Dashboard', icon: Activity },
+const mainNavItems = [
+  { path: '/', label: 'Dashboard', icon: LayoutDashboard },
   { path: '/teams', label: 'Teams', icon: Users },
-  { path: '/tasks', label: 'Tasks', icon: ListChecks },
+  { path: '/agents', label: 'Agents', icon: Bot },
+  { path: '/containers', label: 'Containers', icon: Server },
+  { path: '/tasks', label: 'Tasks', icon: CheckSquare },
   { path: '/logs', label: 'Logs', icon: FileText },
+  { path: '/integrations', label: 'Integrations', icon: Puzzle },
 ];
+
+const settingsNavItem = { path: '/settings', label: 'Settings', icon: Cog };
 
 function NavLink({ path, label, icon: Icon, isActive }: {
   path: string;
@@ -57,8 +62,8 @@ export function Layout({ children }: LayoutProps) {
       {/* Navigation */}
       <nav className="bg-gray-800 border-b border-gray-700">
         <div className="max-w-7xl mx-auto px-4 py-2">
-          <div className="flex gap-2">
-            {navItems.map((item) => (
+          <div className="flex items-center gap-2">
+            {mainNavItems.map((item) => (
               <NavLink
                 key={item.path}
                 path={item.path}
@@ -67,6 +72,14 @@ export function Layout({ children }: LayoutProps) {
                 isActive={location.pathname === item.path}
               />
             ))}
+            <div className="ml-auto border-l border-gray-600 pl-2">
+              <NavLink
+                path={settingsNavItem.path}
+                label={settingsNavItem.label}
+                icon={settingsNavItem.icon}
+                isActive={location.pathname === settingsNavItem.path}
+              />
+            </div>
           </div>
         </div>
       </nav>

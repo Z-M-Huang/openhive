@@ -1,0 +1,60 @@
+name: Escalation Chain
+description: Verify escalation flow -- member agent uses escalate tool, escalation routes upward (member -> lead -> root -> user), correlation_id tracks the chain, task status transitions to escalated, escalation_response flows back down, and task transitions back to pending after resolution.
+
+setup:
+  - command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+    description: "Clean start -- remove all containers and volumes from any previous run"
+  - command: "cd /app/openhive && bun run docker 2>&1 &"
+    description: "Build the Docker image and start the server in the background"
+  - command: "for i in $(seq 1 60); do curl -sf http://localhost:8080/api/health && exit 0; sleep 5; done; echo 'Health check timed out'; exit 1"
+    description: "Wait up to 5 minutes for the health check endpoint to respond (exits 1 on timeout)"
+  - command: "echo 'Create a team called escalation-test with a member agent that can perform tasks' | timeout 300 bun run cli/index.ts 2>&1"
+    description: "Create a team with a member agent for escalation testing"
+
+teardown:
+  - command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+    description: "Clean up -- remove all containers and volumes"
+
+test_cases:
+  - name: Trigger escalation from agent
+    description: Agent uses escalate MCP tool to escalate a task
+    steps:
+      - action: "Trigger escalation via CLI"
+        command: "echo 'Have the escalation-test team agent escalate a task because it needs guidance on how to proceed' | timeout 300 bun run cli/index.ts 2>&1"
+        expected: "[Assistant]"
+    expected_outcome: "Escalation triggered, assistant acknowledges the escalation request"
+
+  - name: Verify upward routing through hierarchy
+    description: Escalation routes upward -- member -> lead -> root -> user
+    steps:
+      - action: "Check log events for escalation routing"
+        command: "curl -sf 'http://localhost:8080/api/logs?limit=30' 2>&1"
+        expected: "entries"
+    expected_outcome: "Log events show escalation flowing upward through the team hierarchy"
+
+  - name: Verify correlation_id tracking
+    description: Same correlation_id used throughout the escalation chain
+    steps:
+      - action: "Check for correlation_id in escalation events"
+        command: "curl -sf 'http://localhost:8080/api/logs?limit=20' 2>&1"
+        expected: "entries"
+    expected_outcome: "Escalation events share a correlation_id for tracking the chain"
+
+  - name: Task status transitions to escalated
+    description: Task involved in escalation has status set to 'escalated'
+    steps:
+      - action: "Query tasks for escalated status"
+        command: "curl -sf 'http://localhost:8080/api/tasks?status=escalated' 2>&1"
+        expected: "task"
+    expected_outcome: "At least one task shows status 'escalated' in the tasks list"
+
+  - name: Escalation response returns task to pending
+    description: After resolution, escalation_response flows back down and task transitions from escalated to pending (not active) per handleEscalationResponse() which calls assertValidTransition(task.status, TaskStatus.Pending)
+    steps:
+      - action: "Respond to escalation via CLI"
+        command: "echo 'Respond to the escalated task with guidance: proceed with default approach' | timeout 300 bun run cli/index.ts 2>&1"
+        expected: "[Assistant]"
+      - action: "Verify task status is now pending after escalation resolution"
+        command: "curl -sf http://localhost:8080/api/tasks?limit=20 2>&1"
+        expected: "pending"
+    expected_outcome: "Escalation response acknowledged. The previously escalated task transitions to 'pending' status (not 'active') after resolution per handleEscalationResponse() which transitions escalated -> pending"

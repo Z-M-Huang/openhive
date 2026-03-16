@@ -1,0 +1,72 @@
+name: REST API Baseline
+description: Verify REST API baseline endpoints return correct responses on a fresh system: health check with uptime/containers/dbStatus, empty lists for teams/tasks/agents/containers, and settings endpoint with config and source metadata.
+
+setup:
+  - command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+    description: "Clean start -- remove all containers and volumes from any previous run"
+  - command: "cd /app/openhive && bun run docker 2>&1 &"
+    description: "Build the Docker image and start the server in the background"
+  - command: "for i in $(seq 1 60); do curl -sf http://localhost:8080/api/health && exit 0; sleep 5; done; echo 'Health check timed out'; exit 1"
+    description: "Wait up to 5 minutes for the health check endpoint to respond (exits 1 on timeout)"
+
+teardown:
+  - command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+    description: "Clean up -- remove all containers and volumes"
+
+test_cases:
+  - name: Health check returns status and uptime
+    description: Verify GET /api/health returns JSON with status, uptime, containers, connectedTeams, dbStatus
+    steps:
+      - action: "Verify status is healthy"
+        command: "curl -sf http://localhost:8080/api/health 2>&1"
+        expected: "\"status\":\"healthy\""
+      - action: "Verify dbStatus is connected"
+        command: "curl -sf http://localhost:8080/api/health 2>&1"
+        expected: "\"dbStatus\":\"connected\""
+      - action: "Verify uptime is a number"
+        command: "curl -sf http://localhost:8080/api/health 2>&1 | grep -o '\"uptime\":[0-9]'"
+        expected: "\"uptime\":"
+    expected_outcome: "Health endpoint returns JSON with status 'healthy', uptime as integer, containers count, connectedTeams array, and dbStatus 'connected'"
+
+  - name: Empty teams list on fresh system
+    description: Verify GET /api/teams returns empty teams array initially
+    steps:
+      - action: "Query teams endpoint and verify empty array"
+        command: "curl -sf http://localhost:8080/api/teams 2>&1"
+        expected: "\"teams\":[]"
+    expected_outcome: "Teams endpoint returns JSON with 'teams' key containing an empty array"
+
+  - name: Empty tasks list on fresh system
+    description: Verify GET /api/tasks returns empty tasks array initially
+    steps:
+      - action: "Query tasks endpoint and verify empty array with total 0"
+        command: "curl -sf http://localhost:8080/api/tasks 2>&1"
+        expected: "\"tasks\":[],\"total\":0"
+    expected_outcome: "Tasks endpoint returns JSON with 'tasks' key containing an empty array and total=0"
+
+  - name: Empty agents list on fresh system
+    description: Verify GET /api/agents returns empty agents array initially
+    steps:
+      - action: "Query agents endpoint and verify empty array"
+        command: "curl -sf http://localhost:8080/api/agents 2>&1"
+        expected: "\"agents\":[]"
+    expected_outcome: "Agents endpoint returns JSON with 'agents' key containing an empty array"
+
+  - name: Containers list shows root only
+    description: Verify GET /api/containers returns container array on a fresh system
+    steps:
+      - action: "Query containers endpoint and verify containers array exists"
+        command: "curl -sf http://localhost:8080/api/containers 2>&1"
+        expected: "\"containers\":["
+    expected_outcome: "Containers endpoint returns JSON with 'containers' array"
+
+  - name: Settings endpoint returns config with source metadata
+    description: Verify GET /api/settings returns nested config with per-field value and source tracking
+    steps:
+      - action: "Query settings endpoint"
+        command: "curl -sf http://localhost:8080/api/settings 2>&1"
+        expected: "server"
+      - action: "Verify source metadata is present"
+        command: "curl -sf http://localhost:8080/api/settings 2>&1"
+        expected: "source"
+    expected_outcome: "Settings endpoint returns nested JSON object with sections (server, limits, etc.) and each field has 'value' and 'source' (default/yaml/env)"

@@ -1,0 +1,66 @@
+name: Docker Lifecycle
+description: Verify Docker lifecycle operations -- image builds successfully from deployments/Dockerfile, container HEALTHCHECK reports healthy after startup, POST /api/containers/:slug/restart restarts a container, graceful shutdown completes on docker compose down, container restart preserves workspace state.
+
+setup:
+  - command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+    description: "Clean start only -- first test case builds the image, so no bun run docker here"
+
+teardown:
+  - command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+    description: "Clean up -- remove all containers and volumes"
+
+test_cases:
+  - name: Docker image builds successfully
+    description: Image builds from deployments/Dockerfile without errors
+    steps:
+      - action: "Build Docker image"
+        command: "cd /app/openhive && docker build -t openhive:test -f deployments/Dockerfile . 2>&1 | tail -10"
+        expected: "Successfully"
+    expected_outcome: "Docker image builds successfully with no errors, final line shows success"
+
+  - name: HEALTHCHECK reports healthy after startup
+    description: Container starts and health check endpoint reports healthy status
+    steps:
+      - action: "Start container via docker compose"
+        command: "cd /app/openhive && bun run docker 2>&1 &"
+        expected: ""
+      - action: "Wait for health endpoint to respond"
+        command: "for i in $(seq 1 60); do curl -sf http://localhost:8080/api/health && exit 0; sleep 5; done; echo 'Health check timed out'; exit 1"
+        expected: "healthy"
+    expected_outcome: "Health check returns status 'healthy' after container startup within 5 minutes"
+
+  - name: Container restart via API
+    description: POST /api/containers/:slug/restart successfully restarts a team container
+    steps:
+      - action: "Create test team for restart testing"
+        command: "echo 'Create a team called restart-test for Docker lifecycle testing' | timeout 300 bun run cli/index.ts 2>&1"
+        expected: "[Assistant]"
+      - action: "Restart the team container"
+        command: "curl -sf -X POST http://localhost:8080/api/containers/restart-test/restart 2>&1"
+        expected: "restarted"
+      - action: "Wait and verify container healthy after restart"
+        command: "sleep 15 && curl -sf http://localhost:8080/api/health 2>&1"
+        expected: "healthy"
+    expected_outcome: "Container restarts successfully and system remains healthy"
+
+  - name: Graceful shutdown via docker compose down
+    description: docker compose down completes gracefully without errors
+    steps:
+      - action: "Gracefully stop all containers"
+        command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml down 2>&1"
+        expected: "Removed"
+    expected_outcome: "All containers stop gracefully, compose down reports removal"
+
+  - name: State preservation across restart
+    description: After full restart, previously created teams and state persist via volume mounts
+    steps:
+      - action: "Restart the system"
+        command: "cd /app/openhive && bun run docker 2>&1 &"
+        expected: ""
+      - action: "Wait for health check"
+        command: "for i in $(seq 1 60); do curl -sf http://localhost:8080/api/health && exit 0; sleep 5; done; echo 'Health check timed out'; exit 1"
+        expected: "healthy"
+      - action: "Verify restart-test team persisted after restart"
+        command: "curl -sf http://localhost:8080/api/teams 2>&1"
+        expected: "restart-test"
+    expected_outcome: "After restart, system comes up healthy and workspace state (teams, data) is preserved via volume mounts"

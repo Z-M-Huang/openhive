@@ -170,8 +170,13 @@ export class HealthMonitorImpl implements HealthMonitor {
 
   /**
    * Periodic check: evaluate all containers and publish state change events.
+   *
+   * Public so the orchestrator's consolidated 30s timer can call it directly
+   * (AC-CROSS-4 timer consolidation). The HealthMonitor's own internal timer
+   * (started via start()) and this method are both available; the orchestrator
+   * chooses which model to use.
    */
-  private checkTimeouts(): void {
+  checkTimeouts(): void {
     const now = Date.now();
     for (const [tid, entry] of this.containers) {
       const elapsed = now - entry.lastHeartbeat;

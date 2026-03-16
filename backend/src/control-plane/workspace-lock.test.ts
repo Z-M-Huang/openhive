@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { WorkspaceLockImpl } from './workspace-lock.js';
 
 describe('WorkspaceLockImpl', () => {
@@ -89,5 +89,61 @@ describe('WorkspaceLockImpl', () => {
   it('release of unheld lock is a no-op', () => {
     const lock = new WorkspaceLockImpl();
     expect(() => lock.release('/app/workspace/nonexistent')).not.toThrow();
+  });
+
+  describe('acquire timeout (AC-D2)', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('throws timeout error when lock is held for 30s without release', async () => {
+      vi.useFakeTimers();
+      const lock = new WorkspaceLockImpl();
+
+      // First caller holds the lock indefinitely
+      await lock.acquire('/app/workspace/timeout-test');
+
+      // Second caller races against the 30s timeout — capture error before it propagates
+      let caughtError: Error | undefined;
+      const secondAcquirePromise = lock
+        .acquire('/app/workspace/timeout-test')
+        .catch((err: Error) => {
+          caughtError = err;
+        });
+
+      // Advance time by 30 seconds to trigger the timeout
+      await vi.advanceTimersByTimeAsync(30_000);
+      await secondAcquirePromise;
+
+      expect(caughtError).toBeDefined();
+      expect(caughtError?.message).toBe(
+        'WorkspaceLock acquire timeout after 30s for path: /app/workspace/timeout-test'
+      );
+
+      // Cleanup: release the first lock
+      lock.release('/app/workspace/timeout-test');
+    });
+
+    it('succeeds without timeout when lock is released before 30s', async () => {
+      vi.useFakeTimers();
+      const lock = new WorkspaceLockImpl();
+
+      await lock.acquire('/app/workspace/fast-test');
+
+      let acquired = false;
+      const secondAcquirePromise = lock.acquire('/app/workspace/fast-test').then(() => {
+        acquired = true;
+        lock.release('/app/workspace/fast-test');
+      });
+
+      // Advance only 1 second then release the first holder — well within timeout
+      await vi.advanceTimersByTimeAsync(1_000);
+      lock.release('/app/workspace/fast-test');
+
+      // Let the second acquire settle (timer cancelled, mutex granted)
+      await secondAcquirePromise;
+
+      expect(acquired).toBe(true);
+    });
   });
 });

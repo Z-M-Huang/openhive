@@ -41,6 +41,7 @@ export const tasks = sqliteTable('tasks', {
   created_at: integer('created_at').notNull(),
   updated_at: integer('updated_at').notNull(),
   completed_at: integer('completed_at'),
+  origin_chat_jid: text('origin_chat_jid'),
 }, (table) => [
   index('idx_tasks_parent_id').on(table.parent_id),
   index('idx_tasks_team_slug').on(table.team_slug),
@@ -78,6 +79,8 @@ export const chatSessions = sqliteTable('chat_sessions', {
   last_agent_timestamp: integer('last_agent_timestamp').notNull(),
   session_id: text('session_id').notNull().default(''),
   agent_aid: text('agent_aid').notNull().default(''),
+  /** Team TID this session is bound to (AC-C2). Empty string for legacy rows. */
+  tid: text('tid').notNull().default(''),
 });
 
 // ---------------------------------------------------------------------------
@@ -210,6 +213,8 @@ export const integrations = sqliteTable('integrations', {
   name: text('name').notNull(),
   config_path: text('config_path').notNull().default(''),
   status: text('status').notNull().default('proposed'),
+  /** Error details for failed or rolled_back integrations (AC-G8). */
+  error_message: text('error_message').notNull().default(''),
   created_at: integer('created_at').notNull(),
 }, (table) => [
   index('idx_integrations_team_id').on(table.team_id),

@@ -144,6 +144,12 @@ export class WSConnectionImpl implements WSConnection {
   private _pongReceived = true;
   private _messageHandler: ((msg: WSMessage) => void) | null = null;
   private _closeHandler: ((code: number, reason: string) => void) | null = null;
+  /**
+   * Session token received in container_init.
+   * Used in place of the consumed one-time token on reconnect attempts (AC-A2, AC-A3).
+   * Null until the container_init message is processed.
+   */
+  private _sessionToken: string | null = null;
 
   constructor(config: WSConnectionConfig) {
     this.tid = config.tid;
@@ -311,19 +317,37 @@ export class WSConnectionImpl implements WSConnection {
     return this._disconnecting;
   }
 
+  /** Returns the session token received from container_init (for testing). */
+  get sessionToken(): string | null {
+    return this._sessionToken;
+  }
+
   // ---------------------------------------------------------------------------
   // Private helpers
   // ---------------------------------------------------------------------------
 
   /** Creates a new WebSocket to root and wires up message/pong/close handlers. */
   private _createSocket(): WebSocket {
-    const url = `${this._hubUrl}/ws/container?team=${this.tid}&token=${this._token}`;
+    // Use session token for reconnects if available (AC-A2, AC-A3).
+    // On the very first connect, _sessionToken is null so the one-time token is used.
+    // After receiving container_init, _sessionToken is set and used for all subsequent
+    // reconnect attempts.
+    const authToken = this._sessionToken ?? this._token;
+    const url = `${this._hubUrl}/ws/container?team=${this.tid}&token=${authToken}`;
     const ws = new WebSocket(url);
 
     ws.on('message', (data: WebSocket.Data) => {
       const raw = data.toString();
       try {
         const msg = toDomainMessage(raw);
+        // Capture session token from container_init for future reconnects (AC-A2, AC-A3).
+        // The token is stored but the message is still delivered to the handler.
+        if (msg.type === 'container_init') {
+          const sessionToken = (msg.data as Record<string, unknown>)['session_token'];
+          if (typeof sessionToken === 'string' && sessionToken.length > 0) {
+            this._sessionToken = sessionToken;
+          }
+        }
         if (this._messageHandler) {
           this._messageHandler(msg);
         }

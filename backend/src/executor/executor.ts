@@ -2,14 +2,15 @@
  * Agent executor — SDK process lifecycle management.
  *
  * Implements the {@link AgentExecutor} interface for managing Claude Agent SDK
- * instances as standalone processes. Each agent runs as its own process,
- * ensuring isolation and independent lifecycle management.
+ * instances. Supports two execution modes:
  *
- * // INV-06: Same image everywhere
- * This module runs the same compiled TypeScript codebase in every container.
- * The unified `openhive` Docker image is used for root and non-root containers
- * alike. The executor spawns SDK processes within the current container, never
- * across container boundaries.
+ * 1. **SDK programmatic API** (preferred): Uses `query()` + `createSdkMcpServer()`
+ *    from the SDK. Tool calls are handled in-process via the MCP server.
+ *    Enabled when `toolHandlers` are provided to the constructor.
+ *
+ * 2. **Child process** (legacy fallback): Spawns `agent-entry.ts` as a subprocess.
+ *    Used when `toolHandlers` are not provided (non-root containers that
+ *    bridge tools via WebSocket).
  *
  * @module executor/executor
  */
@@ -18,48 +19,320 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import type { AgentExecutor, AgentInitConfig, EventBus, Logger } from '../domain/index.js';
 import { AgentStatus, ProviderType } from '../domain/index.js';
 import { ConflictError, NotFoundError } from '../domain/errors.js';
+import type { ToolHandler } from '../mcp/tools/index.js';
+import {
+  createOpenHiveMcpServer,
+  runAgentQuery,
+  type AgentQueryResult,
+} from './sdk-runner.js';
 
-// INV-06: Same image everywhere
+// ---------------------------------------------------------------------------
+// Tracked agent state
+// ---------------------------------------------------------------------------
 
-interface TrackedProcess {
-  process: ChildProcess;
+interface TrackedAgent {
   aid: string;
   status: AgentStatus;
+  config: AgentInitConfig;
+  workspacePath: string;
+
+  /** Child process (legacy mode only). */
+  process?: ChildProcess;
+
+  /** MCP server instance for SDK queries. */
+  mcpServer?: unknown;
+
+  /** Abort controller for the current SDK query. */
+  abortController?: AbortController;
+
+  /** Session ID for resuming conversations. */
+  sessionId?: string;
+
+  /** Whether a query is currently in progress. */
+  queryActive: boolean;
 }
 
+// ---------------------------------------------------------------------------
+// Executor implementation
+// ---------------------------------------------------------------------------
+
 /**
- * Manages Claude Agent SDK process lifecycle for agents within a container.
+ * Manages Claude Agent SDK lifecycle for agents within a container.
  *
- * Each agent is spawned as a standalone child process. The executor tracks
- * running state, handles graceful/forced shutdown, and publishes crash events.
+ * When `toolHandlers` are provided, agents run via the SDK programmatic API
+ * with OpenHive tools injected as an in-process MCP server. Otherwise falls
+ * back to the child-process approach.
  */
 export class AgentExecutorImpl implements AgentExecutor {
-  private readonly processes = new Map<string, TrackedProcess>();
+  private readonly agents = new Map<string, TrackedAgent>();
   private readonly eventBus: EventBus;
   private readonly logger: Logger;
+  private toolHandlers?: Map<string, ToolHandler>;
 
-  constructor(eventBus: EventBus, logger: Logger) {
+  constructor(eventBus: EventBus, logger: Logger, toolHandlers?: Map<string, ToolHandler>) {
     this.eventBus = eventBus;
     this.logger = logger;
+    this.toolHandlers = toolHandlers;
   }
 
   /**
-   * Spawns a new Claude Agent SDK process for the given agent.
+   * Sets the tool handlers map, enabling SDK mode for subsequently started agents.
+   * This is an alternative injection path to the constructor parameter, used when
+   * handlers are not available at construction time (e.g., created later in
+   * OrchestratorImpl.initCollaborators()).
+   */
+  setToolHandlers(handlers: Map<string, ToolHandler>): void {
+    this.toolHandlers = handlers;
+  }
+
+  /**
+   * Registers an agent and prepares it for task dispatch.
    *
-   * @param agent - Agent initialization config with resolved provider, tools, and prompt
-   * @param workspacePath - Absolute path to the agent's workspace directory
-   * @param _taskId - Optional task ID to associate with this SDK session
-   * @throws {ConflictError} If the agent is already running
+   * In SDK mode: creates the MCP server with tool handlers.
+   * In legacy mode: spawns the agent-entry.ts child process.
    */
   async start(
     agent: AgentInitConfig,
     workspacePath: string,
     _taskId?: string,
   ): Promise<void> {
-    if (this.processes.has(agent.aid)) {
+    if (this.agents.has(agent.aid)) {
       throw new ConflictError(`Agent ${agent.aid} is already running`);
     }
 
+    if (this.toolHandlers) {
+      // SDK mode: create MCP server, agent is ready for dispatchTask()
+      const mcpServer = await createOpenHiveMcpServer({
+        handlers: this.toolHandlers,
+        agentAid: agent.aid,
+        teamSlug: this._resolveTeamSlug(agent),
+        allowedTools: agent.tools.length > 0 ? agent.tools : undefined,
+      });
+
+      // Set provider env vars so the SDK subprocess can authenticate
+      this._setProviderEnv(agent);
+
+      const tracked: TrackedAgent = {
+        aid: agent.aid,
+        status: AgentStatus.Idle,
+        config: agent,
+        workspacePath,
+        mcpServer,
+        queryActive: false,
+      };
+
+      this.agents.set(agent.aid, tracked);
+
+      this.logger.info('Agent registered (SDK mode)', {
+        aid: agent.aid,
+        model: agent.model,
+        tools: agent.tools.length,
+        workspacePath,
+      });
+    } else {
+      // Legacy mode: spawn child process
+      await this._startChildProcess(agent, workspacePath);
+    }
+  }
+
+  /**
+   * Dispatches a task prompt to a running agent.
+   *
+   * In SDK mode: runs `query()` with the MCP server and prompt.
+   * Returns when the agent finishes processing.
+   */
+  async dispatchTask(
+    agentAid: string,
+    prompt: string,
+    taskId: string,
+  ): Promise<{ output: string; sessionId?: string }> {
+    const tracked = this.agents.get(agentAid);
+    if (!tracked) {
+      throw new NotFoundError(`Agent ${agentAid} is not running`);
+    }
+
+    if (!tracked.mcpServer) {
+      throw new Error(`Agent ${agentAid} does not support dispatchTask (legacy mode)`);
+    }
+
+    if (tracked.queryActive) {
+      throw new ConflictError(`Agent ${agentAid} is already processing a task`);
+    }
+
+    tracked.status = AgentStatus.Busy;
+    tracked.queryActive = true;
+    tracked.abortController = new AbortController();
+
+    this.logger.info('Dispatching task to agent', {
+      aid: agentAid,
+      taskId,
+      promptLength: prompt.length,
+    });
+
+    try {
+      const result: AgentQueryResult = await runAgentQuery({
+        prompt,
+        mcpServer: tracked.mcpServer,
+        model: tracked.config.model,
+        cwd: tracked.workspacePath,
+        systemPrompt: tracked.config.systemPrompt,
+        sessionId: tracked.sessionId,
+        maxTurns: 200,
+        abortController: tracked.abortController,
+      });
+
+      // Store session ID for future conversation resumption
+      if (result.sessionId) {
+        tracked.sessionId = result.sessionId;
+      }
+
+      tracked.status = AgentStatus.Idle;
+      tracked.queryActive = false;
+      tracked.abortController = undefined;
+
+      if (!result.success) {
+        this.logger.error('Agent query failed', {
+          aid: agentAid,
+          taskId,
+          error: result.error,
+        });
+
+        this.eventBus.publish({
+          type: 'task_result',
+          data: {
+            task_id: taskId,
+            agent_aid: agentAid,
+            status: 'failed',
+            error: result.error ?? 'Agent query failed',
+          },
+          timestamp: Date.now(),
+          source: 'executor',
+        });
+      } else {
+        this.eventBus.publish({
+          type: 'task_result',
+          data: {
+            task_id: taskId,
+            agent_aid: agentAid,
+            status: 'completed',
+            result: result.output,
+          },
+          timestamp: Date.now(),
+          source: 'executor',
+        });
+      }
+
+      return { output: result.output, sessionId: result.sessionId };
+    } catch (err) {
+      tracked.status = AgentStatus.Error;
+      tracked.queryActive = false;
+      tracked.abortController = undefined;
+
+      this.logger.error('Agent dispatch error', {
+        aid: agentAid,
+        taskId,
+        error: String(err),
+      });
+
+      this.eventBus.publish({
+        type: 'agent.crashed',
+        data: { aid: agentAid, error: String(err) },
+        timestamp: Date.now(),
+        source: 'executor',
+      });
+
+      throw err;
+    }
+  }
+
+  /**
+   * Gracefully stops an agent.
+   * In SDK mode: aborts the current query.
+   * In legacy mode: sends SIGTERM, waits, then SIGKILL.
+   */
+  async stop(agentAid: string, timeoutMs: number = 30000): Promise<void> {
+    const tracked = this.agents.get(agentAid);
+    if (!tracked) {
+      throw new NotFoundError(`Agent ${agentAid} is not running`);
+    }
+
+    this.agents.delete(agentAid);
+
+    // SDK mode: abort any active query
+    if (tracked.abortController) {
+      tracked.abortController.abort();
+      this.logger.info('Aborted agent query', { aid: agentAid });
+      return;
+    }
+
+    // Legacy mode: stop child process
+    if (tracked.process) {
+      return this._stopChildProcess(tracked, timeoutMs);
+    }
+  }
+
+  /** Immediately terminates an agent. */
+  kill(agentAid: string): void {
+    const tracked = this.agents.get(agentAid);
+    if (!tracked) {
+      throw new NotFoundError(`Agent ${agentAid} is not running`);
+    }
+
+    this.agents.delete(agentAid);
+
+    if (tracked.abortController) {
+      tracked.abortController.abort();
+    }
+    if (tracked.process) {
+      tracked.process.kill('SIGKILL');
+    }
+
+    this.logger.info('Killed agent', { aid: agentAid });
+  }
+
+  /** Checks whether an agent is currently registered and running. */
+  isRunning(agentAid: string): boolean {
+    return this.agents.has(agentAid);
+  }
+
+  /** Returns the current status of an agent. */
+  getStatus(agentAid: string): AgentStatus | undefined {
+    return this.agents.get(agentAid)?.status;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Private helpers
+  // ---------------------------------------------------------------------------
+
+  /** Extracts team slug from agent config or defaults to 'main'. */
+  private _resolveTeamSlug(_agent: AgentInitConfig): string {
+    // Agent's team slug is typically set in the init config
+    // For root agents, use 'main' as the default
+    return 'main';
+  }
+
+  /** Sets provider environment variables for SDK subprocess authentication. */
+  private _setProviderEnv(agent: AgentInitConfig): void {
+    if (agent.provider.type === ProviderType.OAuth && agent.provider.oauthToken) {
+      process.env['CLAUDE_CODE_OAUTH_TOKEN'] = agent.provider.oauthToken;
+      delete process.env['ANTHROPIC_API_KEY'];
+      delete process.env['ANTHROPIC_BASE_URL'];
+    } else if (agent.provider.type === ProviderType.AnthropicDirect) {
+      if (agent.provider.apiKey) {
+        process.env['ANTHROPIC_API_KEY'] = agent.provider.apiKey;
+      }
+      if (agent.provider.baseUrl) {
+        process.env['ANTHROPIC_BASE_URL'] = agent.provider.baseUrl;
+      }
+      delete process.env['CLAUDE_CODE_OAUTH_TOKEN'];
+    }
+  }
+
+  /** Legacy: spawns agent-entry.ts as a child process. */
+  private async _startChildProcess(
+    agent: AgentInitConfig,
+    workspacePath: string,
+  ): Promise<void> {
     const env: Record<string, string> = {
       ...process.env as Record<string, string>,
       OPENHIVE_AGENT_AID: agent.aid,
@@ -67,10 +340,8 @@ export class AgentExecutorImpl implements AgentExecutor {
       OPENHIVE_AGENT_MODEL: agent.model,
     };
 
-    // Map provider type to environment variables
     if (agent.provider.type === ProviderType.OAuth && agent.provider.oauthToken) {
       env['CLAUDE_CODE_OAUTH_TOKEN'] = agent.provider.oauthToken;
-      // Clear any existing API key vars when using OAuth
       delete env['ANTHROPIC_API_KEY'];
       delete env['ANTHROPIC_BASE_URL'];
     } else if (agent.provider.type === ProviderType.AnthropicDirect) {
@@ -80,40 +351,38 @@ export class AgentExecutorImpl implements AgentExecutor {
       if (agent.provider.baseUrl) {
         env['ANTHROPIC_BASE_URL'] = agent.provider.baseUrl;
       }
-      // Clear any existing OAuth token when using direct API
       delete env['CLAUDE_CODE_OAUTH_TOKEN'];
     }
 
-    // Spawn the agent entry point from the container's built output
-    // The agent-entry.js is compiled from backend/src/agent-entry.ts
     const child = spawn('node', ['/app/backend/dist/agent-entry.js'], {
       cwd: workspacePath,
       env,
       stdio: 'pipe',
     });
 
-    const tracked: TrackedProcess = {
-      process: child,
+    const tracked: TrackedAgent = {
       aid: agent.aid,
       status: AgentStatus.Starting,
+      config: agent,
+      workspacePath,
+      process: child,
+      queryActive: false,
     };
 
-    this.processes.set(agent.aid, tracked);
+    this.agents.set(agent.aid, tracked);
 
-    this.logger.info('Agent process spawned', {
+    this.logger.info('Agent process spawned (legacy mode)', {
       aid: agent.aid,
       pid: child.pid,
       workspacePath,
     });
 
-    // Register crash handler for unexpected exit
     child.on('exit', (code, signal) => {
-      const entry = this.processes.get(agent.aid);
+      const entry = this.agents.get(agent.aid);
       if (!entry) return;
 
-      // If still tracked (not removed by stop/kill), it's a crash
       entry.status = AgentStatus.Error;
-      this.processes.delete(agent.aid);
+      this.agents.delete(agent.aid);
 
       this.logger.error('Agent process crashed', {
         aid: agent.aid,
@@ -123,39 +392,19 @@ export class AgentExecutorImpl implements AgentExecutor {
 
       this.eventBus.publish({
         type: 'agent.crashed',
-        data: {
-          aid: agent.aid,
-          exitCode: code,
-          signal,
-        },
+        data: { aid: agent.aid, exitCode: code, signal },
         timestamp: Date.now(),
         source: 'executor',
       });
     });
   }
 
-  /**
-   * Gracefully stops an agent's SDK process.
-   * Sends SIGTERM, waits up to timeoutMs, then SIGKILL if still alive.
-   *
-   * @param agentAid - Agent ID identifying which process to stop
-   * @param timeoutMs - Maximum time in milliseconds to wait for graceful shutdown
-   * @throws {NotFoundError} If the agent is not running
-   */
-  async stop(agentAid: string, timeoutMs: number = 30000): Promise<void> {
-    const tracked = this.processes.get(agentAid);
-    if (!tracked) {
-      throw new NotFoundError(`Agent ${agentAid} is not running`);
-    }
-
-    const child = tracked.process;
-
-    // Remove from tracking immediately so the exit handler doesn't fire as a crash
-    this.processes.delete(agentAid);
+  /** Legacy: stops a child process with SIGTERM then SIGKILL. */
+  private _stopChildProcess(tracked: TrackedAgent, timeoutMs: number): Promise<void> {
+    const child = tracked.process!;
 
     return new Promise<void>((resolve) => {
       let resolved = false;
-
       const cleanup = () => {
         if (resolved) return;
         resolved = true;
@@ -164,62 +413,18 @@ export class AgentExecutorImpl implements AgentExecutor {
       };
 
       child.on('exit', cleanup);
-
-      // Send SIGTERM for graceful shutdown
       child.kill('SIGTERM');
 
-      this.logger.info('Sent SIGTERM to agent', { aid: agentAid });
+      this.logger.info('Sent SIGTERM to agent', { aid: tracked.aid });
 
-      // After timeout, force kill
       const timer = setTimeout(() => {
         if (resolved) return;
         this.logger.warn('Agent did not exit within timeout, sending SIGKILL', {
-          aid: agentAid,
+          aid: tracked.aid,
           timeoutMs,
         });
         child.kill('SIGKILL');
       }, timeoutMs);
     });
-  }
-
-  /**
-   * Immediately terminates an agent's SDK process with SIGKILL.
-   *
-   * @param agentAid - Agent ID identifying which process to kill
-   * @throws {NotFoundError} If the agent is not running
-   */
-  kill(agentAid: string): void {
-    const tracked = this.processes.get(agentAid);
-    if (!tracked) {
-      throw new NotFoundError(`Agent ${agentAid} is not running`);
-    }
-
-    // Remove from tracking before kill so exit handler doesn't fire as crash
-    this.processes.delete(agentAid);
-
-    tracked.process.kill('SIGKILL');
-
-    this.logger.info('Sent SIGKILL to agent', { aid: agentAid });
-  }
-
-  /**
-   * Checks whether an agent's SDK process is currently running.
-   *
-   * @param agentAid - Agent ID to check
-   * @returns true if the agent's process is tracked, false otherwise
-   */
-  isRunning(agentAid: string): boolean {
-    return this.processes.has(agentAid);
-  }
-
-  /**
-   * Returns the current runtime status of an agent's SDK process.
-   *
-   * @param agentAid - Agent ID to query
-   * @returns The agent's current status, or undefined if not tracked
-   */
-  getStatus(agentAid: string): AgentStatus | undefined {
-    const tracked = this.processes.get(agentAid);
-    return tracked?.status;
   }
 }

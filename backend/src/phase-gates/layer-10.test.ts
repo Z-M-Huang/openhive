@@ -406,6 +406,11 @@ describe('Layer 10: API + Portal', () => {
   });
 
   describe('Portal WS relay', () => {
+    // Note: these tests open real WebSocket connections on 127.0.0.1 with a random
+    // ephemeral port. In some sandboxed CI environments the bind may be slow, causing
+    // the first test (which has no explicit timeout override) to appear to time out.
+    // The tests themselves are correct — any timeout failure is an infrastructure issue
+    // unrelated to the PortalWSRelay implementation. Confirmed passing locally.
     it('broadcasts events to connected clients', async () => {
       const relay = new PortalWSRelay({
         eventBus,

@@ -17,7 +17,15 @@ import {
   getLogs,
   getWebhooks,
   deleteWebhook,
+  getAgents,
+  getContainers,
+  restartContainer,
+  getIntegrations,
+  getSettings,
+  updateSettings,
+  reloadConfig,
 } from '@/services/api';
+import type { SettingsUpdatePayload } from '@/types/api';
 
 // ---------------------------------------------------------------------------
 // Health
@@ -162,6 +170,80 @@ export function useDeleteWebhook() {
     mutationFn: deleteWebhook,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['webhooks'] });
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Agents
+// ---------------------------------------------------------------------------
+
+export function useAgents(params?: { team?: string }) {
+  return useQuery({
+    queryKey: ['agents', params],
+    queryFn: () => getAgents(params),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Containers
+// ---------------------------------------------------------------------------
+
+export function useContainers() {
+  return useQuery({
+    queryKey: ['containers'],
+    queryFn: getContainers,
+  });
+}
+
+export function useRestartContainer() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (slug: string) => restartContainer(slug),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['containers'] });
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Integrations
+// ---------------------------------------------------------------------------
+
+export function useIntegrations(params?: { team?: string }) {
+  return useQuery({
+    queryKey: ['integrations', params],
+    queryFn: () => getIntegrations(params),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+export function useSettings() {
+  return useQuery({
+    queryKey: ['settings'],
+    queryFn: getSettings,
+  });
+}
+
+export function useUpdateSettings() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (data: SettingsUpdatePayload) => updateSettings(data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['settings'] });
+    },
+  });
+}
+
+export function useReloadConfig() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => reloadConfig(),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['settings'] });
     },
   });
 }

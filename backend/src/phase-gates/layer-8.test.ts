@@ -374,7 +374,7 @@ describe('Layer 8: Orchestrator Integration', () => {
       expect(triggers).toHaveLength(1);
       expect(triggers[0].name).toBe('test-cron');
       expect(triggers[0].type).toBe('cron');
-      expect(triggers[0].teamSlug).toBe('team-a');
+      expect(triggers[0].targetTeam).toBe('team-a');
     });
 
     it('rejects invalid cron expression', () => {
@@ -425,7 +425,7 @@ describe('Layer 8: Orchestrator Integration', () => {
       // Allow event propagation
       await new Promise(resolve => setTimeout(resolve, 10));
 
-      expect(fireHandler).toHaveBeenCalledWith('team-a', 'Check follow-up');
+      expect(fireHandler).toHaveBeenCalledWith('team-a', 'Check follow-up', undefined);
     });
   });
 
@@ -2132,6 +2132,7 @@ describe('Layer 8: Orchestrator Integration', () => {
         watchProviders: vi.fn(),
         watchTeam: vi.fn(),
         stopWatching: vi.fn(),
+        getConfigWithSources: vi.fn().mockResolvedValue({}),
       };
 
       // Set up task store so recoverTasks() finds no active tasks

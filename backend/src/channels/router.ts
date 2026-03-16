@@ -201,6 +201,37 @@ export class MessageRouterImpl implements MessageRouter {
   }
 
   /**
+   * Send a response back to the originating channel identified by chatJid.
+   *
+   * Parses the chatJid prefix to find the appropriate channel adapter
+   * and delivers the message. Used by agents to reply to users.
+   *
+   * @param chatJid - The chat JID to send to (e.g., "cli:local:0", "discord:guild:channel").
+   * @param content - The message content to send.
+   */
+  async sendResponse(chatJid: string, content: string): Promise<void> {
+    // Find the adapter by checking which registered adapter handles this JID prefix
+    for (const [_channelType, adapter] of this.channels) {
+      // Try sending — adapter will handle if JID matches its format
+      try {
+        await adapter.sendMessage({ chatJid, content });
+        return;
+      } catch {
+        // This adapter doesn't handle this JID — try next
+      }
+    }
+    // No adapter found — log warning
+    console.warn(`[MessageRouter] No adapter found for chatJid: ${chatJid}`);
+  }
+
+  /**
+   * Get the adapter for a channel type.
+   */
+  getAdapter(channelType: ChannelType): ChannelAdapter | undefined {
+    return this.channels.get(channelType);
+  }
+
+  /**
    * Dispatch a message to a team's lead agent.
    *
    * @param msg - The inbound message.
@@ -217,7 +248,7 @@ export class MessageRouterImpl implements MessageRouter {
         }
       }
 
-      // Create a task for the team's lead agent
+      // Create a task for the team's lead agent with origin chatJid for response routing
       await this.orchestrator.dispatchTask({
         id: `msg-${msg.id}-${Date.now()}`,
         parent_id: '',
@@ -235,8 +266,8 @@ export class MessageRouterImpl implements MessageRouter {
         created_at: Date.now(),
         updated_at: Date.now(),
         completed_at: null,
+        origin_chat_jid: msg.chatJid,
       });
     }
-    // If no orchestrator, just log (useful for testing)
   }
 }

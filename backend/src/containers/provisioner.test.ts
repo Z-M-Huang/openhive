@@ -75,6 +75,61 @@ describe('ContainerProvisionerImpl', () => {
       await expect(provisioner.scaffoldWorkspace('/tmp/../../etc', 'test-team'))
         .rejects.toThrow(ValidationError);
     });
+
+    it('writes agent .md files and includes refs in team.yaml when agents are provided', async () => {
+      const agents: AgentDefinition[] = [
+        {
+          name: 'researcher',
+          description: 'Searches the web',
+          model: 'sonnet',
+          tools: ['web_search'],
+          content: 'You are a researcher.',
+        },
+        {
+          name: 'writer',
+          description: 'Writes reports',
+          content: 'You are a writer.',
+        },
+      ];
+
+      const wsPath = await provisioner.scaffoldWorkspace(tmpDir, 'agents-team', agents);
+
+      // team.yaml should list both agent refs
+      const teamYaml = await readFile(join(wsPath, 'team.yaml'), 'utf-8');
+      const parsed = yamlParse(teamYaml);
+      expect(parsed.slug).toBe('agents-team');
+      expect(parsed.agents).toHaveLength(2);
+      expect(parsed.agents[0]).toMatchObject({ name: 'researcher', description: 'Searches the web' });
+      expect(parsed.agents[1]).toMatchObject({ name: 'writer', description: 'Writes reports' });
+
+      // Each agent .md file should exist with correct content
+      const researcherMd = await readFile(join(wsPath, '.claude/agents/researcher.md'), 'utf-8');
+      expect(researcherMd).toContain('name: researcher');
+      expect(researcherMd).toContain('model: sonnet');
+      expect(researcherMd).toContain('You are a researcher.');
+
+      const writerMd = await readFile(join(wsPath, '.claude/agents/writer.md'), 'utf-8');
+      expect(writerMd).toContain('name: writer');
+      expect(writerMd).toContain('You are a writer.');
+      expect(writerMd).not.toContain('model:');
+    });
+
+    it('writes empty agents array in team.yaml when no agents provided', async () => {
+      const wsPath = await provisioner.scaffoldWorkspace(tmpDir, 'no-agents-team');
+
+      const teamYaml = await readFile(join(wsPath, 'team.yaml'), 'utf-8');
+      const parsed = yamlParse(teamYaml);
+      expect(parsed.agents).toEqual([]);
+    });
+
+    it('does not create any .md files when no agents provided', async () => {
+      const wsPath = await provisioner.scaffoldWorkspace(tmpDir, 'empty-team');
+
+      // The agents directory should exist but be empty
+      const { readdir } = await import('node:fs/promises');
+      const files = await readdir(join(wsPath, '.claude/agents'));
+      expect(files).toHaveLength(0);
+    });
   });
 
   // -----------------------------------------------------------------------

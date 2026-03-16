@@ -56,6 +56,8 @@ import { ChannelType } from '../domain/index.js';
 interface SessionInfo {
   sessionId: string;
   agentAid: string;
+  /** Team TID this session is bound to (AC-C2). */
+  tid: string;
   taskId: string;
   memoryContent: string | null;
 }
@@ -80,12 +82,16 @@ export class SessionManagerImpl implements SessionManager {
   /**
    * Creates a new SDK session for an agent working on a task.
    *
+   * The session is bound to both the agent AID and the team TID (AC-C2).
+   * This ensures sessions cannot be transferred across team boundaries.
+   *
    * @param agentAid - Agent ID that will own this session
    * @param taskId - Task ID this session is associated with
+   * @param tid - Team TID this session is bound to
    * @returns The newly created session ID string
    * @throws {ConflictError} If the agent already has an active session
    */
-  async createSession(agentAid: string, taskId: string): Promise<string> {
+  async createSession(agentAid: string, taskId: string, tid: string): Promise<string> {
     if (this.activeSessions.has(agentAid)) {
       throw new ConflictError(`Agent ${agentAid} already has an active session`);
     }
@@ -112,11 +118,13 @@ export class SessionManagerImpl implements SessionManager {
       last_agent_timestamp: Date.now(),
       session_id: sessionId,
       agent_aid: agentAid,
+      tid,
     });
 
     this.activeSessions.set(agentAid, {
       sessionId,
       agentAid,
+      tid,
       taskId,
       memoryContent,
     });
@@ -144,6 +152,7 @@ export class SessionManagerImpl implements SessionManager {
     this.activeSessions.set(stored.agent_aid, {
       sessionId: stored.session_id,
       agentAid: stored.agent_aid,
+      tid: stored.tid,
       taskId: '',
       memoryContent: null,
     });
@@ -178,10 +187,40 @@ export class SessionManagerImpl implements SessionManager {
    *
    * Synchronous lookup against in-memory state.
    *
+   * Design note: sessions are keyed solely by `agentAid`, not by (agentAid, tid) pair.
+   * This is intentional and consistent with INV-07 (per-agent memory/state). An agent AID
+   * is globally unique across the entire system — an agent belongs to exactly one team at a
+   * time, so scoping by TID would be redundant. Session recovery after a container restart
+   * resumes by AID because the agent's identity (and its SDK session context) is what
+   * matters for conversation continuity, not the container it happens to run in.
+   *
    * @param agentAid - Agent ID to query
    * @returns The active session ID, or `undefined` if no active session
    */
   getSessionByAgent(agentAid: string): string | undefined {
     return this.activeSessions.get(agentAid)?.sessionId;
+  }
+
+  /**
+   * Populates the in-memory session map from the SessionStore.
+   *
+   * Called once at startup (before rebuildState / resumeActiveSessions) so that
+   * sessions persisted before a root restart are visible to getSessionByAgent().
+   * Existing in-memory entries are not overwritten (createSession may have already
+   * run for agents that came online before preload completed).
+   */
+  async preloadFromStore(): Promise<void> {
+    const sessions = await this.sessionStore.listAll();
+    for (const s of sessions) {
+      if (!this.activeSessions.has(s.agent_aid)) {
+        this.activeSessions.set(s.agent_aid, {
+          sessionId: s.session_id,
+          agentAid: s.agent_aid,
+          tid: s.tid,
+          taskId: '',
+          memoryContent: null,
+        });
+      }
+    }
   }
 }

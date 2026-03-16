@@ -1,0 +1,58 @@
+name: Memory Tools
+description: Verify save_memory and recall_memory MCP tools -- save curated and daily memory entries, recall memories by keyword query with limit, and confirm per-agent memory scoping per INV-07 (agent cannot recall another agent's memories).
+
+setup:
+  - command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+    description: "Clean start -- remove all containers and volumes from any previous run"
+  - command: "cd /app/openhive && bun run docker 2>&1 &"
+    description: "Build the Docker image and start the server in the background"
+  - command: "for i in $(seq 1 60); do curl -sf http://localhost:8080/api/health && exit 0; sleep 5; done; echo 'Health check timed out'; exit 1"
+    description: "Wait up to 5 minutes for the health check endpoint to respond (exits 1 on timeout)"
+
+teardown:
+  - command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+    description: "Clean up -- remove all containers and volumes"
+
+test_cases:
+  - name: Save curated memory
+    description: save_memory tool saves curated memory entry via CLI
+    steps:
+      - action: "Save curated memory via CLI"
+        command: "echo 'Save this important information as curated memory: Project deadline is March 30th' | timeout 300 bun run cli/index.ts 2>&1"
+        expected: "[Assistant]"
+    expected_outcome: "Memory saved successfully as curated type, assistant confirms save"
+
+  - name: Save daily memory
+    description: save_memory tool saves daily memory entry via CLI
+    steps:
+      - action: "Save daily memory via CLI"
+        command: "echo 'Record today meeting notes as daily memory: discussed Q1 performance metrics' | timeout 300 bun run cli/index.ts 2>&1"
+        expected: "[Assistant]"
+    expected_outcome: "Memory saved successfully as daily type, assistant confirms"
+
+  - name: Recall memory by keyword
+    description: recall_memory tool returns memories matching keyword query
+    steps:
+      - action: "Recall memories about project deadlines"
+        command: "echo 'Recall any memories you have about project deadlines' | timeout 300 bun run cli/index.ts 2>&1"
+        expected: "[Assistant]"
+    expected_outcome: "Returns memories matching 'deadline' keyword, includes the previously saved March 30th entry"
+
+  - name: Verify per-agent memory scoping (INV-07)
+    description: Create second agent and confirm it cannot access first agent's memories
+    steps:
+      - action: "Create a team with separate agents"
+        command: "echo 'Create a team called memory-test with two agents: agent-alpha and agent-beta' | timeout 300 bun run cli/index.ts 2>&1"
+        expected: "[Assistant]"
+      - action: "Save memory as one agent and try to recall as another"
+        command: "echo 'Save secret data as memory for agent-alpha, then try to recall it as agent-beta' | timeout 300 bun run cli/index.ts 2>&1"
+        expected: "[Assistant]"
+    expected_outcome: "Per-agent scoping enforced: agent-beta cannot access agent-alpha's memories (INV-07)"
+
+  - name: Verify memory persistence
+    description: Memories are persisted and survive recall after subsequent operations
+    steps:
+      - action: "Recall all memories to confirm they persist"
+        command: "echo 'List all memories you have saved' | timeout 300 bun run cli/index.ts 2>&1"
+        expected: "[Assistant]"
+    expected_outcome: "Previously saved memories are still retrievable, confirming dual-write persistence"

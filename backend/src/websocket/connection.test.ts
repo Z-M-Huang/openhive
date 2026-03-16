@@ -459,4 +459,130 @@ describe('WSConnectionImpl', () => {
 
     expect(handler).not.toHaveBeenCalled();
   });
+
+  // -------------------------------------------------------------------------
+  // Session token: AC-A2, AC-A3
+  // -------------------------------------------------------------------------
+
+  it('sessionToken is null before container_init is received', () => {
+    conn = new WSConnectionImpl(makeConfig());
+    expect(conn.sessionToken).toBeNull();
+  });
+
+  it('stores session token received in container_init message', async () => {
+    conn = new WSConnectionImpl(makeConfig());
+    const handler = vi.fn();
+    conn.onMessage(handler);
+
+    const serverConnP = waitForServerConnection(wss);
+    await conn.connect();
+    const serverWs = await serverConnP;
+
+    // Send a container_init with session_token
+    serverWs.send(JSON.stringify({
+      type: 'container_init',
+      data: {
+        protocol_version: '1.0',
+        is_main_assistant: false,
+        team_config: {},
+        agents: [],
+        session_token: 'test-session-token-abc123',
+      },
+    }));
+
+    await tick(100);
+
+    expect(conn.sessionToken).toBe('test-session-token-abc123');
+    // Message handler should still be called with the full message
+    expect(handler).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'container_init' }),
+    );
+  });
+
+  it('container_init without session_token does not set sessionToken', async () => {
+    conn = new WSConnectionImpl(makeConfig());
+
+    const serverConnP = waitForServerConnection(wss);
+    await conn.connect();
+    const serverWs = await serverConnP;
+
+    // Send container_init without session_token
+    serverWs.send(JSON.stringify({
+      type: 'container_init',
+      data: {
+        protocol_version: '1.0',
+        is_main_assistant: false,
+        team_config: {},
+        agents: [],
+      },
+    }));
+
+    await tick(100);
+
+    expect(conn.sessionToken).toBeNull();
+  });
+
+  it('uses session token for reconnect URL after container_init sets it', async () => {
+    // Track the URLs used when creating connections to the server
+    const connectedUrls: string[] = [];
+
+    // Override httpServer upgrade handler to capture the request URL
+    const originalUpgradeListeners = httpServer.listeners('upgrade').slice();
+    httpServer.removeAllListeners('upgrade');
+    httpServer.on('upgrade', (req, socket, head) => {
+      connectedUrls.push(req.url ?? '');
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        wss.emit('connection', ws, req);
+      });
+    });
+
+    conn = new WSConnectionImpl(makeConfig({
+      token: 'one-time-token',
+      reconnectBaseMs: 50,
+      reconnectMultiplier: 1,
+      reconnectMaxMs: 50,
+      reconnectJitter: 0,
+    }));
+
+    const serverConnP = waitForServerConnection(wss);
+    await conn.connect();
+    const serverWs = await serverConnP;
+
+    // Verify initial connection used one-time token
+    expect(connectedUrls[0]).toContain('token=one-time-token');
+
+    // Send container_init with a session token
+    serverWs.send(JSON.stringify({
+      type: 'container_init',
+      data: {
+        protocol_version: '1.0',
+        is_main_assistant: false,
+        team_config: {},
+        agents: [],
+        session_token: 'session-token-xyz',
+      },
+    }));
+    await tick(100);
+
+    expect(conn.sessionToken).toBe('session-token-xyz');
+
+    // Listen for the next server connection (reconnect)
+    const reconnectedP = waitForServerConnection(wss);
+
+    // Close server side to trigger reconnect
+    serverWs.close(1001, 'test close');
+
+    // Wait for reconnect
+    await reconnectedP;
+    await tick(100);
+
+    // Reconnect should have used the session token
+    expect(connectedUrls[1]).toContain('token=session-token-xyz');
+
+    // Restore original listeners
+    httpServer.removeAllListeners('upgrade');
+    for (const listener of originalUpgradeListeners) {
+      httpServer.on('upgrade', listener as (...args: unknown[]) => void);
+    }
+  });
 });

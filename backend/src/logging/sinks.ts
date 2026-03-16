@@ -8,8 +8,9 @@
  *     Root-only sink. Never throws from write() — errors are logged to stderr.
  *
  * Plugin system:
- *   - PluginManager loads custom sinks from workspace/plugins/sinks/.
- *   - Currently ships as no-op stubs (sandboxing deferred — see ADR).
+ *   - PluginManager lives in backend/src/plugins/manager.ts.
+ *   - It loads custom LogSink implementations from workspace/plugins/sinks/.
+ *   - Hot-reload via chokidar with content-hash deduplication (CON-04, AC-F3).
  */
 
 import pino from 'pino';
@@ -118,50 +119,5 @@ export class SQLiteSink implements LogSink {
   }
 }
 
-// ---------------------------------------------------------------------------
-// PluginManager (no-op stubs — sandboxing deferred)
-// ---------------------------------------------------------------------------
-
-// TODO: Sandboxing deferred — plugins run in same process. See ADR for accepted risk.
-
-/**
- * Plugin manager — hot-reloads custom log sinks from the filesystem.
- *
- * Currently ships as no-op stubs per user decision #5 (deferred sandboxing).
- * All methods are safe to call but perform no work.
- */
-export class PluginManager {
-  constructor(private readonly _workspacePath: string) {
-    void this._workspacePath;
-  }
-
-  /** Load all plugins from the sinks directory. Returns empty array (deferred). */
-  async loadAll(): Promise<LogSink[]> {
-    return [];
-  }
-
-  /** Start watching the plugins directory. No-op (deferred). */
-  startWatching(): void {
-    // no-op
-  }
-
-  /** Stop the file watcher. No-op (deferred). */
-  async stopWatching(): Promise<void> {
-    // no-op
-  }
-
-  /** Get all currently loaded plugin sinks. Returns empty array (deferred). */
-  getLoadedSinks(): LogSink[] {
-    return [];
-  }
-
-  /** Reload a single plugin by filename. No-op (deferred). */
-  async reloadPlugin(_filename: string): Promise<LogSink | undefined> {
-    return undefined;
-  }
-
-  /** Unload a single plugin by filename. No-op (deferred). */
-  async unloadPlugin(_filename: string): Promise<void> {
-    // no-op
-  }
-}
+// PluginManager has been moved to backend/src/plugins/manager.ts (AC-F5).
+// Import from that module instead.

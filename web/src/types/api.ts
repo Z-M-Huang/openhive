@@ -25,6 +25,7 @@ export interface TeamSummary {
   health: string;
   agentCount: number;
   depth: number;
+  parentSlug?: string;
 }
 
 export interface TeamDetail {
@@ -135,6 +136,76 @@ export interface WebhookRegistration {
 export interface WebhooksResponse {
   webhooks: WebhookRegistration[];
 }
+
+// ---------------------------------------------------------------------------
+// Agents
+// ---------------------------------------------------------------------------
+
+export interface AgentItem {
+  aid: string;
+  name: string;
+  teamSlug: string;
+  role: string;
+  status: string;
+  leadsTeam: boolean;
+  /** Null for agents without a stored model tier (e.g. main assistant). */
+  modelTier: string | null;
+}
+
+export interface AgentsListResponse {
+  agents: AgentItem[];
+}
+
+// ---------------------------------------------------------------------------
+// Containers
+// ---------------------------------------------------------------------------
+
+export interface ContainerItem {
+  slug: string;
+  health: string;
+  agentCount: number;
+  uptime: number;
+  restartCount: number;
+  activeTaskCount: number;
+  childTeams: string[];
+}
+
+export interface ContainersListResponse {
+  containers: ContainerItem[];
+}
+
+// ---------------------------------------------------------------------------
+// Integrations
+// ---------------------------------------------------------------------------
+
+export interface IntegrationItem {
+  id: string;
+  name: string;
+  teamSlug: string;
+  config_path: string;
+  status: 'proposed' | 'validated' | 'tested' | 'approved' | 'active' | 'failed' | 'rolled_back';
+  /** Error details for failed or rolled_back integrations (AC-G8). Empty string when not applicable. */
+  error_message: string;
+  created_at: number;
+}
+
+export interface IntegrationsListResponse {
+  integrations: IntegrationItem[];
+}
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+export interface SettingsFieldValue {
+  value: unknown;
+  source: 'env' | 'yaml' | 'default';
+  isSecret?: boolean;
+}
+
+export type SettingsResponse = Record<string, unknown>;
+
+export type SettingsUpdatePayload = Record<string, unknown>;
 
 // ---------------------------------------------------------------------------
 // WebSocket Events

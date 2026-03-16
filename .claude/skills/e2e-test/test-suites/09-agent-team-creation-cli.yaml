@@ -1,0 +1,61 @@
+name: Agent and Team Creation via CLI
+description: Verify MCP tools create_team and create_agent work through the CLI pipeline -- natural-language request triggers tool invocation, team appears in GET /api/teams with leaderAid, agent appears in GET /api/agents, container is spawned for the team, and org chart reflects the hierarchy.
+
+setup:
+  - command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+    description: "Clean start -- remove all containers and volumes from any previous run"
+  - command: "cd /app/openhive && bun run docker 2>&1 &"
+    description: "Build the Docker image and start the server in the background"
+  - command: "for i in $(seq 1 60); do curl -sf http://localhost:8080/api/health && exit 0; sleep 5; done; echo 'Health check timed out'; exit 1"
+    description: "Wait up to 5 minutes for the health check endpoint to respond (exits 1 on timeout)"
+
+teardown:
+  - command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+    description: "Clean up -- remove all containers and volumes"
+
+test_cases:
+  - name: Create team via CLI
+    description: Natural-language request triggers create_team tool and team appears in API
+    steps:
+      - action: "Request team creation through CLI"
+        command: "echo 'Create a team called data-analysis with purpose of analyzing datasets' | timeout 300 bun run cli/index.ts 2>&1"
+        expected: "[Assistant]"
+      - action: "Verify team exists in API"
+        command: "curl -sf http://localhost:8080/api/teams 2>&1"
+        expected: "team"
+    expected_outcome: "Team created successfully and appears in teams list"
+
+  - name: Create agent via CLI
+    description: Request create_agent tool via natural language and verify agent in API
+    steps:
+      - action: "Request agent creation"
+        command: "echo 'Create an agent named data-analyst in the data-analysis team with role member' | timeout 300 bun run cli/index.ts 2>&1"
+        expected: "[Assistant]"
+      - action: "Verify agent exists in agents API"
+        command: "curl -sf http://localhost:8080/api/agents 2>&1"
+        expected: "agent"
+    expected_outcome: "Agent created and appears in agents API response"
+
+  - name: Verify team leader assignment
+    description: Team has leaderAid assigned after creation
+    steps:
+      - action: "Query team details for leaderAid"
+        command: "curl -sf http://localhost:8080/api/teams 2>&1"
+        expected: "leaderAid"
+    expected_outcome: "Team shows non-empty leaderAid pointing to a valid agent (aid-*)"
+
+  - name: Verify container spawned for team
+    description: New team has its own container per INV-05 (root spawns all containers)
+    steps:
+      - action: "Query containers API"
+        command: "curl -sf http://localhost:8080/api/containers 2>&1"
+        expected: "containers"
+    expected_outcome: "Containers API shows at least one child container besides root for the new team"
+
+  - name: Verify org chart hierarchy
+    description: Team appears in org chart with correct parent-child relationship
+    steps:
+      - action: "Query teams list with parentSlug field"
+        command: "curl -sf http://localhost:8080/api/teams 2>&1"
+        expected: "depth"
+    expected_outcome: "Teams list shows new team with depth > 0 and parentSlug indicating it is a child"

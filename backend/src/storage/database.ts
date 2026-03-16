@@ -207,6 +207,7 @@ export class Database {
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         completed_at INTEGER,
+        origin_chat_jid TEXT,
         CHECK (status IN ('pending','active','completed','failed','escalated','cancelled'))
       );
       CREATE INDEX IF NOT EXISTS idx_tasks_parent_id ON tasks(parent_id);
@@ -231,7 +232,8 @@ export class Database {
         last_timestamp INTEGER NOT NULL,
         last_agent_timestamp INTEGER NOT NULL,
         session_id TEXT NOT NULL DEFAULT '',
-        agent_aid TEXT NOT NULL DEFAULT ''
+        agent_aid TEXT NOT NULL DEFAULT '',
+        tid TEXT NOT NULL DEFAULT ''
       );
 
       CREATE TABLE IF NOT EXISTS log_entries (
@@ -329,6 +331,7 @@ export class Database {
         name TEXT NOT NULL,
         config_path TEXT NOT NULL DEFAULT '',
         status TEXT NOT NULL DEFAULT 'proposed',
+        error_message TEXT NOT NULL DEFAULT '',
         created_at INTEGER NOT NULL,
         CHECK (status IN ('proposed','validated','tested','approved','active','failed','rolled_back'))
       );
@@ -346,6 +349,17 @@ export class Database {
     `;
 
     this.connection.exec(ddl);
+
+    // Schema migration guard: add the `tid` column to chat_sessions for databases
+    // created before this column was introduced. SQLite has no "ADD COLUMN IF NOT
+    // EXISTS" syntax; the try/catch makes the migration idempotent.
+    try { this.connection.exec("ALTER TABLE chat_sessions ADD COLUMN tid TEXT NOT NULL DEFAULT ''"); } catch { /* already exists */ }
+
+    // Migration: add origin_chat_jid to tasks for response routing
+    try { this.connection.exec("ALTER TABLE tasks ADD COLUMN origin_chat_jid TEXT"); } catch { /* already exists */ }
+
+    // Migration: add error_message to integrations
+    try { this.connection.exec("ALTER TABLE integrations ADD COLUMN error_message TEXT NOT NULL DEFAULT ''"); } catch { /* already exists */ }
   }
   /* eslint-enable @typescript-eslint/no-unused-vars */
 }

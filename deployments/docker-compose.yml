@@ -6,17 +6,25 @@
 
 services:
   openhive:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile
     image: openhive:latest
     ports:
       - "8080:8080"
     volumes:
-      - ./.run/workspace:/app/workspace
-      - ./data:/app/data
+      - ../.run/workspace:/app/workspace
+      - ../data:/app/data
       - /var/run/docker.sock:/var/run/docker.sock
+    env_file:
+      - ../.env
     environment:
       OPENHIVE_IS_ROOT: "true"
+      OPENHIVE_SYSTEM_LISTEN_ADDRESS: "0.0.0.0"
     networks:
       - openhive-network
+    stdin_open: true
+    tty: true
 
 networks:
   openhive-network:

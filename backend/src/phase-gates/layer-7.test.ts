@@ -324,13 +324,13 @@ describe('Layer 7: Executor', () => {
     });
 
     it('should create a session and return a UUID session ID', async () => {
-      const sessionId = await sessionManager.createSession('aid-test-abc123', 'task-001');
+      const sessionId = await sessionManager.createSession('aid-test-abc123', 'task-001', 'tid-team-0001');
 
       expect(sessionId).toMatch(/^[0-9a-f-]{36}$/);
     });
 
     it('should persist session to the session store', async () => {
-      const sessionId = await sessionManager.createSession('aid-test-abc123', 'task-001');
+      const sessionId = await sessionManager.createSession('aid-test-abc123', 'task-001', 'tid-team-0001');
 
       expect(sessionStore.upsert).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -343,16 +343,16 @@ describe('Layer 7: Executor', () => {
     });
 
     it('should enforce one-per-agent constraint', async () => {
-      await sessionManager.createSession('aid-test-abc123', 'task-001');
+      await sessionManager.createSession('aid-test-abc123', 'task-001', 'tid-team-0001');
 
       await expect(
-        sessionManager.createSession('aid-test-abc123', 'task-002'),
+        sessionManager.createSession('aid-test-abc123', 'task-002', 'tid-team-0001'),
       ).rejects.toThrow(ConflictError);
     });
 
     it('should allow different agents to have sessions concurrently', async () => {
-      const id1 = await sessionManager.createSession('aid-alpha-aaa111', 'task-001');
-      const id2 = await sessionManager.createSession('aid-beta-bbb222', 'task-002');
+      const id1 = await sessionManager.createSession('aid-alpha-aaa111', 'task-001', 'tid-team-0001');
+      const id2 = await sessionManager.createSession('aid-beta-bbb222', 'task-002', 'tid-team-0002');
 
       expect(id1).not.toBe(id2);
       expect(sessionManager.getSessionByAgent('aid-alpha-aaa111')).toBe(id1);
@@ -360,7 +360,7 @@ describe('Layer 7: Executor', () => {
     });
 
     it('should resume a previously created session', async () => {
-      const sessionId = await sessionManager.createSession('aid-test-abc123', 'task-001');
+      const sessionId = await sessionManager.createSession('aid-test-abc123', 'task-001', 'tid-team-0001');
       await sessionManager.endSession(sessionId);
 
       // Re-add to store for resume
@@ -371,6 +371,7 @@ describe('Layer 7: Executor', () => {
         last_agent_timestamp: Date.now(),
         session_id: sessionId,
         agent_aid: 'aid-test-abc123',
+        tid: 'tid-team-0001',
       });
 
       await sessionManager.resumeSession(sessionId);
@@ -385,7 +386,7 @@ describe('Layer 7: Executor', () => {
     });
 
     it('should end a session and remove from tracking', async () => {
-      const sessionId = await sessionManager.createSession('aid-test-abc123', 'task-001');
+      const sessionId = await sessionManager.createSession('aid-test-abc123', 'task-001', 'tid-team-0001');
       expect(sessionManager.getSessionByAgent('aid-test-abc123')).toBe(sessionId);
 
       await sessionManager.endSession(sessionId);
@@ -405,10 +406,10 @@ describe('Layer 7: Executor', () => {
     });
 
     it('should allow creating a new session after ending the previous one', async () => {
-      const firstId = await sessionManager.createSession('aid-test-abc123', 'task-001');
+      const firstId = await sessionManager.createSession('aid-test-abc123', 'task-001', 'tid-team-0001');
       await sessionManager.endSession(firstId);
 
-      const secondId = await sessionManager.createSession('aid-test-abc123', 'task-002');
+      const secondId = await sessionManager.createSession('aid-test-abc123', 'task-002', 'tid-team-0001');
       expect(secondId).not.toBe(firstId);
       expect(sessionManager.getSessionByAgent('aid-test-abc123')).toBe(secondId);
     });
@@ -435,7 +436,7 @@ describe('Layer 7: Executor', () => {
       fs.writeFileSync(path.join(tmpRoot, 'MEMORY.md'), memoryContent);
 
       const manager = new SessionManagerImpl(sessionStore, tmpRoot);
-      const sessionId = await manager.createSession('aid-test-abc123', 'task-001');
+      const sessionId = await manager.createSession('aid-test-abc123', 'task-001', 'tid-team-0001');
 
       // Session was created successfully — MEMORY.md was read without error
       expect(sessionId).toBeDefined();
@@ -444,7 +445,7 @@ describe('Layer 7: Executor', () => {
     it('should handle missing MEMORY.md gracefully', async () => {
       // No MEMORY.md file exists in tmpRoot
       const manager = new SessionManagerImpl(sessionStore, tmpRoot);
-      const sessionId = await manager.createSession('aid-test-abc123', 'task-001');
+      const sessionId = await manager.createSession('aid-test-abc123', 'task-001', 'tid-team-0001');
 
       expect(sessionId).toBeDefined();
     });
@@ -454,7 +455,7 @@ describe('Layer 7: Executor', () => {
       fs.writeFileSync(path.join(tmpRoot, 'MEMORY.md'), memoryContent);
 
       const manager = new SessionManagerImpl(sessionStore, tmpRoot);
-      const sessionId = await manager.createSession('aid-test-abc123', 'task-001');
+      const sessionId = await manager.createSession('aid-test-abc123', 'task-001', 'tid-team-0001');
       await manager.endSession(sessionId);
 
       // Re-add to store for resume
@@ -465,6 +466,7 @@ describe('Layer 7: Executor', () => {
         last_agent_timestamp: Date.now(),
         session_id: sessionId,
         agent_aid: 'aid-test-abc123',
+        tid: 'tid-team-0001',
       });
 
       // Modify MEMORY.md after creation
@@ -505,7 +507,7 @@ describe('Layer 7: Executor', () => {
       expect(executor.isRunning('aid-worker-aaa111')).toBe(true);
       expect(executor.getStatus('aid-worker-aaa111')).toBe(AgentStatus.Starting);
       expect(logger.info).toHaveBeenCalledWith(
-        'Agent process spawned',
+        'Agent process spawned (legacy mode)',
         expect.objectContaining({
           aid: 'aid-worker-aaa111',
           workspacePath: '/app/workspace',
@@ -745,7 +747,7 @@ describe('Layer 7: Executor', () => {
       const hooks = createSDKHooks(logger, 'aid-lead-abc123');
 
       // 1. Create session
-      const sessionId = await sessionManager.createSession('aid-lead-abc123', 'task-main');
+      const sessionId = await sessionManager.createSession('aid-lead-abc123', 'task-main', 'tid-team-0001');
       expect(sessionId).toBeDefined();
       expect(sessionManager.getSessionByAgent('aid-lead-abc123')).toBe(sessionId);
 
@@ -792,7 +794,7 @@ describe('Layer 7: Executor', () => {
       const sessionManager = new SessionManagerImpl(sessionStore, tmpRoot);
 
       // Create session and start executor
-      const sessionId = await sessionManager.createSession('aid-worker-bbb222', 'task-sub');
+      const sessionId = await sessionManager.createSession('aid-worker-bbb222', 'task-sub', 'tid-team-0001');
       const agent = createTestAgent('aid-worker-bbb222', 'worker');
       await executor.start(agent, tmpRoot);
 

@@ -11,6 +11,11 @@ import type {
   TaskEventsResponse,
   LogsResponse,
   WebhooksResponse,
+  AgentsListResponse,
+  ContainersListResponse,
+  IntegrationsListResponse,
+  SettingsResponse,
+  SettingsUpdatePayload,
 } from '@/types/api';
 
 const API_BASE = '/api';
@@ -167,5 +172,68 @@ export async function getWebhooks(): Promise<WebhooksResponse> {
 export async function deleteWebhook(id: string): Promise<{ id: string; status: string }> {
   return fetchApi(`/v1/hooks/${id}`, {
     method: 'DELETE',
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Agents
+// ---------------------------------------------------------------------------
+
+export async function getAgents(params?: {
+  team?: string;
+}): Promise<AgentsListResponse> {
+  const searchParams = new URLSearchParams();
+  if (params?.team) searchParams.set('team', params.team);
+
+  const query = searchParams.toString();
+  return fetchApi<AgentsListResponse>(`/agents${query ? `?${query}` : ''}`);
+}
+
+// ---------------------------------------------------------------------------
+// Containers
+// ---------------------------------------------------------------------------
+
+export async function getContainers(): Promise<ContainersListResponse> {
+  return fetchApi<ContainersListResponse>('/containers');
+}
+
+export async function restartContainer(slug: string): Promise<{ slug: string; status: string }> {
+  return fetchApi(`/containers/${slug}/restart`, {
+    method: 'POST',
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Integrations
+// ---------------------------------------------------------------------------
+
+export async function getIntegrations(params?: {
+  team?: string;
+}): Promise<IntegrationsListResponse> {
+  const searchParams = new URLSearchParams();
+  if (params?.team) searchParams.set('team', params.team);
+
+  const query = searchParams.toString();
+  return fetchApi<IntegrationsListResponse>(`/integrations${query ? `?${query}` : ''}`);
+}
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+export async function getSettings(): Promise<SettingsResponse> {
+  return fetchApi<SettingsResponse>('/settings');
+}
+
+export async function updateSettings(data: SettingsUpdatePayload): Promise<SettingsResponse> {
+  return fetchApi<SettingsResponse>('/settings', {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  });
+}
+
+export async function reloadConfig(): Promise<SettingsResponse> {
+  return fetchApi<SettingsResponse>('/settings/reload', {
+    method: 'POST',
   });
 }

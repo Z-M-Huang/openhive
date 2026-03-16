@@ -21,7 +21,7 @@ vi.mock('pino', () => ({
 }));
 
 // Import AFTER mock is declared (vitest hoists vi.mock above imports)
-import { SQLiteSink, StdoutSink, PluginManager } from './sinks.js';
+import { SQLiteSink, StdoutSink } from './sinks.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -240,39 +240,5 @@ describe('SQLiteSink', () => {
 });
 
 // ---------------------------------------------------------------------------
-// PluginManager (no-op stubs)
+// PluginManager tests have been moved to backend/src/plugins/manager.test.ts (AC-F5).
 // ---------------------------------------------------------------------------
-
-describe('PluginManager', () => {
-  let manager: PluginManager;
-
-  beforeEach(() => {
-    manager = new PluginManager('/app/workspace');
-  });
-
-  it('loadAll() returns empty array', async () => {
-    const result = await manager.loadAll();
-    expect(result).toEqual([]);
-  });
-
-  it('getLoadedSinks() returns empty array', async () => {
-    expect(manager.getLoadedSinks()).toEqual([]);
-  });
-
-  it('startWatching() does not throw', () => {
-    expect(() => manager.startWatching()).not.toThrow();
-  });
-
-  it('stopWatching() resolves without error', async () => {
-    await expect(manager.stopWatching()).resolves.toBeUndefined();
-  });
-
-  it('reloadPlugin() returns undefined', async () => {
-    const result = await manager.reloadPlugin('test-plugin.js');
-    expect(result).toBeUndefined();
-  });
-
-  it('unloadPlugin() resolves without error', async () => {
-    await expect(manager.unloadPlugin('test-plugin.js')).resolves.toBeUndefined();
-  });
-});

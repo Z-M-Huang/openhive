@@ -1,6 +1,6 @@
 # Runtime state
 .run/
-.claude/
+.claude/settings.local.json
 
 # Dependencies
 node_modules/

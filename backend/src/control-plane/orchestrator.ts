@@ -20,7 +20,12 @@ import type {
   SessionManager,
   ConfigLoader,
   KeyManager,
+  TokenManager,
   MCPRegistry,
+  DispatchTracker,
+  WorkspaceLock,
+  PluginManager,
+  MessageRouter,
   AgentInitConfig,
   BusEvent,
   ResolvedProvider,
@@ -34,7 +39,7 @@ import { TaskDAGManager } from './task-dag-manager.js';
 import { EscalationRouter } from './escalation-router.js';
 import { ProactiveScheduler } from './proactive-scheduler.js';
 import { RetentionWorker } from './retention-worker.js';
-import { createToolHandlers, type ToolContext } from '../mcp/tools/index.js';
+import { createToolHandlers, type ToolContext, type ToolHandler } from '../mcp/tools/index.js';
 
 /** All store interfaces combined for convenience. */
 export interface AllStores {
@@ -53,6 +58,7 @@ export interface OrchestratorDeps {
   logger: Logger;
   database?: unknown; // root only - Database type not needed here
   keyManager?: KeyManager; // root only
+  tokenManager?: TokenManager; // root only — used to revoke stale tokens before restart (AC-B6)
   eventBus: EventBus;
   orgChart: OrgChart;
   wsServer?: unknown; // root only - WSServer type
@@ -64,7 +70,10 @@ export interface OrchestratorDeps {
   triggerScheduler?: TriggerScheduler; // root only
   router?: unknown; // root only - Router type
   agentExecutor: AgentExecutor;
-  sessionManager?: SessionManager; // optional - not used directly by orchestrator
+  sessionManager?: SessionManager; // root only — wired into task dispatch chain (AC-C1, AC-C2)
+  dispatchTracker?: DispatchTracker; // root only — in-flight task tracking for state replay (AC-B5)
+  workspaceLock?: WorkspaceLock; // root only — advisory lock for concurrent workspace operations (AC-D2, AC-D3)
+  pluginManager?: PluginManager; // root only — log sink plugin hot-reload (AC-F1, AC-F5)
   stores?: AllStores; // root only
   mcpRegistry: MCPRegistry;
   /** Configurable limits from master config (CON-01, CON-02, CON-03). Frozen in ToolContext. */
@@ -104,6 +113,9 @@ export class OrchestratorImpl implements Orchestrator {
   private proactiveScheduler?: ProactiveScheduler;
   private retentionWorker?: RetentionWorker;
 
+  /** Optional message router for sending responses back to channels (root-only, AC-G5-01). */
+  private messageRouter?: MessageRouter;
+
   // Event subscriptions for cleanup
   private eventSubscriptions: string[] = [];
 
@@ -114,13 +126,51 @@ export class OrchestratorImpl implements Orchestrator {
   // Agent configs received in container_init
   private agentConfigs: AgentInitConfig[] = [];
 
-  // Stuck agent check timer (root only)
-  private stuckAgentTimer?: ReturnType<typeof setInterval>;
+  /**
+   * Consolidated health + stuck-agent check timer (root only, AC-CROSS-4).
+   *
+   * Replaces both the HealthMonitor's internal checkTimeouts timer and the
+   * previous stuckAgentTimer. A single setInterval(30000) calls:
+   *   (a) healthMonitor.checkTimeouts() — detects unhealthy/unreachable containers
+   *   (b) this.checkStuckAgents()       — detects stuck agent processes
+   */
+  private consolidatedCheckTimer?: ReturnType<typeof setInterval>;
+
+  /**
+   * Per-slug restart counters for rate limiting (max 3 auto-restarts per hour).
+   * Each entry: { count, windowStart } where windowStart is a Unix ms timestamp.
+   */
+  private restartCounts = new Map<string, { count: number; windowStart: number }>();
+
+  /**
+   * Maps taskId -> sessionId for active in-flight tasks (AC-C1, AC-C2).
+   * Created in dispatchTask(), consumed and cleared in handleTaskResult().
+   */
+  private readonly taskSessionMap = new Map<string, string>();
+
+  /** Tool handlers map created in initCollaborators(). Available via getToolHandlers(). */
+  private toolHandlersMap?: Map<string, ToolHandler>;
 
   constructor(deps: OrchestratorDeps, isRoot: boolean = true) {
     this.deps = deps;
     this.logger = deps.logger;
     this.isRoot = isRoot;
+  }
+
+  /**
+   * Returns the tool handlers map created in initCollaborators().
+   * Returns undefined if initCollaborators() has not run (non-root containers).
+   */
+  getToolHandlers(): Map<string, ToolHandler> | undefined {
+    return this.toolHandlersMap;
+  }
+
+  /**
+   * Set the message router for sending responses back to channels (AC-G5-02).
+   * Called post-construction because MessageRouter is created after the orchestrator.
+   */
+  setMessageRouter(router: MessageRouter): void {
+    this.messageRouter = router;
   }
 
   /**
@@ -167,25 +217,11 @@ export class OrchestratorImpl implements Orchestrator {
       this.deps.wsConnection.onMessage(this.handleWSMessage.bind(this));
     }
 
-    // Wait for container_init message
+    // Wait for container_init message (root sends it after WS connect)
     this.initPromise = new Promise<void>((resolve) => {
       this.initResolve = resolve;
     });
 
-    // Send ready message with protocol-compliant payload
-    if (this.deps.wsConnection) {
-      // Agent count is 0 initially; will be updated when agents are added
-      this.deps.wsConnection.send({
-        type: 'ready',
-        data: {
-          team_id: this.deps.wsConnection.tid,
-          agent_count: 0,
-          protocol_version: '1.0.0',
-        },
-      });
-    }
-
-    // Wait for init (with timeout)
     const timeout = setTimeout(() => {
       this.logger.warn('container_init timeout, continuing anyway');
       this.initResolve?.();
@@ -194,8 +230,21 @@ export class OrchestratorImpl implements Orchestrator {
     await this.initPromise;
     clearTimeout(timeout);
 
-    // Start agents from received configs
+    // Start agents from received configs BEFORE sending ready
     await this.startAgents();
+
+    // Send ready AFTER agents are started (WebSocket-Protocol.md spec)
+    // This ensures root knows the container is fully operational
+    if (this.deps.wsConnection) {
+      this.deps.wsConnection.send({
+        type: 'ready',
+        data: {
+          team_id: this.deps.wsConnection.tid,
+          agent_count: this.agentConfigs.length,
+          protocol_version: '1.0.0',
+        },
+      });
+    }
   }
 
   private initCollaborators(): void {
@@ -224,6 +273,7 @@ export class OrchestratorImpl implements Orchestrator {
       mcpRegistry,
       healthMonitor,
       logger: this.logger,
+      workspaceLock: this.deps.workspaceLock,
       limits: Object.freeze({
         max_depth: this.deps.limits?.max_depth ?? 3,
         max_teams: this.deps.limits?.max_teams ?? 10,
@@ -234,6 +284,7 @@ export class OrchestratorImpl implements Orchestrator {
 
     // Create all 22 tool handlers with proper authorization and validation
     const handlers = createToolHandlers(toolContext);
+    this.toolHandlersMap = handlers;
 
     // ToolCallDispatcher
     this.toolCallDispatcher = new ToolCallDispatcher({
@@ -253,6 +304,7 @@ export class OrchestratorImpl implements Orchestrator {
       eventBus,
       logger: this.logger,
       onEscalation: this.handleEscalation.bind(this),
+      agentExecutor: this.deps.agentExecutor,
     });
 
     // EscalationRouter
@@ -400,12 +452,17 @@ export class OrchestratorImpl implements Orchestrator {
       },
     });
 
-    // Stuck agent detection timer (check every 30 seconds, default 30 min timeout)
-    const STUCK_CHECK_INTERVAL_MS = 30_000;
+    // Consolidated health + stuck-agent timer (AC-CROSS-4).
+    // Replaces both healthMonitor's internal checkTimeouts timer and the previous
+    // stuckAgentTimer. One setInterval(30000) calls both checks sequentially.
+    const CONSOLIDATED_INTERVAL_MS = 30_000;
     const STUCK_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
-    this.stuckAgentTimer = setInterval(() => {
-      this.checkStuckAgents(STUCK_TIMEOUT_MS);
-    }, STUCK_CHECK_INTERVAL_MS);
+    this.consolidatedCheckTimer = setInterval(() => {
+      // (a) Detect unhealthy/unreachable containers and emit health.state_changed
+      healthMonitor.checkTimeouts();
+      // (b) Detect stuck agent processes
+      void this.checkStuckAgents(STUCK_TIMEOUT_MS);
+    }, CONSOLIDATED_INTERVAL_MS);
   }
 
   /**
@@ -521,18 +578,175 @@ export class OrchestratorImpl implements Orchestrator {
       },
     );
     this.eventSubscriptions.push(heartbeatSub);
+
+    // Subscribe to health.state_changed events for auto-restart (AC-B1, AC-B2, AC-B6)
+    const healthSub = eventBus.filteredSubscribe(
+      (e: BusEvent) => e.type === 'health.state_changed',
+      (e: BusEvent) => {
+        const { tid, previousState, newState } = e.data as {
+          tid: string;
+          previousState: string;
+          newState: string;
+        };
+        if (newState === 'unreachable') {
+          this.handleHealthStateChanged(tid, previousState, newState).catch((err) => {
+            this.logger.error('health.state_changed handler failed', { error: String(err) });
+          });
+        }
+      },
+    );
+    this.eventSubscriptions.push(healthSub);
+  }
+
+  /**
+   * Handle a health state transition to 'unreachable': revoke stale tokens and
+   * auto-restart the container, subject to a per-slug rate limit of 3/hour.
+   *
+   * Sequence (AC-B6):
+   *   (a) Look up oldTid via orgChart.getTeamBySlug(slug)
+   *   (b) Revoke all tokens bound to oldTid so stale auth cannot be reused
+   *   (c) Call containerManager.restartTeamContainer(slug, reason)
+   */
+  private async handleHealthStateChanged(tid: string, previousState: string, newState: string): Promise<void> {
+    const { orgChart, containerManager, tokenManager } = this.deps;
+    if (!containerManager) return;
+
+    // Find the team slug from the tid
+    const allTeams = orgChart.listTeams();
+    const team = allTeams.find((t) => t.tid === tid);
+    if (!team) {
+      this.logger.warn('health.auto_restart.no_team', { tid, newState });
+      return;
+    }
+    const { slug } = team;
+
+    // Rate limiting: max 3 restarts per hour per slug (AC-B2)
+    const now = Date.now();
+    const ONE_HOUR_MS = 60 * 60 * 1000;
+    let rateEntry = this.restartCounts.get(slug);
+    if (rateEntry) {
+      if (now - rateEntry.windowStart >= ONE_HOUR_MS) {
+        // Window expired — reset
+        rateEntry = { count: 0, windowStart: now };
+        this.restartCounts.set(slug, rateEntry);
+      }
+      if (rateEntry.count >= 3) {
+        this.logger.warn(`Auto-restart rate limit exceeded for container ${slug}: 3/hour limit reached`, {
+          slug,
+          count: rateEntry.count,
+          window_start: new Date(rateEntry.windowStart).toISOString(),
+        });
+        return;
+      }
+    } else {
+      rateEntry = { count: 0, windowStart: now };
+      this.restartCounts.set(slug, rateEntry);
+    }
+
+    // Increment before attempting restart
+    rateEntry.count += 1;
+
+    const reason = `health_auto_restart: ${previousState} -> ${newState}`;
+
+    // Dispatches are intentionally NOT cleared here. When the container restarts and
+    // sends 'ready', recoverTasks() will replay the unacknowledged dispatches (AC-B5).
+    // Clearing them here would prevent replay.
+
+    // (b) Revoke stale tokens bound to this TID before issuing new ones (AC-B6)
+    const oldTid = orgChart.getTeamBySlug(slug)?.tid;
+    if (oldTid && tokenManager) {
+      tokenManager.revokeSessionsForTid(oldTid);
+    }
+
+    // (c) Restart the container
+    this.logger.audit('health.auto_restart', { slug, tid, reason, restart_count: rateEntry.count });
+    try {
+      await containerManager.restartTeamContainer(slug, reason);
+      this.logger.info('health.auto_restart.done', { slug, tid, reason });
+    } catch (err) {
+      this.logger.error('health.auto_restart.failed', { slug, tid, error: String(err) });
+    }
   }
 
   private startProactiveScheduler(): void {
     if (!this.proactiveScheduler) return;
 
-    // Register all agents from org chart
-    const agents = this.deps.orgChart.listTeams()
-      .flatMap((team) => this.deps.orgChart.getAgentsByTeam(team.slug));
+    // Register all agents from org chart, reading per-agent and team-level
+    // proactive_interval_minutes from each team's config file (AC-D1).
+    void this.registerProactiveAgents().then(() => {
+      this.proactiveScheduler?.start();
+    });
+  }
 
-    for (const agent of agents) {
-      // Default 30 min interval, can be configured per agent
-      this.proactiveScheduler.registerAgent(agent.aid, 30);
+  /**
+   * Read each team's team.yaml and register agents with the correct proactive
+   * interval (AC-D1).
+   *
+   * Priority (highest first):
+   *   1. agents[].proactive_interval_minutes (per-agent in team.yaml)
+   *   2. proactive_interval_minutes           (team-level in team.yaml)
+   *   3. 30 minutes                           (CON-08 default)
+   *
+   * ProactiveScheduler.registerAgent() enforces the 5-minute minimum (CON-07).
+   * Errors reading a team's config are logged and skipped; the default 30-min
+   * interval is used for agents in the failing team.
+   */
+  private async registerProactiveAgents(): Promise<void> {
+    const teams = this.deps.orgChart.listTeams();
+
+    for (const team of teams) {
+      const agents = this.deps.orgChart.getAgentsByTeam(team.slug);
+      if (agents.length === 0) continue;
+
+      // Attempt to load raw TeamConfig from disk to read interval fields.
+      let agentIntervalMap: Map<string, number> | undefined;
+      let teamInterval: number | undefined;
+
+      try {
+        const fs = await import('node:fs/promises');
+        const nodePath = await import('node:path');
+        const { validateTeam } = await import('../config/validation.js');
+        const YAML = await import('yaml');
+
+        const teamYamlPath = nodePath.join(team.workspacePath, 'team.yaml');
+        const raw = await fs.readFile(teamYamlPath, 'utf-8');
+        const parsed: unknown = YAML.parse(raw);
+        const teamConfig = validateTeam(parsed);
+
+        teamInterval = teamConfig.proactive_interval_minutes;
+
+        // Build per-agent lookup from agents[] array
+        if (teamConfig.agents && teamConfig.agents.length > 0) {
+          agentIntervalMap = new Map<string, number>();
+          for (const agentEntry of teamConfig.agents) {
+            if (agentEntry.proactive_interval_minutes !== undefined) {
+              agentIntervalMap.set(agentEntry.aid, agentEntry.proactive_interval_minutes);
+            }
+          }
+        }
+      } catch (err) {
+        const errno = (err as NodeJS.ErrnoException).code;
+        if (errno === 'ENOENT') {
+          // team.yaml not present yet (e.g. root team) — use default
+          this.logger.debug('proactive.no_team_yaml', { team_slug: team.slug });
+        } else {
+          this.logger.warn('proactive.team_yaml_error', {
+            team_slug: team.slug,
+            error: String(err),
+          });
+        }
+        // Fall through — register all agents with fallback interval
+      }
+
+      for (const agent of agents) {
+        // Priority: per-agent > team-level > default 30
+        const intervalMinutes =
+          agentIntervalMap?.get(agent.aid) ??
+          teamInterval ??
+          30; // CON-08
+
+        this.proactiveScheduler!.registerAgent(agent.aid, intervalMinutes);
+      }
     }
   }
 
@@ -546,10 +760,10 @@ export class OrchestratorImpl implements Orchestrator {
   async stop(): Promise<void> {
     this.logger.info('Orchestrator stopping', { is_root: this.isRoot });
 
-    // Stop stuck agent timer
-    if (this.stuckAgentTimer) {
-      clearInterval(this.stuckAgentTimer);
-      this.stuckAgentTimer = undefined;
+    // Stop consolidated health + stuck-agent timer (AC-CROSS-4)
+    if (this.consolidatedCheckTimer) {
+      clearInterval(this.consolidatedCheckTimer);
+      this.consolidatedCheckTimer = undefined;
     }
 
     // Stop ProactiveScheduler
@@ -557,6 +771,9 @@ export class OrchestratorImpl implements Orchestrator {
 
     // Stop RetentionWorker
     this.retentionWorker?.stop();
+
+    // Stop DispatchTracker (clears all in-flight timers)
+    this.deps.dispatchTracker?.stop();
 
     // Unsubscribe from EventBus
     for (const subId of this.eventSubscriptions) {
@@ -602,7 +819,16 @@ export class OrchestratorImpl implements Orchestrator {
     // 5. Rebuild org chart from stored state
     // (Assumes teams were loaded from config during startup)
 
-    // 6. Task recovery
+    // 6. Resume active sessions for reconnected containers (AC-C2).
+    // First, populate the in-memory map from the SessionStore so that sessions
+    // persisted before this root restart are visible to getSessionByAgent().
+    // Then resume them so agents can continue their prior SDK context.
+    if (this.deps.sessionManager) {
+      await this.deps.sessionManager.preloadFromStore();
+    }
+    await this.resumeActiveSessions();
+
+    // 7. Task recovery
     await this.recoverTasks();
 
     this.logger.info('State rebuild complete');
@@ -664,6 +890,54 @@ export class OrchestratorImpl implements Orchestrator {
   }
 
   /**
+   * Resume active sessions for agents that were running when root restarted (AC-C2).
+   *
+   * Queries the task store for Active tasks, looks up persisted session IDs via
+   * SessionManager.getSessionByAgent(), and calls resumeSession() so the agent
+   * can continue its prior SDK context once the container reconnects.
+   * Errors per session are non-fatal and logged at warn level.
+   */
+  private async resumeActiveSessions(): Promise<void> {
+    const { sessionManager, stores } = this.deps;
+    if (!sessionManager || !stores) return;
+
+    const activeTasks = await stores.taskStore.listByStatus(TS.Active);
+    if (activeTasks.length === 0) return;
+
+    this.logger.info('session.resume.start', { active_task_count: activeTasks.length });
+
+    for (const task of activeTasks) {
+      // Look up any persisted session for this agent
+      const existingSessionId = sessionManager.getSessionByAgent(task.agent_aid);
+      if (!existingSessionId) {
+        // No session was persisted (e.g. root restarted between session create and persist)
+        this.logger.debug('session.resume.no_session', {
+          task_id: task.id,
+          agent_aid: task.agent_aid,
+        });
+        continue;
+      }
+
+      try {
+        await sessionManager.resumeSession(existingSessionId);
+        this.taskSessionMap.set(task.id, existingSessionId);
+        this.logger.debug('session.resume.ok', {
+          task_id: task.id,
+          agent_aid: task.agent_aid,
+          session_id: existingSessionId,
+        });
+      } catch (err) {
+        this.logger.warn('session.resume.failed', {
+          task_id: task.id,
+          agent_aid: task.agent_aid,
+          session_id: existingSessionId,
+          error: String(err),
+        });
+      }
+    }
+  }
+
+  /**
    * Handle WebSocket message (non-root).
    */
   private handleWSMessage(message: { type: string; data: Record<string, unknown> }): void {
@@ -693,6 +967,11 @@ export class OrchestratorImpl implements Orchestrator {
             teamSlug: team.slug,
             role: (agent.role as 'main_assistant' | 'team_lead' | 'member') || 'member',
             status: 'idle',
+            // agent.model is the resolved model name (e.g. 'claude-haiku-4-...'). The
+            // tier is unavailable here — root already stored the tier in the root-side
+            // OrgChart at create_agent time. Non-root containers don't serve the
+            // GET /api/agents endpoint, so modelTier is left undefined on the
+            // non-root org chart.
           });
         }
         // Start the agent in this container
@@ -746,6 +1025,8 @@ export class OrchestratorImpl implements Orchestrator {
           reason?: string;
         };
         this.logger.info('Received task_cancel', { task_id, cascade, reason });
+        // Acknowledge the dispatch so it is not replayed after a container restart (AC-B4)
+        this.deps.dispatchTracker?.acknowledgeDispatch(task_id);
         // Publish to event bus for handling
         this.deps.eventBus?.publish({
           type: 'task.cancel',
@@ -821,10 +1102,45 @@ export class OrchestratorImpl implements Orchestrator {
 
   /**
    * Handle task_dispatch message (non-root).
+   * Dispatches the task to the local agent executor and sends task_result back to root.
    */
   private handleTaskDispatch(data: { task_id: string; agent_aid: string; prompt: string }): void {
-    this.logger.debug('task_dispatch received', { task_id: data.task_id, agent_aid: data.agent_aid });
-    // Forward to agent executor - will be handled by SDK hooks
+    const { task_id, agent_aid, prompt } = data;
+    this.logger.info('task_dispatch received', { task_id, agent_aid });
+
+    // Dispatch to local agent executor (async, don't block message handler)
+    void this.deps.agentExecutor.dispatchTask(agent_aid, prompt, task_id)
+      .then(({ output }) => {
+        // Send task_result back to root via WS
+        if (this.deps.wsConnection) {
+          this.deps.wsConnection.send({
+            type: 'task_result',
+            data: {
+              task_id,
+              agent_aid,
+              status: 'completed',
+              result: output,
+              duration: 0,
+            },
+          });
+        }
+      })
+      .catch((err) => {
+        this.logger.error('task_dispatch failed', { task_id, agent_aid, error: String(err) });
+        // Send failure result back to root
+        if (this.deps.wsConnection) {
+          this.deps.wsConnection.send({
+            type: 'task_result',
+            data: {
+              task_id,
+              agent_aid,
+              status: 'failed',
+              error: String(err),
+              duration: 0,
+            },
+          });
+        }
+      });
   }
 
   /**
@@ -859,18 +1175,57 @@ export class OrchestratorImpl implements Orchestrator {
 
   /**
    * Dispatch a task to the appropriate agent for execution.
-   * Delegates to TaskDAGManager.
+   * Delegates to TaskDAGManager. Before dispatch, creates an SDK session via
+   * SessionManager and includes the session_id in the task_dispatch WS message
+   * (AC-C1). After dispatch, registers the task with DispatchTracker so state
+   * can be replayed if the container reconnects (AC-B5).
    */
   async dispatchTask(task: Task): Promise<void> {
     if (!this.taskDAGManager) {
       throw new Error('TaskDAGManager not initialized');
     }
-    return this.taskDAGManager.dispatchTask(task);
+
+    // Create SDK session before dispatch so the container can resume it (AC-C1).
+    // The session is bound to both the agent AID and the team TID (AC-C2).
+    // Errors are non-fatal — dispatch proceeds even if session creation fails.
+    let sessionId: string | undefined;
+    if (this.deps.sessionManager) {
+      try {
+        // Resolve the TID for this agent's team so the session can be bound to it.
+        const agent = this.deps.orgChart.getAgent(task.agent_aid);
+        const agentTeam = agent ? this.deps.orgChart.getTeamBySlug(agent.teamSlug) : undefined;
+        const tid = agentTeam?.tid ?? '';
+        sessionId = await this.deps.sessionManager.createSession(task.agent_aid, task.id, tid);
+        this.taskSessionMap.set(task.id, sessionId);
+      } catch (err) {
+        this.logger.warn('session.create.failed', {
+          task_id: task.id,
+          agent_aid: task.agent_aid,
+          error: String(err),
+        });
+      }
+    }
+
+    await this.taskDAGManager.dispatchTask(task, sessionId);
+
+    // Track dispatch for state replay on reconnect (AC-B5).
+    // Look up the target team's TID via the org chart so we can replay by TID.
+    if (this.deps.dispatchTracker) {
+      const agent = this.deps.orgChart.getAgent(task.agent_aid);
+      if (agent) {
+        const team = this.deps.orgChart.getTeamBySlug(agent.teamSlug);
+        if (team) {
+          this.deps.dispatchTracker.trackDispatch(task.id, team.tid, task.agent_aid);
+        }
+      }
+    }
   }
 
   /**
    * Process a task result reported by an agent.
-   * Delegates to TaskDAGManager.
+   * Delegates to TaskDAGManager. Before delegating, acknowledges the dispatch
+   * so DispatchTracker stops the grace-period timer (AC-B5). After processing,
+   * ends the SDK session so the agent can accept a new task (AC-C2).
    */
   async handleTaskResult(
     taskId: string,
@@ -882,7 +1237,45 @@ export class OrchestratorImpl implements Orchestrator {
     if (!this.taskDAGManager) {
       throw new Error('TaskDAGManager not initialized');
     }
-    return this.taskDAGManager.handleTaskResult(taskId, agentAid, status, result, error);
+    // Acknowledge the dispatch so DispatchTracker clears the grace-period timer (AC-B5).
+    this.deps.dispatchTracker?.acknowledgeDispatch(taskId);
+    await this.taskDAGManager.handleTaskResult(taskId, agentAid, status, result, error);
+
+    // End the SDK session now that the task is complete (AC-C2).
+    // Errors are non-fatal — session may have already been cleaned up.
+    const sessionId = this.taskSessionMap.get(taskId);
+    if (sessionId && this.deps.sessionManager) {
+      this.taskSessionMap.delete(taskId);
+      try {
+        await this.deps.sessionManager.endSession(sessionId);
+      } catch (err) {
+        this.logger.warn('session.end.failed', {
+          task_id: taskId,
+          session_id: sessionId,
+          error: String(err),
+        });
+      }
+    }
+
+    // Send response back to originating channel if this is a completed root-level task
+    // with origin_chat_jid (AC-G5-01). Failures are logged as warnings but do NOT block
+    // task completion (AC-G5-04). Null origin_chat_jid is silently skipped (AC-G5-03).
+    if (status === TS.Completed && result && this.messageRouter) {
+      const taskStore = this.deps.stores?.taskStore;
+      if (taskStore) {
+        try {
+          const task = await taskStore.get(taskId);
+          if (task.origin_chat_jid && !task.parent_id) {
+            await this.messageRouter.sendResponse(task.origin_chat_jid, result);
+          }
+        } catch (err) {
+          this.logger.warn('sendResponse.failed', {
+            task_id: taskId,
+            error: String(err),
+          });
+        }
+      }
+    }
   }
 
   /**

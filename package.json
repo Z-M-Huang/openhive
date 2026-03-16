@@ -11,6 +11,7 @@
     "test": "cd backend && npx vitest run && cd ../web && npx vitest run",
     "lint": "cd backend && npx eslint src/ && cd ../web && npx eslint src/",
     "docker": "docker build -t openhive -f deployments/Dockerfile . && docker compose -f deployments/docker-compose.yml up",
-    "smoke": "cd backend && npx vitest run src/phase-gates/"
+    "smoke": "cd backend && npx vitest run src/phase-gates/",
+    "cli": "bun run cli/index.ts"
   }
 }

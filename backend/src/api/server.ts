@@ -38,9 +38,10 @@ import { createServer } from 'node:http';
 import { existsSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { WSHub, EventBus, OrgChart, ContainerManager, HealthMonitor, TriggerScheduler, Orchestrator, TaskStore, LogStore, TaskEventStore } from '../domain/index.js';
-import { registerRoutes, type RouteContext } from './routes/index.js';
+import type { WSHub, EventBus, OrgChart, ContainerManager, HealthMonitor, TriggerScheduler, Orchestrator, TaskStore, LogStore, TaskEventStore, IntegrationStore, CredentialStore, ConfigLoader, Logger, MessageRouter } from '../domain/index.js';
+import { registerRoutes, registerMiddleware, type RouteContext } from './routes/index.js';
 import { PortalWSRelay } from './portal-ws.js';
+import { CLIWSRelay } from './cli-ws.js';
 
 /**
  * Configuration options for the API server.
@@ -120,6 +121,33 @@ export interface APIServerConfig {
    * TaskEventStore for task events.
    */
   taskEventStore?: TaskEventStore;
+
+  /**
+   * IntegrationStore for integration configuration queries.
+   */
+  integrationStore?: IntegrationStore;
+
+  /**
+   * CredentialStore for credential queries (passed through to route context).
+   */
+  credentialStore?: CredentialStore;
+
+  /**
+   * ConfigLoader for settings read/write endpoints.
+   */
+  configLoader?: ConfigLoader;
+
+  /**
+   * Logger for audit logging from route handlers.
+   */
+  logger?: Logger;
+
+  /**
+   * MessageRouter for CLI WebSocket endpoint.
+   * When provided, the `/ws/cli` endpoint is enabled for remote CLI clients.
+   * Can be set after construction via {@link APIServer.setMessageRouter}.
+   */
+  messageRouter?: MessageRouter;
 }
 
 /**
@@ -140,6 +168,7 @@ export class APIServer {
   private app: ReturnType<typeof Fastify> | null = null;
   private httpServer: ReturnType<typeof createServer> | null = null;
   private portalRelay: PortalWSRelay | null = null;
+  private cliRelay: CLIWSRelay | null = null;
   private startTime = 0;
 
   constructor(config: APIServerConfig) {
@@ -232,7 +261,15 @@ export class APIServer {
       taskStore: this._config.taskStore,
       logStore: this._config.logStore,
       taskEventStore: this._config.taskEventStore,
+      integrationStore: this._config.integrationStore,
+      credentialStore: this._config.credentialStore,
+      configLoader: this._config.configLoader,
+      logger: this._config.logger,
+      eventBus: this._config.eventBus,
     };
+
+    // Register middleware (body limit, 5xx error handler)
+    registerMiddleware(this.app, routeContext);
 
     // Register API routes
     registerRoutes(this.app, routeContext);
@@ -254,6 +291,13 @@ export class APIServer {
         // Route portal WebSocket connections
         if (url.startsWith('/ws/portal')) {
           // PortalWSRelay handles this via its own WebSocketServer
+          // We just need to not destroy the socket here
+          return;
+        }
+
+        // Route CLI WebSocket connections
+        if (url.startsWith('/ws/cli')) {
+          // CLIWSRelay handles this via its own WebSocketServer
           // We just need to not destroy the socket here
           return;
         }
@@ -282,6 +326,36 @@ export class APIServer {
     if (this.portalRelay && this.httpServer) {
       await this.portalRelay.start(this.httpServer);
     }
+
+    // Start CLI WebSocket relay if messageRouter was provided at construction
+    if (this._config.messageRouter && this.httpServer) {
+      this.cliRelay = new CLIWSRelay({
+        messageRouter: this._config.messageRouter,
+        path: '/ws/cli',
+      });
+      await this.cliRelay.start(this.httpServer);
+    }
+  }
+
+  /**
+   * Set the MessageRouter for the CLI WebSocket endpoint.
+   *
+   * Can be called after `start()` when the MessageRouter is created later
+   * in the initialization sequence. Starts the CLI WebSocket relay
+   * immediately if the HTTP server is already running.
+   */
+  async setMessageRouter(messageRouter: MessageRouter): Promise<void> {
+    if (this.cliRelay) {
+      return; // Already initialized
+    }
+
+    if (this.httpServer) {
+      this.cliRelay = new CLIWSRelay({
+        messageRouter,
+        path: '/ws/cli',
+      });
+      await this.cliRelay.start(this.httpServer);
+    }
   }
 
   /**
@@ -291,7 +365,13 @@ export class APIServer {
    * and releases the listening socket. Safe to call multiple times.
    */
   async stop(): Promise<void> {
-    // Stop portal relay first
+    // Stop CLI relay
+    if (this.cliRelay) {
+      await this.cliRelay.stop();
+      this.cliRelay = null;
+    }
+
+    // Stop portal relay
     if (this.portalRelay) {
       await this.portalRelay.stop();
       this.portalRelay = null;

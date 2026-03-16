@@ -70,6 +70,7 @@ const containerInitSchema = z.object({
   agents: z.array(agentInitConfigSchema),
   secrets: z.record(z.string()).optional(),
   mcp_servers: z.array(mcpServerConfigSchema).optional(),
+  session_token: z.string().optional(),
 });
 
 const taskDispatchSchema = z.object({
@@ -294,6 +295,18 @@ class WebSocketConnectionAdapter implements WSConnection {
     // and the socket is in OPEN state
     return this._ws.readyState === 1 && (Date.now() - this._lastPong) < 60000;
   }
+
+  /** Sends a WebSocket ping frame to the remote peer. */
+  ping(): void {
+    if (this._ws.readyState === 1) {
+      this._ws.ping();
+    }
+  }
+
+  /** Returns the timestamp (ms since epoch) when the last pong was received. */
+  get lastPong(): number {
+    return this._lastPong;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -303,13 +316,28 @@ class WebSocketConnectionAdapter implements WSConnection {
 /** Callbacks for WSServer lifecycle events. */
 export interface WSServerCallbacks {
   onMessage: (tid: string, message: WSMessage) => void;
-  onConnect: (tid: string) => void;
+  /**
+   * Called when a container establishes a WebSocket connection.
+   *
+   * @param tid        - Team ID of the connecting container.
+   * @param isReconnect - True when authentication was via session token (reconnect),
+   *                      false when authenticated via one-time token (initial connect).
+   *                      Callers should skip sending container_init on reconnects because
+   *                      the container already has its configuration (AC-A3).
+   */
+  onConnect: (tid: string, isReconnect: boolean) => void;
   onDisconnect: (tid: string) => void;
 }
 
 // ---------------------------------------------------------------------------
 // WSServer implementation
 // ---------------------------------------------------------------------------
+
+/** Interval (ms) between server-side ping frames sent to each container. */
+const PING_INTERVAL_MS = 30_000;
+
+/** Deadline (ms) after which a missing pong is logged as a warning. */
+const PING_DEADLINE_MS = 10_000;
 
 /**
  * WebSocket server implementing the WSHub interface (root-only).
@@ -326,12 +354,14 @@ export interface WSServerCallbacks {
  *
  * Upgrade path: /ws/container?token=<one-time-token>&team=<team-id>
  */
+
 export class WSServer implements WSHub {
   private readonly _tokenManager: TokenManager;
   private readonly _callbacks: WSServerCallbacks;
   private readonly _hub: WSHubImpl;
   private readonly _adapters: Map<string, WebSocketConnectionAdapter> = new Map();
   private _wss: WebSocketServer | undefined;
+  private _pingTimer: ReturnType<typeof setInterval> | undefined;
 
   constructor(tokenManager: TokenManager, callbacks: WSServerCallbacks) {
     this._tokenManager = tokenManager;
@@ -350,12 +380,33 @@ export class WSServer implements WSHub {
   /**
    * Initializes the ws.WebSocketServer in noServer mode and sets up
    * connection/message/close event handlers. Called once during root startup.
+   *
+   * Also starts the 30-second ping loop (AC-A4): iterates all connected adapters,
+   * sends a WebSocket ping frame to each, and schedules a 10-second deadline
+   * check. If no pong has been received within the deadline, logs a warning.
+   * The health monitor transitions the container state via heartbeat absence.
    */
   start(): void {
     this._wss = new WebSocketServer({
       noServer: true,
       maxPayload: 1_048_576, // 1 MB inbound limit
     });
+
+    // Start root-side ping loop (CON-05: 30-second interval).
+    this._pingTimer = setInterval(() => {
+      const pingTime = Date.now();
+      for (const [tid, adapter] of this._adapters) {
+        adapter.ping();
+        // Schedule a 10-second deadline check per adapter.
+        setTimeout(() => {
+          if (adapter.lastPong < pingTime) {
+            // No pong received since we sent the ping — log a warning.
+            // The health monitor handles state transition via heartbeat absence.
+            console.warn(`[WSServer] No pong from ${tid} within ${PING_DEADLINE_MS}ms`);
+          }
+        }, PING_DEADLINE_MS);
+      }
+    }, PING_INTERVAL_MS);
   }
 
   /**
@@ -363,6 +414,12 @@ export class WSServer implements WSHub {
    * with a 1001 (Going Away) code and drains pending messages.
    */
   async close(): Promise<void> {
+    // Stop the ping loop first so no new pings are sent during shutdown.
+    if (this._pingTimer !== undefined) {
+      clearInterval(this._pingTimer);
+      this._pingTimer = undefined;
+    }
+
     // Close the hub (drains write queues and closes all connections)
     await this._hub.close();
     this._adapters.clear();
@@ -416,16 +473,21 @@ export class WSServer implements WSHub {
       return;
     }
 
-    // Validate token via TokenManager
-    if (!this._tokenManager.validate(token, team)) {
+    // Validate token via TokenManager.
+    // Try one-time token first (initial connect), then session token (reconnect).
+    const isOneTimeValid = this._tokenManager.validate(token, team);
+    const isSessionValid = !isOneTimeValid && this._tokenManager.validateSession(token, team);
+    if (!isOneTimeValid && !isSessionValid) {
       sock.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
       sock.destroy();
       return;
     }
 
-    // Token valid — upgrade the connection
+    // Token valid — upgrade the connection.
+    // Pass isReconnect so the onConnect callback can skip container_init for
+    // containers that are reconnecting with an existing session (AC-A3).
     this._wss.handleUpgrade(req, sock, buf, (ws) => {
-      this._registerConnection(team, ws);
+      this._registerConnection(team, ws, isSessionValid);
     });
   }
 
@@ -513,8 +575,13 @@ export class WSServer implements WSHub {
   /**
    * Registers a newly upgraded WebSocket connection with the hub.
    * Creates a WSConnection adapter and wires up message/close handlers.
+   *
+   * @param isReconnect - True when the connection was authenticated via session token
+   *                      (i.e. the container is reconnecting after a disconnect). The
+   *                      onConnect callback receives this flag so it can skip sending
+   *                      a redundant container_init (AC-A3).
    */
-  private _registerConnection(tid: string, ws: WebSocket): void {
+  private _registerConnection(tid: string, ws: WebSocket, isReconnect: boolean): void {
     // Create adapter for this connection
     const adapter = new WebSocketConnectionAdapter(tid, ws);
 
@@ -523,7 +590,7 @@ export class WSServer implements WSHub {
     this._adapters.set(tid, adapter);
 
     // Notify callback of new connection
-    this._callbacks.onConnect(tid);
+    this._callbacks.onConnect(tid, isReconnect);
 
     // Wire up message handling (validation + callback)
     adapter.onMessage((msg) => {

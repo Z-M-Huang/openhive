@@ -1,0 +1,50 @@
+name: Team Lifecycle
+description: Verify team creation flow through CLI -- create a weather team, confirm creation, verify INV-01 (team lead in root container), and verify child container is spawned.
+
+setup:
+  - command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+    description: "Clean start -- remove all containers and volumes from any previous run"
+  - command: "cd /app/openhive && bun run docker 2>&1 &"
+    description: "Build the Docker image and start the server in the background"
+  - command: "for i in $(seq 1 60); do curl -sf http://localhost:8080/api/health && exit 0; sleep 5; done; echo 'Health check timed out'; exit 1"
+    description: "Wait up to 5 minutes for the health check endpoint to respond (exits 1 on timeout)"
+
+teardown:
+  - command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+    description: "Clean up -- remove all containers and volumes"
+
+test_cases:
+  - name: Request weather team creation
+    description: Send a natural-language request to create a weather team and verify the assistant confirms it
+    steps:
+      - action: "Send a team creation request through the CLI and capture the response"
+        command: "echo 'Create a team that can report the current temperature and weather with a given city' | timeout 300 bun run cli/index.ts 2>&1"
+        expected: "[Assistant]"
+    expected_outcome: "The assistant acknowledges the request and confirms that a weather team has been created (response mentions team creation, weather, or similar confirmation)"
+
+  - name: Verify team exists via REST API
+    description: Confirm the team was persisted by querying the teams API endpoint
+    steps:
+      - action: "Query the teams API to list all teams"
+        command: "curl -sf http://localhost:8080/api/teams 2>&1"
+        expected: "team"
+    expected_outcome: "The API returns a JSON response containing at least one team entry related to weather"
+
+  - name: Verify INV-01 -- team lead runs in root container
+    description: Confirm the team lead agent executes in the root container per design invariant INV-01. Use /api/teams/:slug which returns containerId (the child container) and leaderAid (the team lead). The team lead must NOT be in the child container — it runs in the parent (root) per INV-01.
+    steps:
+      - action: "Query the teams API for the weather team and verify the leaderAid is present. The team's containerId is the CHILD container, but the leader runs in the PARENT (root). Verify by checking that the leader agent appears in the root org chart, not in the child container."
+        command: "curl -sf http://localhost:8080/api/teams 2>&1"
+        expected: "leaderAid"
+      - action: "Query the containers API and verify the root container lists the team lead agent"
+        command: "curl -sf http://localhost:8080/api/containers 2>&1"
+        expected: "root"
+    expected_outcome: "The teams API shows a weather team with leaderAid set. The containers API shows the root container has the team lead agent registered, confirming INV-01 (team lead in parent container, not in the team's own child container)."
+
+  - name: Verify child container was spawned
+    description: Confirm a new Docker container was created for the team members
+    steps:
+      - action: "Query the containers API to see running containers"
+        command: "curl -sf http://localhost:8080/api/containers 2>&1"
+        expected: "container"
+    expected_outcome: "The containers list shows at least one child container besides the root, indicating the team's member container was spawned (INV-05)"

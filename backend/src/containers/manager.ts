@@ -22,7 +22,10 @@ import type {
   EventBus,
   ContainerProvisioner,
 } from '../domain/index.js';
-import { ConflictError, NotFoundError } from '../domain/errors.js';
+import { ConflictError, NotFoundError, ValidationError } from '../domain/errors.js';
+
+/** Slug format: lowercase alphanumeric, hyphens allowed between segments, 3-63 chars. */
+const SLUG_REGEX = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 
 // INV-05: Root spawns all containers
 
@@ -73,6 +76,12 @@ export class ContainerManagerImpl implements ContainerManager {
 
   /** Prevents infinite recursion in bidirectional lead/team cascade. */
   private readonly deletionGuard = new Set<string>();
+
+  /** Tracks slugs with an in-progress restart to prevent concurrent restarts. */
+  private readonly restartingSet = new Set<string>();
+
+  /** Tracks how many times each slug has been restarted. */
+  private readonly restartCounts = new Map<string, number>();
 
   constructor(
     runtime: ContainerRuntime,
@@ -189,8 +198,54 @@ export class ContainerManagerImpl implements ContainerManager {
   }
 
   async restartTeamContainer(teamSlug: string, reason: string): Promise<void> {
-    await this.stopTeamContainer(teamSlug, reason);
-    await this.spawnTeamContainer(teamSlug);
+    // Validate slug format
+    if (!SLUG_REGEX.test(teamSlug) || teamSlug.length < 3 || teamSlug.length > 63) {
+      throw new ValidationError(`Invalid team slug: "${teamSlug}". Must match ^[a-z0-9]+(-[a-z0-9]+)*$ and be 3-63 chars.`);
+    }
+
+    // Prevent concurrent restarts for the same slug
+    if (this.restartingSet.has(teamSlug)) {
+      throw new ConflictError(`Restart already in progress for team "${teamSlug}"`);
+    }
+
+    this.restartingSet.add(teamSlug);
+
+    try {
+      // Capture old TID BEFORE stopTeamContainer deletes the entry
+      const oldEntry = this.containers.get(teamSlug);
+      const oldTid = oldEntry?.tid;
+
+      await this.stopTeamContainer(teamSlug, reason);
+
+      // Revoke all tokens (one-time + session) bound to the old TID
+      if (oldTid) {
+        this.tokenManager.revokeSessionsForTid(oldTid);
+      }
+
+      // Spawn fresh container with new TID and new token
+      await this.spawnTeamContainer(teamSlug);
+
+      // Increment restart count
+      this.restartCounts.set(teamSlug, (this.restartCounts.get(teamSlug) ?? 0) + 1);
+
+      // Publish restart lifecycle event
+      this.eventBus.publish({
+        type: 'container.restarted',
+        data: { slug: teamSlug, oldTid: oldTid ?? '', reason },
+        timestamp: Date.now(),
+        source: 'container-manager',
+      });
+    } finally {
+      this.restartingSet.delete(teamSlug);
+    }
+  }
+
+  /**
+   * Returns the number of times the given team's container has been restarted.
+   * Returns 0 if the team has never been restarted.
+   */
+  getRestartCount(teamSlug: string): number {
+    return this.restartCounts.get(teamSlug) ?? 0;
   }
 
   async getContainerByTeam(teamSlug: string): Promise<ContainerInfo | undefined> {

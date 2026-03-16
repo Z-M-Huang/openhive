@@ -38,7 +38,7 @@ describe('TriggerSchedulerImpl', () => {
     // Advance time by 1 second to trigger cron
     vi.advanceTimersByTime(1100);
 
-    expect(fireSpy).toHaveBeenCalledWith('weather-team', 'check weather');
+    expect(fireSpy).toHaveBeenCalledWith('weather-team', 'check weather', undefined);
   });
 
   it('rejects invalid cron expression', () => {
@@ -71,9 +71,9 @@ describe('TriggerSchedulerImpl', () => {
 
     vi.advanceTimersByTime(1100);
 
-    expect(fireSpy).toHaveBeenCalledWith('new-team', 'new prompt');
+    expect(fireSpy).toHaveBeenCalledWith('new-team', 'new prompt', undefined);
     // Should NOT have been called with old values
-    expect(fireSpy).not.toHaveBeenCalledWith('old-team', 'old prompt');
+    expect(fireSpy).not.toHaveBeenCalledWith('old-team', 'old prompt', undefined);
 
     scheduler.stop();
   });
@@ -124,7 +124,7 @@ describe('TriggerSchedulerImpl', () => {
     eventBus.publish(event);
     await flushMicrotasks();
 
-    expect(fireSpy).toHaveBeenCalledWith('chat-team', 'process message');
+    expect(fireSpy).toHaveBeenCalledWith('chat-team', 'process message', undefined);
   });
 
   it('event trigger ignores non-matching event type', async () => {
@@ -165,7 +165,7 @@ describe('TriggerSchedulerImpl', () => {
       timestamp: Date.now(),
     });
     await flushMicrotasks();
-    expect(fireSpy).toHaveBeenCalledWith('vip-team', 'handle vip');
+    expect(fireSpy).toHaveBeenCalledWith('vip-team', 'handle vip', undefined);
   });
 
   // -------------------------------------------------------------------------
@@ -184,7 +184,7 @@ describe('TriggerSchedulerImpl', () => {
     });
     await flushMicrotasks();
 
-    expect(fireSpy).toHaveBeenCalledWith('followup-team', 'run followup');
+    expect(fireSpy).toHaveBeenCalledWith('followup-team', 'run followup', undefined);
   });
 
   it('task completion trigger filters by source team', async () => {
@@ -208,7 +208,7 @@ describe('TriggerSchedulerImpl', () => {
       timestamp: Date.now(),
     });
     await flushMicrotasks();
-    expect(fireSpy).toHaveBeenCalledWith('followup-team', 'run followup');
+    expect(fireSpy).toHaveBeenCalledWith('followup-team', 'run followup', undefined);
   });
 
   // -------------------------------------------------------------------------
@@ -292,7 +292,7 @@ describe('TriggerSchedulerImpl', () => {
     const cronEntry = list.find((t) => t.name === 'cron-1');
     expect(cronEntry?.type).toBe('cron');
     expect(cronEntry?.schedule).toBe('0 9 * * *');
-    expect(cronEntry?.teamSlug).toBe('team-a');
+    expect(cronEntry?.targetTeam).toBe('team-a');
   });
 
   // -------------------------------------------------------------------------
@@ -319,7 +319,104 @@ describe('TriggerSchedulerImpl', () => {
     scheduler.addCronTrigger('late', '* * * * * *', 'team', 'late prompt');
     vi.advanceTimersByTime(1100);
 
-    expect(fireSpy).toHaveBeenCalledWith('team', 'late prompt');
+    expect(fireSpy).toHaveBeenCalledWith('team', 'late prompt', undefined);
+    scheduler.stop();
+  });
+
+  // -------------------------------------------------------------------------
+  // target_team field (AC-E1, AC-CROSS-5)
+  // -------------------------------------------------------------------------
+
+  it('listTriggers returns targetTeam field', () => {
+    const scheduler = new TriggerSchedulerImpl(eventBus, fireSpy);
+    scheduler.addCronTrigger('cron-check', '0 9 * * *', 'my-team', 'morning check');
+    const list = scheduler.listTriggers();
+    expect(list[0]!.targetTeam).toBe('my-team');
+  });
+
+  it('fireTrigger passes targetTeam to onFire handler', async () => {
+    const scheduler = new TriggerSchedulerImpl(eventBus, fireSpy);
+    scheduler.addCronTrigger('fire-test', '* * * * * *', 'target-team', 'do work');
+    scheduler.start();
+
+    vi.advanceTimersByTime(1100);
+    expect(fireSpy).toHaveBeenCalledWith('target-team', 'do work', undefined);
+    scheduler.stop();
+  });
+
+  // -------------------------------------------------------------------------
+  // agent field and TriggerFireHandler signature (AC-E2, AC-E3)
+  // -------------------------------------------------------------------------
+
+  it('addCronTrigger stores agent AID and fireTrigger passes it to handler (AC-E3)', async () => {
+    const scheduler = new TriggerSchedulerImpl(eventBus, fireSpy);
+    scheduler.addCronTrigger('agent-test', '* * * * * *', 'my-team', 'do work', 'aid-worker-abc');
+    scheduler.start();
+
+    vi.advanceTimersByTime(1100);
+    expect(fireSpy).toHaveBeenCalledWith('my-team', 'do work', 'aid-worker-abc');
+    scheduler.stop();
+  });
+
+  it('addCronTrigger without agent passes undefined to handler (AC-E3)', async () => {
+    const scheduler = new TriggerSchedulerImpl(eventBus, fireSpy);
+    scheduler.addCronTrigger('no-agent', '* * * * * *', 'my-team', 'do work');
+    scheduler.start();
+
+    vi.advanceTimersByTime(1100);
+    expect(fireSpy).toHaveBeenCalledWith('my-team', 'do work', undefined);
+    scheduler.stop();
+  });
+
+  it('loadTriggers extracts prompt from TriggerAction object (AC-E2)', async () => {
+    const cronTrigger = {
+      name: 'action-cron',
+      type: 'cron' as const,
+      target_team: 'my-team',
+      schedule: '* * * * * *',
+      action: { title: 'Morning job', prompt: 'run daily report', priority: 'P1' as const },
+    };
+    const scheduler = new TriggerSchedulerImpl(eventBus, fireSpy, [cronTrigger]);
+    await scheduler.loadTriggers();
+    scheduler.start();
+
+    vi.advanceTimersByTime(1100);
+    expect(fireSpy).toHaveBeenCalledWith('my-team', 'run daily report', undefined);
+    scheduler.stop();
+  });
+
+  it('loadTriggers passes agent AID from trigger config (AC-E2, AC-E3)', async () => {
+    const cronTrigger = {
+      name: 'agent-cron',
+      type: 'cron' as const,
+      target_team: 'my-team',
+      schedule: '* * * * * *',
+      action: { title: 'Agent job', prompt: 'check status', priority: 'P0' as const },
+      agent: 'aid-specialist-xyz',
+    };
+    const scheduler = new TriggerSchedulerImpl(eventBus, fireSpy, [cronTrigger]);
+    await scheduler.loadTriggers();
+    scheduler.start();
+
+    vi.advanceTimersByTime(1100);
+    expect(fireSpy).toHaveBeenCalledWith('my-team', 'check status', 'aid-specialist-xyz');
+    scheduler.stop();
+  });
+
+  it('loadTriggers handles string action shorthand (AC-E2)', async () => {
+    const cronTrigger = {
+      name: 'string-action-cron',
+      type: 'cron' as const,
+      target_team: 'my-team',
+      schedule: '* * * * * *',
+      action: 'run quick check' as string | { title: string; prompt: string; priority: 'P0' | 'P1' | 'P2' },
+    };
+    const scheduler = new TriggerSchedulerImpl(eventBus, fireSpy, [cronTrigger]);
+    await scheduler.loadTriggers();
+    scheduler.start();
+
+    vi.advanceTimersByTime(1100);
+    expect(fireSpy).toHaveBeenCalledWith('my-team', 'run quick check', undefined);
     scheduler.stop();
   });
 });

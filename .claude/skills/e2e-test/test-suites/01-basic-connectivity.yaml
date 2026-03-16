@@ -1,0 +1,39 @@
+name: Basic Connectivity
+description: Verify CLI client connects to the server, sends a message, and receives a meaningful response from the main assistant.
+
+setup:
+  - command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+    description: "Clean start -- remove all containers and volumes from any previous run"
+  - command: "cd /app/openhive && bun run docker 2>&1 &"
+    description: "Build the Docker image and start the server in the background"
+  - command: "for i in $(seq 1 60); do curl -sf http://localhost:8080/api/health && exit 0; sleep 5; done; echo 'Health check timed out'; exit 1"
+    description: "Wait up to 5 minutes for the health check endpoint to respond (exits 1 on timeout)"
+
+teardown:
+  - command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+    description: "Clean up -- remove all containers and volumes"
+
+test_cases:
+  - name: CLI connects to WebSocket endpoint
+    description: Verify that a WebSocket connection to /ws/cli is accepted by the server
+    steps:
+      - action: "Open a WebSocket connection to ws://localhost:8080/ws/cli and verify the connection is established"
+        command: "echo '{\"type\":\"ping\"}' | timeout 10 websocat ws://localhost:8080/ws/cli 2>&1 || curl -sf -o /dev/null -w '%{http_code}' --header 'Connection: Upgrade' --header 'Upgrade: websocket' --header 'Sec-WebSocket-Version: 13' --header 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' http://localhost:8080/ws/cli"
+        expected: "101"
+    expected_outcome: "The server accepts the WebSocket upgrade on /ws/cli without errors"
+
+  - name: Send greeting and receive response
+    description: Verify the main assistant processes a message and returns a response through the full pipeline
+    steps:
+      - action: "Start the CLI client, send 'Hello, what can you do?' and capture the response"
+        command: "echo 'Hello, what can you do?' | timeout 120 bun run cli/index.ts 2>&1"
+        expected: "[Assistant]"
+    expected_outcome: "The CLI displays a response prefixed with '[Assistant]' containing the main assistant's reply"
+
+  - name: Response contains meaningful text
+    description: Verify the assistant response is substantive and not empty or an error
+    steps:
+      - action: "Send a simple question and verify the response has meaningful content (more than a few words)"
+        command: "echo 'What is OpenHive and what are your capabilities?' | timeout 120 bun run cli/index.ts 2>&1"
+        expected: "[Assistant]"
+    expected_outcome: "The response is a multi-word sentence describing capabilities or providing a helpful answer -- not an error message, not empty, and not a single word"

@@ -9,7 +9,7 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ContainerManagerImpl } from './manager.js';
-import { ConflictError, NotFoundError } from '../domain/errors.js';
+import { ConflictError, NotFoundError, ValidationError } from '../domain/errors.js';
 import { ContainerHealth } from '../domain/enums.js';
 import type {
   ContainerRuntime,
@@ -79,6 +79,10 @@ function createMockTokenManager(): TokenManager {
     revokeAll: vi.fn(),
     startCleanup: vi.fn(),
     stopCleanup: vi.fn(),
+    generateSession: vi.fn((tid: string) => `session-${tid}-${++counter}`),
+    validateSession: vi.fn(() => true),
+    revokeSessionsForTid: vi.fn(),
+    revokeSession: vi.fn(),
   };
 }
 
@@ -243,6 +247,107 @@ describe('ContainerManagerImpl', () => {
       // Container should be queryable after restart
       const info = await manager.getContainerByTeam('restart-team');
       expect(info).toBeDefined();
+    });
+
+    it('publishes container.restarted event with oldTid', async () => {
+      await manager.spawnTeamContainer('restart-event-team');
+      eventBus._events.length = 0;
+
+      await manager.restartTeamContainer('restart-event-team', 'api_restart');
+
+      const restartedEvt = eventBus._events.find((e) => e.type === 'container.restarted');
+      expect(restartedEvt).toBeDefined();
+      expect(restartedEvt!.data.slug).toBe('restart-event-team');
+      expect(restartedEvt!.data.reason).toBe('api_restart');
+      // oldTid should be a non-empty string (the TID from before the restart)
+      expect(typeof restartedEvt!.data.oldTid).toBe('string');
+      expect((restartedEvt!.data.oldTid as string).length).toBeGreaterThan(0);
+    });
+
+    it('revokes sessions for old TID before spawning fresh container', async () => {
+      await manager.spawnTeamContainer('revoke-tid-team');
+
+      await manager.restartTeamContainer('revoke-tid-team', 'test');
+
+      expect(tokenManager.revokeSessionsForTid).toHaveBeenCalledTimes(1);
+    });
+
+    it('throws ValidationError for invalid slug format', async () => {
+      await expect(manager.restartTeamContainer('INVALID_SLUG', 'test')).rejects.toThrow(ValidationError);
+    });
+
+    it('throws ValidationError for slug shorter than 3 chars', async () => {
+      await expect(manager.restartTeamContainer('ab', 'test')).rejects.toThrow(ValidationError);
+    });
+
+    it('throws ValidationError for slug longer than 63 chars', async () => {
+      const longSlug = 'a'.repeat(64);
+      await expect(manager.restartTeamContainer(longSlug, 'test')).rejects.toThrow(ValidationError);
+    });
+
+    it('throws ConflictError when restart is already in progress for the same slug', async () => {
+      await manager.spawnTeamContainer('concurrent-restart');
+
+      // Simulate restart in-progress by making stopTeamContainer hang
+      let resolveStop!: () => void;
+      const stopPromise = new Promise<void>((resolve) => { resolveStop = resolve; });
+      (runtime.stopContainer as ReturnType<typeof vi.fn>).mockImplementation(() => stopPromise);
+
+      const firstRestart = manager.restartTeamContainer('concurrent-restart', 'first');
+
+      // Give the first restart time to add slug to restartingSet
+      await Promise.resolve();
+
+      // Second restart should throw ConflictError immediately
+      await expect(manager.restartTeamContainer('concurrent-restart', 'second')).rejects.toThrow(ConflictError);
+      await expect(manager.restartTeamContainer('concurrent-restart', 'second')).rejects.toThrow(/in progress/);
+
+      // Clean up by resolving the first restart
+      resolveStop();
+      await firstRestart.catch(() => {}); // may fail since stop was hung, that's fine for this test
+    });
+
+    it('removes slug from restartingSet even if restart fails', async () => {
+      await manager.spawnTeamContainer('fail-restart-team');
+
+      // Make stop throw
+      (runtime.stopContainer as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('Docker error'));
+
+      await expect(manager.restartTeamContainer('fail-restart-team', 'test')).rejects.toThrow('Docker error');
+
+      // After failure, restartingSet should be cleared so a subsequent restart can proceed
+      // (it won't succeed here because the container was removed from map during failed stop path,
+      // but we can verify ConflictError is NOT thrown)
+      await expect(manager.restartTeamContainer('fail-restart-team', 'test')).rejects.not.toThrow(ConflictError);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // getRestartCount
+  // -------------------------------------------------------------------------
+
+  describe('getRestartCount()', () => {
+    it('returns 0 for a team that has never been restarted', () => {
+      expect(manager.getRestartCount('never-restarted')).toBe(0);
+    });
+
+    it('increments restart count after each successful restart', async () => {
+      await manager.spawnTeamContainer('count-team');
+      expect(manager.getRestartCount('count-team')).toBe(0);
+
+      await manager.restartTeamContainer('count-team', 'test');
+      expect(manager.getRestartCount('count-team')).toBe(1);
+
+      await manager.restartTeamContainer('count-team', 'test');
+      expect(manager.getRestartCount('count-team')).toBe(2);
+    });
+
+    it('does NOT increment count when restart fails during stop', async () => {
+      await manager.spawnTeamContainer('fail-count-team');
+      (runtime.stopContainer as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('stop failed'));
+
+      await expect(manager.restartTeamContainer('fail-count-team', 'test')).rejects.toThrow();
+      expect(manager.getRestartCount('fail-count-team')).toBe(0);
     });
   });
 

@@ -185,49 +185,145 @@ const teamResourceLimitsSchema = z.object({
   idle_timeout: z.string().optional(),
 }).strict();
 
-// Trigger config schemas (discriminated union)
-const cronTriggerSchema = z.object({
-  name: z.string(),
-  team_slug: z.string(),
-  enabled: z.boolean().optional(),
-  type: z.literal('cron'),
-  schedule: z.string(),
+// ---------------------------------------------------------------------------
+// Trigger backward-compat preprocessor
+// ---------------------------------------------------------------------------
+
+/**
+ * Preprocesses trigger config objects to accept the legacy team_slug field as
+ * an alias for target_team. Emits a deprecation warning when team_slug is used.
+ * Strips team_slug from the output so strict schemas do not reject it.
+ */
+function normalizeTriggerTeamField(raw: unknown): unknown {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return raw;
+  const obj = raw as Record<string, unknown>;
+  if ('team_slug' in obj && !('target_team' in obj)) {
+    console.warn(
+      `[config] Trigger '${String(obj['name'] ?? '<unknown>')}': ` +
+        `'team_slug' is deprecated. Use 'target_team' instead.`,
+    );
+    const { team_slug, ...rest } = obj;
+    return { ...rest, target_team: team_slug };
+  }
+  // If both are present, target_team wins; strip team_slug to pass strict schemas.
+  if ('team_slug' in obj && 'target_team' in obj) {
+    const { team_slug: _deprecated, ...rest } = obj;
+    return rest;
+  }
+  return obj;
+}
+
+// Trigger action schema: structured action payload for cron triggers (AC-E2)
+export const triggerActionSchema = z.object({
+  title: z.string(),
   prompt: z.string(),
-}).strict();
+  priority: z.enum(['P0', 'P1', 'P2']),
+});
 
-const webhookTriggerSchema = z.object({
-  name: z.string(),
-  team_slug: z.string(),
-  enabled: z.boolean().optional(),
-  type: z.literal('webhook'),
-  path: z.string(),
-  method: z.string().optional(),
-}).strict();
+// AID format validator for trigger agent field
+const aidStringSchema = z.string().refine(
+  (val) => {
+    try {
+      validateAID(val);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  { message: 'Invalid AID format: must match aid-xxx-xxx pattern' }
+);
 
-const channelEventTriggerSchema = z.object({
-  name: z.string(),
-  team_slug: z.string(),
-  enabled: z.boolean().optional(),
-  type: z.literal('channel_event'),
-  pattern: z.string(),
-  channel_type: z.string().optional(),
-}).strict();
+/**
+ * Normalizes cron trigger input so the output always has an `action` field.
+ * Accepts:
+ *   - Legacy form: { ..., prompt: string } → normalized to action object
+ *   - New form with string shorthand: { ..., action: string } → normalized to action object
+ *   - New form with object: { ..., action: { title, prompt, priority } } → passed through
+ * Also delegates team_slug → target_team normalization.
+ */
+function normalizeCronTrigger(raw: unknown): unknown {
+  // First apply team_slug normalization
+  const obj = normalizeTriggerTeamField(raw) as Record<string, unknown>;
+  if (obj === null || typeof obj !== 'object' || Array.isArray(obj)) return obj;
 
-const taskCompletionTriggerSchema = z.object({
-  name: z.string(),
-  team_slug: z.string(),
-  enabled: z.boolean().optional(),
-  type: z.literal('task_completion'),
-  source_team: z.string().optional(),
-  status_filter: z.array(z.string()).optional(),
-}).strict();
+  // Normalize action field: promote flat 'prompt' to 'action' if action is missing
+  if (!('action' in obj) && 'prompt' in obj) {
+    const { prompt, ...rest } = obj;
+    return {
+      ...rest,
+      action: { title: 'Triggered task', prompt, priority: 'P2' },
+    };
+  }
 
-const triggerConfigSchema: z.ZodType<TriggerConfig> = z.discriminatedUnion('type', [
+  // If action is a string shorthand, normalize to object
+  if (typeof obj['action'] === 'string') {
+    return {
+      ...obj,
+      action: { title: 'Triggered task', prompt: obj['action'], priority: 'P2' },
+    };
+  }
+
+  return obj;
+}
+
+// Trigger config schemas (discriminated union)
+const cronTriggerSchema = z.preprocess(
+  normalizeCronTrigger,
+  z.object({
+    name: z.string(),
+    target_team: z.string(),
+    agent: aidStringSchema.optional(),
+    enabled: z.boolean().optional(),
+    type: z.literal('cron'),
+    schedule: z.string(),
+    action: triggerActionSchema,
+  }).strict(),
+);
+
+const webhookTriggerSchema = z.preprocess(
+  normalizeTriggerTeamField,
+  z.object({
+    name: z.string(),
+    target_team: z.string(),
+    enabled: z.boolean().optional(),
+    type: z.literal('webhook'),
+    path: z.string(),
+    method: z.string().optional(),
+  }).strict(),
+);
+
+const channelEventTriggerSchema = z.preprocess(
+  normalizeTriggerTeamField,
+  z.object({
+    name: z.string(),
+    target_team: z.string(),
+    enabled: z.boolean().optional(),
+    type: z.literal('channel_event'),
+    pattern: z.string(),
+    channel_type: z.string().optional(),
+  }).strict(),
+);
+
+const taskCompletionTriggerSchema = z.preprocess(
+  normalizeTriggerTeamField,
+  z.object({
+    name: z.string(),
+    target_team: z.string(),
+    enabled: z.boolean().optional(),
+    type: z.literal('task_completion'),
+    source_team: z.string().optional(),
+    status_filter: z.array(z.string()).optional(),
+  }).strict(),
+);
+
+// Cannot use discriminatedUnion with z.preprocess wrappers directly — use a
+// plain union that dispatches on the 'type' field after preprocessing.
+const triggerConfigSchema: z.ZodType<TriggerConfig> = z.union([
   cronTriggerSchema,
   webhookTriggerSchema,
   channelEventTriggerSchema,
   taskCompletionTriggerSchema,
-]);
+]) as z.ZodType<TriggerConfig>;
 
 // ---------------------------------------------------------------------------
 // Provider Config Schemas (A5-2)

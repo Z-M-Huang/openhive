@@ -81,6 +81,7 @@ import { DiscordAdapter } from './channels/discord.js';
 import { MessageRouterImpl } from './channels/router.js';
 import { TriggerSchedulerImpl } from './triggers/scheduler.js';
 import { OrchestratorImpl } from './control-plane/orchestrator.js';
+import { DispatchTrackerImpl } from './control-plane/dispatch-tracker.js';
 import { RouterImpl } from './control-plane/router.js';
 import { AgentExecutorImpl } from './executor/executor.js';
 import { SessionManagerImpl } from './executor/session.js';
@@ -88,9 +89,11 @@ import { MCPRegistryImpl } from './mcp/registry.js';
 import { ContainerRuntimeImpl } from './containers/runtime.js';
 import { ContainerManagerImpl } from './containers/manager.js';
 import { ContainerProvisionerImpl } from './containers/provisioner.js';
-import { LogLevel, ChannelType, ProviderType } from './domain/enums.js';
+import { WorkspaceLockImpl } from './control-plane/workspace-lock.js';
+import { PluginManagerImpl } from './plugins/manager.js';
+import { LogLevel, ChannelType, ProviderType, AgentStatus, ContainerHealth } from './domain/enums.js';
 import { DomainError, NotFoundError, mapDomainErrorToWSError } from './domain/errors.js';
-import type { Logger, OrgChartTeam, OrgChartAgent, SessionStore, MCPServerConfig, TaskStore, MessageStore, LogStore, MemoryStore, IntegrationStore, CredentialStore, ToolCallStore, ResolvedProvider } from './domain/interfaces.js';
+import type { Logger, LogSink, OrgChartTeam, OrgChartAgent, SessionStore, MCPServerConfig, TaskStore, MessageStore, LogStore, MemoryStore, IntegrationStore, CredentialStore, ToolCallStore, ResolvedProvider, AgentInitConfig } from './domain/interfaces.js';
 import { resolveSecretsTemplatesInObject } from './mcp/tools/index.js';
 
 // ---------------------------------------------------------------------------
@@ -112,6 +115,8 @@ interface ShutdownState {
   orchestrator: OrchestratorImpl | null;
   tokenManager: TokenManagerImpl | null;
   keyManager: KeyManagerImpl | null;
+  dispatchTracker: DispatchTrackerImpl | null;
+  pluginManager: PluginManagerImpl | null;
   stores: {
     taskStore: TaskStore | null;
     messageStore: MessageStore | null;
@@ -138,6 +143,8 @@ const shutdownState: ShutdownState = {
   orchestrator: null,
   tokenManager: null,
   keyManager: null,
+  dispatchTracker: null,
+  pluginManager: null,
   stores: null,
 };
 
@@ -233,9 +240,11 @@ export async function main(): Promise<void> {
   try {
     providers = await configLoader.loadProviders();
   } catch {
-    // providers.yaml is optional in non-root
-    if (isRoot) {
-      throw new Error('providers.yaml is required in root mode');
+    // providers.yaml is optional in non-root.
+    // In root mode, it's also optional if CLAUDE_CODE_OAUTH_TOKEN env var is set
+    // (enables `bun run docker` with just the env var).
+    if (isRoot && !process.env['CLAUDE_CODE_OAUTH_TOKEN']) {
+      throw new Error('providers.yaml is required in root mode (or set CLAUDE_CODE_OAUTH_TOKEN env var)');
     }
   }
 
@@ -326,7 +335,6 @@ async function initializeRootMode(
   // Suppress unused warnings for stores that will be wired up later
   void messageStore;
   void decisionStore;
-  void integrationStore;
   // credentialStore is used in onConnect for secrets resolution
 
   // Add SQLite sink to logger for persistence
@@ -395,10 +403,25 @@ async function initializeRootMode(
   function resolveProviderPreset(presetName: string): ResolvedProvider {
     const preset = (providers as Record<string, Record<string, unknown>>)[presetName];
     if (!preset) {
-      // Safe default: no credentials, empty models — container will fall back to env vars
+      // No preset found in providers.yaml — fall back to CLAUDE_CODE_OAUTH_TOKEN env var
+      const envOauthToken = process.env['CLAUDE_CODE_OAUTH_TOKEN'];
+      if (envOauthToken) {
+        return {
+          type: ProviderType.OAuth,
+          oauthToken: envOauthToken,
+          models: {
+            haiku: 'claude-haiku-4-5-20251001',
+            sonnet: 'claude-sonnet-4-6',
+            opus: 'claude-opus-4-6',
+          } as ResolvedProvider['models'],
+        };
+      }
+      // No credentials available — empty models, container will fail at SDK call time
       return { type: ProviderType.OAuth, models: {} as ResolvedProvider['models'] };
     }
-    return {
+
+    // Resolve from providers.yaml preset (takes precedence over env vars)
+    const resolved: ResolvedProvider = {
       type: (preset['type'] as string) === ProviderType.AnthropicDirect
         ? ProviderType.AnthropicDirect
         : ProviderType.OAuth,
@@ -407,6 +430,17 @@ async function initializeRootMode(
       ...(preset['oauth_token'] !== undefined ? { oauthToken: String(preset['oauth_token']) } : {}),
       models: ((preset['models'] as Record<string, string>) ?? {}) as ResolvedProvider['models'],
     };
+
+    // If preset exists but has no credentials, fall back to CLAUDE_CODE_OAUTH_TOKEN env var
+    if (!resolved.apiKey && !resolved.oauthToken) {
+      const envOauthToken = process.env['CLAUDE_CODE_OAUTH_TOKEN'];
+      if (envOauthToken) {
+        resolved.oauthToken = envOauthToken;
+        resolved.type = ProviderType.OAuth;
+      }
+    }
+
+    return resolved;
   }
 
   // Helper: resolve a model tier string to a concrete model ID using the resolved provider.
@@ -525,6 +559,44 @@ async function initializeRootMode(
           }
 
           logger.info('Container ready', { tid, team_id, agent_count, protocol_version });
+
+          // State replay (AC-B5): re-dispatch any tasks that were in-flight when
+          // the container disconnected. Query unacknowledged task IDs for this TID,
+          // fetch their data from the task store, and re-send task_dispatch messages
+          // with a 'retried: true' flag. This allows the container to pick up where
+          // it left off without losing in-flight work.
+          if (shutdownState.dispatchTracker && shutdownState.stores?.taskStore && shutdownState.wsServer) {
+            const unacknowledged = shutdownState.dispatchTracker.getUnacknowledged(tid);
+            if (unacknowledged.length > 0) {
+              logger.info('Replaying in-flight dispatches after reconnect', {
+                tid,
+                count: unacknowledged.length,
+              });
+              for (const taskId of unacknowledged) {
+                try {
+                  const task = await shutdownState.stores.taskStore.get(taskId);
+                  shutdownState.wsServer.send(tid, {
+                    type: 'task_dispatch',
+                    data: {
+                      task_id: task.id,
+                      agent_aid: task.agent_aid,
+                      prompt: task.prompt,
+                      blocked_by: task.blocked_by ?? [],
+                      retried: true,
+                    },
+                  });
+                  logger.info('Replayed task dispatch after reconnect', { tid, task_id: taskId });
+                } catch (err) {
+                  logger.error('Failed to replay task dispatch', {
+                    tid,
+                    task_id: taskId,
+                    error: String(err),
+                  });
+                }
+              }
+            }
+          }
+
           break;
         }
 
@@ -628,8 +700,20 @@ async function initializeRootMode(
               }
               break;
             case 'agent_removed':
-              // Agent was removed from container
+              // Agent was explicitly removed from a container.
+              // Acknowledge its in-flight dispatches so grace-period timers are cleared
+              // and the tasks are not replayed to the new container (the agent is gone).
               if (agent_aid) {
+                const dt = shutdownState.dispatchTracker;
+                if (dt) {
+                  const agentTaskIds = dt.getUnacknowledgedByAgent(agent_aid);
+                  for (const taskId of agentTaskIds) {
+                    dt.acknowledgeDispatch(taskId);
+                  }
+                  if (agentTaskIds.length > 0) {
+                    logger.info('dispatch.clear_on_agent_removed', { agent_aid, cleared: agentTaskIds.length });
+                  }
+                }
                 orgChart.removeAgent(agent_aid);
               }
               break;
@@ -643,8 +727,15 @@ async function initializeRootMode(
           logger.debug('Unhandled WS message type', { type: message.type });
       }
     },
-    onConnect: async (tid: string) => {
-      logger.info('Container connected', { tid });
+    onConnect: async (tid: string, isReconnect: boolean) => {
+      logger.info('Container connected', { tid, isReconnect });
+
+      // Reconnecting containers already have their configuration — skip container_init
+      // so they don't reset their in-progress agent state (AC-A3).
+      if (isReconnect) {
+        logger.info('Skipping container_init for reconnecting container', { tid });
+        return;
+      }
 
       // Send container_init with resolved secrets templates (AC-L6-11)
       const team = orgChart.getTeam(tid);
@@ -703,6 +794,11 @@ async function initializeRootMode(
         const rawAgents = rawTeamConfig['agents'];
         const agents = Array.isArray(rawAgents) ? rawAgents : [];
 
+        // Generate a session token for reconnect authentication (AC-A2).
+        // This is a long-lived token delivered via container_init so the container
+        // can re-authenticate on reconnect without needing a new one-time token.
+        const sessionToken = tokenManager.generateSession(tid);
+
         // Build container_init message
         const containerInitData = {
           protocol_version: '1.0',
@@ -724,6 +820,7 @@ async function initializeRootMode(
           }),
           secrets,
           mcp_servers: mcpServers,
+          session_token: sessionToken,
         };
 
         // Send container_init via hub
@@ -776,8 +873,8 @@ async function initializeRootMode(
   // 11. Initialize trigger scheduler
   const triggerScheduler = new TriggerSchedulerImpl(
     eventBus,
-    async (teamSlug: string, prompt: string) => {
-      logger.info('Trigger fired', { team_slug: teamSlug, prompt });
+    async (teamSlug: string, prompt: string, agent?: string) => {
+      logger.info('Trigger fired', { team_slug: teamSlug, prompt, agent });
 
       // Get the team to find its lead
       const team = orgChart.getTeamBySlug(teamSlug);
@@ -785,6 +882,9 @@ async function initializeRootMode(
         logger.error('Trigger fired for unknown team', { team_slug: teamSlug });
         return;
       }
+
+      // Use the specified agent AID, or fall back to the team lead (AC-E3)
+      const assignedAid = agent ?? team.leaderAid;
 
       // Generate task ID
       const taskId = `task-${Date.now().toString(16)}-${Math.random().toString(16).slice(2, 8)}`;
@@ -794,7 +894,7 @@ async function initializeRootMode(
         id: taskId,
         parent_id: '',
         team_slug: teamSlug,
-        agent_aid: team.leaderAid,
+        agent_aid: assignedAid,
         title: `Triggered: ${prompt.slice(0, 50)}...`,
         status: 'pending' as const,
         prompt,
@@ -832,12 +932,65 @@ async function initializeRootMode(
 
   logger.info('Trigger scheduler started');
 
+  // 11b. Initialize DispatchTracker (AC-B5 — in-flight task tracking for state replay)
+  const dispatchTracker = new DispatchTrackerImpl(eventBus);
+  dispatchTracker.start();
+  shutdownState.dispatchTracker = dispatchTracker;
+
+  logger.info('Dispatch tracker started');
+
+  // 11c. Initialize WorkspaceLock (AC-D2, AC-D3 — advisory lock for concurrent workspace ops)
+  const workspaceLock = new WorkspaceLockImpl();
+
+  logger.info('Workspace lock initialized');
+
+  // 11d. Initialize PluginManager (AC-F1, AC-F3, AC-F5 — log sink plugin hot-reload)
+  //
+  // Plugins are loaded from <workspacePath>/plugins/sinks/ and added as additional
+  // LogSink instances to the logger. Hot-reload via chokidar (CON-04: 500ms debounce).
+  // Error boundaries prevent plugin crashes from affecting the host (AC-F2).
+  //
+  // onSinksChanged keeps the live logger in sync after each hot-reload so that
+  // new/changed plugins are immediately active in the logging pipeline (AC-F3).
+  // We track which sinks are currently managed by the PluginManager so we can
+  // diff against the new set and call addSink/removeSink accordingly.
+  let activeManagedSinks: LogSink[] = [];
+  const pluginManager = new PluginManagerImpl({
+    workspacePath: '/app/workspace',
+    logger,
+    onSinksChanged: (currentSinks) => {
+      // LoggerImpl exposes addSink/removeSink for dynamic sink management (AC-F3).
+      const loggerImpl = logger as LoggerImpl;
+      // Remove sinks that are no longer in the current set
+      for (const old of activeManagedSinks) {
+        if (!currentSinks.includes(old)) {
+          loggerImpl.removeSink(old);
+        }
+      }
+      // Add sinks that are new
+      for (const fresh of currentSinks) {
+        if (!activeManagedSinks.includes(fresh)) {
+          loggerImpl.addSink(fresh);
+        }
+      }
+      activeManagedSinks = currentSinks.slice();
+      logger.info('Plugin sinks updated in logger', { count: currentSinks.length });
+    },
+  });
+  await pluginManager.loadAll();
+  // activeManagedSinks is already populated via onSinksChanged called during loadAll
+  pluginManager.startWatching();
+  shutdownState.pluginManager = pluginManager;
+
+  logger.info('Plugin manager started', { plugins_loaded: activeManagedSinks.length });
+
   // 12. Initialize MCP registry
   const mcpRegistry = new MCPRegistryImpl();
 
   logger.info('MCP registry initialized');
 
   // 13. Initialize agent executor and session manager
+  // Tool handlers will be set after orchestrator creates them (see step 14b)
   const agentExecutor = new AgentExecutorImpl(eventBus, logger);
   const sessionManager = new SessionManagerImpl(sessionStore as SessionStore, '/app/workspace');
 
@@ -859,6 +1012,9 @@ async function initializeRootMode(
     triggerScheduler,
     agentExecutor,
     sessionManager,
+    dispatchTracker,
+    workspaceLock,
+    pluginManager,
     stores: {
       taskStore,
       messageStore,
@@ -889,6 +1045,36 @@ async function initializeRootMode(
 
   logger.info('Orchestrator started');
 
+  // 14b. Wire tool handlers to agent executor and start main assistant
+  const toolHandlers = orchestrator.getToolHandlers();
+  if (toolHandlers) {
+    agentExecutor.setToolHandlers(toolHandlers);
+    logger.info('Tool handlers injected into agent executor', { handlerCount: toolHandlers.size });
+  }
+
+  // Build AgentInitConfig for the main assistant
+  const mainAssistantProvider = resolveProviderPreset(assistantConfig.provider);
+  const mainAssistantInitConfig: AgentInitConfig = {
+    aid: assistantConfig.aid,
+    name: assistantConfig.name,
+    description: assistantConfig.name,
+    role: 'main_assistant',
+    model: resolveModel(assistantConfig.model_tier, mainAssistantProvider),
+    tools: [], // Empty = all tools allowed (main assistant has full access)
+    provider: mainAssistantProvider,
+  };
+
+  try {
+    await agentExecutor.start(mainAssistantInitConfig, '/app/workspace');
+    logger.info('Main assistant started', { aid: mainAssistantInitConfig.aid });
+  } catch (err) {
+    logger.error('Failed to start main assistant', {
+      aid: mainAssistantInitConfig.aid,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    throw err;
+  }
+
   // 15. Initialize API server (must be last before channels)
   const apiServer = new APIServer({
     port: listenPort,
@@ -903,6 +1089,10 @@ async function initializeRootMode(
     taskStore,
     logStore,
     taskEventStore,
+    integrationStore,
+    credentialStore,
+    configLoader,
+    logger,
   });
   await apiServer.start();
   shutdownState.apiServer = apiServer;
@@ -912,57 +1102,57 @@ async function initializeRootMode(
     port: listenPort,
   });
 
-  // 16. Initialize channel adapters
+  // 16. Initialize channel adapters and message router
+  // Always create the router — CLI adapter is always available in root mode
+  const mainAssistantAid = masterConfig.assistant.aid;
+  const llmRouter = new RouterImpl(async (msg) => {
+    // Tier 2: LLM-based routing. For now, route everything to main assistant.
+    const teams = orgChart.listTeams();
+    logger.info('Tier 2 routing: selecting default team', {
+      chat_jid: msg.chatJid,
+      content_preview: msg.content.slice(0, 50),
+      main_assistant_aid: mainAssistantAid,
+      available_teams: teams.map(t => t.slug),
+    });
+    const mainTeam = teams.find(t => t.slug === 'main');
+    if (mainTeam) return 'main';
+    if (teams.length > 0) return teams[0].slug;
+    throw new NotFoundError('No teams available for routing');
+  });
+
+  const messageRouter = new MessageRouterImpl(
+    messageStore,
+    llmRouter,
+    orchestrator,
+    orgChart
+  );
+  shutdownState.messageRouter = messageRouter;
+
+  // Wire message router into orchestrator for sendResponse on task completion (AC-G5-02)
+  orchestrator.setMessageRouter(messageRouter);
+
+  // Wire message router into API server for /ws/cli endpoint (AC-CLI-04)
+  await apiServer.setMessageRouter(messageRouter);
+
+  // 16a. CLI adapter — always enabled in root mode when stdin is TTY
+  if (process.stdin.isTTY) {
+    const { CLIAdapter } = await import('./channels/cli.js');
+    const cliAdapter = new CLIAdapter();
+    await cliAdapter.connect();
+    messageRouter.registerChannel(ChannelType.Cli, cliAdapter);
+    logger.info('CLI channel adapter connected');
+  }
+
+  // 16b. Discord adapter — enabled via config
   if (masterConfig.channels.discord.enabled) {
     const discordToken = process.env['DISCORD_BOT_TOKEN'];
     if (discordToken) {
-      // Create the LLM-based router for Tier 2 routing
-      // Tier 2 handler dispatches to main assistant for LLM judgment
-      const mainAssistantAid = masterConfig.assistant.aid;
-      const llmRouter = new RouterImpl(async (msg) => {
-        // Tier 2: LLM-based routing via main assistant
-        // TODO: Implement full LLM-based routing by dispatching a routing task
-        // to the main assistant and parsing its response.
-        // For now, log and return an intelligent default based on org chart.
-        const teams = orgChart.listTeams();
-        logger.info('Tier 2 routing: no known route, selecting default team', {
-          chat_jid: msg.chatJid,
-          content_preview: msg.content.slice(0, 50),
-          main_assistant_aid: mainAssistantAid,
-          available_teams: teams.map(t => t.slug),
-        });
-
-        // Prefer 'main' team if it exists, otherwise use the first team
-        const mainTeam = teams.find(t => t.slug === 'main');
-        if (mainTeam) {
-          return 'main';
-        }
-
-        // Fall back to the first available team
-        if (teams.length > 0) {
-          return teams[0].slug;
-        }
-
-        // No teams available - this is an error state
-        throw new NotFoundError('No teams available for Tier 2 routing');
-      });
-
-      // Create the message router with two-tier routing
-      const messageRouter = new MessageRouterImpl(
-        messageStore,
-        llmRouter,
-        orchestrator,
-        orgChart
-      );
-      shutdownState.messageRouter = messageRouter;
-
-      // Create and register Discord adapter
       const discordAdapter = new DiscordAdapter();
       try {
         await discordAdapter.connect();
         messageRouter.registerChannel(ChannelType.Discord, discordAdapter);
         shutdownState.discordAdapter = discordAdapter;
-        logger.info('Discord adapter connected and registered with message router');
+        logger.info('Discord adapter connected');
       } catch (err) {
         logger.error('Failed to connect Discord adapter', {
           error: err instanceof Error ? err.message : String(err),
@@ -972,6 +1162,14 @@ async function initializeRootMode(
       logger.warn('Discord enabled but DISCORD_BOT_TOKEN not set');
     }
   }
+
+  // 17. Verify main assistant is registered in org chart
+  // (Already bootstrapped in step 6 at line ~353. Just verify it exists.)
+  const mainTeam = orgChart.getTeamBySlug('main');
+  if (!mainTeam) {
+    throw new Error('Root team "main" not found in org chart after bootstrap');
+  }
+  logger.info('Main assistant verified in org chart', { aid: mainAssistantAid, tid: mainTeam.tid });
 
   logger.info('Root mode initialization complete');
 }
@@ -1139,6 +1337,12 @@ async function gracefulShutdown(): Promise<void> {
   if (shutdownState.keyManager) {
     logger?.info('Locking key manager');
     await shutdownState.keyManager.lock();
+  }
+
+  // Stop plugin manager file watcher
+  if (shutdownState.pluginManager) {
+    logger?.info('Stopping plugin manager');
+    shutdownState.pluginManager.stopWatching();
   }
 
   // Stop config watchers

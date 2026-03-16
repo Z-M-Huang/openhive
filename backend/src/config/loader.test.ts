@@ -488,4 +488,125 @@ describe('ConfigLoaderImpl', () => {
       expect(result).toEqual({ l1: { l2: { l3: { val: 'new', keep: true } } } });
     });
   });
+
+  // -----------------------------------------------------------------------
+  // getConfigWithSources
+  // -----------------------------------------------------------------------
+
+  describe('getConfigWithSources', () => {
+    it('all fields are "default" when no YAML file and no env vars set', async () => {
+      // No YAML file written, no env vars set
+      const sources = await loader.getConfigWithSources();
+
+      // Every source should be 'default'
+      for (const [key, entry] of Object.entries(sources)) {
+        expect(entry.source, `key "${key}" should be default`).toBe('default');
+      }
+
+      // Known fields should be present
+      expect(sources['server.listen_address']).toBeDefined();
+      expect(sources['limits.max_depth']).toBeDefined();
+    });
+
+    it('fields present in YAML are marked "yaml"', async () => {
+      // Write YAML that explicitly sets log_level to the default value
+      // (ensuring "YAML set to same value as default" is still 'yaml', not 'default')
+      await writeFile(
+        join(dataDir, 'openhive.yaml'),
+        YAML.stringify({ server: { log_level: 'info' }, limits: { max_depth: 3 } }),
+        'utf-8',
+      );
+
+      const sources = await loader.getConfigWithSources();
+
+      expect(sources['server.log_level'].source).toBe('yaml');
+      expect(sources['limits.max_depth'].source).toBe('yaml');
+      // Fields NOT in YAML should remain 'default'
+      expect(sources['server.listen_address'].source).toBe('default');
+      expect(sources['limits.max_teams'].source).toBe('default');
+    });
+
+    it('env-var-overridden fields are marked "env"', async () => {
+      process.env['OPENHIVE_LOG_LEVEL'] = 'warn';
+      try {
+        const sources = await loader.getConfigWithSources();
+        expect(sources['server.log_level'].source).toBe('env');
+        expect(sources['server.log_level'].value).toBe('warn');
+      } finally {
+        delete process.env['OPENHIVE_LOG_LEVEL'];
+      }
+    });
+
+    it('env var overrides YAML: env takes priority', async () => {
+      await writeFile(
+        join(dataDir, 'openhive.yaml'),
+        YAML.stringify({ server: { log_level: 'debug' } }),
+        'utf-8',
+      );
+      process.env['OPENHIVE_LOG_LEVEL'] = 'error';
+      try {
+        const sources = await loader.getConfigWithSources();
+        // Env wins over YAML
+        expect(sources['server.log_level'].source).toBe('env');
+        expect(sources['server.log_level'].value).toBe('error');
+      } finally {
+        delete process.env['OPENHIVE_LOG_LEVEL'];
+      }
+    });
+
+    it('secret fields are redacted and marked isSecret: true', async () => {
+      const sources = await loader.getConfigWithSources();
+
+      // Look for fields with secret-like key names (e.g., 'security.encryption_key_path')
+      const secretEntries = Object.entries(sources).filter(([, entry]) => entry.isSecret === true);
+      expect(secretEntries.length).toBeGreaterThan(0);
+
+      for (const [, entry] of secretEntries) {
+        expect(entry.value).toBe('********');
+        expect(entry.isSecret).toBe(true);
+      }
+    });
+
+    it('non-secret fields do NOT have isSecret property', async () => {
+      const sources = await loader.getConfigWithSources();
+
+      // limits.max_depth is not a secret
+      const entry = sources['limits.max_depth'];
+      expect(entry.isSecret).toBeUndefined();
+      expect(entry.value).toBe(3);
+    });
+
+    it('OPENHIVE_SYSTEM_LISTEN_ADDRESS env var marks server.listen_address as "env"', async () => {
+      process.env['OPENHIVE_SYSTEM_LISTEN_ADDRESS'] = '0.0.0.0:9090';
+      try {
+        const sources = await loader.getConfigWithSources();
+        expect(sources['server.listen_address'].source).toBe('env');
+        expect(sources['server.listen_address'].value).toBe('0.0.0.0:9090');
+      } finally {
+        delete process.env['OPENHIVE_SYSTEM_LISTEN_ADDRESS'];
+      }
+    });
+
+    it('OPENHIVE_DATA_DIR env var marks server.data_dir as "env"', async () => {
+      process.env['OPENHIVE_DATA_DIR'] = '/custom/data';
+      try {
+        const sources = await loader.getConfigWithSources();
+        expect(sources['server.data_dir'].source).toBe('env');
+        expect(sources['server.data_dir'].value).toBe('/custom/data');
+      } finally {
+        delete process.env['OPENHIVE_DATA_DIR'];
+      }
+    });
+
+    it('works without a prior loadMaster() call (lazy-loads)', async () => {
+      // loader is fresh (no loadMaster called), getConfigWithSources should still work
+      const freshLoader = new ConfigLoaderImpl({ dataDir, runDir });
+      try {
+        const sources = await freshLoader.getConfigWithSources();
+        expect(sources['server.listen_address']).toBeDefined();
+      } finally {
+        freshLoader.stopWatching();
+      }
+    });
+  });
 });

@@ -13,12 +13,13 @@ import {
 type TriggerType = 'cron' | 'webhook' | 'channel_event' | 'task_completion';
 
 /** Callback invoked when a trigger fires. */
-export type TriggerFireHandler = (teamSlug: string, prompt: string) => void;
+export type TriggerFireHandler = (targetTeam: string, prompt: string, agent?: string) => void;
 
 interface TriggerEntry {
   name: string;
   type: TriggerType;
-  teamSlug: string;
+  targetTeam: string;
+  agent?: string;
   schedule?: string;
   prompt?: string;
   path?: string;
@@ -64,17 +65,21 @@ export class TriggerSchedulerImpl implements TriggerScheduler {
 
       try {
         if (isCronTrigger(trigger)) {
-          this.addCronTrigger(trigger.name, trigger.schedule, trigger.team_slug, trigger.prompt);
+          // Extract prompt from action (object or string shorthand)
+          const prompt = typeof trigger.action === 'string'
+            ? trigger.action
+            : trigger.action.prompt;
+          this.addCronTrigger(trigger.name, trigger.schedule, trigger.target_team, prompt, trigger.agent);
         } else if (isWebhookTrigger(trigger)) {
-          this.addWebhookTrigger(trigger.name, trigger.path, trigger.team_slug);
+          this.addWebhookTrigger(trigger.name, trigger.path, trigger.target_team);
         } else if (isChannelEventTrigger(trigger)) {
           // Channel event triggers use pattern as prompt (or empty string)
-          this.addEventTrigger(trigger.name, trigger.pattern, trigger.team_slug, trigger.pattern);
+          this.addEventTrigger(trigger.name, trigger.pattern, trigger.target_team, trigger.pattern);
         } else if (isTaskCompletionTrigger(trigger)) {
           // Task completion triggers need a default prompt
           this.addTaskCompletionTrigger(
             trigger.name,
-            trigger.team_slug,
+            trigger.target_team,
             'Check task completion follow-up',
             trigger.source_team,
             trigger.status_filter,
@@ -87,7 +92,7 @@ export class TriggerSchedulerImpl implements TriggerScheduler {
     }
   }
 
-  addCronTrigger(name: string, schedule: string, teamSlug: string, prompt: string): void {
+  addCronTrigger(name: string, schedule: string, targetTeam: string, prompt: string, agent?: string): void {
     if (!cron.validate(schedule)) {
       throw new ValidationError(`Invalid cron expression: '${schedule}'`);
     }
@@ -98,7 +103,8 @@ export class TriggerSchedulerImpl implements TriggerScheduler {
     const entry: TriggerEntry = {
       name,
       type: 'cron',
-      teamSlug,
+      targetTeam,
+      agent,
       schedule,
       prompt,
       active: false,
@@ -118,7 +124,7 @@ export class TriggerSchedulerImpl implements TriggerScheduler {
     }
   }
 
-  addWebhookTrigger(name: string, path: string, teamSlug: string): void {
+  addWebhookTrigger(name: string, path: string, targetTeam: string): void {
     // Validate path: no /api/* shadowing
     if (path.startsWith('api/') || path.startsWith('/api/') || path === 'api') {
       throw new ValidationError(`Webhook path '${path}' would shadow API routes`);
@@ -137,7 +143,7 @@ export class TriggerSchedulerImpl implements TriggerScheduler {
     const entry: TriggerEntry = {
       name,
       type: 'webhook',
-      teamSlug,
+      targetTeam,
       path: cleanPath,
       active: this.started,
     };
@@ -148,7 +154,7 @@ export class TriggerSchedulerImpl implements TriggerScheduler {
   addEventTrigger(
     name: string,
     eventType: string,
-    teamSlug: string,
+    targetTeam: string,
     prompt: string,
     filter?: (event: BusEvent) => boolean,
   ): void {
@@ -157,7 +163,7 @@ export class TriggerSchedulerImpl implements TriggerScheduler {
     const entry: TriggerEntry = {
       name,
       type: 'channel_event',
-      teamSlug,
+      targetTeam,
       eventType,
       prompt,
       active: false,
@@ -186,7 +192,7 @@ export class TriggerSchedulerImpl implements TriggerScheduler {
 
   addTaskCompletionTrigger(
     name: string,
-    teamSlug: string,
+    targetTeam: string,
     prompt: string,
     sourceTeam?: string,
     statusFilter?: string[],
@@ -196,7 +202,7 @@ export class TriggerSchedulerImpl implements TriggerScheduler {
     const entry: TriggerEntry = {
       name,
       type: 'task_completion',
-      teamSlug,
+      targetTeam,
       eventType: 'task.completed',
       prompt,
       active: false,
@@ -239,14 +245,14 @@ export class TriggerSchedulerImpl implements TriggerScheduler {
     this.triggers.delete(name);
   }
 
-  listTriggers(): Array<{ name: string; type: string; schedule?: string; teamSlug: string }> {
-    const result: Array<{ name: string; type: string; schedule?: string; teamSlug: string }> = [];
+  listTriggers(): Array<{ name: string; type: string; schedule?: string; targetTeam: string }> {
+    const result: Array<{ name: string; type: string; schedule?: string; targetTeam: string }> = [];
     for (const entry of this.triggers.values()) {
       result.push({
         name: entry.name,
         type: entry.type,
         schedule: entry.schedule,
-        teamSlug: entry.teamSlug,
+        targetTeam: entry.targetTeam,
       });
     }
     return result;
@@ -309,7 +315,7 @@ export class TriggerSchedulerImpl implements TriggerScheduler {
 
   private fireTrigger(entry: TriggerEntry): void {
     if (this.onFire && entry.prompt) {
-      this.onFire(entry.teamSlug, entry.prompt);
+      this.onFire(entry.targetTeam, entry.prompt, entry.agent);
     }
   }
 }

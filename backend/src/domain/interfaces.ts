@@ -138,6 +138,14 @@ export interface OrgChartAgent {
   role: string;
   status: AgentStatus;
   leadsTeam?: string;
+  /**
+   * Model tier this agent was created with ('haiku' | 'sonnet' | 'opus').
+   * Optional because: (1) agents created before this field existed won't have it,
+   * and (2) the main assistant model comes from provider config, not per-agent config.
+   * OrgChart stores runtime state only; this is captured at agent registration time
+   * from the create_agent tool's `model` parameter.
+   */
+  modelTier?: string;
 }
 
 /** Team node in the org chart. */
@@ -295,7 +303,8 @@ export interface IntegrationStore {
   update(integration: Integration): Promise<void>;
   delete(id: string): Promise<void>;
   listByTeam(teamId: string): Promise<Integration[]>;
-  updateStatus(id: string, status: IntegrationStatus): Promise<void>;
+  /** Update integration status. For terminal states (failed, rolled_back), pass errorMessage to record the cause (AC-G8). */
+  updateStatus(id: string, status: IntegrationStatus, errorMessage?: string): Promise<void>;
 }
 
 /** Encrypted credential persistence (per-team). */
@@ -352,7 +361,7 @@ export interface ContainerManager {
 
 /** Workspace scaffolding and team provisioning. */
 export interface ContainerProvisioner {
-  scaffoldWorkspace(parentPath: string, teamSlug: string): Promise<string>;
+  scaffoldWorkspace(parentPath: string, teamSlug: string, agents?: AgentDefinition[]): Promise<string>;
   writeTeamConfig(workspacePath: string, team: Team): Promise<void>;
   writeAgentDefinition(workspacePath: string, agent: AgentDefinition): Promise<void>;
   writeSettings(workspacePath: string, allowedTools: string[]): Promise<void>;
@@ -367,6 +376,11 @@ export interface HealthMonitor {
   getAgentHealth(aid: string): AgentStatus | undefined;
   getAllHealth(): Map<string, ContainerHealth>;
   getStuckAgents(timeoutMs: number): string[];
+  /**
+   * Check all container heartbeat timeouts and emit health.state_changed events.
+   * Called by the orchestrator's consolidated 30s timer (AC-CROSS-4).
+   */
+  checkTimeouts(): void;
   start(): void;
   stop(): void;
 }
@@ -407,6 +421,21 @@ export interface TokenManager {
   revokeAll(): void;
   startCleanup(intervalMs: number): void;
   stopCleanup(): void;
+  /** Generate a long-lived session token for reconnect (distinct from one-time tokens). */
+  generateSession(tid: string): string;
+  /** Validate a session token for the given TID. Returns true if valid and not revoked. */
+  validateSession(token: string, tid: string): boolean;
+  /**
+   * Revoke all session tokens AND one-time tokens bound to the given TID.
+   * Called during container restart/stop to invalidate stale auth before issuing new tokens.
+   * Idempotent: safe to call even if no tokens exist for the TID.
+   */
+  revokeSessionsForTid(tid: string): void;
+  /**
+   * Revoke a single session token by value.
+   * No-op if the token does not exist.
+   */
+  revokeSession(token: string): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -510,6 +539,10 @@ export interface MessageRouter {
   routeMessage(msg: InboundMessage): Promise<void>;
   registerChannel(channelType: ChannelType, adapter: ChannelAdapter): void;
   unregisterChannel(channelType: ChannelType): void;
+  /** Send a response back to the originating channel via chatJid. */
+  sendResponse(chatJid: string, content: string): Promise<void>;
+  /** Get the adapter for a channel type. */
+  getAdapter(channelType: ChannelType): ChannelAdapter | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -580,9 +613,9 @@ export interface SkillRegistry {
 /** Manages cron, webhook, channel_event, and task_completion triggers. */
 export interface TriggerScheduler {
   loadTriggers(): Promise<void>;
-  addCronTrigger(name: string, schedule: string, teamSlug: string, prompt: string): void;
+  addCronTrigger(name: string, schedule: string, targetTeam: string, prompt: string): void;
   removeTrigger(name: string): void;
-  listTriggers(): Array<{ name: string; type: string; schedule?: string; teamSlug: string }>;
+  listTriggers(): Array<{ name: string; type: string; schedule?: string; targetTeam: string }>;
   start(): void;
   stop(): void;
 }
@@ -599,6 +632,52 @@ export interface WorkspaceLock {
 }
 
 // ---------------------------------------------------------------------------
+// Dispatch Tracker
+// ---------------------------------------------------------------------------
+
+/**
+ * Tracks in-flight task dispatches so state can be replayed after a container restart.
+ * Dispatches are acknowledged when the container confirms receipt (task_result or status_update).
+ * Unacknowledged dispatches after the 60s grace period are eligible for re-dispatch.
+ */
+export interface DispatchTracker {
+  /** Record that a task was dispatched to a container. */
+  trackDispatch(taskId: string, tid: string, agentAid: string): void;
+  /** Mark a dispatched task as acknowledged (container confirmed receipt). */
+  acknowledgeDispatch(taskId: string): void;
+  /** Return task IDs dispatched to the given TID that have not yet been acknowledged. */
+  getUnacknowledged(tid: string): string[];
+  /** Return task IDs dispatched by the given agent AID that have not yet been acknowledged. */
+  getUnacknowledgedByAgent(agentAid: string): string[];
+  /** Start the tracker (sets up any internal timers). */
+  start(): void;
+  /** Stop the tracker and clear any internal timers. */
+  stop(): void;
+}
+
+// ---------------------------------------------------------------------------
+// Plugin Manager
+// ---------------------------------------------------------------------------
+
+/**
+ * Manages LogSink plugins loaded from workspace/plugins/sinks/ via dynamic import().
+ * Supports hot-reload via chokidar with content-hash deduplication.
+ * All plugin calls are wrapped in try/catch error boundaries.
+ */
+export interface PluginManager {
+  /** Discover and load all plugin files from the configured plugin directory. */
+  loadAll(): Promise<void>;
+  /** Begin watching the plugin directory for additions, changes, and removals. */
+  startWatching(): void;
+  /** Stop watching the plugin directory. */
+  stopWatching(): void;
+  /** Return all currently loaded LogSink instances. */
+  getLoadedSinks(): LogSink[];
+  /** Force reload a specific plugin file by its absolute path. */
+  reloadPlugin(pluginPath: string): Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
 // Executor
 // ---------------------------------------------------------------------------
 
@@ -609,14 +688,26 @@ export interface AgentExecutor {
   kill(agentAid: string): void;
   isRunning(agentAid: string): boolean;
   getStatus(agentAid: string): AgentStatus | undefined;
+  /**
+   * Dispatches a task to a running agent by sending a prompt.
+   * Uses the SDK programmatic API to run a query with the prompt.
+   * Returns the agent's text output and updated session ID.
+   */
+  dispatchTask(agentAid: string, prompt: string, taskId: string): Promise<{ output: string; sessionId?: string }>;
 }
 
 /** Manages SDK sessions with resume support. */
 export interface SessionManager {
-  createSession(agentAid: string, taskId: string): Promise<string>;
+  createSession(agentAid: string, taskId: string, tid: string): Promise<string>;
   resumeSession(sessionId: string): Promise<void>;
   endSession(sessionId: string): Promise<void>;
   getSessionByAgent(agentAid: string): string | undefined;
+  /**
+   * Populate the in-memory session map from the SessionStore.
+   * Must be called at startup before any getSessionByAgent() calls so that
+   * sessions persisted before a root restart are visible in memory.
+   */
+  preloadFromStore(): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -639,4 +730,18 @@ export interface ConfigLoader {
   watchProviders(callback: (providers: Record<string, Provider>) => void): void;
   watchTeam(workspacePath: string, callback: (team: Team) => void): void;
   stopWatching(): void;
+  /**
+   * Return the resolved config annotated with provenance.
+   *
+   * Each leaf field in the config is described by:
+   *   - `value`    — the resolved value (same as getMaster()[key])
+   *   - `source`   — where the value came from: 'default' | 'yaml' | 'env'
+   *   - `isSecret` — true if the value should be redacted in display (e.g. API keys)
+   *
+   * The returned Record mirrors the shape of MasterConfig but with a flat key-path
+   * structure (e.g. `"limits.max_depth"`) so callers can display a diff-friendly table.
+   * Allows RouteContext to depend on this interface (not ConfigLoaderImpl), preserving
+   * the abstraction boundary required by step 16 (admin settings API).
+   */
+  getConfigWithSources(): Promise<Record<string, { value: unknown; source: 'default' | 'yaml' | 'env'; isSecret?: boolean }>>;
 }

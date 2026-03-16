@@ -1,0 +1,94 @@
+name: Configurable Limits
+description: Verify configurable constraints are enforced -- CON-01 max nesting depth (default 3), CON-02 max teams per parent (default 10), CON-03 max agents per team (default 5). Exceeding limits returns a validation error with a descriptive message.
+
+setup:
+  - command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+    description: "Clean start -- remove all containers and volumes from any previous run"
+  - command: "cd /app/openhive && bun run docker 2>&1 &"
+    description: "Build the Docker image and start the server in the background"
+  - command: "for i in $(seq 1 60); do curl -sf http://localhost:8080/api/health && exit 0; sleep 5; done; echo 'Health check timed out'; exit 1"
+    description: "Wait up to 5 minutes for the health check endpoint to respond (exits 1 on timeout)"
+
+teardown:
+  - command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+    description: "Clean up -- remove all containers and volumes"
+
+test_cases:
+  - name: "CON-01: Max depth enforcement"
+    description: Cannot create team beyond max_depth limit (default 3). Build hierarchy to depth 3, then attempt depth 4.
+    steps:
+      - action: "Create depth-1 team"
+        command: "echo 'Create a team called depth-one' | timeout 300 bun run cli/index.ts 2>&1"
+        expected: "[Assistant]"
+      - action: "Create depth-2 team under depth-one"
+        command: "echo 'Create a team called depth-two as a child of depth-one' | timeout 300 bun run cli/index.ts 2>&1"
+        expected: "[Assistant]"
+      - action: "Create depth-3 team under depth-two"
+        command: "echo 'Create a team called depth-three as a child of depth-two' | timeout 300 bun run cli/index.ts 2>&1"
+        expected: "[Assistant]"
+      - action: "Verify 3-level hierarchy exists"
+        command: "curl -sf http://localhost:8080/api/teams 2>&1"
+        expected: "depth"
+      - action: "Attempt to exceed max_depth by creating depth 4"
+        command: "echo 'Create a team called depth-four as a child of depth-three' | timeout 300 bun run cli/index.ts 2>&1"
+        expected: "[Assistant]"
+      - action: "Verify depth-four was NOT created -- API should show no team with slug depth-four"
+        command: "curl -sf http://localhost:8080/api/teams 2>&1"
+        expected: "depth-three"
+    expected_outcome: "Creation at depth 4 fails with validation error. API still shows only depth-one, depth-two, depth-three -- NO depth-four team exists. The response from the final curl should NOT contain 'depth-four'."
+
+  - name: "CON-03: Max agents per team enforcement"
+    description: Cannot create more than max_agents_per_team (default 5) agents in a single team. Create a team and add agents one at a time until limit is hit.
+    steps:
+      - action: "Create team for agent limit test"
+        command: "echo 'Create a team called agent-limit-test' | timeout 300 bun run cli/index.ts 2>&1"
+        expected: "[Assistant]"
+      - action: "Add agent 1"
+        command: "echo 'Add an agent called worker-one to team agent-limit-test' | timeout 300 bun run cli/index.ts 2>&1"
+        expected: "[Assistant]"
+      - action: "Add agent 2"
+        command: "echo 'Add an agent called worker-two to team agent-limit-test' | timeout 300 bun run cli/index.ts 2>&1"
+        expected: "[Assistant]"
+      - action: "Add agent 3"
+        command: "echo 'Add an agent called worker-three to team agent-limit-test' | timeout 300 bun run cli/index.ts 2>&1"
+        expected: "[Assistant]"
+      - action: "Add agent 4"
+        command: "echo 'Add an agent called worker-four to team agent-limit-test' | timeout 300 bun run cli/index.ts 2>&1"
+        expected: "[Assistant]"
+      - action: "Verify current agent count via API"
+        command: "curl -sf http://localhost:8080/api/agents?team=agent-limit-test 2>&1"
+        expected: "agents"
+      - action: "Attempt to add agent 6 (exceeding limit of 5 -- lead + 4 workers = 5)"
+        command: "echo 'Add an agent called worker-five to team agent-limit-test' | timeout 300 bun run cli/index.ts 2>&1"
+        expected: "[Assistant]"
+      - action: "Verify worker-five was NOT created -- API should still show only 5 agents for this team"
+        command: "curl -sf 'http://localhost:8080/api/agents?team=agent-limit-test' 2>&1"
+        expected: "worker-four"
+    expected_outcome: "The 6th agent creation fails. API still shows only 5 agents (leader + workers 1-4). The response should NOT contain 'worker-five'."
+
+  - name: Validation error messages are descriptive
+    description: Error messages clearly state which limit was exceeded
+    steps:
+      - action: "Check logs for limit violation error details"
+        command: "curl -sf 'http://localhost:8080/api/logs?limit=20' 2>&1"
+        expected: "entries"
+    expected_outcome: "Error messages indicate the specific limit exceeded and the attempted vs allowed value"
+
+  - name: Limits readable via GET /api/settings
+    description: Current limit values are visible in the settings API response
+    steps:
+      - action: "Query settings endpoint for limits section"
+        command: "curl -sf http://localhost:8080/api/settings 2>&1"
+        expected: "limits"
+      - action: "Verify max_depth value is present"
+        command: "curl -sf http://localhost:8080/api/settings 2>&1"
+        expected: "max_depth"
+    expected_outcome: "Settings API returns limits section with max_depth, max_teams, max_agents_per_team values"
+
+  - name: Teams count verifiable via API after limit tests
+    description: After all limit tests, verify team counts are consistent with what was allowed
+    steps:
+      - action: "Count teams via API"
+        command: "curl -sf http://localhost:8080/api/teams 2>&1"
+        expected: "teams"
+    expected_outcome: "Teams list shows exactly the teams that were successfully created (depth-one, depth-two, depth-three, agent-limit-test), not the ones that were rejected due to limits"
