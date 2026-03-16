@@ -1185,6 +1185,17 @@ export class OrchestratorImpl implements Orchestrator {
       throw new Error('TaskDAGManager not initialized');
     }
 
+    // Persist the task to the store before dispatch so downstream lookups
+    // (e.g., getBlockedBy, update) can find it.
+    if (this.deps.stores?.taskStore) {
+      try {
+        await this.deps.stores.taskStore.create(task);
+      } catch {
+        // Task may already exist (e.g., retry dispatch) — update instead
+        await this.deps.stores.taskStore.update(task);
+      }
+    }
+
     // Create SDK session before dispatch so the container can resume it (AC-C1).
     // The session is bound to both the agent AID and the team TID (AC-C2).
     // Errors are non-fatal — dispatch proceeds even if session creation fails.
