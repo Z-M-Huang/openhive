@@ -262,7 +262,11 @@ export class AgentExecutorImpl implements AgentExecutor {
         model: modelAlias,
         cwd: tracked.workspacePath,
         systemPrompt: enrichedSystemPrompt,
-        sessionId: tracked.sessionId,
+        // Always start a fresh session. Cross-session context comes from
+        // Tier 2 (MEMORY.md) and Tier 3 (task history), not SDK sessions.
+        // Resuming sessions causes "Claude Code process exited with code 1"
+        // because the SDK session state conflicts across sequential queries.
+        sessionId: undefined,
         maxTurns: 200,
         abortController: tracked.abortController,
         env: sdkEnv,
