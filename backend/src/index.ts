@@ -1139,13 +1139,26 @@ async function initializeRootMode(
     provider: mainAssistantProvider,
   };
 
-  // Write root workspace CLAUDE.md so the SDK subprocess knows about MCP tools
+  // Write root workspace config so the SDK subprocess knows about MCP tools
   try {
     await mkdir(join('/app/workspace', '.claude'), { recursive: true });
     await writeFile(join('/app/workspace', '.claude', 'CLAUDE.md'), ROOT_WORKSPACE_CLAUDE_MD, 'utf-8');
-    logger.info('Root workspace CLAUDE.md written');
+    // Settings.json: allow all tools (Claude Code permission format)
+    await writeFile(join('/app/workspace', '.claude', 'settings.json'), JSON.stringify({
+      permissions: {
+        allow: [
+          'mcp__openhive-tools',
+          'Bash',
+          'Read',
+          'Write',
+          'Edit',
+        ],
+      },
+      enableAllProjectMcpServers: true,
+    }, null, 2), 'utf-8');
+    logger.info('Root workspace CLAUDE.md + settings.json written');
   } catch (err) {
-    logger.warn('Failed to write root CLAUDE.md', { error: String(err) });
+    logger.warn('Failed to write root workspace config', { error: String(err) });
   }
 
   try {

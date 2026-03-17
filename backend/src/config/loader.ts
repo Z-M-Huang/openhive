@@ -240,10 +240,21 @@ export class ConfigLoaderImpl implements ConfigLoader {
     await mkdir(join(teamPath, 'integrations'), { recursive: true });
     await mkdir(join(teamPath, 'teams'), { recursive: true });
 
-    // Write default settings.json
+    // Write default settings.json (Claude Code format)
     await writeFile(
       join(teamPath, '.claude', 'settings.json'),
-      JSON.stringify({ allowedTools: [] }, null, 2),
+      JSON.stringify({
+        permissions: {
+          allow: [
+            'mcp__openhive-tools',   // Allow all OpenHive MCP tools
+            'Bash',                   // Allow bash for HTTP calls and scripting
+            'Read',                   // Allow reading files
+            'Write',                  // Allow writing files
+            'Edit',                   // Allow editing files
+          ],
+        },
+        enableAllProjectMcpServers: true,
+      }, null, 2),
       'utf-8',
     );
   }

@@ -245,7 +245,10 @@ describe('ConfigLoaderImpl', () => {
 
       // Settings.json written
       const settingsRaw = await readFile(join(teamPath, '.claude', 'settings.json'), 'utf-8');
-      expect(JSON.parse(settingsRaw)).toEqual({ allowedTools: [] });
+      const settings = JSON.parse(settingsRaw);
+      expect(settings.permissions).toBeDefined();
+      expect(settings.permissions.allow).toContain('mcp__openhive-tools');
+      expect(settings.enableAllProjectMcpServers).toBe(true);
     });
 
     it('rejects reserved slugs', async () => {
