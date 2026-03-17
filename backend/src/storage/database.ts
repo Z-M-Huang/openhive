@@ -360,6 +360,51 @@ export class Database {
 
     // Migration: add error_message to integrations
     try { this.connection.exec("ALTER TABLE integrations ADD COLUMN error_message TEXT NOT NULL DEFAULT ''"); } catch { /* already exists */ }
+
+    // Migration: memory_chunks table for vector search
+    // Note: this.connection.exec() is better-sqlite3's SQL execution method, not child_process.exec
+    this.connection.exec(`
+      CREATE TABLE IF NOT EXISTS memory_chunks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        memory_id INTEGER NOT NULL,
+        chunk_index INTEGER NOT NULL,
+        content TEXT NOT NULL,
+        embedding BLOB,
+        embedding_model TEXT NOT NULL DEFAULT '',
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_chunks_memory_id ON memory_chunks(memory_id);
+    `);
+
+    // Migration: FTS5 virtual table for BM25 keyword search on agent_memories
+    try {
+      this.connection.exec(`
+        CREATE VIRTUAL TABLE IF NOT EXISTS agent_memories_fts
+        USING fts5(content, content=agent_memories, content_rowid=id, tokenize='porter');
+      `);
+
+      // Triggers to keep FTS5 in sync with agent_memories
+      this.connection.exec(`
+        CREATE TRIGGER IF NOT EXISTS agent_memories_ai AFTER INSERT ON agent_memories BEGIN
+          INSERT INTO agent_memories_fts(rowid, content) VALUES (new.id, new.content);
+        END;
+        CREATE TRIGGER IF NOT EXISTS agent_memories_ad AFTER DELETE ON agent_memories BEGIN
+          INSERT INTO agent_memories_fts(agent_memories_fts, rowid, content) VALUES('delete', old.id, old.content);
+        END;
+        CREATE TRIGGER IF NOT EXISTS agent_memories_au AFTER UPDATE ON agent_memories BEGIN
+          INSERT INTO agent_memories_fts(agent_memories_fts, rowid, content) VALUES('delete', old.id, old.content);
+          INSERT INTO agent_memories_fts(rowid, content) VALUES (new.id, new.content);
+        END;
+      `);
+
+      // Backfill existing rows into FTS5 index
+      this.connection.exec(`
+        INSERT OR IGNORE INTO agent_memories_fts(rowid, content)
+        SELECT id, content FROM agent_memories WHERE deleted_at IS NULL;
+      `);
+    } catch {
+      // FTS5 not available — graceful degradation to LIKE-based search
+    }
   }
   /* eslint-enable @typescript-eslint/no-unused-vars */
 }

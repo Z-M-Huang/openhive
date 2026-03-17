@@ -1,5 +1,5 @@
 /**
- * Tests for SDKToolHandler + 22 tool handlers.
+ * Tests for SDKToolHandler + 23 tool handlers.
  *
  * Uses interface-first mock objects (vi.fn()) for all stores and managers.
  * Focuses on: handler logic, authorization rejection, error mapping,
@@ -135,6 +135,7 @@ function createMockContext(): ToolContext {
     unblockTask: vi.fn(async () => false),
     retryTask: vi.fn(async () => false),
     validateDependencies: vi.fn(async () => {}),
+    getRecentUserTasks: vi.fn(async () => []),
   };
 
   const messageStore: MessageStore = {
@@ -156,13 +157,18 @@ function createMockContext(): ToolContext {
   };
 
   const memoryStore: MemoryStore = {
-    save: vi.fn(async () => {}),
+    save: vi.fn(async () => 1),
     search: vi.fn(async () => []),
     getByAgent: vi.fn(async () => []),
     deleteBefore: vi.fn(async () => 0),
     softDeleteByAgent: vi.fn(async () => 0),
     softDeleteByTeam: vi.fn(async () => 0),
     purgeDeleted: vi.fn(async () => 0),
+    searchBM25: vi.fn(async () => []),
+    searchHybrid: vi.fn(async () => []),
+    saveChunks: vi.fn(async () => undefined),
+    getChunks: vi.fn(async () => []),
+    deleteChunks: vi.fn(async () => undefined),
   };
 
   const integrationStore: IntegrationStore = {
@@ -342,10 +348,10 @@ function createMockContext(): ToolContext {
 // ---------------------------------------------------------------------------
 
 describe('createToolHandlers', () => {
-  it('creates a Map with 22 handlers', () => {
+  it('creates a Map with 23 handlers', () => {
     const ctx = createMockContext();
     const handlers = createToolHandlers(ctx);
-    expect(handlers.size).toBe(22);
+    expect(handlers.size).toBe(23);
   });
 
   it('all TOOL_NAMES have entries in TOOL_SCHEMAS', () => {
@@ -354,8 +360,8 @@ describe('createToolHandlers', () => {
     }
   });
 
-  it('TOOL_COUNT equals 22', () => {
-    expect(TOOL_COUNT).toBe(22);
+  it('TOOL_COUNT equals 23', () => {
+    expect(TOOL_COUNT).toBe(23);
   });
 });
 
@@ -616,7 +622,7 @@ describe('SDKToolHandler', () => {
         created_at: Date.now(),
         deleted_at: null,
       };
-      vi.mocked(ctx.memoryStore.search).mockResolvedValue([mockMemory]);
+      vi.mocked(ctx.memoryStore.searchHybrid).mockResolvedValue([mockMemory]);
 
       const result = await handler.handle(
         'recall_memory',
@@ -628,8 +634,11 @@ describe('SDKToolHandler', () => {
       expect(result.success).toBe(true);
       const memories = (result.result as Record<string, unknown>)['memories'] as unknown[];
       expect(memories).toHaveLength(1);
-      expect(ctx.memoryStore.search).toHaveBeenCalledWith(
-        expect.objectContaining({ agentAid: 'aid-alice-001', query: 'fact' }),
+      expect(ctx.memoryStore.searchHybrid).toHaveBeenCalledWith(
+        'fact',
+        'aid-alice-001',
+        undefined, // no embedding service configured
+        10,
       );
     });
   });

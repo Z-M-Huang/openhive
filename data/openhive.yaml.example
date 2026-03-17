@@ -132,6 +132,14 @@ channels:
 providers: "data/providers.yaml"        # Path to provider presets file
 
 # ------------------------------------------------------------------------------
+# Embedding config (optional)
+# Enables hybrid (BM25 + vector) memory search. References a provider preset
+# from providers.yaml for API credentials. Omit this section for BM25-only search.
+# ------------------------------------------------------------------------------
+# embedding:
+#   provider: anthropic-direct           # Provider preset name from providers.yaml
+
+# ------------------------------------------------------------------------------
 # Global triggers
 # Automate task creation via cron schedules, webhooks, or channel events.
 # These triggers can target any team in the system.

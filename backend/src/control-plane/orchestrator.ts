@@ -39,7 +39,10 @@ import { TaskDAGManager } from './task-dag-manager.js';
 import { EscalationRouter } from './escalation-router.js';
 import { ProactiveScheduler } from './proactive-scheduler.js';
 import { RetentionWorker } from './retention-worker.js';
-import { createToolHandlers, type ToolContext, type ToolHandler } from '../mcp/tools/index.js';
+import { createToolHandlers, type ToolContext, type ToolHandler, type PendingMemoryWrite } from '../mcp/tools/index.js';
+import { join } from 'node:path';
+import { mkdir } from 'node:fs/promises';
+import { appendFile } from 'node:fs/promises';
 
 /** All store interfaces combined for convenience. */
 export interface AllStores {
@@ -150,6 +153,10 @@ export class OrchestratorImpl implements Orchestrator {
 
   /** Tool handlers map created in initCollaborators(). Available via getToolHandlers(). */
   private toolHandlersMap?: Map<string, ToolHandler>;
+  /** Memory file writer created in initCollaborators(). Available via getMemoryFileWriter(). */
+  private memoryFileWriterFn?: (agentAid: string, teamSlug: string, entry: {
+    id: number; content: string; memory_type: 'curated' | 'daily'; created_at: number;
+  }) => Promise<void>;
 
   constructor(deps: OrchestratorDeps, isRoot: boolean = true) {
     this.deps = deps;
@@ -163,6 +170,11 @@ export class OrchestratorImpl implements Orchestrator {
    */
   getToolHandlers(): Map<string, ToolHandler> | undefined {
     return this.toolHandlersMap;
+  }
+
+  /** Returns the memory file writer for post-task auto-save. */
+  getMemoryFileWriter(): typeof this.memoryFileWriterFn {
+    return this.memoryFileWriterFn;
   }
 
   /**
@@ -254,6 +266,49 @@ export class OrchestratorImpl implements Orchestrator {
       return; // Non-root doesn't have these
     }
 
+    // Pending memory writes queue (in-memory, drain-on-write)
+    const pendingMemoryWrites: PendingMemoryWrite[] = [];
+
+    // Memory file writer: append-based dual-write to workspace files
+    const memoryFileWriter = async (
+      agentAid: string,
+      teamSlug: string,
+      entry: { id: number; content: string; memory_type: 'curated' | 'daily'; created_at: number },
+    ): Promise<void> => {
+      // Security: reject path traversal in agentAid
+      if (agentAid.includes('..') || agentAid.includes('/') || agentAid.includes('\\')) {
+        throw new Error(`Invalid agentAid: ${agentAid}`);
+      }
+      // Security: cap individual memory entry at 500 chars
+      if (entry.content.length > 500) {
+        throw new Error('Memory entry exceeds 500 character limit');
+      }
+
+      // Resolve workspace: use orgChart for consistency with executor read path
+      const team = orgChart.getTeamBySlug(teamSlug);
+      const workspacePath = team?.workspacePath ?? '/app/workspace';
+      const memoryDir = join(workspacePath, 'memory', agentAid);
+      await mkdir(memoryDir, { recursive: true });
+
+      const timestamp = new Date(entry.created_at).toISOString();
+
+      if (entry.memory_type === 'curated') {
+        // Append to MEMORY.md with timestamp header
+        const memoryPath = join(memoryDir, 'MEMORY.md');
+        const newEntry = `\n## ${timestamp}\n${entry.content}\n`;
+        await appendFile(memoryPath, newEntry, 'utf-8');
+      } else {
+        // Daily: append to YYYY-MM-DD.md
+        const dateStr = new Date(entry.created_at).toISOString().slice(0, 10);
+        const dailyPath = join(memoryDir, `${dateStr}.md`);
+        const newEntry = `\n### ${timestamp}\n${entry.content}\n`;
+        await appendFile(dailyPath, newEntry, 'utf-8');
+      }
+    };
+
+    // Store for executor access
+    this.memoryFileWriterFn = memoryFileWriter;
+
     // Build ToolContext for createToolHandlers
     const toolContext: ToolContext = {
       orgChart,
@@ -274,6 +329,8 @@ export class OrchestratorImpl implements Orchestrator {
       healthMonitor,
       logger: this.logger,
       workspaceLock: this.deps.workspaceLock,
+      memoryFileWriter,
+      pendingMemoryWrites,
       limits: Object.freeze({
         max_depth: this.deps.limits?.max_depth ?? 3,
         max_teams: this.deps.limits?.max_teams ?? 10,
@@ -282,7 +339,7 @@ export class OrchestratorImpl implements Orchestrator {
       }),
     };
 
-    // Create all 22 tool handlers with proper authorization and validation
+    // Create all 23 tool handlers with proper authorization and validation
     const handlers = createToolHandlers(toolContext);
     this.toolHandlersMap = handlers;
 

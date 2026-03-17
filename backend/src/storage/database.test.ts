@@ -82,7 +82,7 @@ describe('Database', () => {
   });
 
   describe('table creation', () => {
-    it('creates all 10 tables on initialize', async () => {
+    it('creates all 11 tables on initialize', async () => {
       db = newInMemoryDB();
       await db.initialize();
       const conn = db.getConnection();
@@ -99,6 +99,7 @@ describe('Database', () => {
       expect(names).toContain('tool_calls');
       expect(names).toContain('decisions');
       expect(names).toContain('agent_memories');
+      expect(names).toContain('memory_chunks');
       expect(names).toContain('integrations');
       expect(names).toContain('credentials');
     });

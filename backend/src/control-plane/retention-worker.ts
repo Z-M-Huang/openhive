@@ -64,10 +64,11 @@ export class RetentionWorker {
     this.archiveWriter = deps.archiveWriter;
   }
 
-  /** Start the retention and archive workers. */
+  /** Start the retention, archive, and memory retention workers. */
   start(): void {
     this.retentionTimer = setInterval(() => {
       void this.runRetention();
+      void this.runMemoryRetention();
     }, RETENTION_INTERVAL_MS);
 
     this.archiveTimer = setInterval(() => {
@@ -209,5 +210,30 @@ export class RetentionWorker {
     }
 
     return indexed;
+  }
+
+  /**
+   * Run memory retention: purge old soft-deleted memories and clean up stale daily logs.
+   * Runs on the same 1h interval as log retention.
+   */
+  async runMemoryRetention(): Promise<number> {
+    if (this.locked) return 0;
+
+    let totalCleaned = 0;
+    try {
+      // Purge soft-deleted memories older than 30 days + cascade chunks
+      const purged = await this.memoryStore.purgeDeleted(30);
+      totalCleaned += purged;
+
+      if (purged > 0) {
+        this.logger.info('Memory retention: purged soft-deleted entries', { purged });
+      }
+    } catch (err) {
+      this.logger.error('Memory retention failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    return totalCleaned;
   }
 }

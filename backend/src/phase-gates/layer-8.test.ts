@@ -133,6 +133,7 @@ function createMockTaskStore(): TaskStore {
     unblockTask: vi.fn().mockResolvedValue(true),
     retryTask: vi.fn().mockResolvedValue(true),
     validateDependencies: vi.fn().mockResolvedValue(undefined),
+    getRecentUserTasks: vi.fn().mockResolvedValue([]),
   };
 }
 
@@ -182,13 +183,18 @@ function createMockLogStore(): LogStore {
 
 function createMockMemoryStore(): MemoryStore {
   return {
-    save: vi.fn().mockResolvedValue(undefined),
+    save: vi.fn().mockResolvedValue(1),
     search: vi.fn().mockResolvedValue([]),
     getByAgent: vi.fn().mockResolvedValue([]),
     deleteBefore: vi.fn().mockResolvedValue(0),
     softDeleteByAgent: vi.fn().mockResolvedValue(0),
     softDeleteByTeam: vi.fn().mockResolvedValue(0),
     purgeDeleted: vi.fn().mockResolvedValue(0),
+    searchBM25: vi.fn().mockResolvedValue([]),
+    searchHybrid: vi.fn().mockResolvedValue([]),
+    saveChunks: vi.fn().mockResolvedValue(undefined),
+    getChunks: vi.fn().mockResolvedValue([]),
+    deleteChunks: vi.fn().mockResolvedValue(undefined),
   };
 }
 

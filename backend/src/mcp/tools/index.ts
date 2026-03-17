@@ -1,11 +1,11 @@
 /**
- * MCP tools index — SDKToolHandler, ToolContext, and all 22 built-in tool handlers.
+ * MCP tools index — SDKToolHandler, ToolContext, and all 23 built-in tool handlers.
  *
  * Each handler is a function: (args, agentAid, teamSlug) => Promise<unknown>
  * created via `createToolHandlers(ctx)` factory. The SDKToolHandler wraps
  * handlers with authorization, validation, error mapping, and logging.
  *
- * ## Tool Catalog (10 categories, 22 tools)
+ * ## Tool Catalog (10 categories, 23 tools)
  *
  * | Category       | Count | Tools                                                            |
  * |----------------|-------|------------------------------------------------------------------|
@@ -18,7 +18,7 @@
  * | Integration    | 3     | create_integration, test_integration, activate_integration       |
  * | Secret Mgmt    | 2     | get_credential, set_credential                                   |
  * | Query          | 4     | get_team, get_task, get_health, inspect_topology                 |
- * | Event          | 1     | register_webhook                                                 |
+ * | Event          | 2     | register_webhook, register_trigger                               |
  *
  * @module mcp/tools
  */
@@ -165,6 +165,8 @@ export interface ToolContext {
   }) => Promise<void>;
   /** Pending memory writes queue for retry on reconnection (AC-L6-07). */
   pendingMemoryWrites?: PendingMemoryWrite[];
+  /** Embedding service for vector search. Optional — BM25-only when absent. */
+  embeddingService?: import('../../domain/interfaces.js').EmbeddingService;
   /**
    * Advisory workspace-level lock for concurrent workspace operations (AC-D2, AC-D3).
    * Optional — only wired in root mode. Handlers that modify the workspace
@@ -344,6 +346,12 @@ export const TOOL_SCHEMAS: Record<string, z.ZodTypeAny> = {
   get_health: GetHealthSchema,
   inspect_topology: InspectTopologySchema,
   register_webhook: RegisterWebhookSchema,
+  register_trigger: z.object({
+    name: z.string().min(1).max(63).regex(/^[a-z0-9]+(-[a-z0-9]+)*$/),
+    schedule: z.string().min(1),
+    target_team: z.string().min(1),
+    prompt: z.string().min(1).max(2000),
+  }),
 };
 
 // ---------------------------------------------------------------------------
@@ -357,11 +365,11 @@ function generateId(prefix: string, name: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// createToolHandlers — factory for all 22 tool handlers
+// createToolHandlers — factory for all 23 tool handlers
 // ---------------------------------------------------------------------------
 
 /**
- * Creates all 22 tool handler functions, closed over the provided ToolContext.
+ * Creates all 23 tool handler functions, closed over the provided ToolContext.
  * Returns a Map<string, ToolHandler>.
  */
 export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
@@ -820,27 +828,40 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
   handlers.set('save_memory', async (args, agentAid, teamSlug) => {
     const parsed = SaveMemorySchema.parse(args);
 
-    const memoryId = Date.now();
     const createdAt = Date.now();
     const entry = {
-      id: memoryId,
+      id: 0, // Will be set by autoincrement
       content: parsed.content,
       memory_type: parsed.memory_type,
       created_at: createdAt,
     };
 
+    // Drain pending writes first (drain-on-write pattern)
+    if (ctx.pendingMemoryWrites && ctx.pendingMemoryWrites.length > 0) {
+      const pending = [...ctx.pendingMemoryWrites];
+      ctx.pendingMemoryWrites.length = 0;
+      for (const pw of pending) {
+        try {
+          await ctx.memoryStore.save(pw);
+        } catch {
+          // Re-queue if drain fails (bounded: max 100, drop oldest)
+          if (ctx.pendingMemoryWrites.length < 100) {
+            ctx.pendingMemoryWrites.push(pw);
+          }
+        }
+      }
+    }
+
     // AC-L6-06: DUAL-WRITE - file FIRST (source of truth), then SQLite index
-    // Workspace file is the authoritative source; SQLite is just a search index.
-    // File write failure = operation failure (don't create orphaned index entries)
     if (ctx.memoryFileWriter) {
       await ctx.memoryFileWriter(agentAid, teamSlug, entry);
     }
 
     // AC-L6-07: Index in SQLite for fast search/recall
-    // On SQLite failure, queue for retry on reconnection
+    let memoryId = 0;
     try {
-      await ctx.memoryStore.save({
-        id: memoryId,
+      memoryId = await ctx.memoryStore.save({
+        id: 0,
         agent_aid: agentAid,
         team_slug: teamSlug,
         content: parsed.content,
@@ -849,10 +870,12 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
         deleted_at: null,
       });
     } catch (sqliteErr) {
-      // Queue for retry on reconnection (non-blocking)
       if (ctx.pendingMemoryWrites) {
+        if (ctx.pendingMemoryWrites.length >= 100) {
+          ctx.pendingMemoryWrites.shift(); // Drop oldest
+        }
         ctx.pendingMemoryWrites.push({
-          id: memoryId,
+          id: 0,
           agent_aid: agentAid,
           team_slug: teamSlug,
           content: parsed.content,
@@ -864,13 +887,25 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
         });
         ctx.logger.warn('SQLite index write failed, queued for retry', {
           agent_aid: agentAid,
-          memory_id: memoryId,
           queue_size: ctx.pendingMemoryWrites.length,
           error: sqliteErr instanceof Error ? sqliteErr.message : String(sqliteErr),
         });
       } else {
-        // No retry queue available - re-throw
         throw sqliteErr;
+      }
+    }
+
+    // Auto-embed for vector search (skip silently on failure)
+    if (memoryId > 0 && ctx.embeddingService) {
+      try {
+        const embedding = await ctx.embeddingService.embed(parsed.content);
+        await ctx.memoryStore.saveChunks(memoryId, [{
+          content: parsed.content,
+          embedding,
+          embeddingModel: ctx.embeddingService.modelId,
+        }]);
+      } catch {
+        // Embedding failure is non-fatal — search degrades to BM25-only
       }
     }
 
@@ -880,12 +915,34 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
   handlers.set('recall_memory', async (args, agentAid) => {
     const parsed = RecallMemorySchema.parse(args);
 
-    const memories = await ctx.memoryStore.search({
-      agentAid,
-      query: parsed.query,
-      limit: parsed.limit ?? 10,
-      since: parsed.since ? new Date(parsed.since) : undefined,
-    });
+    // Use hybrid search when available, otherwise fall back to LIKE
+    let memories: import('../../domain/domain.js').MemoryEntry[];
+    const limit = parsed.limit ?? 10;
+
+    try {
+      // Compute query embedding if embedding service is available
+      let queryEmbedding: Float32Array | undefined;
+      if (ctx.embeddingService) {
+        try {
+          queryEmbedding = await ctx.embeddingService.embed(parsed.query);
+        } catch { /* embedding failure — proceed with BM25 only */ }
+      }
+
+      memories = await ctx.memoryStore.searchHybrid(
+        parsed.query,
+        agentAid,
+        queryEmbedding,
+        limit,
+      );
+    } catch {
+      // Hybrid search failed — fall back to basic LIKE search
+      memories = await ctx.memoryStore.search({
+        agentAid,
+        query: parsed.query,
+        limit,
+        since: parsed.since ? new Date(parsed.since) : undefined,
+      });
+    }
 
     return {
       memories: memories.map((m) => ({
@@ -1127,6 +1184,46 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
     return { webhook_url: webhookUrl, registration_id: registrationId };
   });
 
+  // ---- Trigger registration (1) ----
+
+  handlers.set('register_trigger', async (args, agentAid, teamSlug) => {
+    const parsed = TOOL_SCHEMAS['register_trigger'].parse(args) as {
+      name: string; schedule: string; target_team: string; prompt: string;
+    };
+
+    // Authorization: caller must be in target_team OR be main assistant
+    const callerAgent = ctx.orgChart.getAgent(agentAid);
+    const isMainAssistant = callerAgent?.role === 'main_assistant';
+    if (!isMainAssistant && teamSlug !== parsed.target_team) {
+      throw new Error(`Unauthorized: agent in team '${teamSlug}' cannot register triggers for team '${parsed.target_team}'`);
+    }
+
+    // Validate cron expression
+    const cron = await import('node-cron');
+    if (!cron.validate(parsed.schedule)) {
+      throw new Error(`Invalid cron expression: '${parsed.schedule}'`);
+    }
+
+    // Rate limit: max 10 triggers per team
+    const existingTriggers = ctx.triggerScheduler.listTriggers();
+    const teamTriggerCount = existingTriggers.filter(t => t.targetTeam === parsed.target_team).length;
+    if (teamTriggerCount >= 10) {
+      throw new Error(`Trigger limit reached: team '${parsed.target_team}' already has ${teamTriggerCount} triggers (max 10)`);
+    }
+
+    // Register for immediate activation
+    ctx.triggerScheduler.addCronTrigger(parsed.name, parsed.schedule, parsed.target_team, parsed.prompt);
+
+    ctx.logger.info('Cron trigger registered via tool', {
+      name: parsed.name,
+      schedule: parsed.schedule,
+      target_team: parsed.target_team,
+      registered_by: agentAid,
+    });
+
+    return { trigger_name: parsed.name, schedule: parsed.schedule, status: 'registered' };
+  });
+
   return handlers;
 }
 
@@ -1308,4 +1405,4 @@ export class SDKToolHandler {
 export const TOOL_NAMES: ReadonlyArray<string> = Object.keys(TOOL_SCHEMAS);
 
 /** Total number of built-in tools. */
-export const TOOL_COUNT = 22;
+export const TOOL_COUNT = 23;

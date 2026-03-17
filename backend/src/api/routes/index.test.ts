@@ -249,6 +249,7 @@ function createMockTaskStore(): TaskStore {
     unblockTask: vi.fn(async () => false),
     retryTask: vi.fn(async () => false),
     validateDependencies: vi.fn(async () => {}),
+    getRecentUserTasks: vi.fn().mockResolvedValue([]),
   };
 }
 

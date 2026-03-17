@@ -74,6 +74,9 @@ export class AgentExecutorImpl implements AgentExecutor {
   private readonly logger: Logger;
   private toolHandlers?: Map<string, ToolHandler>;
   private taskStore?: TaskStore;
+  private memoryFileWriter?: (agentAid: string, teamSlug: string, entry: {
+    id: number; content: string; memory_type: 'curated' | 'daily'; created_at: number;
+  }) => Promise<void>;
 
   constructor(eventBus: EventBus, logger: Logger, toolHandlers?: Map<string, ToolHandler>) {
     this.eventBus = eventBus;
@@ -97,6 +100,16 @@ export class AgentExecutorImpl implements AgentExecutor {
    */
   setTaskStore(store: TaskStore): void {
     this.taskStore = store;
+  }
+
+  /**
+   * Sets the memory file writer for post-task auto-save to daily logs.
+   * Routes through the same callback used by save_memory for consistent formatting.
+   */
+  setMemoryFileWriter(writer: (agentAid: string, teamSlug: string, entry: {
+    id: number; content: string; memory_type: 'curated' | 'daily'; created_at: number;
+  }) => Promise<void>): void {
+    this.memoryFileWriter = writer;
   }
 
   /**
@@ -216,21 +229,45 @@ export class AgentExecutorImpl implements AgentExecutor {
       // DO NOT use `continue: true` — it resumes the LAST session file on disk,
       // which may be from a completely different conversation (stale session bleed).
 
-      // --- Tier 2: MEMORY.md auto-injection + memory management instructions ---
+      // --- Tier 2: MEMORY.md + daily logs auto-injection ---
       let enrichedSystemPrompt = tracked.config.systemPrompt ?? '';
-      const memoryPath = join(tracked.workspacePath, 'memory', agentAid, 'MEMORY.md');
+      const memoryDir = join(tracked.workspacePath, 'memory', agentAid);
+      const memoryPath = join(memoryDir, 'MEMORY.md');
       try {
-        await mkdir(join(tracked.workspacePath, 'memory', agentAid), { recursive: true });
-        const memoryContent = await readFile(memoryPath, 'utf-8');
-        if (memoryContent.trim().length > 0) {
-          enrichedSystemPrompt = `## Your Memory\n${memoryContent}\n\n${enrichedSystemPrompt}`;
+        await mkdir(memoryDir, { recursive: true });
+        let memoryBlock = '';
+
+        // Load curated MEMORY.md
+        try {
+          const memoryContent = await readFile(memoryPath, 'utf-8');
+          if (memoryContent.trim().length > 0) {
+            memoryBlock += memoryContent;
+          }
+        } catch { /* optional */ }
+
+        // Load today's + yesterday's daily logs
+        const today = new Date();
+        const yesterday = new Date(today.getTime() - 24 * 60 * 60 * 1000);
+        for (const date of [yesterday, today]) {
+          const dateStr = date.toISOString().slice(0, 10);
+          const dailyPath = join(memoryDir, `${dateStr}.md`);
+          try {
+            const dailyContent = await readFile(dailyPath, 'utf-8');
+            if (dailyContent.trim().length > 0) {
+              memoryBlock += `\n\n## Daily Log (${dateStr})\n${dailyContent}`;
+            }
+          } catch { /* optional */ }
+        }
+
+        if (memoryBlock.trim().length > 0) {
+          enrichedSystemPrompt = `<agent-memory>\n${memoryBlock}\n</agent-memory>\n\n${enrichedSystemPrompt}`;
         }
       } catch {
-        // MEMORY.md is optional — no error if missing
+        // Memory directory creation failed — skip memory injection
       }
 
-      // --- Tier 3: Recent history (new sessions only) ---
-      if (!tracked.sessionId && this.taskStore) {
+      // --- Tier 3: Recent conversation history (ALWAYS inject) ---
+      if (this.taskStore) {
         try {
           const recentHistory = await this._getRecentHistory(agentAid);
           if (recentHistory) {
@@ -244,12 +281,35 @@ export class AgentExecutorImpl implements AgentExecutor {
         }
       }
 
-      // --- Fix 4: Memory management instructions ---
-      enrichedSystemPrompt += `\n\n## Memory Management
-- When users share personal information, preferences, or important facts, IMMEDIATELY save them using the save_memory tool.
-- Periodically review the conversation for key context worth preserving.
-- When the conversation gets long, save a summary of important decisions and facts.
-- Always check your memory (above) before asking the user to repeat information.`;
+      // --- Behavioral instructions + tool catalog ---
+      enrichedSystemPrompt += `\n\n## Your MCP Tools (MUST USE for system operations)
+
+| Task | Tool to Use | Do NOT |
+|------|-------------|--------|
+| Remember facts | save_memory | Write to MEMORY.md directly |
+| Search memories | recall_memory | Read MEMORY.md directly |
+| Create an agent | create_agent | Write .claude/agents/*.md directly |
+| Schedule recurring task | register_trigger | Suggest crontab or write YAML |
+| Create a task | create_task | Describe tasks without creating them |
+| Make HTTP calls | Bash with curl or /app/common/scripts/http-client.ts | Say you cannot make HTTP calls |
+
+CRITICAL: Writing files directly does NOT register agents, triggers, or memories in the system. Only MCP tool calls update the database and org chart.
+
+## Memory Management (MANDATORY)
+- You MUST call save_memory with memory_type "curated" when the user shares: personal info, preferences, locations, credentials, project details, or any fact they would not want to repeat.
+- Before asking the user for information, ALWAYS check your memory section above — they may have already told you.
+- Do NOT skip memory saves because you are focused on a task. Memory is as important as task completion.
+- Daily conversation logs are saved automatically — you do not need to save daily summaries.
+
+## File Management
+- NEVER write files to /tmp — they will be lost on restart.
+- Save all generated files to your working directory or a subdirectory of it (e.g., ./work/<task-name>/).
+
+## Agent-per-Task Pattern
+- For recurring tasks, create a dedicated agent using create_agent with a DETAILED description (the description IS the agent's system prompt), then register a cron trigger using register_trigger.
+- Do NOT suggest manual crontab edits or external scheduling. Use the built-in trigger system.
+- Before creating an agent, check if one already exists using inspect_topology.
+- A new team is only needed when the task requires multiple collaborating agents or isolated resources.`;
 
       // --- Fix 3A: 5-minute query timeout via AbortController ---
       const timeoutId = setTimeout(() => {
@@ -315,6 +375,24 @@ export class AgentExecutorImpl implements AgentExecutor {
           timestamp: Date.now(),
           source: 'executor',
         });
+
+        // Post-task auto-save: append conversation summary to daily log (best-effort)
+        if (this.memoryFileWriter && result.output) {
+          try {
+            const promptSnippet = prompt.length > 100 ? prompt.slice(0, 100) + '...' : prompt;
+            const resultSnippet = result.output.length > 200 ? result.output.slice(0, 200) + '...' : result.output;
+            const summaryLine = `User: ${promptSnippet} → Assistant: ${resultSnippet}`;
+            const teamSlug = this._resolveTeamSlug(tracked.config);
+            await this.memoryFileWriter(agentAid, teamSlug, {
+              id: 0,
+              content: summaryLine,
+              memory_type: 'daily',
+              created_at: Date.now(),
+            });
+          } catch {
+            // Best-effort — auto-save failure must NOT affect task completion
+          }
+        }
       }
 
       return { output: result.output, sessionId: result.sessionId };
@@ -400,27 +478,21 @@ export class AgentExecutorImpl implements AgentExecutor {
   // ---------------------------------------------------------------------------
 
   /**
-   * Queries the last 5 completed tasks for this agent and formats them
-   * as a "Recent Conversation History" section for the system prompt (Tier 3).
+   * Queries the last 10 user-originated completed tasks for this agent
+   * and formats them as a "Recent Conversation History" section for the system prompt (Tier 3).
+   * Filters by origin_chat_jid IS NOT NULL AND parent_id = '' to exclude subtasks and proactive tasks.
    */
   private async _getRecentHistory(agentAid: string): Promise<string | null> {
     if (!this.taskStore) return null;
 
-    // TaskStore doesn't have a listByAgent method, so we query by status
-    // and filter. Use listByStatus('completed') with a post-filter.
-    // For efficiency, get all completed tasks and filter by agent.
-    const completedTasks = await this.taskStore.listByStatus('completed' as import('../domain/enums.js').TaskStatus);
-    const agentTasks = completedTasks
-      .filter(t => t.agent_aid === agentAid && t.result)
-      .sort((a, b) => b.completed_at! - a.completed_at!)
-      .slice(0, 5);
+    const agentTasks = await this.taskStore.getRecentUserTasks(agentAid, 10);
 
     if (agentTasks.length === 0) return null;
 
     const lines = ['## Recent Conversation History'];
     for (const task of agentTasks.reverse()) {
-      const promptSnippet = task.prompt.length > 200 ? task.prompt.slice(0, 200) + '...' : task.prompt;
-      const resultSnippet = task.result.length > 300 ? task.result.slice(0, 300) + '...' : task.result;
+      const promptSnippet = task.prompt.length > 500 ? task.prompt.slice(0, 500) + '...' : task.prompt;
+      const resultSnippet = (task.result ?? '').length > 1000 ? task.result!.slice(0, 1000) + '...' : (task.result ?? '');
       lines.push(`User: ${promptSnippet}`);
       lines.push(`Assistant: ${resultSnippet}`);
       lines.push('');

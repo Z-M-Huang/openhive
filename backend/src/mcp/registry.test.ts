@@ -216,14 +216,14 @@ describe('MCPRegistryImpl', () => {
   });
 
   describe('role tool matrix integrity', () => {
-    it('MAIN_ASSISTANT_TOOLS contains all 22 tools', () => {
+    it('MAIN_ASSISTANT_TOOLS contains all 23 tools', () => {
       // Verify the set size matches documented count
-      expect(MAIN_ASSISTANT_TOOLS.size).toBe(22);
+      expect(MAIN_ASSISTANT_TOOLS.size).toBe(23);
     });
 
-    it('TEAM_LEAD_TOOLS excludes container tools (19 tools)', () => {
-      // 22 - 3 container tools = 19
-      expect(TEAM_LEAD_TOOLS.size).toBe(19);
+    it('TEAM_LEAD_TOOLS excludes container tools (20 tools)', () => {
+      // 23 - 3 container tools = 20
+      expect(TEAM_LEAD_TOOLS.size).toBe(20);
 
       // Verify container tools are excluded
       expect(TEAM_LEAD_TOOLS.has('spawn_container')).toBe(false);

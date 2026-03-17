@@ -57,6 +57,7 @@ function createMockTaskStore() {
     listByTeam: vi.fn(), listByStatus: vi.fn().mockResolvedValue([]),
     getSubtree: vi.fn(), getBlockedBy: vi.fn(), unblockTask: vi.fn(),
     validateDependencies: vi.fn(), retryTask: vi.fn(),
+    getRecentUserTasks: vi.fn().mockResolvedValue([]),
   };
 }
 
@@ -69,8 +70,13 @@ function createMockLogStore() {
 
 function createMockMemoryStore() {
   return {
-    save: vi.fn(), search: vi.fn(), getByAgent: vi.fn(), deleteBefore: vi.fn(),
+    save: vi.fn().mockResolvedValue(1), search: vi.fn(), getByAgent: vi.fn(), deleteBefore: vi.fn(),
     softDeleteByAgent: vi.fn(), softDeleteByTeam: vi.fn(), purgeDeleted: vi.fn(),
+    searchBM25: vi.fn().mockResolvedValue([]),
+    searchHybrid: vi.fn().mockResolvedValue([]),
+    saveChunks: vi.fn().mockResolvedValue(undefined),
+    getChunks: vi.fn().mockResolvedValue([]),
+    deleteChunks: vi.fn().mockResolvedValue(undefined),
   };
 }
 

@@ -368,6 +368,9 @@ export const masterConfigSchema: z.ZodType<MasterConfig> = z.object({
   skill_registries: z.array(z.string()).optional(),
   agents: z.array(agentRefSchema).optional(),
   providers: z.string().optional(),
+  embedding: z.object({
+    provider: z.string().min(1),
+  }).optional(),
 }).strict();
 
 /**

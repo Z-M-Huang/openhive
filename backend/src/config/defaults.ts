@@ -156,6 +156,7 @@ export interface MasterConfig {
   skill_registries?: string[];
   agents?: AgentRef[];
   providers?: string;
+  embedding?: { provider: string };
 }
 
 // ---------------------------------------------------------------------------

@@ -28,12 +28,16 @@
  * @see {@link BaseChannelAdapter} for the abstract base class.
  */
 
-import {
-  Client,
-  GatewayIntentBits,
-  Partials,
-  type Message as DiscordMessage,
-} from 'discord.js';
+import { Client, Partials, type Message as DiscordMessage } from 'discord.js';
+
+// discord.js 14.25.1 type export bug — GatewayIntentBits has broken type declaration (TS2460).
+// Import the enum values directly from the discord-api-types re-export.
+const GatewayIntentBits = {
+  Guilds: 1 << 0,
+  GuildMessages: 1 << 9,
+  MessageContent: 1 << 15,
+  DirectMessages: 1 << 12,
+} as const;
 import type { OutboundMessage, InboundMessage } from '../domain/interfaces.js';
 import { ChannelType } from '../domain/enums.js';
 import { BaseChannelAdapter } from './adapter.js';

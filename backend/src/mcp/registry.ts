@@ -6,7 +6,7 @@
  *
  * ## Tool Catalog
  *
- * The registry manages ~22 built-in management tools across 10 categories:
+ * The registry manages ~23 built-in management tools across 10 categories:
  *
  * | Category            | Count | Tools                                                        |
  * |---------------------|-------|--------------------------------------------------------------|
@@ -19,7 +19,7 @@
  * | **Integration**     | 3     | `create_integration`, `test_integration`, `activate_integration` |
  * | **Secret Mgmt**     | 2     | `get_credential`, `set_credential`                           |
  * | **Query**           | 4     | `get_team`, `get_task`, `get_health`, `inspect_topology`     |
- * | **Event**           | 1     | `register_webhook`                                           |
+ * | **Event**           | 2     | `register_webhook`, `register_trigger`                       |
  *
  * ## Role-Based Access Matrix (MCP-Tools.md "Tool Scope by Role")
  *
@@ -50,10 +50,11 @@
  * | `get_health`            | Yes | Yes | --  |
  * | `inspect_topology`      | Yes | Yes | --  |
  * | `register_webhook`      | Yes | Yes | --  |
+ * | `register_trigger`      | Yes | Yes | --  |
  *
  * **Summary:**
- * - **main_assistant:** Full access to all 22 tools.
- * - **team_lead:** Team-scoped access (19 tools). Cannot manage containers directly.
+ * - **main_assistant:** Full access to all 23 tools.
+ * - **team_lead:** Team-scoped access (20 tools). Cannot manage containers directly.
  * - **member:** Minimal access (7 tools). Can update tasks, send messages, escalate,
  *   manage own memory, read credentials, and query own tasks.
  *
@@ -79,7 +80,7 @@ import { ConflictError } from '../domain/errors.js';
 
 /**
  * Tools accessible by the `main_assistant` role.
- * Full access to all 22 built-in tools.
+ * Full access to all 23 built-in tools.
  */
 const MAIN_ASSISTANT_TOOLS: ReadonlySet<string> = new Set([
   'spawn_container',
@@ -104,11 +105,12 @@ const MAIN_ASSISTANT_TOOLS: ReadonlySet<string> = new Set([
   'get_health',
   'inspect_topology',
   'register_webhook',
+  'register_trigger',
 ]);
 
 /**
  * Tools accessible by the `team_lead` role.
- * Team-scoped access (19 tools). Cannot manage containers directly.
+ * Team-scoped access (20 tools). Cannot manage containers directly.
  */
 const TEAM_LEAD_TOOLS: ReadonlySet<string> = new Set([
   'create_team',
@@ -130,6 +132,7 @@ const TEAM_LEAD_TOOLS: ReadonlySet<string> = new Set([
   'get_health',
   'inspect_topology',
   'register_webhook',
+  'register_trigger',
 ]);
 
 /**
@@ -315,7 +318,7 @@ export class MCPRegistryImpl implements MCPRegistry {
    * ```ts
    * // Get all tools available to a team lead
    * const tools = registry.getToolsForRole('team_lead');
-   * // Returns 19 tools (all except container management tools)
+   * // Returns 20 tools (all except container management tools)
    *
    * // Get minimal tools for a member
    * const memberTools = registry.getToolsForRole('member');

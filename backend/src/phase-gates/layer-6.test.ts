@@ -113,6 +113,7 @@ function createMockToolContext(overrides?: Partial<ToolContext>): ToolContext {
       unblockTask: vi.fn().mockResolvedValue(false),
       retryTask: vi.fn().mockResolvedValue(false),
       validateDependencies: vi.fn().mockResolvedValue(undefined),
+      getRecentUserTasks: vi.fn().mockResolvedValue([]),
     } satisfies TaskStore,
     messageStore: {
       create: vi.fn().mockResolvedValue(undefined),
@@ -131,13 +132,18 @@ function createMockToolContext(overrides?: Partial<ToolContext>): ToolContext {
       getOldest: vi.fn().mockResolvedValue([]),
     } satisfies LogStore,
     memoryStore: {
-      save: vi.fn().mockResolvedValue(undefined),
+      save: vi.fn().mockResolvedValue(1),
       search: vi.fn().mockResolvedValue([]),
       getByAgent: vi.fn().mockResolvedValue([]),
       deleteBefore: vi.fn().mockResolvedValue(0),
       softDeleteByAgent: vi.fn().mockResolvedValue(0),
       softDeleteByTeam: vi.fn().mockResolvedValue(0),
       purgeDeleted: vi.fn().mockResolvedValue(0),
+      searchBM25: vi.fn().mockResolvedValue([]),
+      searchHybrid: vi.fn().mockResolvedValue([]),
+      saveChunks: vi.fn().mockResolvedValue(undefined),
+      getChunks: vi.fn().mockResolvedValue([]),
+      deleteChunks: vi.fn().mockResolvedValue(undefined),
     } satisfies MemoryStore,
     integrationStore: {
       create: vi.fn().mockResolvedValue(undefined),
@@ -832,7 +838,7 @@ describe('Layer 6: MCP Tools + Skills', () => {
           deleted_at: null,
         },
       ];
-      (ctx.memoryStore.search as ReturnType<typeof vi.fn>).mockResolvedValueOnce(mockMemories);
+      (ctx.memoryStore.searchHybrid as ReturnType<typeof vi.fn>).mockResolvedValueOnce(mockMemories);
 
       const handler = new SDKToolHandler(ctx);
       const result = await handler.handle(
@@ -847,13 +853,12 @@ describe('Layer 6: MCP Tools + Skills', () => {
       expect(memories).toHaveLength(1);
       expect(memories[0].content).toBe('Rate limit is 100 req/min');
 
-      // Verify search was called with correct parameters
-      expect(ctx.memoryStore.search).toHaveBeenCalledWith(
-        expect.objectContaining({
-          agentAid: memberAid,
-          query: 'rate limit',
-          limit: 5,
-        }),
+      // Verify searchHybrid was called (recall_memory now uses hybrid search)
+      expect(ctx.memoryStore.searchHybrid).toHaveBeenCalledWith(
+        'rate limit',
+        memberAid,
+        undefined, // no embedding service
+        5,
       );
     });
   });
@@ -1181,9 +1186,9 @@ describe('Layer 6: MCP Tools + Skills', () => {
       expect(crossResult.error_code).toBe(WSErrorCode.AccessDenied);
     });
 
-    it('should verify all 22 tool schemas are defined', () => {
+    it('should verify all 23 tool schemas are defined', () => {
       const schemaKeys = Object.keys(TOOL_SCHEMAS);
-      expect(schemaKeys).toHaveLength(22);
+      expect(schemaKeys).toHaveLength(23);
 
       // Verify critical tools are present
       const expectedTools = [
@@ -1195,7 +1200,7 @@ describe('Layer 6: MCP Tools + Skills', () => {
         'create_integration', 'test_integration', 'activate_integration',
         'get_credential', 'set_credential',
         'get_team', 'get_task', 'get_health', 'inspect_topology',
-        'register_webhook',
+        'register_webhook', 'register_trigger',
       ];
 
       for (const tool of expectedTools) {
@@ -1203,12 +1208,12 @@ describe('Layer 6: MCP Tools + Skills', () => {
       }
     });
 
-    it('should verify createToolHandlers returns 22 handlers', () => {
+    it('should verify createToolHandlers returns 23 handlers', () => {
       const ctx = createMockToolContext();
       setupOrgChart(ctx.orgChart as OrgChartImpl);
 
       const handlers = createToolHandlers(ctx);
-      expect(handlers.size).toBe(22);
+      expect(handlers.size).toBe(23);
     });
 
     it('should wire MCPBridge round-trip with SDKToolHandler', async () => {

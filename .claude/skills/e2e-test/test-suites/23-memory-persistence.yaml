@@ -43,7 +43,7 @@ test_cases:
           setTimeout(() => { console.log('TIMEOUT'); process.exit(1); }, 110000);
         \" 2>&1"
         expected: "Mark"
-    expected_outcome: "The second response mentions 'Mark' — the assistant remembers from the same session without needing save_memory"
+    expected_outcome: "The second response mentions 'Mark' -- the assistant remembers from the same session without needing save_memory"
 
   - name: Cross-session memory via save_memory (Tier 2)
     description: Tell the assistant to remember a fact, disconnect, reconnect, and verify the fact is recalled from MEMORY.md.
@@ -54,7 +54,7 @@ test_cases:
       - action: "Wait for memory file to be written, then reconnect and ask about the fact"
         command: "sleep 5 && echo 'What is my favorite color?' | timeout 120 bun run cli/index.ts 2>&1"
         expected: "blue"
-    expected_outcome: "After reconnecting, the assistant knows the favorite color is blue — retrieved from MEMORY.md injection"
+    expected_outcome: "After reconnecting, the assistant knows the favorite color is blue -- retrieved from MEMORY.md injection"
 
   - name: MEMORY.md file exists on disk (Tier 2 verification)
     description: After save_memory is called, verify the MEMORY.md file was created in the workspace
@@ -64,16 +64,16 @@ test_cases:
         expected: "MEMORY.md"
     expected_outcome: "At least one MEMORY.md file exists under .run/workspace/memory/<agent-aid>/"
 
-  - name: No stale session bleed (new connections start fresh)
-    description: After discussing topic A, disconnect, reconnect, ask about unrelated topic B. The response should NOT reference topic A unless it was explicitly saved to memory.
+  - name: History bridge injects only user-root tasks
+    description: On reconnect, the history bridge should inject only user-initiated root-level tasks into context, not internal system tasks or sub-agent tasks.
     steps:
-      - action: "Discuss a specific topic (irrigation) in first session"
-        command: "echo 'Tell me about drip irrigation systems for tomatoes' | timeout 120 bun run cli/index.ts 2>&1"
+      - action: "Send a user message that triggers a visible task"
+        command: "echo 'What are the top 3 programming languages for web development in 2026?' | timeout 120 bun run cli/index.ts 2>&1"
         expected: "[Assistant]"
-      - action: "Disconnect, reconnect, ask about a completely different topic"
-        command: "sleep 3 && echo 'What is the capital of France?' | timeout 120 bun run cli/index.ts 2>&1"
-        expected: "Paris"
-    expected_outcome: "The response about France should mention Paris and NOT reference irrigation, tomatoes, or drip systems — proving that new connections don't inherit stale session context"
+      - action: "Disconnect, reconnect, and ask what was discussed"
+        command: "sleep 3 && echo 'What did we discuss in our last conversation?' | timeout 120 bun run cli/index.ts 2>&1"
+        expected: "programming"
+    expected_outcome: "The assistant references the web development discussion (a user-root task) but does not surface internal orchestration details, system heartbeats, or sub-agent task metadata -- confirming history bridge filters to user-root tasks only"
 
   - name: Recent history context on reconnect (Tier 3)
     description: Send several messages, disconnect, reconnect, and ask about previous topics. The assistant should reference recent conversation from task history.
@@ -84,4 +84,35 @@ test_cases:
       - action: "Reconnect and ask about recent conversation"
         command: "sleep 3 && echo 'What were we talking about earlier?' | timeout 120 bun run cli/index.ts 2>&1"
         expected: "Japan"
-    expected_outcome: "The assistant references the Japan trip discussion from the prior session — retrieved from task history injection"
+    expected_outcome: "The assistant references the Japan trip discussion from the prior session -- retrieved from task history injection"
+
+  - name: Daily log injection on reconnect
+    description: On reconnect, the assistant should have access to the daily log from today's session, providing continuity for recent interactions.
+    steps:
+      - action: "Save a daily memory entry"
+        command: "echo 'Record as daily memory: Discussed deployment pipeline optimization with 3 stages' | timeout 120 bun run cli/index.ts 2>&1"
+        expected: "[Assistant]"
+      - action: "Disconnect, reconnect, and ask about today's activities"
+        command: "sleep 5 && echo 'What did we work on today?' | timeout 120 bun run cli/index.ts 2>&1"
+        expected: "deployment"
+    expected_outcome: "The assistant references the deployment pipeline discussion from today's daily log, confirming daily log content is injected into context on reconnect"
+
+  - name: Startup reconciliation re-indexes file memories
+    description: After a full restart, the memory system should re-index MEMORY.md files from disk so that recall_memory works without re-saving.
+    steps:
+      - action: "Save a curated memory with a unique keyword"
+        command: "echo 'Save this as curated memory: The Nexus artifact repository is hosted at nexus.internal.corp on port 8081' | timeout 120 bun run cli/index.ts 2>&1"
+        expected: "[Assistant]"
+      - action: "Verify the memory file exists on disk before restart"
+        command: "find /app/openhive/.run/workspace/memory -name 'MEMORY.md' 2>/dev/null | head -3"
+        expected: "MEMORY.md"
+      - action: "Restart the system"
+        command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml down 2>&1 && docker compose -f deployments/docker-compose.yml up -d 2>&1"
+        expected: ""
+      - action: "Wait for health check after restart"
+        command: "for i in $(seq 1 60); do curl -sf http://localhost:8080/api/health && exit 0; sleep 5; done; echo 'Health check timed out'; exit 1"
+        expected: "healthy"
+      - action: "Recall the memory saved before restart"
+        command: "echo 'Recall any memories about the Nexus artifact repository' | timeout 120 bun run cli/index.ts 2>&1"
+        expected: "Nexus"
+    expected_outcome: "After a full restart, recall_memory returns the Nexus repository entry that was saved before restart, confirming startup reconciliation re-indexes MEMORY.md files from disk"

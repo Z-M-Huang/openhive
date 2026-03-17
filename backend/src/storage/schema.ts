@@ -1,8 +1,8 @@
 /**
  * Drizzle ORM schema — all tables and indexes from Database-Schema.md.
  *
- * 10 tables: tasks, messages, chat_sessions, log_entries, task_events,
- * tool_calls, decisions, agent_memories, integrations, credentials.
+ * 11 tables: tasks, messages, chat_sessions, log_entries, task_events,
+ * tool_calls, decisions, agent_memories, memory_chunks, integrations, credentials.
  *
  * All column types, defaults, CHECK constraints, and foreign keys match
  * the canonical SQL in the wiki. Indexes match the wiki index table.
@@ -14,6 +14,7 @@ import {
   sqliteTable,
   text,
   integer,
+  blob,
   index,
   check,
 } from 'drizzle-orm/sqlite-core';
@@ -200,6 +201,23 @@ export const agentMemories = sqliteTable('agent_memories', {
 }, (table) => [
   index('idx_memories_agent_aid').on(table.agent_aid),
   index('idx_memories_team_slug').on(table.team_slug),
+]);
+
+// ---------------------------------------------------------------------------
+// memory_chunks (embedding chunks for hybrid search)
+// ---------------------------------------------------------------------------
+
+/** Embedding chunks stored alongside memory entries for vector search. */
+export const memoryChunks = sqliteTable('memory_chunks', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  memory_id: integer('memory_id').notNull(),
+  chunk_index: integer('chunk_index').notNull(),
+  content: text('content').notNull(),
+  embedding: blob('embedding'),
+  embedding_model: text('embedding_model').notNull().default(''),
+  created_at: integer('created_at').notNull(),
+}, (table) => [
+  index('idx_chunks_memory_id').on(table.memory_id),
 ]);
 
 // ---------------------------------------------------------------------------

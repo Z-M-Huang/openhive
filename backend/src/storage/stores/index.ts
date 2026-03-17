@@ -23,6 +23,7 @@ import type {
   SessionStore,
   MemoryStore,
   MemoryQuery,
+  MemoryChunk,
   IntegrationStore,
   CredentialStore,
   Transactor,
@@ -380,6 +381,24 @@ export function newTaskStore(db: Database): TaskStore {
         visited.clear();
         dfs(blockerId, [taskId]);
       }
+    },
+
+    async getRecentUserTasks(agentAid: string, limit: number): Promise<Task[]> {
+      const rows = db.getDB()
+        .select()
+        .from(schema.tasks)
+        .where(
+          and(
+            eq(schema.tasks.agent_aid, agentAid),
+            sql`${schema.tasks.origin_chat_jid} IS NOT NULL`,
+            sql`(${schema.tasks.parent_id} IS NULL OR ${schema.tasks.parent_id} = '')`,
+            eq(schema.tasks.status, 'completed'),
+          )
+        )
+        .orderBy(desc(schema.tasks.created_at))
+        .limit(limit)
+        .all();
+      return rows.map(rowToTask);
     },
   };
 }
@@ -843,14 +862,98 @@ export function newSessionStore(db: Database): SessionStore {
 }
 
 // ---------------------------------------------------------------------------
+// Memory search helpers
+// ---------------------------------------------------------------------------
+
+/** Cosine similarity between two vectors. */
+function cosineSimilarity(a: Float32Array, b: Float32Array): number {
+  if (a.length !== b.length) return 0;
+  let dot = 0, normA = 0, normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  const denom = Math.sqrt(normA) * Math.sqrt(normB);
+  return denom === 0 ? 0 : dot / denom;
+}
+
+/** Apply type-based temporal decay: curated = no decay, daily = 30-day half-life. */
+function applyDecayForEntry(entry: MemoryEntry, score: number): number {
+  if (entry.memory_type === 'curated') return score; // No decay for curated
+  const ageDays = (Date.now() - entry.created_at) / (24 * 60 * 60 * 1000);
+  return score * Math.exp(-Math.LN2 / 30 * ageDays);
+}
+
+/** Apply temporal decay to a list of entries, re-sorting by decayed score. */
+function applyTemporalDecay(entries: MemoryEntry[]): MemoryEntry[] {
+  const scored = entries.map((entry, i) => ({
+    entry,
+    score: applyDecayForEntry(entry, 1 - i / Math.max(entries.length, 1)),
+  }));
+  scored.sort((a, b) => b.score - a.score);
+  return scored.map(s => s.entry);
+}
+
+/** MMR reranking for diversity. Lambda controls relevance vs diversity trade-off. */
+function mmrRerank(
+  scored: Array<{ entry: MemoryEntry; score: number }>,
+  _queryEmbedding: Float32Array,
+  limit: number,
+  lambda: number,
+): Array<{ entry: MemoryEntry; score: number }> {
+  if (scored.length <= limit) return scored;
+
+  const selected: Array<{ entry: MemoryEntry; score: number }> = [];
+  const remaining = [...scored];
+
+  while (selected.length < limit && remaining.length > 0) {
+    let bestIdx = 0;
+    let bestMmr = -Infinity;
+
+    for (let i = 0; i < remaining.length; i++) {
+      const relevance = remaining[i].score;
+      // Max similarity to already selected (simple: use score overlap as proxy)
+      let maxSim = 0;
+      for (const s of selected) {
+        // Content overlap as diversity proxy (avoids needing embeddings for all pairs)
+        const overlap = contentOverlap(remaining[i].entry.content, s.entry.content);
+        if (overlap > maxSim) maxSim = overlap;
+      }
+      const mmr = lambda * relevance - (1 - lambda) * maxSim;
+      if (mmr > bestMmr) {
+        bestMmr = mmr;
+        bestIdx = i;
+      }
+    }
+
+    selected.push(remaining[bestIdx]);
+    remaining.splice(bestIdx, 1);
+  }
+
+  return selected;
+}
+
+/** Simple word-overlap similarity for MMR diversity (avoids embedding dependency). */
+function contentOverlap(a: string, b: string): number {
+  const wordsA = new Set(a.toLowerCase().split(/\s+/));
+  const wordsB = new Set(b.toLowerCase().split(/\s+/));
+  let intersection = 0;
+  for (const w of wordsA) if (wordsB.has(w)) intersection++;
+  const union = wordsA.size + wordsB.size - intersection;
+  return union === 0 ? 0 : intersection / union;
+}
+
+// ---------------------------------------------------------------------------
 // MemoryStore
 // ---------------------------------------------------------------------------
 
 export function newMemoryStore(db: Database): MemoryStore {
   return {
-    async save(entry: MemoryEntry): Promise<void> {
+    async save(entry: MemoryEntry): Promise<number> {
+      let insertedId = 0;
       await db.enqueueWrite(() => {
-        db.getDB().insert(schema.agentMemories).values({
+        const result = db.getDB().insert(schema.agentMemories).values({
           agent_aid: entry.agent_aid,
           team_slug: entry.team_slug,
           content: entry.content,
@@ -858,7 +961,9 @@ export function newMemoryStore(db: Database): MemoryStore {
           created_at: entry.created_at,
           deleted_at: entry.deleted_at,
         }).run();
+        insertedId = Number(result.lastInsertRowid);
       });
+      return insertedId;
     },
 
     async search(query: MemoryQuery): Promise<MemoryEntry[]> {
@@ -963,6 +1068,114 @@ export function newMemoryStore(db: Database): MemoryStore {
           )
           .run();
         return result.changes;
+      });
+    },
+
+    async searchBM25(query: string, agentAid: string, limit = 10): Promise<MemoryEntry[]> {
+      // Try FTS5 first, fall back to LIKE
+      try {
+        const rows = db.getDB().all<Record<string, unknown>>(sql`
+          SELECT m.* FROM agent_memories_fts fts
+          JOIN agent_memories m ON m.id = fts.rowid
+          WHERE fts.content MATCH ${query}
+            AND m.agent_aid = ${agentAid}
+            AND m.deleted_at IS NULL
+          ORDER BY rank
+          LIMIT ${limit}
+        `);
+        return rows.map(row => rowToMemoryEntry(row as typeof schema.agentMemories.$inferSelect));
+      } catch {
+        // FTS5 not available — fall back to LIKE
+        const escapedQuery = query.replace(/[%_]/g, '\\$&');
+        const rows = db.getDB()
+          .select()
+          .from(schema.agentMemories)
+          .where(
+            and(
+              eq(schema.agentMemories.agent_aid, agentAid),
+              isNull(schema.agentMemories.deleted_at),
+              sql`${schema.agentMemories.content} LIKE ${'%' + escapedQuery + '%'} ESCAPE '\\'`,
+            )
+          )
+          .orderBy(desc(schema.agentMemories.created_at))
+          .limit(limit)
+          .all();
+        return rows.map(rowToMemoryEntry);
+      }
+    },
+
+    async searchHybrid(query: string, agentAid: string, queryEmbedding?: Float32Array, limit = 10): Promise<MemoryEntry[]> {
+      // Step 1: BM25 candidates (top 100)
+      const bm25Results = await this.searchBM25(query, agentAid, 100);
+
+      if (!queryEmbedding || bm25Results.length === 0) {
+        // No embedding available — return BM25 results with type-based decay
+        return applyTemporalDecay(bm25Results).slice(0, limit);
+      }
+
+      // Step 2: Load chunks for BM25 candidates and compute cosine similarity
+      const scored: Array<{ entry: MemoryEntry; score: number }> = [];
+      for (const entry of bm25Results) {
+        const chunks = await this.getChunks(entry.id);
+        if (chunks.length === 0) {
+          // No embeddings — use BM25 rank position as score
+          const bm25Score = 1 - (bm25Results.indexOf(entry) / bm25Results.length);
+          scored.push({ entry, score: applyDecayForEntry(entry, bm25Score) });
+          continue;
+        }
+
+        // Best chunk cosine similarity
+        let bestSim = 0;
+        for (const chunk of chunks) {
+          const sim = cosineSimilarity(queryEmbedding, chunk.embedding);
+          if (sim > bestSim) bestSim = sim;
+        }
+
+        // Hybrid merge: 0.7 * vector + 0.3 * BM25
+        const bm25Score = 1 - (bm25Results.indexOf(entry) / bm25Results.length);
+        const hybridScore = 0.7 * bestSim + 0.3 * bm25Score;
+        scored.push({ entry, score: applyDecayForEntry(entry, hybridScore) });
+      }
+
+      // Step 3: Sort by score descending
+      scored.sort((a, b) => b.score - a.score);
+
+      // Step 4: MMR reranking (lambda=0.7)
+      const selected = mmrRerank(scored, queryEmbedding, limit, 0.7);
+
+      return selected.map(s => s.entry);
+    },
+
+    async saveChunks(memoryId: number, chunks: Array<{ content: string; embedding: Float32Array; embeddingModel: string }>): Promise<void> {
+      await db.enqueueWrite(() => {
+        for (let i = 0; i < chunks.length; i++) {
+          const chunk = chunks[i];
+          db.getDB().run(sql`
+            INSERT INTO memory_chunks (memory_id, chunk_index, content, embedding, embedding_model, created_at)
+            VALUES (${memoryId}, ${i}, ${chunk.content}, ${Buffer.from(chunk.embedding.buffer)}, ${chunk.embeddingModel}, ${Date.now()})
+          `);
+        }
+      });
+    },
+
+    async getChunks(memoryId: number): Promise<MemoryChunk[]> {
+      const rows = db.getDB().all<Record<string, unknown>>(sql`
+        SELECT * FROM memory_chunks WHERE memory_id = ${memoryId} ORDER BY chunk_index
+      `);
+      return rows.map(row => ({
+        id: row.id as number,
+        memory_id: row.memory_id as number,
+        chunk_index: row.chunk_index as number,
+        content: row.content as string,
+        embedding: new Float32Array((row.embedding as Buffer).buffer),
+        embedding_model: row.embedding_model as string,
+        created_at: row.created_at as number,
+      }));
+    },
+
+    async deleteChunks(memoryId: number): Promise<void> {
+      await db.enqueueWrite(() => {
+        db.getDB().run(sql`DELETE FROM memory_chunks WHERE memory_id = ${memoryId}`);
       });
     },
   };

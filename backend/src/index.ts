@@ -46,7 +46,8 @@
  * @module
  */
 
-import { resolve } from 'node:path';
+import { resolve, join } from 'node:path';
+import { mkdir, writeFile } from 'node:fs/promises';
 import Dockerode from 'dockerode';
 
 // INV-09: Invariants in code, policies in skills
@@ -95,6 +96,63 @@ import { LogLevel, ChannelType, ProviderType } from './domain/enums.js';
 import { DomainError, NotFoundError, mapDomainErrorToWSError } from './domain/errors.js';
 import type { Logger, LogSink, OrgChartTeam, OrgChartAgent, SessionStore, MCPServerConfig, TaskStore, MessageStore, LogStore, MemoryStore, IntegrationStore, CredentialStore, ToolCallStore, ResolvedProvider, AgentInitConfig } from './domain/interfaces.js';
 import { resolveSecretsTemplatesInObject } from './mcp/tools/index.js';
+
+// ---------------------------------------------------------------------------
+// Root workspace CLAUDE.md — instructs the SDK subprocess about MCP tools
+// ---------------------------------------------------------------------------
+
+const ROOT_WORKSPACE_CLAUDE_MD = `# OpenHive Assistant
+
+You are an AI assistant running inside OpenHive. You have 23 management tools available via MCP.
+
+## CRITICAL: Use MCP Tools for System Operations
+
+You MUST use the following MCP tools — do NOT write files directly for these operations:
+
+| Task | Tool to Use | Do NOT |
+|------|-------------|--------|
+| Remember facts | \`save_memory\` | Write to MEMORY.md directly |
+| Search memories | \`recall_memory\` | Read MEMORY.md directly |
+| Create an agent | \`create_agent\` | Write .claude/agents/*.md directly |
+| Schedule recurring task | \`register_trigger\` | Suggest crontab or write YAML |
+| Create a task for an agent | \`create_task\` | Describe what should happen without creating a task |
+| Register HTTP endpoint | \`register_webhook\` | Write server config directly |
+
+Writing files directly does NOT register them in the system. Only MCP tool calls update the database, org chart, and trigger scheduler.
+
+## HTTP Calls
+
+You CAN make HTTP calls. Use the built-in HTTP client:
+\`\`\`bash
+bun run /app/common/scripts/http-client.ts https://example.com/api --method POST --data '{"key":"value"}'
+\`\`\`
+This client has SSRF protection and timeout handling. You can also use curl via Bash.
+
+## Creating Agents
+
+When you create an agent with \`create_agent\`, include a DETAILED description that covers:
+- What the agent does (full job description)
+- Step-by-step instructions for its workflow
+- API endpoints, credentials, entity IDs it needs
+- Decision rules and thresholds
+- What to do on success vs failure
+
+Do NOT create minimal agents with just a name. The description IS the agent's system prompt.
+Check if an agent already exists before creating a duplicate — use \`inspect_topology\` first.
+
+## Available Tools (23)
+
+**Container:** spawn_container, stop_container, list_containers
+**Team:** create_team, create_agent
+**Task:** create_task, dispatch_subtask, update_task_status
+**Messaging:** send_message
+**Orchestration:** escalate
+**Memory:** save_memory, recall_memory
+**Integration:** create_integration, test_integration, activate_integration
+**Secrets:** get_credential, set_credential
+**Query:** get_team, get_task, get_health, inspect_topology
+**Event:** register_webhook, register_trigger
+`;
 
 // ---------------------------------------------------------------------------
 // Global State (for shutdown handling)
@@ -1062,6 +1120,12 @@ async function initializeRootMode(
   }
   agentExecutor.setTaskStore(taskStore);
 
+  // Wire memory file writer for post-task auto-save to daily logs
+  const memoryFileWriter = orchestrator.getMemoryFileWriter();
+  if (memoryFileWriter) {
+    agentExecutor.setMemoryFileWriter(memoryFileWriter);
+  }
+
   // Build AgentInitConfig for the main assistant
   const mainAssistantProvider = resolveProviderPreset(assistantConfig.provider);
   const mainAssistantInitConfig: AgentInitConfig = {
@@ -1074,6 +1138,15 @@ async function initializeRootMode(
     tools: [], // Empty = all tools allowed (main assistant has full access)
     provider: mainAssistantProvider,
   };
+
+  // Write root workspace CLAUDE.md so the SDK subprocess knows about MCP tools
+  try {
+    await mkdir(join('/app/workspace', '.claude'), { recursive: true });
+    await writeFile(join('/app/workspace', '.claude', 'CLAUDE.md'), ROOT_WORKSPACE_CLAUDE_MD, 'utf-8');
+    logger.info('Root workspace CLAUDE.md written');
+  } catch (err) {
+    logger.warn('Failed to write root CLAUDE.md', { error: String(err) });
+  }
 
   try {
     await agentExecutor.start(mainAssistantInitConfig, '/app/workspace');

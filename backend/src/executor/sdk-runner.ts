@@ -2,7 +2,7 @@
  * SDK runner — bridges OpenHive tool handlers to the Claude Agent SDK.
  *
  * Uses the SDK's programmatic API (`query()` + `createSdkMcpServer()`) to run
- * agents with OpenHive's 22 built-in MCP tools injected as an in-process server.
+ * agents with OpenHive's 23 built-in MCP tools injected as an in-process server.
  *
  * ## How It Works
  *
@@ -26,7 +26,7 @@ import { TOOL_SCHEMAS } from '../mcp/tools/index.js';
 // Tool descriptions (one-line summaries for the MCP server catalog)
 // ---------------------------------------------------------------------------
 
-/** Human-readable description for each of the 22 tools. */
+/** Human-readable description for each of the 23 tools. */
 export const TOOL_DESCRIPTIONS: Record<string, string> = {
   spawn_container: 'Create and start a new Docker container for a team',
   stop_container: 'Stop a running team container gracefully',
@@ -50,6 +50,7 @@ export const TOOL_DESCRIPTIONS: Record<string, string> = {
   get_health: 'Get system or team health information',
   inspect_topology: 'Inspect the full team/agent hierarchy',
   register_webhook: 'Register an HTTP webhook endpoint for external events',
+  register_trigger: 'Register a cron trigger to schedule recurring tasks',
 };
 
 // ---------------------------------------------------------------------------

@@ -56,3 +56,53 @@ test_cases:
         command: "echo 'List all memories you have saved' | timeout 300 bun run cli/index.ts 2>&1"
         expected: "[Assistant]"
     expected_outcome: "Previously saved memories are still retrievable, confirming dual-write persistence"
+
+  - name: Append preserves prior curated content
+    description: Saving a second curated memory does not overwrite the first -- both entries are present in MEMORY.md
+    steps:
+      - action: "Save first curated memory"
+        command: "echo 'Save this as curated memory: CI pipeline uses GitHub Actions with 4 parallel runners' | timeout 300 bun run cli/index.ts 2>&1"
+        expected: "[Assistant]"
+      - action: "Save second curated memory"
+        command: "echo 'Save this as curated memory: Staging environment is deployed to us-west-2 region' | timeout 300 bun run cli/index.ts 2>&1"
+        expected: "[Assistant]"
+      - action: "Verify both entries are present in the memory file"
+        command: "cat $(find /app/openhive/.run/workspace/memory -name 'MEMORY.md' 2>/dev/null | head -1) 2>&1"
+        expected: "GitHub Actions"
+    expected_outcome: "MEMORY.md contains both the CI pipeline entry and the staging environment entry, confirming append does not clobber prior curated content"
+
+  - name: Curated vs daily file routing
+    description: Curated and daily memories are written to separate files or sections, not mixed together
+    steps:
+      - action: "Save a curated memory"
+        command: "echo 'Save this as curated memory: The SLA target is 99.95 percent uptime' | timeout 300 bun run cli/index.ts 2>&1"
+        expected: "[Assistant]"
+      - action: "Save a daily memory"
+        command: "echo 'Record as daily memory: Today we discussed load balancer tuning' | timeout 300 bun run cli/index.ts 2>&1"
+        expected: "[Assistant]"
+      - action: "Check that memory files exist and content is routed correctly"
+        command: "find /app/openhive/.run/workspace/memory -name '*.md' -exec echo '--- {} ---' \\; -exec cat {} \\; 2>&1"
+        expected: "99.95"
+    expected_outcome: "Curated memory (SLA target) is stored in MEMORY.md and daily memory (load balancer) is stored in a date-stamped daily file or separate section, confirming proper file routing"
+
+  - name: 200-line cap enforcement
+    description: Memory files do not exceed approximately 200 lines -- older entries are pruned or summarized
+    steps:
+      - action: "Rapidly save many memory entries to approach the cap"
+        command: "for i in $(seq 1 25); do echo \"Save this as curated memory: Test entry number $i with padding text to fill lines for cap enforcement testing\" | timeout 300 bun run cli/index.ts 2>&1 | tail -1; done"
+        expected: "[Assistant]"
+      - action: "Check line count of the memory file"
+        command: "wc -l $(find /app/openhive/.run/workspace/memory -name 'MEMORY.md' 2>/dev/null | head -1) 2>&1"
+        expected: ""
+    expected_outcome: "MEMORY.md line count stays at or below approximately 200 lines, confirming the cap is enforced by pruning or summarizing older entries"
+
+  - name: recall_memory finds saved content via keyword
+    description: recall_memory tool returns previously saved content when searched by a specific keyword
+    steps:
+      - action: "Save a memory with a distinctive keyword"
+        command: "echo 'Save this as curated memory: The Kubernetes cluster uses Istio service mesh version 1.20' | timeout 300 bun run cli/index.ts 2>&1"
+        expected: "[Assistant]"
+      - action: "Recall memory using the keyword"
+        command: "echo 'Use recall_memory to search for memories about Istio' | timeout 300 bun run cli/index.ts 2>&1"
+        expected: "Istio"
+    expected_outcome: "recall_memory returns the saved entry about Istio service mesh when queried by keyword, confirming keyword-based retrieval works"

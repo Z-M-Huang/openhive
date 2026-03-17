@@ -29,9 +29,9 @@ vi.mock('discord.js', () => {
   return {
     Client: vi.fn(() => mockClient),
     GatewayIntentBits: {
-      Guilds: 1,
-      GuildMessages: 2,
-      MessageContent: 4,
+      Guilds: 1 << 0,       // 1
+      GuildMessages: 1 << 9, // 512
+      MessageContent: 1 << 15, // 32768
     },
     Partials: {
       Channel: 0,
