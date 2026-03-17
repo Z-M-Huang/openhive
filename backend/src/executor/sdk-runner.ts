@@ -169,10 +169,6 @@ export interface RunAgentQueryOptions {
   sessionId?: string;
   /**
    * Continue the most recent conversation in the current directory.
-   * Mutually exclusive with `sessionId`. When true, the SDK resumes
-   * the latest session automatically (provider-agnostic, local state).
-   */
-  continue?: boolean;
   /** Maximum conversation turns (default: 200). */
   maxTurns?: number;
   /** Abort controller for cancellation. */
@@ -217,7 +213,8 @@ export async function runAgentQuery(opts: RunAgentQueryOptions): Promise<AgentQu
         cwd: opts.cwd,
         systemPrompt: opts.systemPrompt,
         sessionId: opts.sessionId,
-        continue: opts.continue,
+        // Note: Do NOT use `continue: true` — it resumes the last session on disk,
+        // which may be from a different conversation. Use sessionId for explicit resumption.
         maxTurns: opts.maxTurns ?? 200,
         permissionMode: 'bypassPermissions',
         mcpServers: mcpServers as Record<string, import('@anthropic-ai/claude-agent-sdk').McpServerConfig>,

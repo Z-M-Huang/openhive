@@ -64,6 +64,17 @@ test_cases:
         expected: "MEMORY.md"
     expected_outcome: "At least one MEMORY.md file exists under .run/workspace/memory/<agent-aid>/"
 
+  - name: No stale session bleed (new connections start fresh)
+    description: After discussing topic A, disconnect, reconnect, ask about unrelated topic B. The response should NOT reference topic A unless it was explicitly saved to memory.
+    steps:
+      - action: "Discuss a specific topic (irrigation) in first session"
+        command: "echo 'Tell me about drip irrigation systems for tomatoes' | timeout 120 bun run cli/index.ts 2>&1"
+        expected: "[Assistant]"
+      - action: "Disconnect, reconnect, ask about a completely different topic"
+        command: "sleep 3 && echo 'What is the capital of France?' | timeout 120 bun run cli/index.ts 2>&1"
+        expected: "Paris"
+    expected_outcome: "The response about France should mention Paris and NOT reference irrigation, tomatoes, or drip systems — proving that new connections don't inherit stale session context"
+
   - name: Recent history context on reconnect (Tier 3)
     description: Send several messages, disconnect, reconnect, and ask about previous topics. The assistant should reference recent conversation from task history.
     steps:

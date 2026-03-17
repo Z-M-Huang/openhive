@@ -210,10 +210,11 @@ export class AgentExecutorImpl implements AgentExecutor {
       }
       sdkEnv['CLAUDE_CODE_SUBAGENT_MODEL'] = modelAlias;
 
-      // --- Tier 1: Session continuity ---
-      // Use `continue: true` to resume the most recent SDK session in the
-      // agent's working directory. This is provider-agnostic (local state).
-      const shouldContinue = tracked.sessionId !== undefined;
+      // --- Tier 1: Session continuity (within same connection) ---
+      // Reuse tracked.sessionId for subsequent queries from the same agent.
+      // On first query (new WS connection), sessionId is undefined → fresh session.
+      // DO NOT use `continue: true` — it resumes the LAST session file on disk,
+      // which may be from a completely different conversation (stale session bleed).
 
       // --- Tier 2: MEMORY.md auto-injection + memory management instructions ---
       let enrichedSystemPrompt = tracked.config.systemPrompt ?? '';
@@ -229,7 +230,7 @@ export class AgentExecutorImpl implements AgentExecutor {
       }
 
       // --- Tier 3: Recent history (new sessions only) ---
-      if (!shouldContinue && this.taskStore) {
+      if (!tracked.sessionId && this.taskStore) {
         try {
           const recentHistory = await this._getRecentHistory(agentAid);
           if (recentHistory) {
@@ -261,7 +262,7 @@ export class AgentExecutorImpl implements AgentExecutor {
         model: modelAlias,
         cwd: tracked.workspacePath,
         systemPrompt: enrichedSystemPrompt,
-        continue: shouldContinue,
+        sessionId: tracked.sessionId,
         maxTurns: 200,
         abortController: tracked.abortController,
         env: sdkEnv,
