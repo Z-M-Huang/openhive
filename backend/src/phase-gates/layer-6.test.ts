@@ -1186,9 +1186,9 @@ describe('Layer 6: MCP Tools + Skills', () => {
       expect(crossResult.error_code).toBe(WSErrorCode.AccessDenied);
     });
 
-    it('should verify all 23 tool schemas are defined', () => {
+    it('should verify all 25 tool schemas are defined', () => {
       const schemaKeys = Object.keys(TOOL_SCHEMAS);
-      expect(schemaKeys).toHaveLength(23);
+      expect(schemaKeys).toHaveLength(25);
 
       // Verify critical tools are present
       const expectedTools = [
@@ -1208,12 +1208,12 @@ describe('Layer 6: MCP Tools + Skills', () => {
       }
     });
 
-    it('should verify createToolHandlers returns 23 handlers', () => {
+    it('should verify createToolHandlers returns 25 handlers', () => {
       const ctx = createMockToolContext();
       setupOrgChart(ctx.orgChart as OrgChartImpl);
 
       const handlers = createToolHandlers(ctx);
-      expect(handlers.size).toBe(23);
+      expect(handlers.size).toBe(25);
     });
 
     it('should wire MCPBridge round-trip with SDKToolHandler', async () => {

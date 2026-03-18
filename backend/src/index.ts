@@ -1114,6 +1114,7 @@ async function initializeRootMode(
     limits: masterConfig.limits,
     archiveDir: masterConfig.server.log_archive.archive_dir,
     dataDir: masterConfig.server.data_dir,
+    skillRegistries: masterConfig.skill_registries,
   }, true);
 
   shutdownState.stores = {
@@ -1381,6 +1382,7 @@ async function initializeNonRootMode(logger: Logger): Promise<void> {
     'get_credential', 'set_credential',
     'get_team', 'get_task', 'get_health', 'inspect_topology',
     'register_webhook', 'register_trigger',
+    'search_skill', 'install_skill',
   ];
 
   const bridgedHandlers = new Map<string, ToolHandler>();

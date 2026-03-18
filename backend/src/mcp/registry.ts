@@ -106,11 +106,13 @@ const MAIN_ASSISTANT_TOOLS: ReadonlySet<string> = new Set([
   'inspect_topology',
   'register_webhook',
   'register_trigger',
+  'search_skill',
+  'install_skill',
 ]);
 
 /**
  * Tools accessible by the `team_lead` role.
- * Team-scoped access (20 tools). Cannot manage containers directly.
+ * Team-scoped access. Cannot manage containers directly.
  */
 const TEAM_LEAD_TOOLS: ReadonlySet<string> = new Set([
   'create_team',
@@ -133,6 +135,8 @@ const TEAM_LEAD_TOOLS: ReadonlySet<string> = new Set([
   'inspect_topology',
   'register_webhook',
   'register_trigger',
+  'search_skill',
+  'install_skill',
 ]);
 
 /**

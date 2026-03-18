@@ -51,6 +51,8 @@ export const TOOL_DESCRIPTIONS: Record<string, string> = {
   inspect_topology: 'Inspect the full team/agent hierarchy',
   register_webhook: 'Register an HTTP webhook endpoint for external events',
   register_trigger: 'Register a cron trigger to schedule recurring tasks',
+  search_skill: 'Search configured skill registries for skills by keyword',
+  install_skill: 'Install a skill from a configured registry into the team workspace',
 };
 
 // ---------------------------------------------------------------------------

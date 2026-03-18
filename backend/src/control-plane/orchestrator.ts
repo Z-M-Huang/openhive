@@ -90,6 +90,8 @@ export interface OrchestratorDeps {
   archiveDir?: string;
   /** Base data directory used to validate archiveDir is within bounds (AC22). */
   dataDir?: string;
+  /** Configured skill registry URLs from openhive.yaml. */
+  skillRegistries?: string[];
 }
 
 /**
@@ -331,6 +333,7 @@ export class OrchestratorImpl implements Orchestrator {
       workspaceLock: this.deps.workspaceLock,
       memoryFileWriter,
       pendingMemoryWrites,
+      skillRegistries: this.deps.skillRegistries,
       limits: Object.freeze({
         max_depth: this.deps.limits?.max_depth ?? 3,
         max_teams: this.deps.limits?.max_teams ?? 10,

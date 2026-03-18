@@ -348,10 +348,10 @@ function createMockContext(): ToolContext {
 // ---------------------------------------------------------------------------
 
 describe('createToolHandlers', () => {
-  it('creates a Map with 23 handlers', () => {
+  it('creates a Map with 25 handlers', () => {
     const ctx = createMockContext();
     const handlers = createToolHandlers(ctx);
-    expect(handlers.size).toBe(23);
+    expect(handlers.size).toBe(25);
   });
 
   it('all TOOL_NAMES have entries in TOOL_SCHEMAS', () => {
@@ -361,7 +361,7 @@ describe('createToolHandlers', () => {
   });
 
   it('TOOL_COUNT equals 23', () => {
-    expect(TOOL_COUNT).toBe(23);
+    expect(TOOL_COUNT).toBe(25);
   });
 });
 

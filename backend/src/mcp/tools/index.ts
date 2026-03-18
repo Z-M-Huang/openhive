@@ -173,6 +173,8 @@ export interface ToolContext {
    * (create_team, create_agent, stop_container) acquire/release this lock.
    */
   workspaceLock?: WorkspaceLock;
+  /** Configured skill registry URLs for search_skill/install_skill tools. */
+  skillRegistries?: string[];
   /** Frozen configurable limits (CON-01, CON-02, CON-03). Object.freeze() applied at construction site (orchestrator.ts). */
   limits: Readonly<{
     max_depth: number;
@@ -322,6 +324,16 @@ const RegisterWebhookSchema = z.object({
   event_type: z.string().optional(),
 });
 
+const SearchSkillSchema = z.object({
+  query: z.string().min(1).max(200),
+  registry: z.string().url().optional(),
+});
+
+const InstallSkillSchema = z.object({
+  name: z.string().min(1).max(63).regex(/^[a-z0-9]+(-[a-z0-9]+)*$/),
+  registry_url: z.string().url(),
+});
+
 /** Maps each tool name to its Zod schema. */
 export const TOOL_SCHEMAS: Record<string, z.ZodTypeAny> = {
   spawn_container: SpawnContainerSchema,
@@ -352,6 +364,8 @@ export const TOOL_SCHEMAS: Record<string, z.ZodTypeAny> = {
     target_team: z.string().min(1),
     prompt: z.string().min(1).max(2000),
   }),
+  search_skill: SearchSkillSchema,
+  install_skill: InstallSkillSchema,
 };
 
 // ---------------------------------------------------------------------------
@@ -1224,6 +1238,93 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
     return { trigger_name: parsed.name, schedule: parsed.schedule, status: 'registered' };
   });
 
+  // ---- Skill registry tools (2) ----
+
+  handlers.set('search_skill', async (args) => {
+    const parsed = SearchSkillSchema.parse(args);
+    const registries = parsed.registry
+      ? [parsed.registry]
+      : (ctx.skillRegistries ?? []);
+
+    if (registries.length === 0) {
+      return { results: [], message: 'No skill registries configured. Add skill_registries to openhive.yaml.' };
+    }
+
+    const results: Array<{ name: string; description: string; registry_url: string; version?: string }> = [];
+    for (const registryUrl of registries) {
+      try {
+        const url = `${registryUrl.replace(/\/$/, '')}/api/search?q=${encodeURIComponent(parsed.query)}`;
+        const response = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+        if (response.ok) {
+          const data = await response.json() as { skills?: Array<{ name: string; description: string; version?: string }> };
+          if (data.skills) {
+            for (const skill of data.skills) {
+              results.push({ ...skill, registry_url: registryUrl });
+            }
+          }
+        }
+      } catch {
+        // Registry unreachable — skip silently, return partial results
+      }
+    }
+    return { results, registries_searched: registries.length };
+  });
+
+  handlers.set('install_skill', async (args, _agentAid, teamSlug) => {
+    const parsed = InstallSkillSchema.parse(args);
+
+    // Validate registry is in the allowlist
+    const allowedRegistries = ctx.skillRegistries ?? [];
+    if (!allowedRegistries.includes(parsed.registry_url)) {
+      throw new Error(
+        `Registry '${parsed.registry_url}' is not in the configured skill_registries allowlist. ` +
+        `Allowed: ${allowedRegistries.join(', ') || '(none configured)'}`
+      );
+    }
+
+    // Fetch skill content from registry
+    const url = `${parsed.registry_url.replace(/\/$/, '')}/api/skills/${encodeURIComponent(parsed.name)}`;
+    const response = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+    if (!response.ok) {
+      throw new Error(`Failed to fetch skill '${parsed.name}' from ${parsed.registry_url}: HTTP ${response.status}`);
+    }
+
+    const data = await response.json() as { content: string; name: string; description?: string };
+    if (!data.content) {
+      throw new Error(`Skill '${parsed.name}' has no content`);
+    }
+
+    // Validate frontmatter before writing
+    if (!data.content.startsWith('---')) {
+      throw new Error(`Skill '${parsed.name}' is missing YAML frontmatter`);
+    }
+
+    // Write to team workspace (INV-08: team-scoped isolation)
+    const { mkdir: mkdirFs, writeFile: writeFileFs } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+
+    // Resolve workspace path from org chart
+    const team = ctx.orgChart.getTeamBySlug(teamSlug);
+    const workspacePath = team?.workspacePath ?? '/app/workspace';
+    const skillDir = join(workspacePath, '.claude', 'skills', parsed.name);
+
+    await mkdirFs(skillDir, { recursive: true });
+    await writeFileFs(join(skillDir, 'SKILL.md'), data.content, 'utf-8');
+
+    ctx.logger.info('Skill installed from registry', {
+      name: parsed.name,
+      registry: parsed.registry_url,
+      team_slug: teamSlug,
+      path: join(skillDir, 'SKILL.md'),
+    });
+
+    return {
+      installed_path: join(skillDir, 'SKILL.md'),
+      name: parsed.name,
+      description: data.description ?? '',
+    };
+  });
+
   return handlers;
 }
 
@@ -1405,4 +1506,4 @@ export class SDKToolHandler {
 export const TOOL_NAMES: ReadonlyArray<string> = Object.keys(TOOL_SCHEMAS);
 
 /** Total number of built-in tools. */
-export const TOOL_COUNT = 23;
+export const TOOL_COUNT = 25;

@@ -122,6 +122,7 @@ const QUERY_TOOLS: ReadonlySet<string> = new Set([
   'recall_memory',
   'get_credential',
   'list_containers',
+  'search_skill',
 ]);
 
 /**
@@ -163,6 +164,7 @@ const MUTATING_TOOLS: ReadonlySet<string> = new Set([
   'save_memory',
   'set_credential',
   'register_webhook',
+  'install_skill',
 ]);
 
 /**
