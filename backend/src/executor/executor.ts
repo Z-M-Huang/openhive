@@ -32,6 +32,49 @@ import {
 const DEFAULT_QUERY_TIMEOUT_MS = 300_000;
 
 // ---------------------------------------------------------------------------
+// Personal info extraction (deterministic, no LLM needed)
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract personal facts from a user message for curated auto-save.
+ * Returns a summary string if personal info is detected, null otherwise.
+ * Uses lightweight regex patterns — not exhaustive but catches common patterns.
+ */
+function extractPersonalFacts(text: string): string | null {
+  const facts: string[] = [];
+  const lower = text.toLowerCase();
+
+  // Name patterns: "I'm X", "my name is X", "I am X"
+  const nameMatch = text.match(/(?:I'm|I am|my name is)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/);
+  if (nameMatch) facts.push(`Name: ${nameMatch[1]}`);
+
+  // Location: "in City, ST", "in City ST", "I live in X", "based in X"
+  const locMatch = text.match(/(?:I (?:live|am|'m) in|located in|based in|in)\s+([A-Z][a-zA-Z\s]+,\s*[A-Z]{2})\b/);
+  if (locMatch) facts.push(`Location: ${locMatch[1].trim()}`);
+
+  // Company/org: "at X Inc/Corp/LLC/Co", "my company is X", "I work at X", "I run X", "called X"
+  const compMatch = text.match(/(?:at|my company is|I (?:work|am) at|I run|called)\s+([A-Z][A-Za-z\s]+(?:Inc|Corp|LLC|Co|Ltd|Systems|Tech|Pro|Labs|Studio|Group)?)\b/);
+  if (compMatch) facts.push(`Work: ${compMatch[1].trim()}`);
+
+  // Role: "I'm a X at", "I am a X", "my role is X", "I'm the X"
+  const roleMatch = text.match(/(?:I'm a|I am a|my role is|I'm the)\s+([a-z][^.!?]{2,40?})(?:\s+at\b|[.,])/i);
+  if (roleMatch) facts.push(`Role: ${roleMatch[1].trim()}`);
+
+  // API/URL: explicit URLs or tokens shared
+  if (lower.includes('url') || lower.includes('token') || lower.includes('api key') || lower.includes('endpoint')) {
+    const urlMatch = text.match(/https?:\/\/[^\s,]+/);
+    if (urlMatch) facts.push(`URL: ${urlMatch[0]}`);
+  }
+
+  // Entity IDs: HomeAssistant, IoT, etc.
+  const entityMatch = text.match(/(?:entity|entity_id|script)\.\w[\w.]+/i);
+  if (entityMatch) facts.push(`Entity: ${entityMatch[0]}`);
+
+  if (facts.length === 0) return null;
+  return facts.join('. ') + '.';
+}
+
+// ---------------------------------------------------------------------------
 // Tracked agent state
 // ---------------------------------------------------------------------------
 
@@ -376,22 +419,38 @@ CRITICAL: Writing files directly does NOT register agents, triggers, or memories
           source: 'executor',
         });
 
-        // Post-task auto-save: append conversation summary to daily log (best-effort)
+        // Post-task auto-save: daily log + curated personal info extraction (best-effort)
         if (this.memoryFileWriter && result.output) {
+          const teamSlug = this._resolveTeamSlug(tracked.config);
+          // 1. Daily log: conversation summary
           try {
             const promptSnippet = prompt.length > 100 ? prompt.slice(0, 100) + '...' : prompt;
             const resultSnippet = result.output.length > 200 ? result.output.slice(0, 200) + '...' : result.output;
-            const summaryLine = `User: ${promptSnippet} → Assistant: ${resultSnippet}`;
-            const teamSlug = this._resolveTeamSlug(tracked.config);
             await this.memoryFileWriter(agentAid, teamSlug, {
               id: 0,
-              content: summaryLine,
+              content: `User: ${promptSnippet} → Assistant: ${resultSnippet}`,
               memory_type: 'daily',
               created_at: Date.now(),
             });
-          } catch {
-            // Best-effort — auto-save failure must NOT affect task completion
-          }
+          } catch { /* best-effort */ }
+
+          // 2. Curated auto-extract: detect personal info the LLM may not have saved
+          try {
+            const facts = extractPersonalFacts(prompt);
+            if (facts) {
+              await this.memoryFileWriter(agentAid, teamSlug, {
+                id: 0,
+                content: facts,
+                memory_type: 'curated',
+                created_at: Date.now(),
+              });
+              // Also index in SQLite if taskStore is available
+              if (this.taskStore) {
+                // Use the memoryStore via the save path (already handled by memoryFileWriter + tool handler)
+                // The curated file write is the source of truth; SQLite is best-effort
+              }
+            }
+          } catch { /* best-effort */ }
         }
       }
 
