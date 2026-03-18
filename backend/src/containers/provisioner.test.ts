@@ -56,7 +56,9 @@ describe('ContainerProvisionerImpl', () => {
 
       // Verify settings.json
       const settings = JSON.parse(await readFile(join(wsPath, '.claude/settings.json'), 'utf-8'));
-      expect(settings).toEqual({ allowedTools: [] });
+      expect(settings.permissions).toBeDefined();
+      expect(settings.permissions.allow).toContain('mcp__openhive-tools');
+      expect(settings.enableAllProjectMcpServers).toBe(true);
     });
 
     it('rejects reserved slugs', async () => {
@@ -227,7 +229,12 @@ describe('ContainerProvisionerImpl', () => {
 
       const raw = await readFile(join(wsPath, '.claude/settings.json'), 'utf-8');
       const parsed = JSON.parse(raw);
-      expect(parsed).toEqual({ allowedTools: tools });
+      expect(parsed.permissions).toBeDefined();
+      expect(parsed.permissions.allow).toContain('mcp__openhive-tools');
+      expect(parsed.permissions.allow).toContain('mcp__openhive-tools__send_message');
+      expect(parsed.permissions.allow).toContain('mcp__openhive-tools__escalate');
+      expect(parsed.permissions.allow).toContain('mcp__openhive-tools__save_memory');
+      expect(parsed.enableAllProjectMcpServers).toBe(true);
     });
   });
 

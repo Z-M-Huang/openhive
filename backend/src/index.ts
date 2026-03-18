@@ -1125,6 +1125,7 @@ async function initializeRootMode(
   if (memoryFileWriter) {
     agentExecutor.setMemoryFileWriter(memoryFileWriter);
   }
+  agentExecutor.setMemoryStore(memoryStore);
 
   // Build AgentInitConfig for the main assistant
   const mainAssistantProvider = resolveProviderPreset(assistantConfig.provider);

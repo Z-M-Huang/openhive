@@ -117,6 +117,7 @@ export class AgentExecutorImpl implements AgentExecutor {
   private readonly logger: Logger;
   private toolHandlers?: Map<string, ToolHandler>;
   private taskStore?: TaskStore;
+  private memoryStore?: import('../domain/interfaces.js').MemoryStore;
   private memoryFileWriter?: (agentAid: string, teamSlug: string, entry: {
     id: number; content: string; memory_type: 'curated' | 'daily'; created_at: number;
   }) => Promise<void>;
@@ -143,6 +144,11 @@ export class AgentExecutorImpl implements AgentExecutor {
    */
   setTaskStore(store: TaskStore): void {
     this.taskStore = store;
+  }
+
+  /** Sets the memory store for auto-extracted facts SQLite indexing (dual-write). */
+  setMemoryStore(store: import('../domain/interfaces.js').MemoryStore): void {
+    this.memoryStore = store;
   }
 
   /**
@@ -438,16 +444,25 @@ CRITICAL: Writing files directly does NOT register agents, triggers, or memories
           try {
             const facts = extractPersonalFacts(prompt);
             if (facts) {
+              const createdAt = Date.now();
+              // Dual-write: file (source of truth) + SQLite (searchable index)
               await this.memoryFileWriter(agentAid, teamSlug, {
                 id: 0,
                 content: facts,
                 memory_type: 'curated',
-                created_at: Date.now(),
+                created_at: createdAt,
               });
-              // Also index in SQLite if taskStore is available
-              if (this.taskStore) {
-                // Use the memoryStore via the save path (already handled by memoryFileWriter + tool handler)
-                // The curated file write is the source of truth; SQLite is best-effort
+              // SQLite index for recall_memory search
+              if (this.memoryStore) {
+                await this.memoryStore.save({
+                  id: 0,
+                  agent_aid: agentAid,
+                  team_slug: teamSlug,
+                  content: facts,
+                  memory_type: 'curated',
+                  created_at: createdAt,
+                  deleted_at: null,
+                }).catch(() => {}); // best-effort
               }
             }
           } catch { /* best-effort */ }

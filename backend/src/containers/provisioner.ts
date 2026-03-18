@@ -139,7 +139,18 @@ export class ContainerProvisionerImpl implements ContainerProvisioner {
 
     await writeFile(
       resolve(fullPath, '.claude/settings.json'),
-      JSON.stringify({ allowedTools: [] }, null, 2) + '\n',
+      JSON.stringify({
+        permissions: {
+          allow: [
+            'mcp__openhive-tools',
+            'Bash',
+            'Read',
+            'Write',
+            'Edit',
+          ],
+        },
+        enableAllProjectMcpServers: true,
+      }, null, 2) + '\n',
       'utf-8',
     );
 
@@ -190,8 +201,27 @@ export class ContainerProvisionerImpl implements ContainerProvisioner {
     this.assertWithinWorkspaceRoot(workspacePath);
     await this.assertDirectoryExists(workspacePath);
 
+    // Claude Code permissions format: tool patterns in allow array
+    const mcpTools = allowedTools
+      .filter(t => !['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep'].includes(t))
+      .map(t => `mcp__openhive-tools__${t}`);
+
+    const settings = {
+      permissions: {
+        allow: [
+          'mcp__openhive-tools',  // Allow all MCP tools as fallback
+          ...mcpTools,             // Also list individual tools for clarity
+          'Bash',
+          'Read',
+          'Write',
+          'Edit',
+        ],
+      },
+      enableAllProjectMcpServers: true,
+    };
+
     const filePath = resolve(workspacePath, '.claude/settings.json');
-    await writeFile(filePath, JSON.stringify({ allowedTools }, null, 2) + '\n', 'utf-8');
+    await writeFile(filePath, JSON.stringify(settings, null, 2) + '\n', 'utf-8');
   }
 
   async deleteWorkspace(workspacePath: string): Promise<void> {

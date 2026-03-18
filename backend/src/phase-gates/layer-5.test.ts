@@ -220,7 +220,8 @@ describe('Layer 5: Containers', () => {
       const settings = JSON.parse(
         fs.readFileSync(path.join(workspacePath, '.claude/settings.json'), 'utf-8'),
       ) as Record<string, unknown>;
-      expect(settings).toHaveProperty('allowedTools');
+      expect(settings).toHaveProperty('permissions');
+      expect(settings).toHaveProperty('enableAllProjectMcpServers');
     });
   });
 
