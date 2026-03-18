@@ -656,6 +656,29 @@ export class OrchestratorImpl implements Orchestrator {
       },
     );
     this.eventSubscriptions.push(healthSub);
+
+    // Subscribe to container.restarted events for dispatch ownership transfer (Phase 9.1)
+    const restartSub = eventBus.filteredSubscribe(
+      (e: BusEvent) => e.type === 'container.restarted',
+      (e: BusEvent) => {
+        const { slug, oldTid } = e.data as { slug: string; oldTid: string };
+        if (oldTid && this.deps.dispatchTracker) {
+          // New TID will be assigned when container reconnects — for now transfer
+          // ownership from oldTid to slug as a temporary marker
+          const newTeam = this.deps.orgChart.getTeamBySlug(slug);
+          if (newTeam) {
+            const transferred = this.deps.dispatchTracker.transferOwnership(oldTid, newTeam.tid);
+            this.logger.info('Dispatch ownership transferred after container restart', {
+              slug,
+              old_tid: oldTid,
+              new_tid: newTeam.tid,
+              transferred_count: transferred,
+            });
+          }
+        }
+      },
+    );
+    this.eventSubscriptions.push(restartSub);
   }
 
   /**

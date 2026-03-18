@@ -456,7 +456,7 @@ describe('OrchestratorImpl', () => {
 
       // filteredSubscribe should be called for:
       // tool_call, task_result, escalation, heartbeat, health.state_changed
-      expect(deps.eventBus.filteredSubscribe).toHaveBeenCalledTimes(5);
+      expect(deps.eventBus.filteredSubscribe).toHaveBeenCalledTimes(6);
       expect(deps.eventBus.filteredSubscribe).toHaveBeenCalledWith(
         expect.any(Function),
         expect.any(Function)

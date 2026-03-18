@@ -80,6 +80,22 @@ export class DispatchTrackerImpl implements DispatchTracker {
   }
 
   /**
+   * Transfer dispatch ownership from an old TID to a new TID.
+   * Used when a container restarts and gets a new TID (Phase 9.1).
+   * The new container's `ready` message will trigger replay using the new TID.
+   */
+  transferOwnership(oldTid: string, newTid: string): number {
+    let transferred = 0;
+    for (const entry of this.entries.values()) {
+      if (entry.tid === oldTid) {
+        entry.tid = newTid;
+        transferred++;
+      }
+    }
+    return transferred;
+  }
+
+  /**
    * Return the task IDs dispatched to the given TID that have not yet been
    * acknowledged (i.e. still within or past the grace period but timer not
    * yet fired — or timer just started).
