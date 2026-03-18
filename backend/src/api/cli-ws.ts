@@ -41,6 +41,19 @@ export interface CLIWSRelayConfig {
    * @default '/ws/cli'
    */
   path?: string;
+
+  /**
+   * Authentication token required for CLI WebSocket connections.
+   * When set, clients must provide this token via `Authorization: Bearer <token>`
+   * header or `?token=<token>` query parameter on the upgrade request.
+   * Read from OPENHIVE_CLI_TOKEN env var.
+   */
+  cliToken?: string;
+
+  /**
+   * Allowed origins for CLI WebSocket connections (CORS-like check on upgrade).
+   */
+  allowedOrigins?: string[];
 }
 
 /**
@@ -181,12 +194,38 @@ export class CLIWSRelay {
       path,
     });
 
-    // Handle upgrade requests
+    // Handle upgrade requests with authentication
     server.on('upgrade', (request: IncomingMessage, socket: Socket, head: Buffer) => {
       const url = request.url ?? '';
 
       if (!url.startsWith(path)) {
         return; // Not our path, let other handlers deal with it
+      }
+
+      // Authentication check: require token if configured
+      const requiredToken = this._config.cliToken;
+      if (requiredToken) {
+        const authHeader = request.headers['authorization'] ?? '';
+        const urlParams = new URL(request.url ?? '', 'http://localhost').searchParams;
+        const headerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+        const queryToken = urlParams.get('token') ?? '';
+
+        if (headerToken !== requiredToken && queryToken !== requiredToken) {
+          socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+          socket.destroy();
+          return;
+        }
+      }
+
+      // Origin check: validate against allowed origins if configured
+      const allowedOrigins = this._config.allowedOrigins;
+      if (allowedOrigins?.length) {
+        const origin = request.headers['origin'] ?? '';
+        if (origin && !allowedOrigins.includes(origin)) {
+          socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+          socket.destroy();
+          return;
+        }
       }
 
       this.wss!.handleUpgrade(request, socket, head, (ws) => {

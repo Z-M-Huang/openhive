@@ -12,7 +12,10 @@
 
 import * as readline from 'node:readline';
 
-const url = process.env.OPENHIVE_URL ?? 'ws://localhost:8080/ws/cli';
+const baseUrl = process.env.OPENHIVE_URL ?? 'ws://localhost:8080/ws/cli';
+const cliToken = process.env.OPENHIVE_CLI_TOKEN ?? '';
+// Append auth token as query param if configured
+const url = cliToken ? `${baseUrl}?token=${encodeURIComponent(cliToken)}` : baseUrl;
 const responseTimeoutMs = 300_000; // 5 min max wait for piped mode
 
 let rl: readline.Interface | null = null;
