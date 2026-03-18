@@ -102,6 +102,7 @@ export type ContainerHealth = (typeof ContainerHealth)[keyof typeof ContainerHea
 /** Messaging channel adapters (Database-Schema.md chat_sessions.channel_type). */
 export const ChannelType = {
   Discord: 'discord',
+  Slack: 'slack',
   WhatsApp: 'whatsapp',
   Api: 'api',
   Cli: 'cli',
