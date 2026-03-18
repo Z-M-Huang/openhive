@@ -92,12 +92,13 @@ describe('Config Validation', () => {
       expect(result.providers).toBe('custom-provider');
     });
 
-    it('rejects unknown fields at top level (strict mode)', () => {
+    it('passes through unknown fields at top level (passthrough mode for backwards compat)', () => {
       const config = {
         ...defaultMasterConfig(),
-        unknown_field: 'should fail',
+        unknown_field: 'should pass through',
       };
-      expect(() => validateMasterConfig(config)).toThrow(ZodError);
+      const result = validateMasterConfig(config);
+      expect(result).toBeDefined();
     });
 
     it('error messages do not contain secret values', () => {
@@ -179,7 +180,7 @@ describe('Config Validation', () => {
       expect(() => validateProviders(providers)).toThrow(ZodError);
     });
 
-    it('rejects extra fields on oauth provider (strict mode)', () => {
+    it('passes through extra fields on oauth provider (passthrough mode)', () => {
       const providers = {
         oauth_provider: {
           type: 'oauth' as const,
@@ -187,10 +188,10 @@ describe('Config Validation', () => {
           extra_field: 'should fail',
         },
       };
-      expect(() => validateProviders(providers)).toThrow(ZodError);
+      const result = validateProviders(providers); expect(result).toBeDefined();
     });
 
-    it('rejects extra fields on anthropic_direct provider (strict mode)', () => {
+    it('passes through extra fields on anthropic_direct provider (passthrough mode)', () => {
       const providers = {
         direct_provider: {
           type: 'anthropic_direct' as const,
@@ -198,7 +199,7 @@ describe('Config Validation', () => {
           extra_field: 'should fail',
         },
       };
-      expect(() => validateProviders(providers)).toThrow(ZodError);
+      const result = validateProviders(providers); expect(result).toBeDefined();
     });
 
     it('error messages do not contain secret values', () => {
@@ -375,13 +376,14 @@ describe('Config Validation', () => {
       expect(result.triggers).toHaveLength(1);
     });
 
-    it('rejects unknown fields at top level (strict mode)', () => {
+    it('passes through unknown fields at top level (passthrough mode)', () => {
       const team = {
         slug: 'test-team',
         leader_aid: 'aid-lead-001',
-        unknown_field: 'should fail',
+        unknown_field: 'should pass through',
       };
-      expect(() => validateTeam(team)).toThrow(ZodError);
+      const result = validateTeam(team);
+      expect(result).toBeDefined();
     });
   });
 
@@ -628,33 +630,36 @@ describe('Config Validation', () => {
     });
   });
 
-  describe('Schema strictness', () => {
-    it('masterConfigSchema rejects unknown fields', () => {
+  describe('Schema passthrough (backwards compatibility)', () => {
+    it('masterConfigSchema passes through unknown fields', () => {
       const config = {
         ...defaultMasterConfig(),
-        extra: 'not allowed',
+        extra: 'passed through',
       };
-      expect(() => masterConfigSchema.parse(config)).toThrow(ZodError);
+      const result = masterConfigSchema.parse(config);
+      expect(result).toBeDefined();
     });
 
-    it('providerConfigSchema rejects unknown fields', () => {
+    it('providerConfigSchema passes through unknown fields on entries', () => {
       const providers = {
         test: {
           type: 'oauth' as const,
-          oauth_token: 'test',
+          oauth_token: 'test-value-placeholder',
           unknown: 'field',
         },
       };
-      expect(() => providerConfigSchema.parse(providers)).toThrow(ZodError);
+      const result = providerConfigSchema.parse(providers);
+      expect(result).toBeDefined();
     });
 
-    it('teamConfigSchema rejects unknown fields', () => {
+    it('teamConfigSchema passes through unknown fields', () => {
       const team = {
         slug: 'test-team',
         leader_aid: 'aid-lead-001',
-        extra: 'not allowed',
+        extra: 'passed through',
       };
-      expect(() => teamConfigSchema.parse(team)).toThrow(ZodError);
+      const result = teamConfigSchema.parse(team);
+      expect(result).toBeDefined();
     });
   });
 });

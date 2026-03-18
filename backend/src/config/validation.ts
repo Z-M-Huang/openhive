@@ -44,14 +44,14 @@ const logArchiveConfigSchema = z.object({
   max_entries: z.number().int().nonnegative(),
   keep_copies: z.number().int().nonnegative(),
   archive_dir: z.string(),
-}).strict();
+}).passthrough();
 
 const messageArchiveConfigSchema = z.object({
   enabled: z.boolean(),
   max_entries: z.number().int().nonnegative(),
   keep_copies: z.number().int().nonnegative(),
   archive_dir: z.string(),
-}).strict();
+}).passthrough();
 
 const serverConfigSchema = z.object({
   listen_address: z.string().min(1),
@@ -63,44 +63,44 @@ const serverConfigSchema = z.object({
   event_bus_workers: z.number().int().nonnegative(),
   portal_ws_max_connections: z.number().int().nonnegative(),
   message_archive: messageArchiveConfigSchema,
-}).strict();
+}).passthrough();
 
 const databasePragmaSchema = z.object({
   journal_size_limit: z.number(),
   cache_size: z.number(),
   busy_timeout: z.number(),
-}).strict();
+}).passthrough();
 
 const databaseConfigSchema = z.object({
   path: z.string().min(1),
   wal_mode: z.boolean(),
   pragma: databasePragmaSchema,
-}).strict();
+}).passthrough();
 
 const resourceLimitsSchema = z.object({
   max_memory: z.string(),
   max_cpus: z.number(),
   max_old_space: z.number(),
-}).strict();
+}).passthrough();
 
 const dockerConfigSchema = z.object({
   image: z.string().min(1),
   network: z.string().min(1),
   resource_limits: resourceLimitsSchema,
-}).strict();
+}).passthrough();
 
 const securityConfigSchema = z.object({
   encryption_key_path: z.string().min(1),
   token_ttl: z.string(),
   allowed_origins: z.array(z.string()),
-}).strict();
+}).passthrough();
 
 const limitsConfigSchema = z.object({
   max_depth: z.number().int().positive().max(10),
   max_teams: z.number().int().positive(),
   max_agents_per_team: z.number().int().positive(),
   max_concurrent_tasks: z.number().int().nonnegative(),
-}).strict();
+}).passthrough();
 
 const assistantConfigSchema = z.object({
   name: z.string().min(1),
@@ -119,19 +119,19 @@ const assistantConfigSchema = z.object({
   model_tier: z.enum(['haiku', 'sonnet', 'opus']),
   max_turns: z.number().int().positive(),
   timeout_minutes: z.number().int().positive(),
-}).strict();
+}).passthrough();
 
 const channelConfigSchema = z.object({
   enabled: z.boolean(),
   token_env: z.string().optional(),
   prefix: z.string().optional(),
   channel_id: z.string().optional(),
-}).strict();
+}).passthrough();
 
 const channelsConfigSchema = z.object({
   discord: channelConfigSchema,
   slack: channelConfigSchema,
-}).strict();
+}).passthrough();
 
 const agentRefSchema = z.object({
   aid: z.string().refine(
@@ -147,7 +147,7 @@ const agentRefSchema = z.object({
   ),
   name: z.string().min(1),
   leads_team: z.string().optional(),
-}).strict();
+}).passthrough();
 
 const teamAgentConfigSchema = z.object({
   aid: z.string().refine(
@@ -169,21 +169,21 @@ const teamAgentConfigSchema = z.object({
   timeout_minutes: z.number().int().positive().optional(),
   leads_team: z.string().optional(),
   proactive_interval_minutes: z.number().int().positive().optional(),
-}).strict();
+}).passthrough();
 
 const mcpServerConfigSchema = z.object({
   name: z.string(),
   command: z.string(),
   args: z.array(z.string()),
   env: z.record(z.string()),
-}).strict();
+}).passthrough();
 
 const teamResourceLimitsSchema = z.object({
   max_memory: z.string().optional(),
   max_cpus: z.number().optional(),
   max_old_space: z.number().optional(),
   idle_timeout: z.string().optional(),
-}).strict();
+}).passthrough();
 
 // ---------------------------------------------------------------------------
 // Trigger backward-compat preprocessor
@@ -333,14 +333,14 @@ const oauthSchema = z.object({
   type: z.literal('oauth'),
   oauth_token: z.string().min(1),
   models: z.record(z.string()).optional(),
-}).strict();
+}).passthrough();
 
 const anthropicDirectSchema = z.object({
   type: z.literal('anthropic_direct'),
   api_key: z.string().min(1),
   base_url: z.string().optional(),
   models: z.record(z.string()).optional(),
-}).strict();
+}).passthrough();
 
 const providerEntrySchema = z.discriminatedUnion('type', [
   oauthSchema,
@@ -371,7 +371,7 @@ export const masterConfigSchema: z.ZodType<MasterConfig> = z.object({
   embedding: z.object({
     provider: z.string().min(1),
   }).optional(),
-}).strict();
+}).passthrough();
 
 /**
  * Zod schema for provider presets (data/providers.yaml).
@@ -432,7 +432,7 @@ export const teamConfigSchema: z.ZodType<TeamConfig> = z.object({
   resource_limits: teamResourceLimitsSchema.optional(),
   children: z.array(z.string()).optional(),
   env_vars: z.record(z.string(), z.string()).optional(),
-}).strict();
+}).passthrough();
 
 // ---------------------------------------------------------------------------
 // Validation Functions
