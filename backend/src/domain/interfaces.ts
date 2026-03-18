@@ -110,6 +110,8 @@ export interface AgentInitConfig {
   tools: string[];
   provider: ResolvedProvider;
   systemPrompt?: string;
+  /** External MCP servers from team.yaml mcp_servers config. */
+  mcpServers?: MCPServerConfig[];
 }
 
 /** MCP server configuration for a team container. */

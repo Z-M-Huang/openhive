@@ -388,6 +388,7 @@ CRITICAL: Writing files directly does NOT register agents, triggers, or memories
         abortController: tracked.abortController,
         env: sdkEnv,
         hooks: hooksConfig,
+        externalMcpServers: tracked.config.mcpServers,
       });
 
       clearTimeout(timeoutId);

@@ -892,6 +892,7 @@ async function initializeRootMode(
               tools: (a['tools'] as string[]) || [],
               provider: resolvedProvider,
               ...(a['system_prompt'] ? { systemPrompt: String(a['system_prompt']) } : {}),
+              ...(mcpServers?.length ? { mcpServers } : {}),
             };
           }),
           secrets,

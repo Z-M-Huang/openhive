@@ -176,6 +176,8 @@ export interface RunAgentQueryOptions {
   abortController?: AbortController;
   /** SDK hooks (PreToolUse/PostToolUse) for tool call logging and auditing. */
   hooks?: Record<string, Array<{ hooks: Array<(input: Record<string, unknown>) => Promise<Record<string, unknown>>> }>>;
+  /** External MCP servers from team config to inject alongside openhive-tools. */
+  externalMcpServers?: Array<{ name: string; command: string; args: string[]; env: Record<string, string> }>;
 }
 
 /** Result from a completed agent query. */
@@ -203,6 +205,14 @@ export async function runAgentQuery(opts: RunAgentQueryOptions): Promise<AgentQu
 
   const mcpServers: Record<string, unknown> = {
     'openhive-tools': opts.mcpServer,
+    // Inject external MCP servers from team config (Phase 3)
+    ...Object.fromEntries(
+      (opts.externalMcpServers ?? []).map(s => [s.name, {
+        command: s.command,
+        args: s.args,
+        env: s.env,
+      }])
+    ),
   };
 
   let output = '';
