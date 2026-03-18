@@ -389,6 +389,13 @@ CRITICAL: Writing files directly does NOT register agents, triggers, or memories
         env: sdkEnv,
         hooks: hooksConfig,
         externalMcpServers: tracked.config.mcpServers,
+        onPartialMessage: (text: string) => {
+          this.eventBus.publish({
+            type: 'agent.partial_message',
+            data: { aid: agentAid, taskId, text },
+            timestamp: Date.now(),
+          });
+        },
       });
 
       clearTimeout(timeoutId);

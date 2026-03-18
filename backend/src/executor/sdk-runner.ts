@@ -181,6 +181,8 @@ export interface RunAgentQueryOptions {
   hooks?: Record<string, Array<{ hooks: Array<(input: Record<string, unknown>) => Promise<Record<string, unknown>>> }>>;
   /** External MCP servers from team config to inject alongside openhive-tools. */
   externalMcpServers?: Array<{ name: string; command: string; args: string[]; env: Record<string, string> }>;
+  /** Callback for partial/streaming messages (for real-time portal updates). */
+  onPartialMessage?: (text: string) => void;
 }
 
 /** Result from a completed agent query. */
@@ -235,6 +237,7 @@ export async function runAgentQuery(opts: RunAgentQueryOptions): Promise<AgentQu
         permissionMode: 'bypassPermissions',
         mcpServers: mcpServers as Record<string, import('@anthropic-ai/claude-agent-sdk').McpServerConfig>,
         abortController: opts.abortController,
+        includePartialMessages: true,
         ...(opts.env ? { env: opts.env } : {}),
         ...(opts.hooks ? { hooks: opts.hooks } : {}),
       },
@@ -256,6 +259,14 @@ export async function runAgentQuery(opts: RunAgentQueryOptions): Promise<AgentQu
               output += block.text;
             }
           }
+        }
+      }
+
+      // Forward partial/streaming messages for real-time portal updates
+      if (msg.type === 'partial' && opts.onPartialMessage) {
+        const partial = msg as { text?: string };
+        if (partial.text) {
+          opts.onPartialMessage(partial.text);
         }
       }
 
