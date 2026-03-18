@@ -5,7 +5,7 @@ paths:
 
 # Executor Rules
 
-- Root-local agents run via Claude Agent SDK `query()` API. Non-root container agents use the legacy child-process mode.
+- Both root-local and non-root container agents run via Claude Agent SDK `query()` API. Non-root agents use bridged tool handlers (MCPBridge → WebSocket → root) instead of direct store access.
 - Always pass `sessionId: undefined` — never resume SDK sessions (causes conflicts)
 - Cross-message context comes from Tier 2 (MEMORY.md + daily logs) and Tier 3 (task history)
 - System prompt is enriched with: memory → daily logs → task history → tool catalog → behavioral instructions
