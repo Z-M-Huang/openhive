@@ -1383,6 +1383,7 @@ async function initializeNonRootMode(logger: Logger): Promise<void> {
     'get_team', 'get_task', 'get_health', 'inspect_topology',
     'register_webhook', 'register_trigger',
     'search_skill', 'install_skill',
+    'invoke_integration',
   ];
 
   const bridgedHandlers = new Map<string, ToolHandler>();

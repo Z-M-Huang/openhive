@@ -53,6 +53,7 @@ export const TOOL_DESCRIPTIONS: Record<string, string> = {
   register_trigger: 'Register a cron trigger to schedule recurring tasks',
   search_skill: 'Search configured skill registries for skills by keyword',
   install_skill: 'Install a skill from a configured registry into the team workspace',
+  invoke_integration: 'Invoke an active integration endpoint with parameters',
 };
 
 // ---------------------------------------------------------------------------

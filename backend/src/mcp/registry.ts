@@ -108,6 +108,7 @@ const MAIN_ASSISTANT_TOOLS: ReadonlySet<string> = new Set([
   'register_trigger',
   'search_skill',
   'install_skill',
+  'invoke_integration',
 ]);
 
 /**
@@ -137,6 +138,7 @@ const TEAM_LEAD_TOOLS: ReadonlySet<string> = new Set([
   'register_trigger',
   'search_skill',
   'install_skill',
+  'invoke_integration',
 ]);
 
 /**

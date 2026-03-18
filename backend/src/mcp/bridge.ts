@@ -165,6 +165,7 @@ const MUTATING_TOOLS: ReadonlySet<string> = new Set([
   'set_credential',
   'register_webhook',
   'install_skill',
+  'invoke_integration',
 ]);
 
 /**
