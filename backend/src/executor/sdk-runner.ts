@@ -174,6 +174,8 @@ export interface RunAgentQueryOptions {
   maxTurns?: number;
   /** Abort controller for cancellation. */
   abortController?: AbortController;
+  /** SDK hooks (PreToolUse/PostToolUse) for tool call logging and auditing. */
+  hooks?: Record<string, Array<{ hooks: Array<(input: Record<string, unknown>) => Promise<Record<string, unknown>>> }>>;
 }
 
 /** Result from a completed agent query. */
@@ -221,6 +223,7 @@ export async function runAgentQuery(opts: RunAgentQueryOptions): Promise<AgentQu
         mcpServers: mcpServers as Record<string, import('@anthropic-ai/claude-agent-sdk').McpServerConfig>,
         abortController: opts.abortController,
         ...(opts.env ? { env: opts.env } : {}),
+        ...(opts.hooks ? { hooks: opts.hooks } : {}),
       },
     });
 

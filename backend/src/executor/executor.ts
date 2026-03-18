@@ -27,6 +27,7 @@ import {
   runAgentQuery,
   type AgentQueryResult,
 } from './sdk-runner.js';
+import { createSDKHooks } from './hooks.js';
 
 /** Default query timeout: 5 minutes. */
 const DEFAULT_QUERY_TIMEOUT_MS = 300_000;
@@ -185,8 +186,8 @@ export class AgentExecutorImpl implements AgentExecutor {
         allowedTools: agent.tools.length > 0 ? agent.tools : undefined,
       });
 
-      // Set provider env vars so the SDK subprocess can authenticate
-      this._setProviderEnv(agent);
+      // Provider env vars are set per-dispatch in dispatchTask() via sdkEnv,
+      // not at start() time, to support mixed providers in the same container.
 
       const tracked: TrackedAgent = {
         aid: agent.aid,
@@ -365,6 +366,13 @@ CRITICAL: Writing files directly does NOT register agents, triggers, or memories
         tracked.abortController?.abort();
       }, DEFAULT_QUERY_TIMEOUT_MS);
 
+      // Create SDK hooks for tool call audit logging
+      const sdkHooks = createSDKHooks(this.logger, agentAid);
+      const hooksConfig: Record<string, Array<{ hooks: Array<(input: Record<string, unknown>) => Promise<Record<string, unknown>>> }>> = {
+        PreToolUse: [{ hooks: sdkHooks.PreToolUse as Array<(input: Record<string, unknown>) => Promise<Record<string, unknown>>> }],
+        PostToolUse: [{ hooks: sdkHooks.PostToolUse as Array<(input: Record<string, unknown>) => Promise<Record<string, unknown>>> }],
+      };
+
       const result: AgentQueryResult = await runAgentQuery({
         prompt,
         mcpServer: tracked.mcpServer,
@@ -379,6 +387,7 @@ CRITICAL: Writing files directly does NOT register agents, triggers, or memories
         maxTurns: 200,
         abortController: tracked.abortController,
         env: sdkEnv,
+        hooks: hooksConfig,
       });
 
       clearTimeout(timeoutId);

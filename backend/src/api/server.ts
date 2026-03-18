@@ -65,6 +65,11 @@ export interface APIServerConfig {
   listenAddress?: string;
 
   /**
+   * CORS allowed origins. Defaults to localhost dev origins if not set.
+   */
+  allowedOrigins?: string[];
+
+  /**
    * Optional WSHub instance for WebSocket upgrade handling.
    * When provided, HTTP upgrade requests on `/ws/container` are forwarded
    * to the hub.
@@ -251,9 +256,12 @@ export class APIServer {
       reply.code(500).send({ error: 'Internal Server Error', message: error.message });
     });
 
-    // Register CORS plugin
+    // Register CORS plugin (use configured origins or fallback to dev defaults)
+    const corsOrigins = this.config.allowedOrigins?.length
+      ? this.config.allowedOrigins
+      : ['http://localhost:3000', 'http://localhost:5173', 'http://127.0.0.1:3000', 'http://127.0.0.1:5173'];
     await this.app.register(cors, {
-      origin: ['http://localhost:3000', 'http://localhost:5173', 'http://127.0.0.1:3000', 'http://127.0.0.1:5173'],
+      origin: corsOrigins,
       credentials: true,
     });
 

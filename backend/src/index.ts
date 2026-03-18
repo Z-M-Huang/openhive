@@ -347,6 +347,21 @@ export async function main(): Promise<void> {
 }
 
 /**
+ * Parses a simple duration string (e.g., "5m", "24h", "300s") to milliseconds.
+ * Supports s (seconds), m (minutes), h (hours). Falls back to defaultMs on parse failure.
+ */
+function parseDurationMs(duration: string, defaultMs: number): number {
+  const match = duration.match(/^(\d+)\s*(s|m|h)$/i);
+  if (!match) return defaultMs;
+  const value = parseInt(match[1], 10);
+  const unit = match[2].toLowerCase();
+  if (unit === 's') return value * 1_000;
+  if (unit === 'm') return value * 60_000;
+  if (unit === 'h') return value * 3_600_000;
+  return defaultMs;
+}
+
+/**
  * Initializes all root-only services.
  */
 async function initializeRootMode(
@@ -450,8 +465,9 @@ async function initializeRootMode(
     main_assistant: assistantConfig.aid,
   });
 
-  // 7. Initialize token manager
-  const tokenManager = new TokenManagerImpl({ ttlMs: 300_000 });
+  // 7. Initialize token manager (wire token_ttl from config)
+  const tokenTtlMs = parseDurationMs(masterConfig.security.token_ttl, 300_000);
+  const tokenManager = new TokenManagerImpl({ ttlMs: tokenTtlMs });
   tokenManager.startCleanup(60_000);
   shutdownState.tokenManager = tokenManager;
 
@@ -1179,6 +1195,7 @@ async function initializeRootMode(
   const apiServer = new APIServer({
     port: listenPort,
     listenAddress: listenHost,
+    allowedOrigins: masterConfig.security.allowed_origins,
     wsHub: wsServer,
     eventBus,
     orgChart,
