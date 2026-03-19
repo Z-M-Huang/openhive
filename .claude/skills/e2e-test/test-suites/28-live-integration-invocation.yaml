@@ -1,0 +1,31 @@
+name: Live Integration Invocation
+description: Verify invoke_integration makes a real HTTP call to a public API (Open-Meteo weather) — tests the full integration lifecycle end-to-end.
+
+setup:
+  - command: "cd /app/openhive && sudo docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+    description: "Clean start -- remove all containers and volumes"
+  - command: "cd /app/openhive && sudo rm -rf .run/workspace && mkdir -p .run/workspace && sudo docker compose -f deployments/docker-compose.yml up -d 2>&1"
+    description: "Start the server (image pre-built)"
+  - command: "for i in $(seq 1 30); do curl -sf http://localhost:8080/api/health && exit 0; sleep 3; done; echo 'Health check timed out'; exit 1"
+    description: "Wait up to 90s for the health check endpoint to respond"
+
+teardown:
+  - command: "cd /app/openhive && sudo docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+    description: "Clean up"
+
+test_cases:
+  - name: Create, test, activate, and invoke a weather integration
+    description: Full integration lifecycle with a real HTTP call to the free Open-Meteo API
+    steps:
+      - action: "Ask the assistant to create and invoke a weather integration using explicit tool instructions"
+        command: "echo 'Use create_integration to create an HTTP integration called weather-check with base_url https://api.open-meteo.com and a GET endpoint named forecast at path /v1/forecast?latitude=26.37&longitude=-80.13&current_weather=true with no auth needed. Then test_integration, activate_integration, and invoke_integration forecast endpoint to get the current weather for Boca Raton.' | timeout 300 bun run cli/index.ts 2>&1"
+        expected: "[Assistant]"
+    expected_outcome: "The assistant creates the integration, tests it, activates it, invokes it, and returns actual weather data including temperature"
+
+  - name: Verify integration is active in API
+    description: Check that the integration was created and activated via the REST API
+    steps:
+      - action: "Query integrations API"
+        command: "curl -sf http://localhost:8080/api/integrations 2>&1"
+        expected: "weather-check"
+    expected_outcome: "The integrations API shows weather-check exists"

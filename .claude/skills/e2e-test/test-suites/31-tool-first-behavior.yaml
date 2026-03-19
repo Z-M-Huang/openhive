@@ -1,0 +1,37 @@
+name: Tool-First Behavior
+description: Verify the assistant uses MCP tools (save_memory, create_agent) instead of direct file writes — behavioral compliance with system prompt guidance.
+
+setup:
+  - command: "cd /app/openhive && sudo docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+    description: "Clean start"
+  - command: "cd /app/openhive && sudo rm -rf .run/workspace && mkdir -p .run/workspace && sudo docker compose -f deployments/docker-compose.yml up -d 2>&1"
+    description: "Start the server"
+  - command: "for i in $(seq 1 30); do curl -sf http://localhost:8080/api/health && exit 0; sleep 3; done; echo 'Health check timed out'; exit 1"
+    description: "Wait for health"
+
+teardown:
+  - command: "cd /app/openhive && sudo docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+    description: "Clean up"
+
+test_cases:
+  - name: Memory save uses save_memory tool
+    description: When user shares personal info, the assistant should call save_memory (not write MEMORY.md directly)
+    steps:
+      - action: "Tell the assistant personal info that should be saved to memory"
+        command: "echo 'Remember that my favorite programming language is Rust and I work at SpaceX' | timeout 120 bun run cli/index.ts 2>&1"
+        expected: "[Assistant]"
+      - action: "Check logs for save_memory tool call"
+        command: "curl -sf 'http://localhost:8080/api/logs?limit=50' 2>&1 | python3 -c \"import sys,json; d=json.load(sys.stdin); calls=[e for e in d['entries'] if 'save_memory' in e.get('params','')]; print(f'save_memory calls: {len(calls)}'); assert len(calls)>0, 'save_memory tool was not called'\""
+        expected: "save_memory calls:"
+    expected_outcome: "The assistant called save_memory MCP tool to persist the user's info"
+
+  - name: Agent creation uses create_agent tool
+    description: When asked to create an agent, the assistant should call create_agent (not write .md files directly)
+    steps:
+      - action: "Ask the assistant to create an agent"
+        command: "echo 'Create an agent called code-helper that reviews TypeScript code for the main team. Give it a detailed description about what it does.' | timeout 300 bun run cli/index.ts 2>&1"
+        expected: "[Assistant]"
+      - action: "Check logs for create_agent tool call"
+        command: "curl -sf 'http://localhost:8080/api/logs?limit=50' 2>&1 | python3 -c \"import sys,json; d=json.load(sys.stdin); calls=[e for e in d['entries'] if 'create_agent' in e.get('params','')]; print(f'create_agent calls: {len(calls)}'); assert len(calls)>0, 'create_agent tool was not called'\""
+        expected: "create_agent calls:"
+    expected_outcome: "The assistant called create_agent MCP tool instead of writing agent definition files directly"

@@ -1,0 +1,33 @@
+name: Cron Trigger Fire & Task Creation
+description: Verify the trigger→task→result chain — register a cron trigger, wait for it to fire, verify a task was created and completed.
+
+setup:
+  - command: "cd /app/openhive && sudo docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+    description: "Clean start"
+  - command: "cd /app/openhive && sudo rm -rf .run/workspace && mkdir -p .run/workspace && sudo docker compose -f deployments/docker-compose.yml up -d 2>&1"
+    description: "Start the server"
+  - command: "for i in $(seq 1 30); do curl -sf http://localhost:8080/api/health && exit 0; sleep 3; done; echo 'Health check timed out'; exit 1"
+    description: "Wait for health"
+
+teardown:
+  - command: "cd /app/openhive && sudo docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+    description: "Clean up"
+
+test_cases:
+  - name: Register cron trigger via CLI
+    description: Use register_trigger tool to create a fast-firing cron trigger
+    steps:
+      - action: "Ask assistant to register a cron trigger with explicit tool usage"
+        command: "echo 'Use the register_trigger tool to create a trigger named health-pulse with schedule */10 * * * * * targeting team main with prompt Report system health briefly' | timeout 300 bun run cli/index.ts 2>&1"
+        expected: "[Assistant]"
+    expected_outcome: "The assistant confirms trigger registration"
+
+  - name: Verify triggered task created
+    description: Wait for the cron to fire and check that a triggered task appears in the API
+    steps:
+      - action: "Wait 15 seconds for the 10-second cron to fire at least once"
+        command: "sleep 15"
+      - action: "Poll tasks API for triggered task"
+        command: "curl -sf http://localhost:8080/api/tasks 2>&1 | python3 -c \"import sys,json; d=json.load(sys.stdin); triggered=[t for t in d['tasks'] if 'Triggered:' in t.get('title','')]; print(f'Found {len(triggered)} triggered tasks'); assert len(triggered)>0, 'No triggered tasks found'\""
+        expected: "Found"
+    expected_outcome: "At least one task with 'Triggered:' in the title was created by the cron trigger"

@@ -1,0 +1,31 @@
+name: Identity & Channel Awareness
+description: Regression test — verify the assistant identifies as OpenHive (not Claude Code) and does not ask about delivery method when the user is already on CLI.
+
+setup:
+  - command: "cd /app/openhive && sudo docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+    description: "Clean start"
+  - command: "cd /app/openhive && sudo rm -rf .run/workspace && mkdir -p .run/workspace && sudo docker compose -f deployments/docker-compose.yml up -d 2>&1"
+    description: "Start the server"
+  - command: "for i in $(seq 1 30); do curl -sf http://localhost:8080/api/health && exit 0; sleep 3; done; echo 'Health check timed out'; exit 1"
+    description: "Wait for health"
+
+teardown:
+  - command: "cd /app/openhive && sudo docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+    description: "Clean up"
+
+test_cases:
+  - name: Assistant identifies as OpenHive
+    description: When asked about identity, the assistant should say OpenHive, not Claude Code
+    steps:
+      - action: "Ask the assistant who it is"
+        command: "echo 'Who are you? What is your name? Answer in one sentence.' | timeout 120 bun run cli/index.ts 2>&1"
+        expected: "OpenHive"
+    expected_outcome: "Response contains 'OpenHive' and does NOT say 'Claude Code'"
+
+  - name: No delivery method question on CLI
+    description: When asked to send recurring updates, the assistant should not ask how to deliver them
+    steps:
+      - action: "Ask for recurring updates without specifying channel"
+        command: "echo 'Send me a weather update for Miami every 5 minutes' | timeout 120 bun run cli/index.ts 2>&1"
+        expected: "[Assistant]"
+    expected_outcome: "The response acknowledges the request without asking 'how would you like to receive' or 'which channel' — the assistant knows the user is on CLI"
