@@ -389,7 +389,7 @@ export interface ContainerRuntime {
 
 /** High-level container lifecycle coordination. */
 export interface ContainerManager {
-  spawnTeamContainer(teamSlug: string): Promise<ContainerInfo>;
+  spawnTeamContainer(teamSlug: string, workspacePath?: string): Promise<ContainerInfo>;
   stopTeamContainer(teamSlug: string, reason: string): Promise<void>;
   restartTeamContainer(teamSlug: string, reason: string): Promise<void>;
   getContainerByTeam(teamSlug: string): Promise<ContainerInfo | undefined>;

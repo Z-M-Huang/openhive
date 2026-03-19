@@ -108,7 +108,7 @@ export class ContainerManagerImpl implements ContainerManager {
     };
   }
 
-  async spawnTeamContainer(teamSlug: string): Promise<ContainerInfo> {
+  async spawnTeamContainer(teamSlug: string, explicitWorkspacePath?: string): Promise<ContainerInfo> {
     // INV-05: Root spawns all containers
 
     // Reject duplicate — at most one container per slug
@@ -122,9 +122,12 @@ export class ContainerManagerImpl implements ContainerManager {
     // Generate TID for container identification
     const tid = `tid-${teamSlug}-${randomHex(6)}`;
 
-    // Resolve workspace paths — internal (inside containers) and host (for Docker bind mounts)
-    const workspacePath = `${this.config.workspaceRoot}/teams/${teamSlug}`;
-    const hostWorkspacePath = `${this.config.hostWorkspaceRoot}/teams/${teamSlug}`;
+    // Resolve workspace paths — use explicit path for sub-teams (nested workspaces),
+    // fall back to root-level path for top-level teams.
+    const workspacePath = explicitWorkspacePath ?? `${this.config.workspaceRoot}/teams/${teamSlug}`;
+    const hostWorkspacePath = explicitWorkspacePath
+      ? workspacePath.replace(this.config.workspaceRoot, this.config.hostWorkspaceRoot)
+      : `${this.config.hostWorkspaceRoot}/teams/${teamSlug}`;
 
     // Generate one-time WS auth token bound to this TID
     const wsToken = this.tokenManager.generate(tid);

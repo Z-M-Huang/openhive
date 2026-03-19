@@ -599,40 +599,6 @@ CRITICAL: Writing files directly does NOT register agents, triggers, or memories
     return 'main';
   }
 
-  /** Sets provider environment variables for SDK subprocess authentication. */
-  private _setProviderEnv(agent: AgentInitConfig): void {
-    if (agent.provider.type === ProviderType.OAuth && agent.provider.oauthToken) {
-      process.env['CLAUDE_CODE_OAUTH_TOKEN'] = agent.provider.oauthToken;
-      delete process.env['ANTHROPIC_API_KEY'];
-      delete process.env['ANTHROPIC_BASE_URL'];
-    } else if (agent.provider.type === ProviderType.AnthropicDirect) {
-      if (agent.provider.apiKey) {
-        process.env['ANTHROPIC_API_KEY'] = agent.provider.apiKey;
-      }
-      if (agent.provider.baseUrl) {
-        process.env['ANTHROPIC_BASE_URL'] = agent.provider.baseUrl;
-      }
-      delete process.env['CLAUDE_CODE_OAUTH_TOKEN'];
-    }
-
-    // Set model tier mappings so the SDK resolves tier aliases (haiku/sonnet/opus)
-    // to the provider's actual model names. This is required for non-Anthropic
-    // providers like MiniMax that use custom model identifiers.
-    if (agent.provider.models) {
-      const models = agent.provider.models;
-      if (models.haiku) process.env['ANTHROPIC_DEFAULT_HAIKU_MODEL'] = models.haiku;
-      if (models.sonnet) process.env['ANTHROPIC_DEFAULT_SONNET_MODEL'] = models.sonnet;
-      if (models.opus) process.env['ANTHROPIC_DEFAULT_OPUS_MODEL'] = models.opus;
-    } else {
-      // Fallback: map all tiers to the agent's configured model
-      process.env['ANTHROPIC_DEFAULT_HAIKU_MODEL'] = agent.model;
-      process.env['ANTHROPIC_DEFAULT_SONNET_MODEL'] = agent.model;
-      process.env['ANTHROPIC_DEFAULT_OPUS_MODEL'] = agent.model;
-    }
-    // Tell the SDK to use 'sonnet' as the default subagent model alias
-    process.env['CLAUDE_CODE_SUBAGENT_MODEL'] = 'sonnet';
-  }
-
   /** Legacy: spawns agent-entry.ts as a child process. */
   private async _startChildProcess(
     agent: AgentInitConfig,

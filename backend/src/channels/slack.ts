@@ -13,7 +13,8 @@
  * @module channels/slack
  */
 
-import type { InboundMessage } from '../domain/interfaces.js';
+import crypto from 'node:crypto';
+import type { OutboundMessage, InboundMessage } from '../domain/interfaces.js';
 import { ChannelType } from '../domain/enums.js';
 import { BaseChannelAdapter } from './adapter.js';
 
@@ -55,9 +56,9 @@ export class SlackAdapter extends BaseChannelAdapter {
   }
 
   /**
-   * Send a response message to a Slack channel.
+   * Send a message through Slack.
    */
-  async sendResponse(message: { chatJid: string; content: string }): Promise<void> {
+  async sendMessage(msg: OutboundMessage): Promise<void> {
     if (!this.connected) {
       throw new Error('Slack adapter is not connected');
     }
@@ -66,12 +67,12 @@ export class SlackAdapter extends BaseChannelAdapter {
     if (!botToken) return;
 
     // Parse channel from JID: slack:<team_id>:<channel_id>
-    const parts = message.chatJid.split(':');
+    const parts = msg.chatJid.split(':');
     if (parts.length < 3 || parts[0] !== 'slack') return;
     const channelId = parts[2];
 
     // Split long messages
-    const chunks = this.splitMessage(message.content, SLACK_MAX_MESSAGE_LENGTH);
+    const chunks = this.splitMessage(msg.content, SLACK_MAX_MESSAGE_LENGTH);
 
     for (const chunk of chunks) {
       await fetch('https://slack.com/api/chat.postMessage', {
@@ -105,14 +106,14 @@ export class SlackAdapter extends BaseChannelAdapter {
     if (!event.user) return;
 
     const inbound: InboundMessage = {
+      id: crypto.randomUUID(),
       chatJid: `slack:${event.team ?? 'unknown'}:${event.channel}`,
-      senderName: event.user,
       content: event.text,
       channelType: ChannelType.Slack,
       timestamp: event.ts ? parseFloat(event.ts) * 1000 : Date.now(),
     };
 
-    await this.emitMessage(inbound);
+    await this.notifyHandlers(inbound);
   }
 
   /**

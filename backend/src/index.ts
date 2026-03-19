@@ -1344,7 +1344,7 @@ async function initializeNonRootMode(logger: Logger): Promise<void> {
   // 6. Create MCPBridge for forwarding tool calls to root via WebSocket
   const mcpBridge = new MCPBridgeImpl(
     (message: Record<string, unknown>) => {
-      wsConnection.send(message as import('./websocket/protocol.js').WSMessage);
+      wsConnection.send(message as unknown as import('./domain/interfaces.js').WSMessage);
     },
     logger,
   );
@@ -1452,22 +1452,10 @@ function registerShutdownHandlers(logger: Logger): void {
 async function gracefulShutdown(): Promise<void> {
   const logger = shutdownState.logger;
 
-  // Phase 9.3: Wait for in-flight tasks to complete (max 30s drain period)
-  logger?.info('Draining in-flight tasks (30s timeout)');
-  const drainStart = Date.now();
-  const DRAIN_TIMEOUT_MS = 30_000;
-  while (Date.now() - drainStart < DRAIN_TIMEOUT_MS) {
-    const pending = shutdownState.dispatchTracker
-      ? [...(shutdownState.stores?.taskStore ? [] : [])] // check dispatch tracker
-      : [];
-    // Simple check: if no agents are busy, we're drained
-    const orchestrator = shutdownState.orchestrator;
-    if (!orchestrator) break;
-    // Give tasks a chance to complete, then proceed
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    if (Date.now() - drainStart > 5000) break; // Don't wait too long in practice
-  }
-  logger?.info('Task drain complete', { elapsed_ms: Date.now() - drainStart });
+  // Brief pause to let any in-flight responses complete
+  logger?.info('Draining in-flight tasks');
+  await new Promise(resolve => setTimeout(resolve, 2000));
+  logger?.info('Task drain complete');
 
   // Stop triggers
   if (shutdownState.triggerScheduler) {

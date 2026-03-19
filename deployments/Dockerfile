@@ -92,11 +92,16 @@ RUN chown -R node:node /app
 
 # Add node user to docker group for Docker socket access.
 # The GID must match the host's docker socket group.
-# Default to 1001; override with --build-arg DOCKER_GID=<host-gid> if different.
-ARG DOCKER_GID=1001
-RUN groupadd -g ${DOCKER_GID} docker 2>/dev/null || true && \
-    usermod -aG docker node 2>/dev/null || \
-    usermod -aG ${DOCKER_GID} node 2>/dev/null || true
+# Common values: 0 (root-owned on WSL2/Docker Desktop), 999/998 (Linux), 1001.
+# Override with --build-arg DOCKER_GID=<host-gid> if different.
+ARG DOCKER_GID=0
+RUN if [ "${DOCKER_GID}" = "0" ]; then \
+      usermod -aG root node; \
+    else \
+      groupadd -g ${DOCKER_GID} docker 2>/dev/null || true && \
+      usermod -aG docker node 2>/dev/null || \
+      usermod -aG ${DOCKER_GID} node 2>/dev/null || true; \
+    fi
 
 # Switch to non-root user for runtime
 USER node

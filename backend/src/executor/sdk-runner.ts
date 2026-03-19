@@ -263,8 +263,8 @@ export async function runAgentQuery(opts: RunAgentQueryOptions): Promise<AgentQu
       }
 
       // Forward partial/streaming messages for real-time portal updates
-      if (msg.type === 'partial' && opts.onPartialMessage) {
-        const partial = msg as { text?: string };
+      if ((msg.type as string) === 'partial' && opts.onPartialMessage) {
+        const partial = msg as unknown as { text?: string };
         if (partial.text) {
           opts.onPartialMessage(partial.text);
         }

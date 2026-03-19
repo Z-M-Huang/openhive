@@ -24,7 +24,62 @@
  */
 
 import crypto from 'node:crypto';
+import { URL } from 'node:url';
 import { z } from 'zod';
+
+// ---------------------------------------------------------------------------
+// Private-IP blocklist — prevents agents from reaching localhost, cloud
+// metadata, or internal network services via integration HTTP calls.
+// ---------------------------------------------------------------------------
+
+const PRIVATE_HOSTNAME_BLOCKLIST = new Set([
+  'localhost',
+  'metadata.google.internal',
+  'metadata.google',
+]);
+
+/**
+ * Checks whether a URL targets a private/internal network address.
+ * Throws if the hostname resolves to a loopback, link-local, private RFC-1918,
+ * or cloud metadata IP range.
+ */
+function assertNotPrivateUrl(urlStr: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(urlStr);
+  } catch {
+    throw new Error(`Invalid URL: ${urlStr}`);
+  }
+
+  const hostname = parsed.hostname.toLowerCase();
+
+  // Block well-known internal hostnames
+  if (PRIVATE_HOSTNAME_BLOCKLIST.has(hostname)) {
+    throw new Error(`Blocked request to private hostname: ${hostname}`);
+  }
+
+  // Block IPv4 private/reserved ranges
+  const ipv4Match = hostname.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4Match) {
+    const [, a, b] = ipv4Match.map(Number);
+    if (
+      a === 127 ||                          // 127.0.0.0/8 loopback
+      a === 10 ||                           // 10.0.0.0/8 private
+      (a === 172 && b >= 16 && b <= 31) ||  // 172.16.0.0/12 private
+      (a === 192 && b === 168) ||           // 192.168.0.0/16 private
+      (a === 169 && b === 254) ||           // 169.254.0.0/16 link-local / cloud metadata
+      a === 0                               // 0.0.0.0/8
+    ) {
+      throw new Error(`Blocked request to private IP: ${hostname}`);
+    }
+  }
+
+  // Block IPv6 loopback and link-local (bracket-stripped by URL parser)
+  const bare = hostname.replace(/^\[|\]$/g, '');
+  if (bare === '::1' || bare === '::' || bare.startsWith('fe80:') || bare.startsWith('fc') || bare.startsWith('fd')) {
+    throw new Error(`Blocked request to private IPv6 address: ${hostname}`);
+  }
+}
 
 import type {
   OrgChart,
@@ -509,11 +564,12 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
       }
     }
 
-    // Spawn container first - it generates the authoritative TID
+    // Spawn container first - it generates the authoritative TID.
+    // Pass the scaffolded workspace path so sub-teams mount the correct nested directory.
     let containerInfo;
     let tid: string;
     try {
-      containerInfo = await ctx.containerManager.spawnTeamContainer(parsed.slug);
+      containerInfo = await ctx.containerManager.spawnTeamContainer(parsed.slug, workspacePath);
       tid = containerInfo.tid;
     } catch (err) {
       ctx.logger.error('Failed to spawn team container', {
@@ -1032,6 +1088,7 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
       // If config has a smoke_test GET endpoint, make a real HTTP call
       const smokeTest = config['smoke_test'] as { url?: string } | undefined;
       if (smokeTest?.url) {
+        assertNotPrivateUrl(smokeTest.url);
         const response = await fetch(smokeTest.url, {
           method: 'GET',
           signal: AbortSignal.timeout(10_000),
@@ -1147,6 +1204,7 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
       headers['Content-Type'] = headers['Content-Type'] ?? 'application/json';
     }
 
+    assertNotPrivateUrl(url);
     const response = await fetch(url, fetchOpts);
     const responseText = await response.text();
 
@@ -1386,6 +1444,18 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
 
   handlers.set('search_skill', async (args) => {
     const parsed = SearchSkillSchema.parse(args);
+
+    // Validate registry param against allowlist (same as install_skill)
+    if (parsed.registry) {
+      const allowed = ctx.skillRegistries ?? [];
+      if (!allowed.includes(parsed.registry)) {
+        throw new Error(
+          `Registry '${parsed.registry}' is not in the configured skill_registries allowlist. ` +
+          `Allowed: ${allowed.join(', ') || '(none configured)'}`
+        );
+      }
+    }
+
     const registries = parsed.registry
       ? [parsed.registry]
       : (ctx.skillRegistries ?? []);

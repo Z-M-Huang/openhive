@@ -257,8 +257,8 @@ export class APIServer {
     });
 
     // Register CORS plugin (use configured origins or fallback to dev defaults)
-    const corsOrigins = this.config.allowedOrigins?.length
-      ? this.config.allowedOrigins
+    const corsOrigins = this._config.allowedOrigins?.length
+      ? this._config.allowedOrigins
       : ['http://localhost:3000', 'http://localhost:5173', 'http://127.0.0.1:3000', 'http://127.0.0.1:5173'];
     await this.app.register(cors, {
       origin: corsOrigins,
