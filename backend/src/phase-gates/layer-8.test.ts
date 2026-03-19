@@ -431,7 +431,7 @@ describe('Layer 8: Orchestrator Integration', () => {
       // Allow event propagation
       await new Promise(resolve => setTimeout(resolve, 10));
 
-      expect(fireHandler).toHaveBeenCalledWith('team-a', 'Check follow-up', undefined);
+      expect(fireHandler).toHaveBeenCalledWith('team-a', 'Check follow-up', undefined, undefined);
     });
   });
 

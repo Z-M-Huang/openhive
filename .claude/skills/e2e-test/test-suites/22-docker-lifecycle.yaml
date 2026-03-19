@@ -2,11 +2,11 @@ name: Docker Lifecycle
 description: Verify Docker lifecycle operations -- image builds successfully from deployments/Dockerfile, container HEALTHCHECK reports healthy after startup, POST /api/containers/:slug/restart restarts a container, graceful shutdown completes on docker compose down, container restart preserves workspace state.
 
 setup:
-  - command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+  - command: "cd /app/openhive && sudo docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
     description: "Clean start only -- first test case builds the image, so no bun run docker here"
 
 teardown:
-  - command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+  - command: "cd /app/openhive && sudo docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
     description: "Clean up -- remove all containers and volumes"
 
 test_cases:
@@ -22,10 +22,10 @@ test_cases:
     description: Container starts and health check endpoint reports healthy status
     steps:
       - action: "Start container via docker compose"
-        command: "cd /app/openhive && bun run docker 2>&1 &"
+        command: "cd /app/openhive && sudo rm -rf .run/workspace && mkdir -p .run/workspace && sudo docker compose -f deployments/docker-compose.yml up -d 2>&1"
         expected: ""
       - action: "Wait for health endpoint to respond"
-        command: "for i in $(seq 1 60); do curl -sf http://localhost:8080/api/health && exit 0; sleep 5; done; echo 'Health check timed out'; exit 1"
+        command: "for i in $(seq 1 30); do curl -sf http://localhost:8080/api/health && exit 0; sleep 3; done; echo 'Health check timed out'; exit 1"
         expected: "healthy"
     expected_outcome: "Health check returns status 'healthy' after container startup within 5 minutes"
 
@@ -47,7 +47,7 @@ test_cases:
     description: docker compose down completes gracefully without errors
     steps:
       - action: "Gracefully stop all containers"
-        command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml down 2>&1"
+        command: "cd /app/openhive && sudo docker compose -f deployments/docker-compose.yml down 2>&1"
         expected: "Removed"
     expected_outcome: "All containers stop gracefully, compose down reports removal"
 
@@ -55,10 +55,10 @@ test_cases:
     description: After full restart, previously created teams and state persist via volume mounts
     steps:
       - action: "Restart the system"
-        command: "cd /app/openhive && bun run docker 2>&1 &"
+        command: "cd /app/openhive && sudo rm -rf .run/workspace && mkdir -p .run/workspace && sudo docker compose -f deployments/docker-compose.yml up -d 2>&1"
         expected: ""
       - action: "Wait for health check"
-        command: "for i in $(seq 1 60); do curl -sf http://localhost:8080/api/health && exit 0; sleep 5; done; echo 'Health check timed out'; exit 1"
+        command: "for i in $(seq 1 30); do curl -sf http://localhost:8080/api/health && exit 0; sleep 3; done; echo 'Health check timed out'; exit 1"
         expected: "healthy"
       - action: "Verify restart-test team persisted after restart"
         command: "curl -sf http://localhost:8080/api/teams 2>&1"

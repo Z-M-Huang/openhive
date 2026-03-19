@@ -38,7 +38,7 @@ describe('TriggerSchedulerImpl', () => {
     // Advance time by 1 second to trigger cron
     vi.advanceTimersByTime(1100);
 
-    expect(fireSpy).toHaveBeenCalledWith('weather-team', 'check weather', undefined);
+    expect(fireSpy).toHaveBeenCalledWith('weather-team', 'check weather', undefined, undefined);
   });
 
   it('rejects invalid cron expression', () => {
@@ -71,9 +71,9 @@ describe('TriggerSchedulerImpl', () => {
 
     vi.advanceTimersByTime(1100);
 
-    expect(fireSpy).toHaveBeenCalledWith('new-team', 'new prompt', undefined);
+    expect(fireSpy).toHaveBeenCalledWith('new-team', 'new prompt', undefined, undefined);
     // Should NOT have been called with old values
-    expect(fireSpy).not.toHaveBeenCalledWith('old-team', 'old prompt', undefined);
+    expect(fireSpy).not.toHaveBeenCalledWith('old-team', 'old prompt', undefined, undefined);
 
     scheduler.stop();
   });
@@ -124,7 +124,7 @@ describe('TriggerSchedulerImpl', () => {
     eventBus.publish(event);
     await flushMicrotasks();
 
-    expect(fireSpy).toHaveBeenCalledWith('chat-team', 'process message', undefined);
+    expect(fireSpy).toHaveBeenCalledWith('chat-team', 'process message', undefined, undefined);
   });
 
   it('event trigger ignores non-matching event type', async () => {
@@ -165,7 +165,7 @@ describe('TriggerSchedulerImpl', () => {
       timestamp: Date.now(),
     });
     await flushMicrotasks();
-    expect(fireSpy).toHaveBeenCalledWith('vip-team', 'handle vip', undefined);
+    expect(fireSpy).toHaveBeenCalledWith('vip-team', 'handle vip', undefined, undefined);
   });
 
   // -------------------------------------------------------------------------
@@ -184,7 +184,7 @@ describe('TriggerSchedulerImpl', () => {
     });
     await flushMicrotasks();
 
-    expect(fireSpy).toHaveBeenCalledWith('followup-team', 'run followup', undefined);
+    expect(fireSpy).toHaveBeenCalledWith('followup-team', 'run followup', undefined, undefined);
   });
 
   it('task completion trigger filters by source team', async () => {
@@ -208,7 +208,7 @@ describe('TriggerSchedulerImpl', () => {
       timestamp: Date.now(),
     });
     await flushMicrotasks();
-    expect(fireSpy).toHaveBeenCalledWith('followup-team', 'run followup', undefined);
+    expect(fireSpy).toHaveBeenCalledWith('followup-team', 'run followup', undefined, undefined);
   });
 
   // -------------------------------------------------------------------------
@@ -319,7 +319,7 @@ describe('TriggerSchedulerImpl', () => {
     scheduler.addCronTrigger('late', '* * * * * *', 'team', 'late prompt');
     vi.advanceTimersByTime(1100);
 
-    expect(fireSpy).toHaveBeenCalledWith('team', 'late prompt', undefined);
+    expect(fireSpy).toHaveBeenCalledWith('team', 'late prompt', undefined, undefined);
     scheduler.stop();
   });
 
@@ -340,7 +340,7 @@ describe('TriggerSchedulerImpl', () => {
     scheduler.start();
 
     vi.advanceTimersByTime(1100);
-    expect(fireSpy).toHaveBeenCalledWith('target-team', 'do work', undefined);
+    expect(fireSpy).toHaveBeenCalledWith('target-team', 'do work', undefined, undefined);
     scheduler.stop();
   });
 
@@ -354,7 +354,7 @@ describe('TriggerSchedulerImpl', () => {
     scheduler.start();
 
     vi.advanceTimersByTime(1100);
-    expect(fireSpy).toHaveBeenCalledWith('my-team', 'do work', 'aid-worker-abc');
+    expect(fireSpy).toHaveBeenCalledWith('my-team', 'do work', 'aid-worker-abc', undefined);
     scheduler.stop();
   });
 
@@ -364,7 +364,7 @@ describe('TriggerSchedulerImpl', () => {
     scheduler.start();
 
     vi.advanceTimersByTime(1100);
-    expect(fireSpy).toHaveBeenCalledWith('my-team', 'do work', undefined);
+    expect(fireSpy).toHaveBeenCalledWith('my-team', 'do work', undefined, undefined);
     scheduler.stop();
   });
 
@@ -381,7 +381,7 @@ describe('TriggerSchedulerImpl', () => {
     scheduler.start();
 
     vi.advanceTimersByTime(1100);
-    expect(fireSpy).toHaveBeenCalledWith('my-team', 'run daily report', undefined);
+    expect(fireSpy).toHaveBeenCalledWith('my-team', 'run daily report', undefined, undefined);
     scheduler.stop();
   });
 
@@ -399,7 +399,7 @@ describe('TriggerSchedulerImpl', () => {
     scheduler.start();
 
     vi.advanceTimersByTime(1100);
-    expect(fireSpy).toHaveBeenCalledWith('my-team', 'check status', 'aid-specialist-xyz');
+    expect(fireSpy).toHaveBeenCalledWith('my-team', 'check status', 'aid-specialist-xyz', undefined);
     scheduler.stop();
   });
 
@@ -416,7 +416,7 @@ describe('TriggerSchedulerImpl', () => {
     scheduler.start();
 
     vi.advanceTimersByTime(1100);
-    expect(fireSpy).toHaveBeenCalledWith('my-team', 'run quick check', undefined);
+    expect(fireSpy).toHaveBeenCalledWith('my-team', 'run quick check', undefined, undefined);
     scheduler.stop();
   });
 });

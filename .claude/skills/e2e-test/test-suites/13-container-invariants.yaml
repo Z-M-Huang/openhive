@@ -2,17 +2,17 @@ name: Container Invariants
 description: Verify container design invariants after creating a team -- INV-01 (team lead agent runs in parent container, not in the team's child container), INV-05 (all containers spawned by root via Docker socket), INV-06 (all containers use the same openhive:latest image).
 
 setup:
-  - command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+  - command: "cd /app/openhive && sudo docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
     description: "Clean start -- remove all containers and volumes from any previous run"
-  - command: "cd /app/openhive && bun run docker 2>&1 &"
-    description: "Build the Docker image and start the server in the background"
-  - command: "for i in $(seq 1 60); do curl -sf http://localhost:8080/api/health && exit 0; sleep 5; done; echo 'Health check timed out'; exit 1"
-    description: "Wait up to 5 minutes for the health check endpoint to respond (exits 1 on timeout)"
+  - command: "cd /app/openhive && sudo rm -rf .run/workspace && mkdir -p .run/workspace && sudo docker compose -f deployments/docker-compose.yml up -d 2>&1"
+    description: "Start the server (image pre-built)"
+  - command: "for i in $(seq 1 30); do curl -sf http://localhost:8080/api/health && exit 0; sleep 3; done; echo 'Health check timed out'; exit 1"
+    description: "Wait up to 90s for the health check endpoint to respond (exits 1 on timeout)"
   - command: "echo 'Create a team called invariant-test with purpose of testing container invariants' | timeout 300 bun run cli/index.ts 2>&1"
     description: "Create a team via CLI to have child containers to inspect"
 
 teardown:
-  - command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+  - command: "cd /app/openhive && sudo docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
     description: "Clean up -- remove all containers and volumes"
 
 test_cases:

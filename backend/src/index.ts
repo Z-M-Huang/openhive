@@ -959,7 +959,7 @@ async function initializeRootMode(
   // 11. Initialize trigger scheduler
   const triggerScheduler = new TriggerSchedulerImpl(
     eventBus,
-    async (teamSlug: string, prompt: string, agent?: string) => {
+    async (teamSlug: string, prompt: string, agent?: string, replyTo?: string) => {
       logger.info('Trigger fired', { team_slug: teamSlug, prompt, agent });
 
       // Get the team to find its lead
@@ -993,6 +993,7 @@ async function initializeRootMode(
         created_at: Date.now(),
         updated_at: Date.now(),
         completed_at: null,
+        origin_chat_jid: replyTo ?? null,
       };
 
       try {
@@ -1158,6 +1159,7 @@ async function initializeRootMode(
     modelTier: assistantConfig.model_tier ?? 'sonnet',
     tools: [], // Empty = all tools allowed (main assistant has full access)
     provider: mainAssistantProvider,
+    systemPrompt: `You are ${assistantConfig.name}, the primary AI assistant for the OpenHive platform. You manage teams of specialized AI agents, handle user requests, and orchestrate complex tasks. Always identify yourself as ${assistantConfig.name} — never as "Claude", "Claude Code", or any other identity.`,
   };
 
   // Write root workspace config so the SDK subprocess knows about MCP tools

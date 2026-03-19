@@ -2,15 +2,15 @@ name: Configurable Limits
 description: Verify configurable constraints are enforced -- CON-01 max nesting depth (default 3), CON-02 max teams per parent (default 10), CON-03 max agents per team (default 5). Exceeding limits returns a validation error with a descriptive message.
 
 setup:
-  - command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+  - command: "cd /app/openhive && sudo docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
     description: "Clean start -- remove all containers and volumes from any previous run"
-  - command: "cd /app/openhive && bun run docker 2>&1 &"
-    description: "Build the Docker image and start the server in the background"
-  - command: "for i in $(seq 1 60); do curl -sf http://localhost:8080/api/health && exit 0; sleep 5; done; echo 'Health check timed out'; exit 1"
-    description: "Wait up to 5 minutes for the health check endpoint to respond (exits 1 on timeout)"
+  - command: "cd /app/openhive && sudo rm -rf .run/workspace && mkdir -p .run/workspace && sudo docker compose -f deployments/docker-compose.yml up -d 2>&1"
+    description: "Start the server (image pre-built)"
+  - command: "for i in $(seq 1 30); do curl -sf http://localhost:8080/api/health && exit 0; sleep 3; done; echo 'Health check timed out'; exit 1"
+    description: "Wait up to 90s for the health check endpoint to respond (exits 1 on timeout)"
 
 teardown:
-  - command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+  - command: "cd /app/openhive && sudo docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
     description: "Clean up -- remove all containers and volumes"
 
 test_cases:

@@ -2,17 +2,17 @@ name: Memory Persistence
 description: Verify the assistant remembers facts across messages (same session) and across sessions (MEMORY.md + task history injection).
 
 setup:
-  - command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+  - command: "cd /app/openhive && sudo docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
     description: "Clean start -- remove all containers and volumes"
   - command: "rm -rf /app/openhive/.run/workspace/memory 2>/dev/null; mkdir -p /app/openhive/.run/workspace"
     description: "Clear any stale memory files"
-  - command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml up -d --build 2>&1 &"
+  - command: "cd /app/openhive && sudo docker compose -f deployments/docker-compose.yml up -d --build 2>&1 &"
     description: "Build and start the server"
-  - command: "for i in $(seq 1 60); do curl -sf http://localhost:8080/api/health && exit 0; sleep 5; done; echo 'Health check timed out'; exit 1"
+  - command: "for i in $(seq 1 30); do curl -sf http://localhost:8080/api/health && exit 0; sleep 3; done; echo 'Health check timed out'; exit 1"
     description: "Wait for health check (exits 1 on timeout)"
 
 teardown:
-  - command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+  - command: "cd /app/openhive && sudo docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
     description: "Clean up"
 
 test_cases:
@@ -107,10 +107,10 @@ test_cases:
         command: "find /app/openhive/.run/workspace/memory -name 'MEMORY.md' 2>/dev/null | head -3"
         expected: "MEMORY.md"
       - action: "Restart the system"
-        command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml down 2>&1 && docker compose -f deployments/docker-compose.yml up -d 2>&1"
+        command: "cd /app/openhive && sudo docker compose -f deployments/docker-compose.yml down 2>&1 && docker compose -f deployments/docker-compose.yml up -d 2>&1"
         expected: ""
       - action: "Wait for health check after restart"
-        command: "for i in $(seq 1 60); do curl -sf http://localhost:8080/api/health && exit 0; sleep 5; done; echo 'Health check timed out'; exit 1"
+        command: "for i in $(seq 1 30); do curl -sf http://localhost:8080/api/health && exit 0; sleep 3; done; echo 'Health check timed out'; exit 1"
         expected: "healthy"
       - action: "Recall the memory saved before restart"
         command: "echo 'Recall any memories about the Nexus artifact repository' | timeout 120 bun run cli/index.ts 2>&1"

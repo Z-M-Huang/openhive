@@ -2,19 +2,19 @@ name: INV-01 Lead Agent Placement
 description: Verify team lead agent definition is written to the parent workspace (not the team's workspace) per INV-01.
 
 setup:
-  - command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+  - command: "cd /app/openhive && sudo docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
     description: "Clean start"
   - command: "rm -rf /app/openhive/.run/workspace/teams 2>/dev/null; mkdir -p /app/openhive/.run/workspace"
     description: "Clear stale team workspaces"
-  - command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml up -d --build 2>&1 &"
+  - command: "cd /app/openhive && sudo docker compose -f deployments/docker-compose.yml up -d --build 2>&1 &"
     description: "Build and start the server"
-  - command: "for i in $(seq 1 60); do curl -sf http://localhost:8080/api/health && exit 0; sleep 5; done; echo 'Health check timed out'; exit 1"
+  - command: "for i in $(seq 1 30); do curl -sf http://localhost:8080/api/health && exit 0; sleep 3; done; echo 'Health check timed out'; exit 1"
     description: "Wait for health check"
   - command: "echo 'Create a team called placement-test with a team lead and one member agent. Use create_team and create_agent tools.' | timeout 300 bun run cli/index.ts 2>&1"
     description: "Create test team with lead and member via CLI"
 
 teardown:
-  - command: "cd /app/openhive && docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+  - command: "cd /app/openhive && sudo docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
     description: "Clean up"
 
 test_cases:

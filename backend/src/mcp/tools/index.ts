@@ -1427,8 +1427,14 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
       throw new Error(`Trigger limit reached: team '${parsed.target_team}' already has ${teamTriggerCount} triggers (max 10)`);
     }
 
+    // Auto-capture the most recent origin_chat_jid so trigger results route back to the user
+    let replyTo: string | undefined;
+    const teamTasks = await ctx.taskStore.listByTeam(teamSlug);
+    const sorted = teamTasks.sort((a, b) => b.created_at - a.created_at);
+    replyTo = sorted.find(t => t.origin_chat_jid)?.origin_chat_jid ?? undefined;
+
     // Register for immediate activation
-    ctx.triggerScheduler.addCronTrigger(parsed.name, parsed.schedule, parsed.target_team, parsed.prompt);
+    ctx.triggerScheduler.addCronTrigger(parsed.name, parsed.schedule, parsed.target_team, parsed.prompt, undefined, replyTo);
 
     ctx.logger.info('Cron trigger registered via tool', {
       name: parsed.name,

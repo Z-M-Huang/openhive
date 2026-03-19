@@ -13,7 +13,7 @@ import {
 type TriggerType = 'cron' | 'webhook' | 'channel_event' | 'task_completion';
 
 /** Callback invoked when a trigger fires. */
-export type TriggerFireHandler = (targetTeam: string, prompt: string, agent?: string) => void;
+export type TriggerFireHandler = (targetTeam: string, prompt: string, agent?: string, replyTo?: string) => void;
 
 interface TriggerEntry {
   name: string;
@@ -24,6 +24,7 @@ interface TriggerEntry {
   prompt?: string;
   path?: string;
   eventType?: string;
+  replyTo?: string;
   cronTask?: cron.ScheduledTask;
   subscriptionId?: string;
   active: boolean;
@@ -92,7 +93,7 @@ export class TriggerSchedulerImpl implements TriggerScheduler {
     }
   }
 
-  addCronTrigger(name: string, schedule: string, targetTeam: string, prompt: string, agent?: string): void {
+  addCronTrigger(name: string, schedule: string, targetTeam: string, prompt: string, agent?: string, replyTo?: string): void {
     if (!cron.validate(schedule)) {
       throw new ValidationError(`Invalid cron expression: '${schedule}'`);
     }
@@ -107,6 +108,7 @@ export class TriggerSchedulerImpl implements TriggerScheduler {
       agent,
       schedule,
       prompt,
+      replyTo,
       active: false,
     };
 
@@ -315,7 +317,7 @@ export class TriggerSchedulerImpl implements TriggerScheduler {
 
   private fireTrigger(entry: TriggerEntry): void {
     if (this.onFire && entry.prompt) {
-      this.onFire(entry.targetTeam, entry.prompt, entry.agent);
+      this.onFire(entry.targetTeam, entry.prompt, entry.agent, entry.replyTo);
     }
   }
 }

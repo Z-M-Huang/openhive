@@ -651,7 +651,7 @@ export interface SkillRegistry {
 /** Manages cron, webhook, channel_event, and task_completion triggers. */
 export interface TriggerScheduler {
   loadTriggers(): Promise<void>;
-  addCronTrigger(name: string, schedule: string, targetTeam: string, prompt: string): void;
+  addCronTrigger(name: string, schedule: string, targetTeam: string, prompt: string, agent?: string, replyTo?: string): void;
   removeTrigger(name: string): void;
   listTriggers(): Array<{ name: string; type: string; schedule?: string; targetTeam: string }>;
   start(): void;

@@ -114,7 +114,7 @@ export class TaskDAGManager {
       if (isRootLocal && this.agentExecutor) {
         // Root-resident agent: dispatch locally via executor (fire-and-forget —
         // the executor publishes task_result events via eventBus)
-        void this.agentExecutor.dispatchTask(task.agent_aid, task.prompt, task.id).catch(async (err: unknown) => {
+        void this.agentExecutor.dispatchTask(task.agent_aid, this.prependChannelContext(task), task.id).catch(async (err: unknown) => {
           this.logger.error('Local agent dispatch failed', {
             task_id: task.id,
             agent_aid: task.agent_aid,
@@ -151,7 +151,7 @@ export class TaskDAGManager {
           data: {
             task_id: task.id,
             agent_aid: task.agent_aid,
-            prompt: task.prompt,
+            prompt: this.prependChannelContext(task),
             blocked_by: task.blocked_by ?? [],
             ...(sessionId !== undefined && { session_id: sessionId }),
           },
@@ -164,6 +164,20 @@ export class TaskDAGManager {
       data: { task_id: task.id, agent_aid: task.agent_aid },
       timestamp: now,
     });
+  }
+
+  /**
+   * Prepend channel context to the task prompt when origin_chat_jid is present.
+   * Tells the agent which channel the user is on and that responses are auto-delivered.
+   */
+  private prependChannelContext(task: Task): string {
+    if (!task.origin_chat_jid) return task.prompt;
+    let channel: string;
+    if (task.origin_chat_jid.startsWith('cli:')) channel = 'CLI';
+    else if (task.origin_chat_jid.startsWith('discord:')) channel = 'Discord';
+    else if (task.origin_chat_jid.startsWith('slack:')) channel = 'Slack';
+    else channel = 'a messaging channel';
+    return `[The user is messaging via ${channel}. Your response is delivered back automatically — do not ask about delivery method.]\n\n${task.prompt}`;
   }
 
   /**
