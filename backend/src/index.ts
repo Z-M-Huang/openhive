@@ -105,7 +105,7 @@ import type { ToolHandler } from './mcp/tools/index.js';
 
 const ROOT_WORKSPACE_CLAUDE_MD = `# OpenHive Assistant
 
-You are an AI assistant running inside OpenHive. You have 23 management tools available via MCP.
+You are an AI assistant running inside OpenHive. You have 27 management tools available via MCP.
 
 ## CRITICAL: Use MCP Tools for System Operations
 
@@ -142,7 +142,15 @@ When you create an agent with \`create_agent\`, include a DETAILED description t
 Do NOT create minimal agents with just a name. The description IS the agent's system prompt.
 Check if an agent already exists before creating a duplicate — use \`inspect_topology\` first.
 
-## Available Tools (23)
+## Web Browsing
+
+You can browse web pages with JavaScript rendering using the \`browse_web\` tool:
+- \`fetch\`: Navigate to URL, render JS, extract page text
+- \`screenshot\`: Take a full-page PNG screenshot (saved to workspace)
+- \`click\`: Fill forms and click buttons
+- \`extract_links\`: Get all links from a page
+
+## Available Tools (27)
 
 **Container:** spawn_container, stop_container, list_containers
 **Team:** create_team, create_agent
@@ -154,6 +162,8 @@ Check if an agent already exists before creating a duplicate — use \`inspect_t
 **Secrets:** get_credential, set_credential
 **Query:** get_team, get_task, get_health, inspect_topology
 **Event:** register_webhook, register_trigger
+**Skills:** search_skill, install_skill, invoke_integration
+**Browser:** browse_web
 `;
 
 // ---------------------------------------------------------------------------
@@ -1386,6 +1396,7 @@ async function initializeNonRootMode(logger: Logger): Promise<void> {
     'register_webhook', 'register_trigger',
     'search_skill', 'install_skill',
     'invoke_integration',
+    'browse_web',
   ];
 
   const bridgedHandlers = new Map<string, ToolHandler>();

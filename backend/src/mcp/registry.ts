@@ -109,6 +109,7 @@ const MAIN_ASSISTANT_TOOLS: ReadonlySet<string> = new Set([
   'search_skill',
   'install_skill',
   'invoke_integration',
+  'browse_web',
 ]);
 
 /**
@@ -139,6 +140,7 @@ const TEAM_LEAD_TOOLS: ReadonlySet<string> = new Set([
   'search_skill',
   'install_skill',
   'invoke_integration',
+  'browse_web',
 ]);
 
 /**

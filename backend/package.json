@@ -30,6 +30,7 @@
     "fastify": "^5",
     "node-cron": "^3",
     "pino": "^9",
+    "playwright": "^1.58.2",
     "uuid": "^11",
     "ws": "^8",
     "yaml": "^2",

@@ -1,0 +1,39 @@
+name: Web Browsing Tool
+description: Verify the browse_web MCP tool can fetch pages with JavaScript rendering, extract links, and take screenshots using Playwright.
+
+setup:
+  - command: "cd /app/openhive && sudo docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+    description: "Clean start"
+  - command: "cd /app/openhive && sudo rm -rf .run/workspace && mkdir -p .run/workspace && sudo docker compose -f deployments/docker-compose.yml up -d 2>&1"
+    description: "Start the server"
+  - command: "for i in $(seq 1 30); do curl -sf http://localhost:8080/api/health && exit 0; sleep 3; done; echo 'Health check timed out'; exit 1"
+    description: "Wait for health"
+
+teardown:
+  - command: "cd /app/openhive && sudo docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+    description: "Clean up"
+
+test_cases:
+  - name: Fetch web page content
+    description: Use browse_web fetch action to get rendered page text from a public URL
+    steps:
+      - action: "Fetch https://example.com using browse_web tool"
+        command: "echo 'Use the browse_web tool with action fetch on url https://example.com' | timeout 120 bun run cli/index.ts 2>&1"
+        expected: "Example Domain"
+    expected_outcome: "Response contains the page title 'Example Domain' from the rendered page"
+
+  - name: Extract links from page
+    description: Use browse_web extract_links action to get all links from a public page
+    steps:
+      - action: "Extract links from https://example.com"
+        command: "echo 'Use browse_web with action extract_links on url https://example.com' | timeout 120 bun run cli/index.ts 2>&1"
+        expected: "iana.org"
+    expected_outcome: "Response contains the IANA link found on the example.com page"
+
+  - name: Take screenshot of page
+    description: Use browse_web screenshot action and verify a file path is returned
+    steps:
+      - action: "Screenshot https://example.com"
+        command: "echo 'Use browse_web with action screenshot on url https://example.com' | timeout 120 bun run cli/index.ts 2>&1"
+        expected: "screenshot"
+    expected_outcome: "Response mentions screenshot and a file path where the PNG was saved"

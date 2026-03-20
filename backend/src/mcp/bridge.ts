@@ -135,6 +135,7 @@ const BLOCKING_TOOLS: ReadonlySet<string> = new Set([
   'create_integration',
   'test_integration',
   'activate_integration',
+  'browse_web',
 ]);
 
 /**

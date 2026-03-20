@@ -1,11 +1,11 @@
 /**
- * MCP tools index — SDKToolHandler, ToolContext, and all 23 built-in tool handlers.
+ * MCP tools index — SDKToolHandler, ToolContext, and all 27 built-in tool handlers.
  *
  * Each handler is a function: (args, agentAid, teamSlug) => Promise<unknown>
  * created via `createToolHandlers(ctx)` factory. The SDKToolHandler wraps
  * handlers with authorization, validation, error mapping, and logging.
  *
- * ## Tool Catalog (10 categories, 23 tools)
+ * ## Tool Catalog (11 categories, 27 tools)
  *
  * | Category       | Count | Tools                                                            |
  * |----------------|-------|------------------------------------------------------------------|
@@ -49,6 +49,11 @@ function assertNotPrivateUrl(urlStr: string): void {
     parsed = new URL(urlStr);
   } catch {
     throw new Error(`Invalid URL: ${urlStr}`);
+  }
+
+  // Only allow HTTP(S) — block file://, data:, javascript:, ftp:// etc.
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(`Blocked non-HTTP URL scheme: ${parsed.protocol}`);
   }
 
   const hostname = parsed.hostname.toLowerCase();
@@ -395,6 +400,19 @@ const InstallSkillSchema = z.object({
   registry_url: z.string().url(),
 });
 
+const BrowseWebSchema = z.object({
+  action: z.enum(['fetch', 'screenshot', 'click', 'extract_links']),
+  url: z.string().url(),
+  selector: z.string().optional(),
+  fill: z.record(z.string()).optional(),
+  submit_selector: z.string().optional(),
+  wait_for: z.string().optional(),
+  extract_text: z.boolean().optional(),
+  timeout_ms: z.number().int().positive().max(60000).optional(),
+}).refine(d => d.action !== 'click' || d.selector || d.fill || d.submit_selector, {
+  message: 'click action requires selector, fill, or submit_selector',
+});
+
 /** Maps each tool name to its Zod schema. */
 export const TOOL_SCHEMAS: Record<string, z.ZodTypeAny> = {
   spawn_container: SpawnContainerSchema,
@@ -428,6 +446,7 @@ export const TOOL_SCHEMAS: Record<string, z.ZodTypeAny> = {
   search_skill: SearchSkillSchema,
   install_skill: InstallSkillSchema,
   invoke_integration: InvokeIntegrationSchema,
+  browse_web: BrowseWebSchema,
 };
 
 // ---------------------------------------------------------------------------
@@ -1545,6 +1564,100 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
     };
   });
 
+  // ---- Web browsing tool (1) ----
+
+  // Lazy singleton browser — one Chromium per root process, fresh context per call
+  let browserInstance: import('playwright').Browser | null = null;
+
+  handlers.set('browse_web', async (args) => {
+    const parsed = BrowseWebSchema.parse(args);
+    assertNotPrivateUrl(parsed.url);
+
+    const { chromium } = await import('playwright');
+
+    // Lazy-launch browser (reused across calls)
+    if (!browserInstance || !browserInstance.isConnected()) {
+      browserInstance = await chromium.launch({ headless: true });
+    }
+
+    // Fresh incognito context per call (isolation)
+    const context = await browserInstance.newContext();
+    const page = await context.newPage();
+
+    try {
+      // SSRF: intercept ALL requests and block private IPs
+      await page.route('**/*', async (route) => {
+        try {
+          assertNotPrivateUrl(route.request().url());
+          await route.continue();
+        } catch {
+          await route.abort('blockedbyclient');
+        }
+      });
+
+      await page.goto(parsed.url, {
+        waitUntil: 'networkidle',
+        timeout: parsed.timeout_ms ?? 30_000,
+      });
+
+      switch (parsed.action) {
+        case 'fetch': {
+          if (parsed.wait_for) {
+            await page.waitForSelector(parsed.wait_for, { timeout: 5000 }).catch(() => {});
+          }
+          const content = parsed.extract_text !== false
+            ? await page.innerText('body')
+            : await page.content();
+          const truncated = content.length > 50000 ? content.slice(0, 50000) + '...(truncated)' : content;
+          return { url: parsed.url, title: await page.title(), content: truncated };
+        }
+
+        case 'screenshot': {
+          const { mkdir: mkFs, writeFile: wfFs } = await import('node:fs/promises');
+          const { join } = await import('node:path');
+          const screenshotDir = join('/app/workspace', 'screenshots');
+          await mkFs(screenshotDir, { recursive: true });
+          const filename = `${crypto.randomUUID()}.png`;
+          const filepath = join(screenshotDir, filename);
+          await page.screenshot({ fullPage: true, path: filepath });
+          void wfFs; // imported but used via page.screenshot path option
+          return { url: parsed.url, title: await page.title(), screenshot_path: filepath };
+        }
+
+        case 'click': {
+          if (parsed.fill) {
+            for (const [sel, val] of Object.entries(parsed.fill)) {
+              await page.fill(sel, val);
+            }
+          }
+          if (parsed.selector) await page.click(parsed.selector);
+          if (parsed.submit_selector) await page.click(parsed.submit_selector);
+          await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => {});
+          const clickContent = await page.innerText('body');
+          return {
+            url: page.url(),
+            title: await page.title(),
+            content: clickContent.length > 50000 ? clickContent.slice(0, 50000) + '...(truncated)' : clickContent,
+          };
+        }
+
+        case 'extract_links': {
+          const links = await page.locator('a[href]').evaluateAll(els =>
+            els.map(a => ({ text: a.textContent?.trim() ?? '', href: (a as HTMLAnchorElement).href }))
+              .filter(l => l.href.startsWith('http'))
+          );
+          return { url: parsed.url, title: await page.title(), links: links.slice(0, 200) };
+        }
+
+        default:
+          throw new Error(`Unknown browse_web action`);
+      }
+    } finally {
+      await page.close();
+      await context.close();
+    }
+  });
+
   return handlers;
 }
 
@@ -1726,4 +1839,4 @@ export class SDKToolHandler {
 export const TOOL_NAMES: ReadonlyArray<string> = Object.keys(TOOL_SCHEMAS);
 
 /** Total number of built-in tools. */
-export const TOOL_COUNT = 26;
+export const TOOL_COUNT = 27;

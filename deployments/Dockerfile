@@ -33,6 +33,10 @@ COPY web/package.json web/
 # Install all dependencies (including devDependencies for compilation)
 RUN bun install --frozen-lockfile
 
+# Install Playwright Chromium to a shared path (accessible by runtime user)
+ENV PLAYWRIGHT_BROWSERS_PATH=/app/browsers
+RUN cd backend && npx playwright install --with-deps chromium
+
 # Copy source code
 COPY backend/ backend/
 COPY web/ web/
@@ -55,12 +59,16 @@ FROM node:22-bookworm-slim
 # Install runtime system dependencies:
 #   - Python 3 with pip + venv (for Claude Agent SDK / tool use)
 #   - curl (health checks, debugging)
+#   - Chromium runtime libs (for Playwright browse_web tool)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         python3 \
         python3-pip \
         python3-venv \
-        curl && \
+        curl \
+        libnss3 libatk-bridge2.0-0 libdrm2 libxcomposite1 \
+        libxdamage1 libxrandr2 libgbm1 libasound2 libpango-1.0-0 \
+        libcairo2 libatspi2.0-0 libcups2 && \
     rm -rf /var/lib/apt/lists/*
 
 # Install bun runtime (pinned)
@@ -86,6 +94,10 @@ COPY --from=builder /build/package.json .
 
 # Copy common/ folder (skills, scripts, templates) -- AC16
 COPY common/ /app/common/
+
+# Copy Playwright browsers from builder (shared path for all users)
+ENV PLAYWRIGHT_BROWSERS_PATH=/app/browsers
+COPY --from=builder /app/browsers /app/browsers
 
 # Ensure non-root user owns app directories
 RUN chown -R node:node /app

@@ -223,3 +223,18 @@ echo 'Who are you? What is your name? Answer in one sentence.' | timeout 120 bun
 echo 'Send me a weather update for Miami every 5 minutes' | timeout 120 bun run cli/index.ts 2>&1
 ```
 - PASS if response does NOT contain "how would you like to receive" or "which channel"
+
+### Suite 33: Web Browsing Tool
+Test browse_web MCP tool with Playwright against https://example.com.
+```bash
+echo 'Use the browse_web tool with action fetch on url https://example.com' | timeout 120 bun run cli/index.ts 2>&1
+```
+- PASS if response contains "Example Domain"
+```bash
+echo 'Use browse_web with action extract_links on url https://example.com' | timeout 120 bun run cli/index.ts 2>&1
+```
+- PASS if response contains "iana.org"
+```bash
+echo 'Use browse_web with action screenshot on url https://example.com' | timeout 120 bun run cli/index.ts 2>&1
+```
+- PASS if response mentions screenshot file path
