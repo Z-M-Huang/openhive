@@ -16,17 +16,19 @@
 
 import { readFile, writeFile, mkdir, rm, readdir, stat, access } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { createHash } from 'node:crypto';
 import * as YAML from 'yaml';
-import { watch, type FSWatcher } from 'chokidar';
 
 import type { ConfigLoader, Logger } from '../domain/index.js';
 import type { MasterConfig } from './defaults.js';
 import type { Provider, Team } from '../domain/index.js';
-import type { TeamConfig } from './defaults.js';
 import { defaultMasterConfig } from './defaults.js';
 import { validateMasterConfig, validateProviders, validateTeam } from './validation.js';
 import { validateSlug, RESERVED_SLUGS } from '../domain/domain.js';
+import { isPlainObject, deepMerge, diffConfig, teamConfigToTeam, teamToTeamConfig } from './config-utils.js';
+import { watchFile, stopWatching, createWatcherState, type WatcherState } from './config-watcher.js';
+
+// Re-export deepMerge for downstream consumers
+export { deepMerge } from './config-utils.js';
 
 // ---------------------------------------------------------------------------
 // Options
@@ -39,44 +41,6 @@ export interface ConfigLoaderOptions {
 }
 
 // ---------------------------------------------------------------------------
-// Deep Merge Utility
-// ---------------------------------------------------------------------------
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-/**
- * Recursive deep merge. For each key in source:
- * - If both values are plain objects, recurse.
- * - If source value is array, replace (not merge).
- * - If source value is undefined, skip.
- * - Otherwise, source wins.
- */
-export function deepMerge<T extends Record<string, unknown>>(target: T, source: Record<string, unknown>): T {
-  const result = { ...target } as Record<string, unknown>;
-  for (const key of Object.keys(source)) {
-    const srcVal = source[key];
-    if (srcVal === undefined) continue;
-    const tgtVal = result[key];
-    if (isPlainObject(tgtVal) && isPlainObject(srcVal)) {
-      result[key] = deepMerge(tgtVal as Record<string, unknown>, srcVal);
-    } else {
-      result[key] = srcVal;
-    }
-  }
-  return result as T;
-}
-
-// ---------------------------------------------------------------------------
-// Content Hash
-// ---------------------------------------------------------------------------
-
-function contentHash(data: string): string {
-  return createHash('sha256').update(data).digest('hex');
-}
-
-// ---------------------------------------------------------------------------
 // ConfigLoaderImpl
 // ---------------------------------------------------------------------------
 
@@ -85,9 +49,7 @@ export class ConfigLoaderImpl implements ConfigLoader {
   private readonly runDir: string;
   private readonly logger?: Logger;
   private cachedMaster: MasterConfig | undefined;
-  private watchers: FSWatcher[] = [];
-  private debounceTimers: ReturnType<typeof setTimeout>[] = [];
-  private hashes = new Map<string, string>();
+  private readonly watcherState: WatcherState = createWatcherState();
 
   constructor(opts?: ConfigLoaderOptions) {
     this.dataDir = resolve(opts?.dataDir ?? process.env['OPENHIVE_DATA_DIR'] ?? 'data');
@@ -134,7 +96,7 @@ export class ConfigLoaderImpl implements ConfigLoader {
   async saveMaster(config: MasterConfig): Promise<void> {
     validateMasterConfig(config);
     const defaults = defaultMasterConfig();
-    const diff = this.diffConfig(
+    const diff = diffConfig(
       defaults as unknown as Record<string, unknown>,
       config as unknown as Record<string, unknown>,
     );
@@ -203,11 +165,11 @@ export class ConfigLoaderImpl implements ConfigLoader {
     const raw = await readFile(yamlPath, 'utf-8');
     const parsed: unknown = YAML.parse(raw);
     const validated = validateTeam(parsed);
-    return this.teamConfigToTeam(validated, workspacePath);
+    return teamConfigToTeam(validated, workspacePath);
   }
 
   async saveTeam(workspacePath: string, team: Team): Promise<void> {
-    const teamConfig = this.teamToTeamConfig(team);
+    const teamConfig = teamToTeamConfig(team);
     validateTeam(teamConfig);
     const yamlStr = YAML.stringify(teamConfig);
     await writeFile(join(workspacePath, 'team.yaml'), yamlStr, 'utf-8');
@@ -305,7 +267,7 @@ export class ConfigLoaderImpl implements ConfigLoader {
 
   watchMaster(callback: (cfg: MasterConfig) => void): void {
     const filePath = join(this.dataDir, 'openhive.yaml');
-    this.watchFile(filePath, async () => {
+    watchFile(this.watcherState, filePath, async () => {
       try {
         const config = await this.loadMaster();
         callback(config);
@@ -317,7 +279,7 @@ export class ConfigLoaderImpl implements ConfigLoader {
 
   watchProviders(callback: (providers: Record<string, Provider>) => void): void {
     const filePath = join(this.dataDir, 'providers.yaml');
-    this.watchFile(filePath, async () => {
+    watchFile(this.watcherState, filePath, async () => {
       try {
         const providers = await this.loadProviders();
         callback(providers);
@@ -329,7 +291,7 @@ export class ConfigLoaderImpl implements ConfigLoader {
 
   watchTeam(workspacePath: string, callback: (team: Team) => void): void {
     const filePath = join(workspacePath, 'team.yaml');
-    this.watchFile(filePath, async () => {
+    watchFile(this.watcherState, filePath, async () => {
       try {
         const team = await this.loadTeam(workspacePath);
         callback(team);
@@ -340,15 +302,7 @@ export class ConfigLoaderImpl implements ConfigLoader {
   }
 
   stopWatching(): void {
-    for (const timer of this.debounceTimers) {
-      clearTimeout(timer);
-    }
-    this.debounceTimers = [];
-    for (const watcher of this.watchers) {
-      void watcher.close();
-    }
-    this.watchers = [];
-    this.hashes.clear();
+    stopWatching(this.watcherState);
   }
 
   // -----------------------------------------------------------------------
@@ -372,80 +326,6 @@ export class ConfigLoaderImpl implements ConfigLoader {
     return result;
   }
 
-  /**
-   * Computes the diff between defaults and current config.
-   * Returns only fields that differ from defaults.
-   */
-  private diffConfig(defaults: Record<string, unknown>, current: Record<string, unknown>): Record<string, unknown> {
-    const result: Record<string, unknown> = {};
-    for (const key of Object.keys(current)) {
-      const defVal = defaults[key];
-      const curVal = current[key];
-      if (isPlainObject(defVal) && isPlainObject(curVal)) {
-        const nested = this.diffConfig(defVal, curVal);
-        if (Object.keys(nested).length > 0) {
-          result[key] = nested;
-        }
-      } else if (JSON.stringify(defVal) !== JSON.stringify(curVal)) {
-        result[key] = curVal;
-      }
-    }
-    return result;
-  }
-
-  private watchFile(filePath: string, onChange: () => Promise<void>): void {
-    const watcher = watch(filePath, {
-      persistent: true,
-      ignoreInitial: true,
-    });
-
-    let timer: ReturnType<typeof setTimeout> | undefined;
-
-    watcher.on('change', () => {
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(async () => {
-        // Content-hash check
-        try {
-          const raw = await readFile(filePath, 'utf-8');
-          const hash = contentHash(raw);
-          const prevHash = this.hashes.get(filePath);
-          if (prevHash === hash) return; // No-op: content unchanged
-          this.hashes.set(filePath, hash);
-          await onChange();
-        } catch {
-          // File may have been deleted
-        }
-      }, 500); // CON-04: 500ms debounce
-
-      if (timer) this.debounceTimers.push(timer);
-    });
-
-    this.watchers.push(watcher);
-  }
-
-  private teamConfigToTeam(config: TeamConfig, workspacePath: string): Team {
-    return {
-      tid: config.tid ?? '',
-      slug: config.slug,
-      leader_aid: config.leader_aid ?? '',
-      parent_tid: config.parent_slug ?? '',
-      depth: 0,
-      container_id: '',
-      health: 'unknown',
-      agent_aids: (config.agents ?? []).map((a) => a.aid),
-      workspace_path: workspacePath,
-      created_at: Date.now(),
-    };
-  }
-
-  private teamToTeamConfig(team: Team): TeamConfig {
-    return {
-      slug: team.slug,
-      ...(team.leader_aid ? { leader_aid: team.leader_aid } : {}),
-      ...(team.tid ? { tid: team.tid } : {}),
-      ...(team.parent_tid ? { parent_slug: team.parent_tid } : {}),
-    };
-  }
 
   // -----------------------------------------------------------------------
   // Config with sources (full implementation — step 16)
