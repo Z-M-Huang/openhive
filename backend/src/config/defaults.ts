@@ -104,7 +104,6 @@ export interface ChannelsConfig {
 export interface AgentRef {
   aid: string;
   name: string;
-  leads_team?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -119,7 +118,6 @@ export interface TeamAgentConfig {
   skills?: string[];
   max_turns?: number;
   timeout_minutes?: number;
-  leads_team?: string;
   proactive_interval_minutes?: number;
 }
 
@@ -133,7 +131,7 @@ export interface TeamResourceLimits {
 export interface TeamConfig {
   slug: string;
   parent_slug?: string;
-  leader_aid: string;
+  leader_aid?: string;
   tid?: string;
   description?: string;
   agents?: TeamAgentConfig[];

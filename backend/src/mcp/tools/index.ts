@@ -267,13 +267,14 @@ const SpawnContainerSchema = z.object({
 
 const StopContainerSchema = z.object({
   team_slug: z.string().min(1),
+  delete_workspace: z.boolean().optional().default(false),
 });
 
 const ListContainersSchema = z.object({});
 
 const CreateTeamSchema = z.object({
   slug: z.string().min(3).max(63),
-  leader_aid: z.string().min(1),
+  leader_aid: z.string().optional(),
   purpose: z.string().min(1),
 });
 
@@ -283,7 +284,6 @@ const CreateAgentSchema = z.object({
   team_slug: z.string().min(1),
   model: z.string().optional(),
   skills: z.array(z.string()).optional(),
-  role: z.enum(['member', 'team_lead']).optional(),
 });
 
 const CreateTaskSchema = z.object({
@@ -360,7 +360,6 @@ const GetCredentialSchema = z.object({
 const SetCredentialSchema = z.object({
   key: z.string().min(1),
   value: z.string().min(1),
-  scope: z.string().optional(),
 });
 
 const GetTeamSchema = z.object({
@@ -490,9 +489,8 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
 
     await ctx.containerManager.stopTeamContainer(parsed.team_slug, 'Tool: stop_container');
 
-    // Delete workspace — acquire lock to prevent race with concurrent create_team
-    // or create_agent targeting the same or overlapping paths (AC-D2, AC-D3).
-    if (teamWorkspacePath) {
+    // Only delete workspace if explicitly requested (default: preserve files)
+    if (parsed.delete_workspace && teamWorkspacePath) {
       if (ctx.workspaceLock) {
         await ctx.workspaceLock.acquire(teamWorkspacePath);
       }
@@ -508,6 +506,7 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
     return {
       message: `Container for team '${parsed.team_slug}' stopped`,
       final_status: 'stopped',
+      workspace_deleted: !!parsed.delete_workspace,
     };
   });
 
@@ -528,13 +527,6 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
   handlers.set('create_team', async (args, agentAid) => {
     const parsed = CreateTeamSchema.parse(args);
     validateSlug(parsed.slug);
-    validateAID(parsed.leader_aid);
-
-    // INV-01: leader must already exist in the parent team (org chart will enforce)
-    const leader = ctx.orgChart.getAgent(parsed.leader_aid);
-    if (!leader) {
-      throw new NotFoundError(`Leader agent '${parsed.leader_aid}' not found in org chart`);
-    }
 
     const callerAgent = ctx.orgChart.getAgent(agentAid);
     const parentTeam = callerAgent ? ctx.orgChart.getTeamBySlug(callerAgent.teamSlug) : undefined;
@@ -598,11 +590,34 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
       throw err;
     }
 
+    // Persist TID to team.yaml so rebuildTeamsFromFilesystem can restore it
+    try {
+      const fs = await import('node:fs/promises');
+      const nodePath = await import('node:path');
+      const yamlMod = await import('yaml');
+      const teamYamlPath = nodePath.join(workspacePath, 'team.yaml');
+      let teamYamlContent: Record<string, unknown> = {};
+      try {
+        const raw = await fs.readFile(teamYamlPath, 'utf-8');
+        teamYamlContent = (yamlMod.parse(raw) as Record<string, unknown>) ?? {};
+      } catch {
+        // team.yaml may not exist yet if scaffolding didn't create one
+      }
+      teamYamlContent.tid = tid;
+      if (!teamYamlContent.slug) teamYamlContent.slug = parsed.slug;
+      await fs.writeFile(teamYamlPath, yamlMod.stringify(teamYamlContent), 'utf-8');
+    } catch (err) {
+      ctx.logger.warn('Failed to persist TID to team.yaml', {
+        tid,
+        slug: parsed.slug,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+
     // Add team to org chart with the container's TID
     ctx.orgChart.addTeam({
       tid,
       slug: parsed.slug,
-      leaderAid: parsed.leader_aid,
       parentTid,
       depth: parentDepth + 1,
       containerId: containerInfo.id,
@@ -613,7 +628,7 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
 
     ctx.eventBus.publish({
       type: 'team.created',
-      data: { tid, slug: parsed.slug, leader_aid: parsed.leader_aid },
+      data: { tid, slug: parsed.slug },
       timestamp: Date.now(),
       source: agentAid,
     });
@@ -665,19 +680,9 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
 
     const aid = generateId('aid', parsed.name);
 
-    // INV-01: Team lead definition goes in the PARENT workspace, not the team's own.
-    // Members write to the team workspace as before.
-    const agentRole = parsed.role ?? 'member';
-    let definitionPath = team.workspacePath;
-    if (agentRole === 'team_lead' && team.parentTid) {
-      const parentTeam = ctx.orgChart.getTeam(team.parentTid);
-      if (parentTeam) {
-        definitionPath = parentTeam.workspacePath;
-      } else {
-        // Fallback to root workspace if parent can't be resolved
-        definitionPath = '/app/workspace';
-      }
-    }
+    // All agent definitions go to the team workspace
+    const agentRole = 'member' as const;
+    const definitionPath = team.workspacePath;
 
     // Write agent definition file — acquire lock on the target workspace path
     // to prevent races with create_team or stop_container on the same directory.
@@ -686,11 +691,22 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
     }
     try {
       await ctx.provisioner.writeAgentDefinition(definitionPath, {
+        aid,
         name: parsed.name,
         description: parsed.description,
         model: parsed.model,
         tools: [],
         content: parsed.description,
+      });
+      // Update team.yaml so the agent survives container restart
+      const teamWorkspacePath = team.workspacePath;
+      await ctx.provisioner.addAgentToTeamYaml(teamWorkspacePath, {
+        aid,
+        name: parsed.name,
+        description: parsed.description,
+        model_tier: parsed.model ?? 'sonnet',
+        role: agentRole,
+        provider: 'default',
       });
     } finally {
       if (ctx.workspaceLock) {
@@ -907,14 +923,13 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
         reason: parsed.reason,
         context: parsed.context,
         correlation_id: correlationId,
-        leader_aid: team.leaderAid,
       },
       timestamp: Date.now(),
       source: agentAid,
     });
 
     return {
-      message: `Escalated to '${team.leaderAid}'`,
+      message: `Escalated from team '${team.slug}'`,
       correlation_id: correlationId,
     };
   });
@@ -1198,10 +1213,11 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
       const creds = await ctx.credentialStore.listByTeam(teamSlug);
       const cred = creds.find((c) => c.name === credKey);
       if (cred) {
-        const decrypted = await ctx.keyManager.decrypt(cred.encrypted_value);
+        // FileCredentialStore returns plaintext directly — no decryption needed
+        const credValue = cred.encrypted_value;
         const headerName = String(auth.header ?? 'Authorization');
         const authType = String(auth.type ?? 'bearer');
-        headers[headerName] = authType === 'bearer' ? `Bearer ${decrypted}` : decrypted;
+        headers[headerName] = authType === 'bearer' ? `Bearer ${credValue}` : credValue;
       }
     }
 
@@ -1253,35 +1269,18 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
       throw new NotFoundError(`Credential '${parsed.key}' not found for team '${teamSlug}'`);
     }
 
-    const value = await ctx.keyManager.decrypt(cred.encrypted_value);
-    return { value };
+    // FileCredentialStore returns plaintext directly — no decryption needed
+    return { value: cred.encrypted_value };
   });
 
-  handlers.set('set_credential', async (args, agentAid, teamSlug) => {
+  handlers.set('set_credential', async (args, _agentAid, teamSlug) => {
     const parsed = SetCredentialSchema.parse(args);
-
-    // AC25/AC26: Enforce scope === caller's teamSlug. An agent may not write
-    // credentials to another team's scope, even if the optional scope param is provided.
-    const scope = parsed.scope ?? teamSlug;
-    if (scope !== teamSlug) {
-      ctx.logger.audit('security.scope_violation', {
-        type: 'set_credential',
-        requested_scope: scope,
-        caller_team: teamSlug,
-        agent_aid: agentAid,
-      });
-      throw new AccessDeniedError(
-        `Cannot set credential for team '${scope}' -- caller belongs to team '${teamSlug}'`
-      );
-    }
-
-    const encrypted = await ctx.keyManager.encrypt(parsed.value);
 
     await ctx.credentialStore.create({
       id: crypto.randomUUID(),
       name: parsed.key,
-      encrypted_value: encrypted,
-      team_id: scope,
+      encrypted_value: parsed.value, // Plaintext in file-backed mode
+      team_id: teamSlug,
       created_at: Date.now(),
     });
 
@@ -1301,7 +1300,7 @@ export function createToolHandlers(ctx: ToolContext): Map<string, ToolHandler> {
     return {
       slug: team.slug,
       tid: team.tid,
-      leader_aid: team.leaderAid,
+      ...(team.leaderAid ? { leader_aid: team.leaderAid } : {}),
       agent_aids: team.agentAids,
       health: team.health,
     };

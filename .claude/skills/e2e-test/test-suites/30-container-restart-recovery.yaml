@@ -20,7 +20,7 @@ test_cases:
     description: Create a team that spawns a container
     steps:
       - action: "Create resilience-test team via API"
-        command: "curl -sf -X POST http://localhost:8080/api/teams -H 'Content-Type: application/json' -d '{\"slug\":\"resilience-test\",\"leader_aid\":\"aid-main-001\"}' 2>&1"
+        command: "curl -sf -X POST http://localhost:8080/api/teams -H 'Content-Type: application/json' -d '{\"slug\":\"resilience-test\",\"purpose\":\"Restart recovery test\"}' 2>&1"
         expected: "resilience-test"
       - action: "Wait for container to start"
         command: "sleep 5"
@@ -45,3 +45,20 @@ test_cases:
         command: "curl -sf http://localhost:8080/api/health 2>&1"
         expected: "\"status\":\"healthy\""
     expected_outcome: "Container restarts successfully, system remains healthy"
+
+  - name: Teams auto-rebuild from filesystem after full restart
+    description: After a full docker compose restart (not just container restart), teams are auto-discovered from workspace filesystem and appear in org chart with status 'stopped'
+    steps:
+      - action: "Stop and restart the entire system"
+        command: "cd /app/openhive && sudo docker compose -f deployments/docker-compose.yml restart 2>&1"
+        expected: ""
+      - action: "Wait for system to come back up"
+        command: "for i in $(seq 1 30); do curl -sf http://localhost:8080/api/health && exit 0; sleep 3; done; echo 'Health check timed out'; exit 1"
+        expected: "healthy"
+      - action: "Verify resilience-test team was auto-discovered from filesystem"
+        command: "curl -sf http://localhost:8080/api/teams 2>&1"
+        expected: "resilience-test"
+      - action: "Verify team appears with stopped status (container not yet re-spawned)"
+        command: "curl -sf http://localhost:8080/api/teams/resilience-test 2>&1"
+        expected: "resilience-test"
+    expected_outcome: "After full restart, the resilience-test team is auto-discovered from the workspace filesystem and appears in the org chart (status 'stopped' until container is re-spawned)"

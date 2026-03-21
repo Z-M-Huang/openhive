@@ -1,5 +1,5 @@
 name: Agent and Team Creation via CLI
-description: Verify MCP tools create_team and create_agent work through the CLI pipeline -- natural-language request triggers tool invocation, team appears in GET /api/teams with leaderAid, agent appears in GET /api/agents, container is spawned for the team, and org chart reflects the hierarchy.
+description: Verify MCP tools create_team and create_agent work through the CLI pipeline -- natural-language request triggers tool invocation, team appears in GET /api/teams, agent appears in GET /api/agents with definition in team workspace, container is spawned for the team, and org chart reflects the hierarchy.
 
 setup:
   - command: "cd /app/openhive && sudo docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
@@ -36,13 +36,13 @@ test_cases:
         expected: "agent"
     expected_outcome: "Agent created and appears in agents API response"
 
-  - name: Verify team leader assignment
-    description: Team has leaderAid assigned after creation
+  - name: Verify agent definition in team workspace
+    description: Agent definitions are written to the team workspace (.claude/agents/) after create_agent
     steps:
-      - action: "Query team details for leaderAid"
-        command: "curl -sf http://localhost:8080/api/teams 2>&1"
-        expected: "leaderAid"
-    expected_outcome: "Team shows non-empty leaderAid pointing to a valid agent (aid-*)"
+      - action: "Check for agent definition files in the team workspace"
+        command: "find /app/openhive/.run/workspace/teams/ -path '*/.claude/agents/*.md' 2>/dev/null | head -5"
+        expected: ".md"
+    expected_outcome: "Agent .md definition file exists in the team's .claude/agents/ directory, confirming agents go to team workspace"
 
   - name: Verify container spawned for team
     description: New team has its own container per INV-05 (root spawns all containers)

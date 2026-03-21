@@ -147,7 +147,6 @@ const agentRefSchema = z.object({
     { message: 'Invalid AID format: must match aid-xxx-xxx pattern' }
   ),
   name: z.string().min(1),
-  leads_team: z.string().optional(),
 }).passthrough();
 
 const teamAgentConfigSchema = z.object({
@@ -168,7 +167,6 @@ const teamAgentConfigSchema = z.object({
   skills: z.array(z.string()).optional(),
   max_turns: z.number().int().positive().optional(),
   timeout_minutes: z.number().int().positive().optional(),
-  leads_team: z.string().optional(),
   proactive_interval_minutes: z.number().int().positive().optional(),
 }).passthrough();
 
@@ -416,7 +414,7 @@ export const teamConfigSchema: z.ZodType<TeamConfig> = z.object({
       }
     },
     { message: 'Invalid AID format' }
-  ),
+  ).optional(),
   tid: z.string().refine(
     (val) => {
       try {

@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { MCPRegistryImpl, MAIN_ASSISTANT_TOOLS, TEAM_LEAD_TOOLS, MEMBER_TOOLS } from './registry.js';
+import { MCPRegistryImpl, MAIN_ASSISTANT_TOOLS, MEMBER_TOOLS } from './registry.js';
 import { ConflictError } from '../domain/errors.js';
 import type { AgentRole } from '../domain/enums.js';
 
@@ -115,7 +115,7 @@ describe('MCPRegistryImpl', () => {
       expect(toolNames).not.toContain('unknown_tool');
     });
 
-    it('getToolsForRole("team_lead") excludes container management tools', () => {
+    it('getToolsForRole("member") excludes container and team management tools', () => {
       // Register all container management tools plus some team tools
       registry.registerTool('spawn_container', createTestSchema(), mockHandler);
       registry.registerTool('stop_container', createTestSchema(), mockHandler);
@@ -123,23 +123,25 @@ describe('MCPRegistryImpl', () => {
       registry.registerTool('create_team', createTestSchema(), mockHandler);
       registry.registerTool('update_task_status', createTestSchema(), mockHandler);
 
-      const tools = registry.getToolsForRole('team_lead');
+      const tools = registry.getToolsForRole('member');
       const toolNames = tools.map(t => t.name);
 
-      // Container tools should NOT be available to team_lead
+      // Container tools should NOT be available to member
       expect(toolNames).not.toContain('spawn_container');
       expect(toolNames).not.toContain('stop_container');
       expect(toolNames).not.toContain('list_containers');
+      // Team creation should NOT be available to member
+      expect(toolNames).not.toContain('create_team');
 
-      // But team tools should be available
-      expect(toolNames).toContain('create_team');
+      // But member-allowed tools should be available
       expect(toolNames).toContain('update_task_status');
     });
 
-    it('getToolsForRole("member") returns only the 7 member-allowed tools', () => {
+    it('getToolsForRole("member") returns only the 8 member-allowed tools', () => {
       // Register tools from different access levels
       registry.registerTool('spawn_container', createTestSchema(), mockHandler);
       registry.registerTool('create_team', createTestSchema(), mockHandler);
+      registry.registerTool('dispatch_subtask', createTestSchema(), mockHandler);
       registry.registerTool('update_task_status', createTestSchema(), mockHandler);
       registry.registerTool('send_message', createTestSchema(), mockHandler);
       registry.registerTool('escalate', createTestSchema(), mockHandler);
@@ -151,7 +153,8 @@ describe('MCPRegistryImpl', () => {
       const tools = registry.getToolsForRole('member');
       const toolNames = tools.map(t => t.name);
 
-      // Should return only member-allowed tools (7 total)
+      // Should return only member-allowed tools (8 total)
+      expect(toolNames).toContain('dispatch_subtask');
       expect(toolNames).toContain('update_task_status');
       expect(toolNames).toContain('send_message');
       expect(toolNames).toContain('escalate');
@@ -164,8 +167,8 @@ describe('MCPRegistryImpl', () => {
       expect(toolNames).not.toContain('spawn_container');
       expect(toolNames).not.toContain('create_team');
 
-      // Should have exactly 7 tools
-      expect(tools.length).toBe(7);
+      // Should have exactly 8 tools
+      expect(tools.length).toBe(8);
     });
 
     it('getToolsForRole returns empty array when no tools are registered', () => {
@@ -187,11 +190,6 @@ describe('MCPRegistryImpl', () => {
     it('isAllowed("spawn_container", "main_assistant") returns true', () => {
       const result = registry.isAllowed('spawn_container', 'main_assistant');
       expect(result).toBe(true);
-    });
-
-    it('isAllowed("spawn_container", "team_lead") returns false', () => {
-      const result = registry.isAllowed('spawn_container', 'team_lead');
-      expect(result).toBe(false);
     });
 
     it('isAllowed("spawn_container", "member") returns false', () => {
@@ -221,20 +219,11 @@ describe('MCPRegistryImpl', () => {
       expect(MAIN_ASSISTANT_TOOLS.size).toBe(27);
     });
 
-    it('TEAM_LEAD_TOOLS excludes container tools (24 tools)', () => {
-      // 27 - 3 container tools = 24
-      expect(TEAM_LEAD_TOOLS.size).toBe(24);
-
-      // Verify container tools are excluded
-      expect(TEAM_LEAD_TOOLS.has('spawn_container')).toBe(false);
-      expect(TEAM_LEAD_TOOLS.has('stop_container')).toBe(false);
-      expect(TEAM_LEAD_TOOLS.has('list_containers')).toBe(false);
-    });
-
-    it('MEMBER_TOOLS contains exactly 7 tools', () => {
-      expect(MEMBER_TOOLS.size).toBe(7);
+    it('MEMBER_TOOLS contains exactly 8 tools', () => {
+      expect(MEMBER_TOOLS.size).toBe(8);
 
       // Verify expected member tools
+      expect(MEMBER_TOOLS.has('dispatch_subtask')).toBe(true);
       expect(MEMBER_TOOLS.has('update_task_status')).toBe(true);
       expect(MEMBER_TOOLS.has('send_message')).toBe(true);
       expect(MEMBER_TOOLS.has('escalate')).toBe(true);

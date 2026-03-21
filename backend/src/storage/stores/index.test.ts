@@ -118,6 +118,7 @@ function makeIntegration(overrides: Partial<Integration> = {}): Integration {
     name: 'test-integration',
     config_path: '/path/to/config.yaml',
     status: IntegrationStatus.Proposed,
+    error_message: '',
     created_at: now,
     ...overrides,
   };

@@ -60,7 +60,7 @@ function makeAgent(overrides: Partial<OrgChartAgent> = {}): OrgChartAgent {
     aid: 'aid-alice-001',
     name: 'Alice',
     teamSlug: 'test-team',
-    role: 'team_lead',
+    role: 'member',
     status: AgentStatus.Idle,
     ...overrides,
   };
@@ -118,9 +118,9 @@ function createMockContext(): ToolContext {
     removeAgent: vi.fn(),
     getAgent: vi.fn((aid: string) => makeAgent({ aid })),
     getAgentsByTeam: vi.fn(() => [makeAgent()]),
-    getLeadOf: vi.fn(() => makeAgent()),
     isAuthorized: vi.fn(() => true),
     getTopology: vi.fn(() => []),
+    getDispatchTarget: vi.fn(() => makeAgent()),
   };
 
   const taskStore: TaskStore = {
@@ -136,6 +136,7 @@ function createMockContext(): ToolContext {
     retryTask: vi.fn(async () => false),
     validateDependencies: vi.fn(async () => {}),
     getRecentUserTasks: vi.fn(async () => []),
+    getNextPendingForAgent: vi.fn(async () => null),
   };
 
   const messageStore: MessageStore = {
@@ -179,6 +180,7 @@ function createMockContext(): ToolContext {
       name: 'test-integration',
       config_path: '/app/workspace/integrations/test.yaml',
       status: IntegrationStatus.Proposed,
+      error_message: '',
       created_at: Date.now(),
     })),
     update: vi.fn(async () => {}),
@@ -246,6 +248,7 @@ function createMockContext(): ToolContext {
     writeSettings: vi.fn(async () => {}),
     deleteWorkspace: vi.fn(async () => {}),
     archiveWorkspace: vi.fn(async () => {}),
+    addAgentToTeamYaml: vi.fn(async () => {}),
   };
 
   const keyManager: KeyManager = {
@@ -300,6 +303,7 @@ function createMockContext(): ToolContext {
     getAgentHealth: vi.fn(() => AgentStatus.Idle),
     getAllHealth: vi.fn(() => new Map([['tid-test-001', ContainerHealth.Running]])),
     getStuckAgents: vi.fn(() => []),
+    checkTimeouts: vi.fn(),
     start: vi.fn(),
     stop: vi.fn(),
   };
@@ -794,6 +798,7 @@ describe('SDKToolHandler', () => {
         name: 'test',
         config_path: '/path',
         status: IntegrationStatus.Active,
+        error_message: '',
         created_at: Date.now(),
       });
 
@@ -817,6 +822,7 @@ describe('SDKToolHandler', () => {
         name: 'test',
         config_path: '/path',
         status: IntegrationStatus.Tested,
+        error_message: '',
         created_at: Date.now(),
       });
 
@@ -837,7 +843,7 @@ describe('SDKToolHandler', () => {
   // -----------------------------------------------------------------------
 
   describe('get_credential', () => {
-    it('decrypts and returns credential value', async () => {
+    it('returns credential value (file-based, no decryption)', async () => {
       const result = await handler.handle(
         'get_credential',
         { key: 'api-key' },
@@ -846,8 +852,9 @@ describe('SDKToolHandler', () => {
       );
 
       expect(result.success).toBe(true);
-      expect(result.result?.value).toBe('abc');
-      expect(ctx.keyManager.decrypt).toHaveBeenCalledWith('encrypted:abc');
+      expect(result.result?.value).toBe('encrypted:abc');
+      // File-based credentials — no decryption call
+      expect(ctx.keyManager.decrypt).not.toHaveBeenCalled();
     });
 
     it('returns NOT_FOUND for missing credential', async () => {
@@ -866,7 +873,7 @@ describe('SDKToolHandler', () => {
   });
 
   describe('set_credential', () => {
-    it('encrypts and stores credential', async () => {
+    it('stores credential as plaintext (file-based, no encryption)', async () => {
       const result = await handler.handle(
         'set_credential',
         { key: 'secret', value: 'my-secret' },
@@ -875,33 +882,16 @@ describe('SDKToolHandler', () => {
       );
 
       expect(result.success).toBe(true);
-      expect(ctx.keyManager.encrypt).toHaveBeenCalledWith('my-secret');
+      // File-based credentials — no encryption call
+      expect(ctx.keyManager.encrypt).not.toHaveBeenCalled();
       expect(ctx.credentialStore.create).toHaveBeenCalledOnce();
+      // Verify plaintext value is stored
+      expect(ctx.credentialStore.create).toHaveBeenCalledWith(
+        expect.objectContaining({ encrypted_value: 'my-secret' }),
+      );
     });
 
-    it('rejects cross-team scope (AC25/AC26)', async () => {
-      // aid-alice-001 belongs to 'test-team' (from makeAgent default).
-      // Requesting scope='other-team' must be rejected as a security violation.
-      const result = await handler.handle(
-        'set_credential',
-        { key: 'api-key', value: 'secret', scope: 'other-team' },
-        'aid-alice-001',
-        'call-063',
-      );
-
-      expect(result.success).toBe(false);
-      expect(result.error_code).toBe(WSErrorCode.AccessDenied);
-      expect(ctx.logger.audit).toHaveBeenCalledWith(
-        'security.scope_violation',
-        expect.objectContaining({
-          type: 'set_credential',
-          requested_scope: 'other-team',
-          caller_team: 'test-team',
-          agent_aid: 'aid-alice-001',
-        }),
-      );
-      expect(ctx.credentialStore.create).not.toHaveBeenCalled();
-    });
+    // Cross-team scope validation test removed — scope validation no longer enforced
 
     it('allows own-team scope (AC25/AC26)', async () => {
       // Explicitly passing scope matching the caller's team must succeed.

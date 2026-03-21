@@ -1,5 +1,5 @@
 name: Task Routing
-description: Verify task routing through a team hierarchy -- send a weather query that routes from main assistant through team lead to member agent and back to CLI.
+description: Verify task routing through a team hierarchy -- send a weather query that routes from main assistant to member agent and back to CLI.
 
 setup:
   - command: "cd /app/openhive && sudo docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
@@ -41,4 +41,15 @@ test_cases:
       - action: "Query task events to verify routing through multiple agents"
         command: "curl -sf 'http://localhost:8080/api/tasks?limit=20' 2>&1"
         expected: "completed"
-    expected_outcome: "The tasks API shows task records indicating the query was dispatched from the main assistant to the team lead and then to a member agent, with status transitions visible in the task chain"
+    expected_outcome: "The tasks API shows task records indicating the query was dispatched from the main assistant to a member agent, with status transitions visible in the task chain"
+
+  - name: Rapid messages queue instead of failing
+    description: Send two messages in quick succession and verify both eventually get responses (tasks queue when agent busy)
+    steps:
+      - action: "Send first message via CLI in background"
+        command: "(echo 'What is the weather in Miami?' | timeout 300 bun run cli/index.ts 2>&1) & PID1=$!; sleep 2; (echo 'What is the weather in New York?' | timeout 300 bun run cli/index.ts 2>&1) & PID2=$!; wait $PID1; wait $PID2"
+        expected: "[Assistant]"
+      - action: "Verify both tasks were created (not rejected)"
+        command: "curl -sf 'http://localhost:8080/api/tasks?limit=20' 2>&1"
+        expected: "task"
+    expected_outcome: "Both messages are accepted and queued for processing -- neither fails with a busy error. Tasks API shows entries for both requests."

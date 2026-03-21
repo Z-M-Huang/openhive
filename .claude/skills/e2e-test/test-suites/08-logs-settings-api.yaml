@@ -68,3 +68,14 @@ test_cases:
         command: "curl -sf -X POST http://localhost:8080/api/settings/reload 2>&1"
         expected: "server"
     expected_outcome: "Config reloaded from disk successfully, returns current config state"
+
+  - name: Assistant responses logged in messages table
+    description: After sending a message, verify the database has both the user message and the assistant response stored in the messages table
+    steps:
+      - action: "Send a message via CLI to generate both user and assistant message rows"
+        command: "echo 'Hello, what can you do?' | timeout 300 bun run cli/index.ts 2>&1"
+        expected: "[Assistant]"
+      - action: "Query the messages API to verify both user and assistant messages exist"
+        command: "curl -sf 'http://localhost:8080/api/messages?limit=10' 2>&1"
+        expected: "assistant"
+    expected_outcome: "Messages API returns rows for both the user message and the assistant response, confirming assistant responses are stored in the messages table"

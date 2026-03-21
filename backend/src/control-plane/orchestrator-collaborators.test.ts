@@ -26,11 +26,12 @@ import { RateLimitedError, AccessDeniedError } from '../domain/errors.js';
 function createMockOrgChart() {
   return {
     addTeam: vi.fn(), updateTeam: vi.fn(), removeTeam: vi.fn(), addAgent: vi.fn(), updateAgent: vi.fn(), removeAgent: vi.fn(),
-    getTeam: vi.fn(), getParent: vi.fn(), getLeadOf: vi.fn(),
-    getTeamBySlug: vi.fn(), getTeamByTid: vi.fn(), getAgent: vi.fn(),
-    getAgentsByTeam: vi.fn(), getTeamLead: vi.fn(), getParentTeam: vi.fn(),
-    getChildren: vi.fn(), isAncestor: vi.fn(), isAuthorized: vi.fn(),
+    getTeam: vi.fn(), getParent: vi.fn(),
+    getTeamBySlug: vi.fn(), getAgent: vi.fn(),
+    getAgentsByTeam: vi.fn(),
+    getChildren: vi.fn(), isAuthorized: vi.fn(),
     getTopology: vi.fn(), listTeams: vi.fn(),
+    getDispatchTarget: vi.fn(),
   };
 }
 
@@ -51,6 +52,7 @@ function createMockTaskStore() {
     getSubtree: vi.fn(), unblockTask: vi.fn(), validateDependencies: vi.fn(),
     retryTask: vi.fn(),
     getRecentUserTasks: vi.fn().mockResolvedValue([]),
+    getNextPendingForAgent: vi.fn().mockResolvedValue(null),
   };
 }
 
@@ -85,7 +87,8 @@ function createMockToolCallStore() {
 function createMockHealthMonitor() {
   return {
     recordHeartbeat: vi.fn(), getHealth: vi.fn(), getAgentHealth: vi.fn(),
-    getAllHealth: vi.fn(), getStuckAgents: vi.fn(), start: vi.fn(), stop: vi.fn(),
+    getAllHealth: vi.fn(), getStuckAgents: vi.fn(), checkTimeouts: vi.fn(),
+    start: vi.fn(), stop: vi.fn(),
   };
 }
 
@@ -300,8 +303,17 @@ describe('EscalationRouter', () => {
   });
 
   it('handleEscalation creates record and returns correlationId', async () => {
-    vi.mocked(orgChart.getAgent).mockReturnValue({ teamSlug: 'team-a' } as any);
-    vi.mocked(orgChart.getTeamBySlug).mockReturnValue({ tid: 'tid-a', leaderAid: 'aid-lead' } as any);
+    vi.mocked(orgChart.getAgent).mockImplementation((aid: string) => {
+      if (aid === 'aid-member') return { aid: 'aid-member', teamSlug: 'team-a' } as any;
+      if (aid === 'aid-main') return { aid: 'aid-main', teamSlug: 'main' } as any;
+      return undefined;
+    });
+    vi.mocked(orgChart.getAgentsByTeam).mockReturnValue([{ aid: 'aid-main', teamSlug: 'main' }] as any);
+    vi.mocked(orgChart.getTeamBySlug).mockImplementation((slug: string) => {
+      if (slug === 'team-a') return { tid: 'tid-a', slug: 'team-a' } as any;
+      if (slug === 'main') return { tid: 'tid-main', slug: 'main' } as any;
+      return undefined;
+    });
     vi.mocked(taskStore.get).mockResolvedValue({ id: 'task-123', status: TaskStatus.Active } as any);
     vi.mocked(taskStore.update).mockResolvedValue(undefined as any);
     vi.mocked(wsHub.isConnected).mockReturnValue(true);

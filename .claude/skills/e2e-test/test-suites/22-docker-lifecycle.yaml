@@ -64,3 +64,23 @@ test_cases:
         command: "curl -sf http://localhost:8080/api/teams 2>&1"
         expected: "restart-test"
     expected_outcome: "After restart, system comes up healthy and workspace state (teams, data) is preserved via volume mounts"
+
+  - name: Workspace persists after stop_container
+    description: Stopping a team container preserves the workspace files on disk (delete_workspace defaults to false)
+    steps:
+      - action: "Create a team for workspace persistence testing"
+        command: "echo 'Create a team called persist-test with a member agent' | timeout 300 bun run cli/index.ts 2>&1"
+        expected: "[Assistant]"
+      - action: "Verify workspace directory exists before stop"
+        command: "test -d /app/openhive/.run/workspace/teams/persist-test && echo 'EXISTS' || echo 'MISSING'"
+        expected: "EXISTS"
+      - action: "Stop the team container via CLI"
+        command: "echo 'Stop the container for the persist-test team' | timeout 300 bun run cli/index.ts 2>&1"
+        expected: "[Assistant]"
+      - action: "Verify workspace directory still exists after stop"
+        command: "test -d /app/openhive/.run/workspace/teams/persist-test && echo 'PRESERVED' || echo 'DELETED'"
+        expected: "PRESERVED"
+      - action: "Verify team.yaml still exists in workspace"
+        command: "test -f /app/openhive/.run/workspace/teams/persist-test/team.yaml && echo 'FOUND' || echo 'MISSING'"
+        expected: "FOUND"
+    expected_outcome: "After stop_container, the workspace directory and its contents (team.yaml, .claude/, etc.) remain on disk because delete_workspace defaults to false"

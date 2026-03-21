@@ -59,7 +59,7 @@ export interface Agent {
 export interface Team {
   tid: string;
   slug: string;
-  leader_aid: string;
+  leader_aid?: string;
   parent_tid: string;
   depth: number;
   container_id: string;
@@ -212,7 +212,7 @@ export interface Provider {
  */
 const VALID_TRANSITIONS: Record<TaskStatus, ReadonlySet<TaskStatus>> = {
   [TS.Pending]: new Set([TS.Active, TS.Cancelled, TS.Escalated]),
-  [TS.Active]: new Set([TS.Completed, TS.Failed, TS.Cancelled, TS.Escalated]),
+  [TS.Active]: new Set([TS.Completed, TS.Failed, TS.Cancelled, TS.Escalated, TS.Pending]),
   [TS.Failed]: new Set([TS.Pending, TS.Escalated]),
   [TS.Escalated]: new Set([TS.Pending]),
   [TS.Completed]: new Set<TaskStatus>(),

@@ -400,6 +400,22 @@ export function newTaskStore(db: Database): TaskStore {
         .all();
       return rows.map(rowToTask);
     },
+
+    async getNextPendingForAgent(agentAid: string): Promise<Task | null> {
+      const rows = db.getDB()
+        .select()
+        .from(schema.tasks)
+        .where(
+          and(
+            eq(schema.tasks.agent_aid, agentAid),
+            eq(schema.tasks.status, 'pending'),
+          )
+        )
+        .orderBy(asc(schema.tasks.created_at))
+        .limit(1)
+        .all();
+      return rows.length > 0 ? rowToTask(rows[0]) : null;
+    },
   };
 }
 

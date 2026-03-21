@@ -86,34 +86,26 @@ export class EscalationRouter {
     }
     this.dedupSet.add(dedupKey);
 
-    // Walk OrgChart upward to find escalation target
-    let currentAid = agentAid;
+    // Flat escalation: member -> main assistant -> user
+    const agent = this.orgChart.getAgent(agentAid);
     let hopCount = 0;
     let targetAid: string | undefined;
 
-    while (hopCount < MAX_HOPS) {
-      const agent = this.orgChart.getAgent(currentAid);
-      if (!agent) break;
-
-      const team = this.orgChart.getTeamBySlug(agent.teamSlug);
-      if (!team) break;
-
-      // Target is the team lead (unless the agent IS the lead)
-      if (team.leaderAid !== currentAid) {
-        targetAid = team.leaderAid;
-        break;
-      }
-
-      // Agent is the team lead — go up to parent team
-      const parent = this.orgChart.getParent(team.tid);
-      if (!parent) {
-        // No parent — force to user
+    if (agent) {
+      if (agent.teamSlug === 'main') {
+        // Agent is on main team — escalate to user
         targetAid = undefined;
-        break;
+      } else {
+        // Find main assistant AID (first agent on 'main' team)
+        const mainAgents = this.orgChart.getAgentsByTeam('main');
+        if (mainAgents.length > 0) {
+          targetAid = mainAgents[0].aid;
+          hopCount = 1;
+        } else {
+          // No main assistant found — escalate to user
+          targetAid = undefined;
+        }
       }
-
-      currentAid = parent.leaderAid;
-      hopCount++;
     }
 
     // Transition task to escalated

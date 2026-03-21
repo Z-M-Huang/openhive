@@ -127,7 +127,7 @@ curl -sf http://localhost:8080/api/settings
 ```bash
 curl -sf -X POST http://localhost:8080/api/teams \
   -H 'Content-Type: application/json' \
-  -d '{"slug":"e2e-team","leader_aid":"aid-main-001"}'
+  -d '{"slug":"e2e-team","purpose":"E2E test team"}'
 ```
 - PASS if team created and visible in `GET /api/teams`
 - Cleanup: `curl -sf -X DELETE http://localhost:8080/api/teams/e2e-team`
@@ -187,7 +187,7 @@ Test container restart + recovery using the REST API directly.
 # Create team via API
 curl -sf -X POST http://localhost:8080/api/teams \
   -H 'Content-Type: application/json' \
-  -d '{"slug":"resilience-test","leader_aid":"aid-main-001"}'
+  -d '{"slug":"resilience-test","purpose":"Resilience test team"}'
 sleep 5
 # Restart
 curl -sf -X POST http://localhost:8080/api/containers/resilience-test/restart \

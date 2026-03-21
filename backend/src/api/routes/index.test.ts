@@ -128,7 +128,6 @@ function makeAgent(overrides?: Partial<OrgChartAgent>): OrgChartAgent {
     teamSlug: 'weather-team',
     role: 'member',
     status: AgentStatus.Idle,
-    leadsTeam: undefined,
     ...overrides,
   };
 }
@@ -202,9 +201,9 @@ function createMockOrgChart(): OrgChart {
     getAgentsByTeam: vi.fn((teamSlug: string) =>
       [...agents.values()].filter((a) => a.teamSlug === teamSlug),
     ),
-    getLeadOf: vi.fn(),
     isAuthorized: vi.fn(() => true),
     getTopology: vi.fn(() => []),
+    getDispatchTarget: vi.fn(),
   } as OrgChart;
 }
 
@@ -250,6 +249,7 @@ function createMockTaskStore(): TaskStore {
     retryTask: vi.fn(async () => false),
     validateDependencies: vi.fn(async () => {}),
     getRecentUserTasks: vi.fn().mockResolvedValue([]),
+    getNextPendingForAgent: vi.fn().mockResolvedValue(null),
   };
 }
 
@@ -285,7 +285,6 @@ describe('GET /api/agents', () => {
     expect(body.agents[0].teamSlug).toBe('weather-team');
     expect(body.agents[0].role).toBe('member');
     expect(body.agents[0].status).toBe(AgentStatus.Idle);
-    expect(body.agents[0].leadsTeam).toBeNull();
   });
 
   it('filters by team when ?team= is provided', async () => {
@@ -312,15 +311,6 @@ describe('GET /api/agents', () => {
     expect(reply._status).toBe(400);
   });
 
-  it('includes leadsTeam when agent is a team lead', async () => {
-    const leadAgent = makeAgent({ aid: 'aid-lead-abc123', leadsTeam: 'sub-team' });
-    (orgChart.addAgent as ReturnType<typeof vi.fn>)(leadAgent);
-
-    const reply = await app.call('GET', '/api/agents');
-    const body = reply._body as { agents: Array<{ leadsTeam: string | null }> };
-    const lead = body.agents.find((a) => (a as { aid?: string }).aid === 'aid-lead-abc123');
-    expect(lead?.leadsTeam).toBe('sub-team');
-  });
 });
 
 // ---------------------------------------------------------------------------
@@ -587,6 +577,7 @@ function makeIntegration(overrides?: Partial<Integration>): Integration {
     name: 'github-webhook',
     config_path: 'integrations/github.yaml',
     status: IntegrationStatus.Active,
+    error_message: '',
     created_at: Date.now(),
     ...overrides,
   };
@@ -646,7 +637,7 @@ describe('GET /api/integrations', () => {
 
     const reply = await app.call('GET', '/api/integrations', { query: { team: 'weather-team' } });
     expect(reply._status).toBe(200);
-    const body = reply._body as { integrations: Integration[] };
+    const body = reply._body as { integrations: Array<{ teamSlug: string }> };
     expect(body.integrations).toHaveLength(1);
     expect(body.integrations[0].teamSlug).toBe('weather-team');
   });
@@ -676,7 +667,7 @@ describe('GET /api/integrations', () => {
     await integrationStore.create(i);
 
     const reply = await app.call('GET', '/api/integrations');
-    const body = reply._body as { integrations: Integration[] };
+    const body = reply._body as { integrations: Array<{ id: string; name: string; teamSlug: string; config_path: string; status: string; created_at: number }> };
     const result = body.integrations[0];
     expect(result.id).toBe(i.id);
     expect(result.name).toBe('slack-hook');
@@ -1052,7 +1043,7 @@ describe('GET /api/logs/stream', () => {
 
     // Simulate client disconnect
     const closeHandler = (req.raw.on as ReturnType<typeof vi.fn>).mock.calls.find(
-      ([event]: [string]) => event === 'close',
+      (call) => call[0] === 'close',
     )?.[1] as (() => void) | undefined;
     expect(closeHandler).toBeDefined();
     closeHandler!();
@@ -1071,7 +1062,7 @@ describe('GET /api/logs/stream', () => {
 
     // Disconnect only the first client
     const closeHandler1 = (req1.raw.on as ReturnType<typeof vi.fn>).mock.calls.find(
-      ([event]: [string]) => event === 'close',
+      (call) => call[0] === 'close',
     )?.[1] as (() => void) | undefined;
     closeHandler1!();
 

@@ -2,6 +2,7 @@ import type { Task } from '../domain/domain.js';
 import { TaskStatus } from '../domain/enums.js';
 import type { EscalationReason } from '../domain/enums.js';
 import { assertValidTransition } from '../domain/domain.js';
+import { ConflictError } from '../domain/errors.js';
 import type {
   TaskStore,
   OrgChart,
@@ -115,27 +116,47 @@ export class TaskDAGManager {
         // Root-resident agent: dispatch locally via executor (fire-and-forget —
         // the executor publishes task_result events via eventBus)
         void this.agentExecutor.dispatchTask(task.agent_aid, this.prependChannelContext(task), task.id).catch(async (err: unknown) => {
+          // Clean up the session created before dispatch (orchestrator.ts creates one).
+          // Without this, the orphaned session blocks future dispatches to this agent.
+          this.eventBus.publish({
+            type: 'session.cleanup',
+            data: { task_id: task.id, agent_aid: task.agent_aid },
+            timestamp: Date.now(),
+          });
+
+          if (err instanceof ConflictError) {
+            // Agent busy — revert task to pending for re-dispatch when agent frees up
+            this.logger.info('Agent busy, re-queuing task', {
+              task_id: task.id,
+              agent_aid: task.agent_aid,
+            });
+            try {
+              await this.taskStore.update({
+                ...task,
+                status: TaskStatus.Pending,
+                updated_at: Date.now(),
+              });
+            } catch (updateErr: unknown) {
+              this.logger.error('Failed to revert task to pending', {
+                task_id: task.id,
+                error: String(updateErr),
+              });
+            }
+            return;
+          }
+
+          // For non-ConflictError failures, mark the task as failed
           this.logger.error('Local agent dispatch failed', {
             task_id: task.id,
             agent_aid: task.agent_aid,
             error: String(err),
           });
-          // Transition task to Failed so it doesn't remain stuck in Active
           try {
             await this.taskStore.update({
               ...task,
               status: TaskStatus.Failed,
               result: `Local dispatch failed: ${String(err)}`,
               updated_at: Date.now(),
-            });
-            this.eventBus.publish({
-              type: 'task_result',
-              data: {
-                task_id: task.id,
-                status: TaskStatus.Failed,
-                result: `Local dispatch failed: ${String(err)}`,
-              },
-              timestamp: Date.now(),
             });
           } catch (updateErr: unknown) {
             this.logger.error('Failed to transition task to Failed after dispatch error', {
@@ -211,6 +232,11 @@ export class TaskDAGManager {
     result?: string,
     error?: string,
   ): Promise<void> {
+    // Skip no-op same-status transitions (can happen from race conditions)
+    if (task.status === status) {
+      this.logger.debug('task.result.noop', { taskId: task.id, status });
+      return;
+    }
     assertValidTransition(task.status, status);
 
     const now = Date.now();
@@ -273,11 +299,8 @@ export class TaskDAGManager {
       return;
     }
 
-    // No retries left: escalate to lead for decision (User Decision #4)
-    const team = this.orgChart.getTeamBySlug(task.team_slug);
-    const leaderAid = team?.leaderAid ?? agentAid;
-
-    await this.onEscalation(leaderAid, task.id, 'error' as EscalationReason, {
+    // No retries left: escalate for decision (User Decision #4)
+    await this.onEscalation(agentAid, task.id, 'error' as EscalationReason, {
       failed_task_id: task.id,
       error: error ?? task.error,
       retries_exhausted: true,

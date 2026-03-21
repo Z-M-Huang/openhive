@@ -68,7 +68,6 @@ import {
   newSessionStore,
   newMemoryStore,
   newIntegrationStore,
-  newCredentialStore,
 } from './storage/stores/index.js';
 import { KeyManagerImpl } from './security/key-manager.js';
 import { EventBusImpl } from './control-plane/event-bus.js';
@@ -417,7 +416,9 @@ async function initializeRootMode(
   const sessionStore = newSessionStore(database);
   const memoryStore = newMemoryStore(database);
   const integrationStore = newIntegrationStore(database); // Used for integrations
-  const credentialStore = newCredentialStore(database); // Used for credentials
+  // File-based credential store (plaintext files in workspace/.credentials/)
+  const { createFileCredentialStore } = await import('./storage/stores/file-credential-store.js');
+  const credentialStore = createFileCredentialStore('/app/workspace');
 
   // Suppress unused warnings for stores that will be wired up later
   void messageStore;
@@ -443,11 +444,10 @@ async function initializeRootMode(
   const assistantConfig = masterConfig.assistant;
   const rootTeamTid = `tid-main-${Date.now().toString(16)}`;
 
-  // Create root team (bypassing INV-01 check for bootstrap)
+  // Create root team
   const rootTeam: OrgChartTeam = {
     tid: rootTeamTid,
     slug: 'main',
-    leaderAid: assistantConfig.aid,
     parentTid: '',
     depth: 0,
     containerId: 'root',
@@ -456,7 +456,7 @@ async function initializeRootMode(
     workspacePath: '/app/workspace',
   };
 
-  // Add root team directly to internal maps (bypasses INV-01 for bootstrap)
+  // Add root team directly to internal maps (bypasses addTeam for bootstrap)
   (orgChart as unknown as { teamsByTid: Map<string, OrgChartTeam> }).teamsByTid.set(rootTeamTid, rootTeam);
   (orgChart as unknown as { teamsBySlug: Map<string, OrgChartTeam> }).teamsBySlug.set(rootTeam.slug, rootTeam);
   (orgChart as unknown as { agentsByTeam: Map<string, Set<string>> }).agentsByTeam.set(rootTeam.slug, new Set([assistantConfig.aid]));
@@ -468,7 +468,6 @@ async function initializeRootMode(
     teamSlug: 'main',
     role: 'main_assistant',
     status: 'idle',
-    leadsTeam: 'main',
   };
   (orgChart as unknown as { agentsByAid: Map<string, OrgChartAgent> }).agentsByAid.set(mainAssistant.aid, mainAssistant);
 
@@ -589,11 +588,14 @@ async function initializeRootMode(
           const { task_id, agent_aid, status, result, error } = message.data as {
             task_id: string;
             agent_aid: string;
-            status: 'completed' | 'failed';
+            status: 'completed' | 'failed' | 'pending';
             result?: string;
             error?: string;
           };
-          const taskStatus = status === 'completed' ? 'completed' : 'failed';
+          // Map wire status to TaskStatus. 'pending' = agent was busy, re-queue task.
+          const taskStatus = status === 'completed' ? 'completed'
+            : status === 'pending' ? 'pending'
+            : 'failed';
           if (shutdownState.orchestrator) {
             shutdownState.orchestrator.handleTaskResult(task_id, agent_aid, taskStatus, result, error).catch((err) => {
               logger.error('task_result handler failed', { task_id, error: String(err) });
@@ -856,18 +858,9 @@ async function initializeRootMode(
         const credentials = await credentialStore.listByTeam(team.slug);
         const secrets: Record<string, string> = {};
 
-        // Decrypt credentials
+        // FileCredentialStore returns plaintext directly — no decryption needed
         for (const cred of credentials) {
-          try {
-            const decrypted = await keyManager.decrypt(cred.encrypted_value);
-            secrets[cred.name] = decrypted;
-          } catch (decryptError) {
-            logger.warn('Failed to decrypt credential', {
-              name: cred.name,
-              team: team.slug,
-              error: String(decryptError),
-            });
-          }
+          secrets[cred.name] = cred.encrypted_value;
         }
 
         // Resolve {secrets.XXX} templates in MCP servers
@@ -988,8 +981,16 @@ async function initializeRootMode(
         return;
       }
 
-      // Use the specified agent AID, or fall back to the team lead (AC-E3)
-      const assignedAid = agent ?? team.leaderAid;
+      // Use the specified agent AID, or fall back to the best dispatch target
+      let assignedAid = agent ?? '';
+      if (!assignedAid) {
+        try {
+          assignedAid = orgChart.getDispatchTarget(teamSlug).aid;
+        } catch {
+          logger.error('No dispatch target for trigger team', { team_slug: teamSlug });
+          return;
+        }
+      }
 
       // Generate task ID
       const taskId = `task-${Date.now().toString(16)}-${Math.random().toString(16).slice(2, 8)}`;

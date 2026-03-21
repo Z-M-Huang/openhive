@@ -32,8 +32,10 @@ import type {
 } from '../domain/interfaces.js';
 import type { Task } from '../domain/domain.js';
 import type { TaskStatus, EscalationReason, AgentStatus } from '../domain/enums.js';
-import { TaskStatus as TS } from '../domain/enums.js';
-import { ValidationError } from '../domain/errors.js';
+import { TaskStatus as TS, ContainerHealth as CH, AgentStatus as AS, AgentRole as AR } from '../domain/enums.js';
+import { ValidationError, ConflictError } from '../domain/errors.js';
+import { validateTeam } from '../config/validation.js';
+import YAML from 'yaml';
 import { ToolCallDispatcher } from './tool-call-dispatcher.js';
 import { TaskDAGManager } from './task-dag-manager.js';
 import { EscalationRouter } from './escalation-router.js';
@@ -41,7 +43,7 @@ import { ProactiveScheduler } from './proactive-scheduler.js';
 import { RetentionWorker } from './retention-worker.js';
 import { createToolHandlers, type ToolContext, type ToolHandler, type PendingMemoryWrite } from '../mcp/tools/index.js';
 import { join } from 'node:path';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, readdir, readFile, stat, access } from 'node:fs/promises';
 import { appendFile } from 'node:fs/promises';
 
 /** All store interfaces combined for convenience. */
@@ -609,6 +611,28 @@ export class OrchestratorImpl implements Orchestrator {
     );
     this.eventSubscriptions.push(taskResultSub);
 
+    // Subscribe to session cleanup events (dispatch failures in task-dag-manager)
+    const sessionCleanupSub = eventBus.filteredSubscribe(
+      (e: BusEvent) => e.type === 'session.cleanup',
+      async (e: BusEvent) => {
+        const { task_id } = e.data as { task_id: string; agent_aid: string };
+        const sessionId = this.taskSessionMap.get(task_id);
+        if (sessionId && this.deps.sessionManager) {
+          this.taskSessionMap.delete(task_id);
+          try {
+            await this.deps.sessionManager.endSession(sessionId);
+          } catch (err) {
+            this.logger.warn('session.cleanup.failed', {
+              task_id,
+              session_id: sessionId,
+              error: String(err),
+            });
+          }
+        }
+      },
+    );
+    this.eventSubscriptions.push(sessionCleanupSub);
+
     // Subscribe to escalation events
     const escalationSub = eventBus.filteredSubscribe(
       (e: BusEvent) => e.type === 'escalation',
@@ -911,10 +935,131 @@ export class OrchestratorImpl implements Orchestrator {
     }
     await this.resumeActiveSessions();
 
-    // 7. Task recovery
+    // 7. Rebuild teams from filesystem (discovers persisted team directories)
+    await this.rebuildTeamsFromFilesystem();
+
+    // 8. Task recovery
     await this.recoverTasks();
 
     this.logger.info('State rebuild complete');
+  }
+
+  /**
+   * Rebuild teams from filesystem on startup.
+   *
+   * Recursively scans the workspace tree for team.yaml files and re-registers
+   * each discovered team (and its agents) in the org chart. Containers are
+   * marked as 'stopped' since they aren't running yet after a restart.
+   *
+   * This ensures the org chart is populated even when the database has no
+   * prior state (fresh start with pre-existing workspace directories).
+   */
+  private async rebuildTeamsFromFilesystem(): Promise<void> {
+    const workspaceRoot = '/app/workspace';
+    const discovered: Array<{ workspacePath: string; depth: number; parentTid: string }> = [];
+
+    // Recursive scanner: find all team.yaml files in the workspace tree
+    const scanDir = async (dir: string, depth: number, parentTid: string): Promise<void> => {
+      const teamsDir = join(dir, 'teams');
+      let entries: string[];
+      try {
+        entries = await readdir(teamsDir);
+      } catch {
+        return; // No teams/ subdirectory — leaf node
+      }
+
+      for (const entry of entries) {
+        const teamPath = join(teamsDir, entry);
+        try {
+          const info = await stat(teamPath);
+          if (!info.isDirectory()) continue;
+          await access(join(teamPath, 'team.yaml'));
+          discovered.push({ workspacePath: teamPath, depth, parentTid });
+          // Recurse into sub-teams
+          await scanDir(teamPath, depth + 1, ''); // parentTid filled in during registration
+        } catch {
+          // Not a valid team directory
+        }
+      }
+    };
+
+    await scanDir(workspaceRoot, 1, '');
+
+    if (discovered.length === 0) {
+      this.logger.debug('rebuild.filesystem.no_teams', { workspace: workspaceRoot });
+      return;
+    }
+
+    this.logger.info('rebuild.filesystem.discovered', { count: discovered.length });
+
+    // Process in order of discovery (parents before children due to BFS-like scan)
+    for (const { workspacePath, depth } of discovered) {
+      try {
+        const raw = await readFile(join(workspacePath, 'team.yaml'), 'utf-8');
+        const parsed: unknown = YAML.parse(raw);
+        const teamConfig = validateTeam(parsed);
+
+        // Use persisted TID if available, else generate new one
+        const tid = teamConfig.tid || `tid-${teamConfig.slug}-${Date.now().toString(16)}`;
+
+        // Determine parentTid: look up the parent directory's team in org chart
+        const parentPath = join(workspacePath, '..', '..');
+        const parentTeam = this.deps.orgChart.listTeams().find(t => {
+          // Normalize paths for comparison
+          const normalized = join(t.workspacePath);
+          const normalizedParent = join(parentPath);
+          return normalized === normalizedParent;
+        });
+        const parentTid = parentTeam?.tid ?? '';
+
+        // Skip if team already registered (e.g., from container discovery)
+        const existing = this.deps.orgChart.getTeamBySlug(teamConfig.slug);
+        if (existing) {
+          this.logger.debug('rebuild.filesystem.skip_existing', { slug: teamConfig.slug, tid: existing.tid });
+          continue;
+        }
+
+        // Register team in org chart with 'stopped' health
+        this.deps.orgChart.addTeam({
+          tid,
+          slug: teamConfig.slug,
+          leaderAid: teamConfig.leader_aid,
+          parentTid,
+          depth,
+          containerId: '',
+          health: CH.Stopped,
+          agentAids: (teamConfig.agents ?? []).map(a => a.aid),
+          workspacePath,
+        });
+
+        // Register agents from team.yaml
+        for (const agentEntry of teamConfig.agents ?? []) {
+          try {
+            this.deps.orgChart.addAgent({
+              aid: agentEntry.aid,
+              name: agentEntry.name,
+              teamSlug: teamConfig.slug,
+              role: AR.Member,
+              status: AS.Idle,
+            });
+          } catch {
+            // Agent may already exist from other sources
+          }
+        }
+
+        this.logger.info('rebuild.filesystem.team_registered', {
+          slug: teamConfig.slug,
+          tid,
+          agents: (teamConfig.agents ?? []).length,
+          workspace: workspacePath,
+        });
+      } catch (err) {
+        this.logger.warn('rebuild.filesystem.team_failed', {
+          workspace: workspacePath,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
   }
 
   /**
@@ -958,11 +1103,8 @@ export class OrchestratorImpl implements Orchestrator {
           max_retries: task.max_retries,
         });
       } else {
-        // Escalate to team lead
-        const team = this.deps.orgChart.getTeamBySlug(task.team_slug);
-        const leaderAid = team?.leaderAid ?? task.agent_aid;
-
-        await this.handleEscalation(leaderAid, task.id, 'error' as EscalationReason, {
+        // Escalate for decision
+        await this.handleEscalation(task.agent_aid, task.id, 'error' as EscalationReason, {
           recovery: true,
           failed_task_id: task.id,
           error: 'Task failed after orchestrator restart, retries exhausted',
@@ -1048,7 +1190,7 @@ export class OrchestratorImpl implements Orchestrator {
             aid: agent.aid,
             name: agent.name,
             teamSlug: team.slug,
-            role: (agent.role as 'main_assistant' | 'team_lead' | 'member') || 'member',
+            role: (agent.role as 'main_assistant' | 'member') || 'member',
             status: 'idle',
             // agent.model is the resolved model name (e.g. 'claude-haiku-4-...'). The
             // tier is unavailable here — root already stored the tier in the root-side
@@ -1209,8 +1351,18 @@ export class OrchestratorImpl implements Orchestrator {
         }
       })
       .catch((err) => {
+        if (err instanceof ConflictError) {
+          // Agent busy — tell root to re-queue
+          this.logger.info('Agent busy, requesting re-queue', { task_id, agent_aid });
+          if (this.deps.wsConnection) {
+            this.deps.wsConnection.send({
+              type: 'task_result',
+              data: { task_id, agent_aid, status: 'pending', error: 'agent_busy', duration: 0 },
+            });
+          }
+          return;
+        }
         this.logger.error('task_dispatch failed', { task_id, agent_aid, error: String(err) });
-        // Send failure result back to root
         if (this.deps.wsConnection) {
           this.deps.wsConnection.send({
             type: 'task_result',
@@ -1331,6 +1483,33 @@ export class OrchestratorImpl implements Orchestrator {
     if (!this.taskDAGManager) {
       throw new Error('TaskDAGManager not initialized');
     }
+
+    // Handle re-queue from non-root container (agent was busy)
+    if (status === TS.Pending) {
+      this.deps.dispatchTracker?.acknowledgeDispatch(taskId);
+      // Clean up session created before dispatch
+      const sessionId = this.taskSessionMap.get(taskId);
+      if (sessionId && this.deps.sessionManager) {
+        this.taskSessionMap.delete(taskId);
+        try {
+          await this.deps.sessionManager.endSession(sessionId);
+        } catch (err) {
+          this.logger.warn('session.end.failed', {
+            task_id: taskId,
+            session_id: sessionId,
+            error: String(err),
+          });
+        }
+      }
+      // Revert task to pending for later re-dispatch
+      const taskStore = this.deps.stores?.taskStore;
+      if (taskStore) {
+        const task = await taskStore.get(taskId);
+        await taskStore.update({ ...task, status: TS.Pending, updated_at: Date.now() });
+      }
+      return;
+    }
+
     // Acknowledge the dispatch so DispatchTracker clears the grace-period timer (AC-B5).
     this.deps.dispatchTracker?.acknowledgeDispatch(taskId);
     await this.taskDAGManager.handleTaskResult(taskId, agentAid, status, result, error);
@@ -1368,6 +1547,25 @@ export class OrchestratorImpl implements Orchestrator {
             error: String(err),
           });
         }
+      }
+    }
+
+    // Dispatch next queued task for this agent now that it's idle
+    if (this.deps.stores?.taskStore) {
+      try {
+        const nextTask = await this.deps.stores.taskStore.getNextPendingForAgent(agentAid);
+        if (nextTask) {
+          this.logger.info('Dispatching queued task', {
+            task_id: nextTask.id,
+            agent_aid: agentAid,
+          });
+          await this.dispatchTask(nextTask);
+        }
+      } catch (err) {
+        this.logger.warn('queued.dispatch.failed', {
+          agent_aid: agentAid,
+          error: String(err),
+        });
       }
     }
   }

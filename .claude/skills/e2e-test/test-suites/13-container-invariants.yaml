@@ -1,5 +1,5 @@
 name: Container Invariants
-description: Verify container design invariants after creating a team -- INV-01 (team lead agent runs in parent container, not in the team's child container), INV-05 (all containers spawned by root via Docker socket), INV-06 (all containers use the same openhive:latest image).
+description: Verify container design invariants after creating a team -- INV-05 (all containers spawned by root via Docker socket), INV-06 (all containers use the same openhive:latest image).
 
 setup:
   - command: "cd /app/openhive && sudo docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
@@ -16,20 +16,6 @@ teardown:
     description: "Clean up -- remove all containers and volumes"
 
 test_cases:
-  - name: "INV-01: Team lead runs in parent container (not child)"
-    description: Verify the team lead agent is NOT in the team's child container by querying /api/teams/:slug for the leaderAid and containerId, then /api/agents to check the leader's leadsTeam field. The leader runs in the parent (root) container per INV-01, while the child container has only member agents.
-    steps:
-      - action: "Get team detail via /api/teams/:slug to retrieve leaderAid and containerId"
-        command: "curl -sf http://localhost:8080/api/teams/invariant-test 2>&1"
-        expected: "leaderAid"
-      - action: "Get agents list to find the leader agent and verify it has leadsTeam set to 'invariant-test'"
-        command: "curl -sf http://localhost:8080/api/agents 2>&1"
-        expected: "leadsTeam"
-      - action: "Verify the child container's agent list does NOT include the leader -- agents array in /api/teams/:slug has only members"
-        command: "curl -sf http://localhost:8080/api/teams/invariant-test 2>&1"
-        expected: "agents"
-    expected_outcome: "GET /api/teams/invariant-test returns leaderAid and containerId. The leader agent appears in /api/agents with leadsTeam set. The agents array in /api/teams/:slug shows members but the leader is NOT listed as a member agent (it runs in the parent container per INV-01)."
-
   - name: "INV-05: Root spawns all containers"
     description: All containers are spawned by root via Docker socket, verified by container labels
     steps:
@@ -45,17 +31,6 @@ test_cases:
         command: "docker ps --format '{{.Image}}' 2>&1 | sort -u"
         expected: "openhive"
     expected_outcome: "All containers use identical openhive:latest image -- sorted unique output should show only one image name (INV-06)"
-
-  - name: Child container has members but not the leader
-    description: The team's child container agentCount reflects only member agents, while the leader is tracked separately via leaderAid on the team
-    steps:
-      - action: "Get team detail showing agents array (members in child container) and leaderAid (in parent)"
-        command: "curl -sf http://localhost:8080/api/teams/invariant-test 2>&1"
-        expected: "childTeams"
-      - action: "Verify containers API shows the child container with agentCount (members only)"
-        command: "curl -sf http://localhost:8080/api/containers 2>&1"
-        expected: "agentCount"
-    expected_outcome: "Team detail shows agents array with only member agents. The container's agentCount reflects members only. The leader (leaderAid) runs in the parent container, not counted in the child's agentCount."
 
   - name: Container hierarchy matches team hierarchy
     description: Container parent-child relationships match org chart

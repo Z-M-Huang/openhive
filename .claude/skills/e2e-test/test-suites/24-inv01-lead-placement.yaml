@@ -1,5 +1,5 @@
-name: INV-01 Lead Agent Placement
-description: Verify team lead agent definition is written to the parent workspace (not the team's workspace) per INV-01.
+name: Agent Workspace Placement
+description: Verify that agent definitions are written to the team workspace (.claude/agents/), agents appear in team.yaml after create_agent, and agent definitions persist across container restart.
 
 setup:
   - command: "cd /app/openhive && sudo docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
@@ -10,40 +10,43 @@ setup:
     description: "Build and start the server"
   - command: "for i in $(seq 1 30); do curl -sf http://localhost:8080/api/health && exit 0; sleep 3; done; echo 'Health check timed out'; exit 1"
     description: "Wait for health check"
-  - command: "echo 'Create a team called placement-test with a team lead and one member agent. Use create_team and create_agent tools.' | timeout 300 bun run cli/index.ts 2>&1"
-    description: "Create test team with lead and member via CLI"
+  - command: "echo 'Create a team called placement-test and add a member agent named test-worker to it' | timeout 300 bun run cli/index.ts 2>&1"
+    description: "Create test team with member via CLI"
 
 teardown:
   - command: "cd /app/openhive && sudo docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
     description: "Clean up"
 
 test_cases:
-  - name: Lead definition in parent workspace
-    description: The team lead's .md file should be in the root workspace (.run/workspace/.claude/agents/), not in the team's workspace
-    steps:
-      - action: "Check for agent definition files in the parent (root) workspace"
-        command: "find /app/openhive/.run/workspace/.claude/agents/ -name '*.md' -not -path '*/teams/*' 2>/dev/null | head -5"
-        expected: ".md"
-      - action: "Verify the lead file is NOT in the team's workspace"
-        command: "find /app/openhive/.run/workspace/teams/placement-test/.claude/agents/ -name '*lead*' -o -name '*Lead*' 2>/dev/null | wc -l"
-        expected: "0"
-    expected_outcome: "Lead agent's .md file found in root workspace, NOT in teams/placement-test/.claude/agents/"
-
-  - name: Member definition in team workspace
-    description: Member agents' .md files should be in the team's own workspace
+  - name: Agent definition written to team workspace
+    description: After create_agent, the agent's .md definition file should exist in the team workspace (.claude/agents/)
     steps:
       - action: "Check for agent definition files in the team workspace"
         command: "find /app/openhive/.run/workspace/teams/placement-test/.claude/agents/ -name '*.md' 2>/dev/null | head -5"
         expected: ".md"
-    expected_outcome: "At least one member agent .md file found in teams/placement-test/.claude/agents/"
+    expected_outcome: "At least one agent .md definition file found in teams/placement-test/.claude/agents/"
 
-  - name: Lead executes in root container
-    description: Verify via the teams API that the lead agent is assigned to the root container per INV-01
+  - name: Agent appears in team.yaml
+    description: After create_agent, the agent should be listed in the team's team.yaml configuration
     steps:
-      - action: "Query teams API and check the leader assignment"
-        command: "curl -sf http://localhost:8080/api/teams 2>&1"
-        expected: "leaderAid"
-      - action: "Query agents API to find the lead agent's team association"
-        command: "curl -sf http://localhost:8080/api/agents 2>&1"
-        expected: "leadsTeam"
-    expected_outcome: "The lead agent appears in the agents list with leadsTeam set, confirming it is registered as the team lead. Per INV-01, it executes in the parent (root) container."
+      - action: "Check team.yaml for agent entry"
+        command: "cat /app/openhive/.run/workspace/teams/placement-test/team.yaml 2>&1"
+        expected: "agent"
+    expected_outcome: "team.yaml contains an entry for the created agent"
+
+  - name: Agent definition persists across container restart
+    description: After restarting the container, agent definition files should still exist on disk
+    steps:
+      - action: "Record agent files before restart"
+        command: "find /app/openhive/.run/workspace/teams/placement-test/.claude/agents/ -name '*.md' 2>/dev/null | sort"
+        expected: ".md"
+      - action: "Restart the container"
+        command: "cd /app/openhive && sudo docker compose -f deployments/docker-compose.yml restart 2>&1"
+        expected: ""
+      - action: "Wait for health check after restart"
+        command: "for i in $(seq 1 30); do curl -sf http://localhost:8080/api/health && exit 0; sleep 3; done; echo 'Health check timed out'; exit 1"
+        expected: "healthy"
+      - action: "Verify agent files still exist after restart"
+        command: "find /app/openhive/.run/workspace/teams/placement-test/.claude/agents/ -name '*.md' 2>/dev/null | head -5"
+        expected: ".md"
+    expected_outcome: "Agent definition files persist on disk after container restart, proving workspace durability"

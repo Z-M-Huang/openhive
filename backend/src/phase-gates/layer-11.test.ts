@@ -124,6 +124,7 @@ function createMockTaskStore(tasks: Task[] = []): TaskStore {
     retryTask: vi.fn(async () => false),
     validateDependencies: vi.fn(async () => {}),
     getRecentUserTasks: vi.fn().mockResolvedValue([]),
+    getNextPendingForAgent: vi.fn().mockResolvedValue(null),
   };
 }
 
@@ -176,6 +177,7 @@ function createMockHealthMonitor(): HealthMonitor {
     getAgentHealth: vi.fn(() => AgentStatus.Idle),
     getAllHealth: vi.fn(() => healthMap),
     getStuckAgents: vi.fn(() => []),
+    checkTimeouts: vi.fn(),
     start: vi.fn(),
     stop: vi.fn(),
   };
@@ -221,7 +223,7 @@ describe('Layer 11: Integration + E2E', () => {
     const leaderAgent: OrgChartAgent = makeOrgChartAgent({
       aid: 'aid-main-leader',
       name: 'Main Leader',
-      role: 'team_lead',
+      role: 'member',
     });
     orgChart.addAgent(leaderAgent);
   }

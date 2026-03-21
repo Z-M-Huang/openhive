@@ -11,21 +11,19 @@ import {
   ValidationError,
 } from '../domain/index.js';
 
+import { AgentStatus } from '../domain/enums.js';
+
 /**
  * In-memory org chart — tracks all agents and teams in the hierarchy.
  *
- * Six Maps for O(1) lookups. INV-01 enforced in addTeam(): leader must
- * exist in the parent team, not in the team being added.
+ * Five Maps for O(1) lookups. Flat team model — no team leads.
  */
 export class OrgChartImpl implements OrgChart {
-  // INV-01: Team lead always in parent container.
-
   private readonly teamsByTid = new Map<string, OrgChartTeam>();
   private readonly teamsBySlug = new Map<string, OrgChartTeam>();
   private readonly agentsByAid = new Map<string, OrgChartAgent>();
   private readonly childrenByTid = new Map<string, Set<string>>();
   private readonly agentsByTeam = new Map<string, Set<string>>();
-  private readonly leadToTeam = new Map<string, string>();
 
   addTeam(team: OrgChartTeam): void {
     if (this.teamsByTid.has(team.tid)) {
@@ -35,27 +33,12 @@ export class OrgChartImpl implements OrgChart {
       throw new ConflictError(`Team with slug '${team.slug}' already exists`);
     }
 
-    // INV-01: leader must already exist as an agent in the parent team
-    const leader = this.agentsByAid.get(team.leaderAid);
-    if (!leader) {
-      throw new ValidationError(
-        `Leader '${team.leaderAid}' not found in org chart (INV-01)`
-      );
-    }
-
-    // For root teams (no parent), the leader just needs to exist.
-    // For non-root teams, verify the leader is in the parent team.
+    // For non-root teams, verify parent exists
     if (team.parentTid) {
       const parent = this.teamsByTid.get(team.parentTid);
       if (!parent) {
         throw new ValidationError(
           `Parent team '${team.parentTid}' not found`
-        );
-      }
-      const parentAgents = this.agentsByTeam.get(parent.slug);
-      if (!parentAgents || !parentAgents.has(team.leaderAid)) {
-        throw new ValidationError(
-          `Leader '${team.leaderAid}' is not in parent team '${parent.slug}' (INV-01)`
         );
       }
     }
@@ -77,9 +60,6 @@ export class OrgChartImpl implements OrgChart {
     if (!this.agentsByTeam.has(team.slug)) {
       this.agentsByTeam.set(team.slug, new Set());
     }
-
-    // Update lead->team mapping
-    this.leadToTeam.set(team.leaderAid, team.tid);
   }
 
   updateTeam(team: OrgChartTeam): void {
@@ -111,8 +91,6 @@ export class OrgChartImpl implements OrgChart {
     if (agentAids) {
       for (const aid of agentAids) {
         this.agentsByAid.delete(aid);
-        // Clean up lead->team if this agent leads another team
-        this.leadToTeam.delete(aid);
       }
       this.agentsByTeam.delete(team.slug);
     }
@@ -123,12 +101,6 @@ export class OrgChartImpl implements OrgChart {
       if (parentChildren) {
         parentChildren.delete(tid);
       }
-    }
-
-    // Clean up lead->team mapping for this team's leader
-    // (leader is in parent team, so the agent itself stays — just the mapping goes)
-    if (this.leadToTeam.get(team.leaderAid) === tid) {
-      this.leadToTeam.delete(team.leaderAid);
     }
 
     // Remove children set for this team
@@ -186,13 +158,6 @@ export class OrgChartImpl implements OrgChart {
       this.agentsByTeam.set(agent.teamSlug, teamAgents);
     }
     teamAgents.add(agent.aid);
-
-    if (agent.leadsTeam) {
-      const ledTeam = this.teamsBySlug.get(agent.leadsTeam);
-      if (ledTeam) {
-        this.leadToTeam.set(agent.aid, ledTeam.tid);
-      }
-    }
   }
 
   updateAgent(agent: OrgChartAgent): void {
@@ -218,17 +183,6 @@ export class OrgChartImpl implements OrgChart {
 
     // Update the agent
     this.agentsByAid.set(agent.aid, agent);
-
-    // Update lead mapping if changed
-    if (agent.leadsTeam !== existing.leadsTeam) {
-      this.leadToTeam.delete(agent.aid);
-      if (agent.leadsTeam) {
-        const ledTeam = this.teamsBySlug.get(agent.leadsTeam);
-        if (ledTeam) {
-          this.leadToTeam.set(agent.aid, ledTeam.tid);
-        }
-      }
-    }
   }
 
   removeAgent(aid: string): void {
@@ -243,8 +197,6 @@ export class OrgChartImpl implements OrgChart {
     if (teamAgents) {
       teamAgents.delete(aid);
     }
-
-    this.leadToTeam.delete(aid);
   }
 
   getAgent(aid: string): OrgChartAgent | undefined {
@@ -262,10 +214,26 @@ export class OrgChartImpl implements OrgChart {
     return result;
   }
 
-  getLeadOf(teamSlug: string): OrgChartAgent | undefined {
-    const team = this.teamsBySlug.get(teamSlug);
-    if (!team) return undefined;
-    return this.agentsByAid.get(team.leaderAid);
+  /**
+   * Returns the best dispatch target for a team.
+   * Prefers idle agents, sorts by AID for deterministic selection.
+   * Throws NotFoundError if the team has no agents.
+   */
+  getDispatchTarget(teamSlug: string): OrgChartAgent {
+    const agents = this.getAgentsByTeam(teamSlug);
+    if (agents.length === 0) {
+      throw new NotFoundError(`No agents found in team '${teamSlug}'`);
+    }
+
+    // Sort by AID for stability
+    const sorted = [...agents].sort((a, b) => a.aid.localeCompare(b.aid));
+
+    // Prefer idle agents
+    const idle = sorted.find(a => a.status === AgentStatus.Idle);
+    if (idle) return idle;
+
+    // Fall back to first agent by AID order
+    return sorted[0];
   }
 
   isAuthorized(sourceAid: string, targetAid: string): boolean {
@@ -278,22 +246,13 @@ export class OrgChartImpl implements OrgChart {
     // 1. Same team — always authorized
     if (source.teamSlug === target.teamSlug) return true;
 
-    // 2. Downward — source leads a team that is an ancestor of target's team
-    const ledTeamTid = this.leadToTeam.get(sourceAid);
-    if (ledTeamTid) {
-      const targetTeam = this.teamsBySlug.get(target.teamSlug);
-      if (targetTeam && this.isAncestor(ledTeamTid, targetTeam.tid)) {
-        return true;
-      }
-    }
+    // 2. main_assistant — authorized to all
+    if (source.role === 'main_assistant') return true;
 
-    // 3. Upward one level — target is the lead of source's team
-    const sourceTeam = this.teamsBySlug.get(source.teamSlug);
-    if (sourceTeam && sourceTeam.leaderAid === targetAid) {
-      return true;
-    }
+    // 3. Any agent — authorized to 'main' team
+    if (target.teamSlug === 'main') return true;
 
-    // 4. Cross-branch — denied
+    // 4. Otherwise — denied
     return false;
   }
 
@@ -310,19 +269,6 @@ export class OrgChartImpl implements OrgChart {
   }
 
   // ---- Private helpers ----
-
-  /** Check if ancestorTid is an ancestor of descendantTid (or equal). */
-  private isAncestor(ancestorTid: string, descendantTid: string): boolean {
-    if (ancestorTid === descendantTid) return true;
-
-    const children = this.childrenByTid.get(ancestorTid);
-    if (!children) return false;
-
-    for (const childTid of children) {
-      if (this.isAncestor(childTid, descendantTid)) return true;
-    }
-    return false;
-  }
 
   /** Build a TopologyNode recursively. */
   private buildTopologyNode(
@@ -343,7 +289,6 @@ export class OrgChartImpl implements OrgChart {
     return {
       tid: team.tid,
       slug: team.slug,
-      leaderAid: team.leaderAid,
       health: team.health,
       agents,
       children,

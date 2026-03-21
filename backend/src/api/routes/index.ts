@@ -254,7 +254,7 @@ function registerTeamRoutes(app: FastifyInstance, ctx: RouteContext): void {
       return {
         tid: team.tid,
         slug: team.slug,
-        leaderAid: team.leaderAid,
+        leaderAid: team.leaderAid ?? null,
         health: team.health,
         agentCount: agents.length,
         depth: team.depth,
@@ -286,7 +286,7 @@ function registerTeamRoutes(app: FastifyInstance, ctx: RouteContext): void {
     reply.send({
       tid: team.tid,
       slug: team.slug,
-      leaderAid: team.leaderAid,
+      leaderAid: team.leaderAid ?? null,
       health: team.health,
       depth: team.depth,
       containerId: team.containerId,
@@ -327,13 +327,10 @@ function registerTeamRoutes(app: FastifyInstance, ctx: RouteContext): void {
 
       // Register team in org chart so root recognizes the child container
       if (ctx.orgChart) {
-        // Resolve leader: use provided leaderAid, or default to main assistant
-        const leaderAid = body.leaderAid ?? ctx.orgChart.listTeams()[0]?.leaderAid ?? '';
         const parentTeam = ctx.orgChart.getTeamBySlug('main');
         ctx.orgChart.addTeam({
           tid: container.tid,
           slug: body.slug,
-          leaderAid,
           parentTid: parentTeam?.tid ?? '',
           depth: (parentTeam?.depth ?? 0) + 1,
           containerId: container.id,
@@ -601,7 +598,7 @@ function registerTaskRoutes(app: FastifyInstance, ctx: RouteContext): void {
  *
  * Endpoints:
  * - `GET /api/agents` - List all agents, optionally filtered by `?team=<slug>`.
- *   Returns `{ aid, name, teamSlug, role, status, leadsTeam }` per agent.
+ *   Returns `{ aid, name, teamSlug, role, status }` per agent.
  *   Data sourced from OrgChart (no N+1 queries, validated query params).
  */
 function registerAgentRoutes(app: FastifyInstance, ctx: RouteContext): void {
@@ -635,7 +632,6 @@ function registerAgentRoutes(app: FastifyInstance, ctx: RouteContext): void {
         teamSlug: a.teamSlug,
         role: a.role,
         status: a.status,
-        leadsTeam: a.leadsTeam ?? null,
         // modelTier is stored on OrgChartAgent at create_agent time (from the tool's
         // `model` parameter). It is undefined for agents created before this field was
         // added, or for the main assistant (whose model comes from provider config).
@@ -1184,11 +1180,15 @@ function registerWebhookRoutes(app: FastifyInstance, ctx: RouteContext): void {
       return;
     }
 
-    // Get the team to find its lead
-    const team = ctx.orgChart?.getTeamBySlug(registration.teamSlug);
-    if (!team) {
-      reply.code(404).send({ error: `Team not found: ${registration.teamSlug}` });
-      return;
+    // Resolve a dispatch target for the team
+    let targetAid = '';
+    if (ctx.orgChart) {
+      try {
+        targetAid = ctx.orgChart.getDispatchTarget(registration.teamSlug).aid;
+      } catch {
+        reply.code(404).send({ error: `No agents found in team: ${registration.teamSlug}` });
+        return;
+      }
     }
 
     // Create task for the webhook payload
@@ -1200,7 +1200,7 @@ function registerWebhookRoutes(app: FastifyInstance, ctx: RouteContext): void {
       id: taskId,
       parent_id: '',
       team_slug: registration.teamSlug,
-      agent_aid: team.leaderAid,
+      agent_aid: targetAid,
       title: `Webhook: ${webhookPath}`,
       status: 'pending' as const,
       prompt,

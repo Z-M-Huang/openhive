@@ -1,5 +1,5 @@
 name: Team Lifecycle
-description: Verify team creation flow through CLI -- create a weather team, confirm creation, verify INV-01 (team lead in root container), and verify child container is spawned.
+description: Verify team creation flow through CLI -- create a weather team, confirm creation, and verify child container is spawned.
 
 setup:
   - command: "cd /app/openhive && sudo docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
@@ -29,17 +29,6 @@ test_cases:
         command: "curl -sf http://localhost:8080/api/teams 2>&1"
         expected: "team"
     expected_outcome: "The API returns a JSON response containing at least one team entry related to weather"
-
-  - name: Verify INV-01 -- team lead runs in root container
-    description: Confirm the team lead agent executes in the root container per design invariant INV-01. Use /api/teams/:slug which returns containerId (the child container) and leaderAid (the team lead). The team lead must NOT be in the child container — it runs in the parent (root) per INV-01.
-    steps:
-      - action: "Query the teams API for the weather team and verify the leaderAid is present. The team's containerId is the CHILD container, but the leader runs in the PARENT (root). Verify by checking that the leader agent appears in the root org chart, not in the child container."
-        command: "curl -sf http://localhost:8080/api/teams 2>&1"
-        expected: "leaderAid"
-      - action: "Query the containers API and verify the root container lists the team lead agent"
-        command: "curl -sf http://localhost:8080/api/containers 2>&1"
-        expected: "root"
-    expected_outcome: "The teams API shows a weather team with leaderAid set. The containers API shows the root container has the team lead agent registered, confirming INV-01 (team lead in parent container, not in the team's own child container)."
 
   - name: Verify child container was spawned
     description: Confirm a new Docker container was created for the team members

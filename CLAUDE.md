@@ -9,8 +9,8 @@ AI agent orchestration platform. User talks to an assistant via messaging channe
 | Entity | Definition |
 |--------|-----------|
 | **User** | External human who interacts via messaging channels. Ultimate authority: can override any policy, cancel any task, reshape any team. Not containerized. Final escalation target. |
-| **Agent** | A Claude Agent SDK instance (standalone process) with AID (`aid-name-hexchars`), definition file, model tier, skills, and timeout. Every AI entity is an agent -- main assistant, team leads, members. Role is an assignment, not a type hierarchy. |
-| **Team** | A group of agents with a designated lead, running in an isolated Docker container. Unit of isolation, deployment, and capability scoping. Identified by TID (`tid-name-hexchars`) and slug. Recursively nestable. |
+| **Agent** | A Claude Agent SDK instance (standalone process) with AID (`aid-name-hexchars`), definition file, model tier, skills, and timeout. Every AI entity is an agent -- main assistant or team member. Role is an assignment, not a type hierarchy. |
+| **Team** | A group of agents running in an isolated Docker container. Unit of isolation, deployment, and capability scoping. Identified by TID (`tid-name-hexchars`) and slug. Recursively nestable. |
 
 ---
 
@@ -36,7 +36,7 @@ Behavioral decisions live in skills. Structural guarantees live in code. This se
 
 | ID | Rule | Description |
 |----|------|-------------|
-| INV-01 | Team lead in parent container | Team lead always executes in the parent container, never in the team's own container. |
+| INV-01 | RETIRED | Team lead role eliminated. All agents are members or main_assistant. |
 | INV-02 | All messages through root WS hub | All inter-container messages route through root's WebSocket hub. |
 | INV-03 | No container-to-container communication | ICC disabled. All traffic goes through root. No direct links between non-root containers. |
 | INV-04 | Single SQLite writer | Only the root container writes to SQLite. Non-root containers forward data via WebSocket. |
@@ -235,9 +235,7 @@ The same codebase ships in every container. `OPENHIVE_IS_ROOT=true` activates: c
 
 ```
 Root Container (OPENHIVE_IS_ROOT=true):
-  +-- Main Assistant (agent)
-  +-- Team-A Lead (agent)          <-- leads Team A, runs HERE (INV-01)
-  +-- Team-B Lead (agent)          <-- leads Team B, runs HERE (INV-01)
+  +-- Main Assistant (agent)       <-- only agent in root; all others in team containers
   +-- WebSocket Hub Server         (INV-02)
   +-- REST API + Web Portal
   +-- SQLite Database              (INV-04)
@@ -246,7 +244,6 @@ Root Container (OPENHIVE_IS_ROOT=true):
 Team-A Container:
   +-- Member-1 (agent)
   +-- Member-2 (agent)
-  +-- Sub-Team-A1 Lead (agent)     <-- leads Sub-Team-A1, runs HERE (INV-01)
 
 Sub-Team-A1 Container:
   +-- Member-3 (agent)
@@ -318,7 +315,7 @@ See wiki: WebSocket-Protocol.md
 
 **Timeout tiers:** Query (10s) / Mutating (60s) / Blocking (5 min).
 
-**Role access:** Main Assistant has full access. Team Leads have team-scoped access (no container tools). Members have minimal access (update status, send message, escalate, memory, read credentials, query own tasks).
+**Role access:** Two roles exist: `main_assistant` (full access to all ~22 tools) and `member` (8 tools: `update_task_status`, `dispatch_subtask`, `send_message`, `escalate`, `save_memory`, `recall_memory`, `get_credential`, `get_task`).
 
 **Tool call flow:** Agent SDK -> in-process MCP server -> MCPBridge -> WebSocket -> Root Hub -> SDKToolHandler -> validate + execute -> response back via same path. Every call authorized against org chart at root.
 
@@ -408,8 +405,8 @@ bun run docker                 # Build image + start via docker compose
 - **Two-tier routing** -- config-defined slug mappings (fast, deterministic) + LLM judgment routing (novel/ambiguous requests)
 - **Agent-as-Feature** -- capabilities are compositions of Teams + Agents + Skills + Triggers, not coded services
 - **Hub-and-spoke WebSocket** -- single persistent connection per container, all through root
-- **Team creation two-step** -- `create_agent` first (lead in parent), then `create_team` (blocking, provisions container)
-- **Escalation chain** -- bottom-up through hierarchy, each hop logged, max 10 hops before direct-to-user
+- **Team creation** -- `create_team` provisions workspace and container; agents added via `create_agent`
+- **Escalation chain** -- flat: member escalates to main assistant, main assistant escalates to user
 - **Proactive behavior** -- orchestrator-driven timers, skip-if-busy, idempotent check IDs
 - **Self-developing integrations** -- agents create, test, and activate their own declarative integration configs
 

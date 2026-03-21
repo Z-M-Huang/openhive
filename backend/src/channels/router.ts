@@ -213,6 +213,20 @@ export class MessageRouterImpl implements MessageRouter {
    * @param content - The message content to send.
    */
   async sendResponse(chatJid: string, content: string): Promise<void> {
+    // Persist assistant response BEFORE sending to channel (crash-safe ordering)
+    try {
+      await this.messageStore.create({
+        id: `resp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        chat_jid: chatJid,
+        role: 'assistant',
+        content,
+        type: 'text',
+        timestamp: Date.now(),
+      });
+    } catch (err) {
+      console.warn(`[MessageRouter] Failed to persist response: ${err}`);
+    }
+
     // Deterministic prefix-based adapter selection — avoids silent no-op returns
     // being treated as success (which caused the Discord reply bug).
     let targetType: ChannelType | undefined;
@@ -260,21 +274,23 @@ export class MessageRouterImpl implements MessageRouter {
    */
   private async dispatchToTeam(msg: InboundMessage, teamSlug: string): Promise<void> {
     if (this.orchestrator) {
-      // Resolve the team lead's agent_aid
-      let leadAid = '';
+      // Resolve the best dispatch target for the team
+      let targetAid = '';
       if (this.orgChart) {
-        const team = this.orgChart.getTeamBySlug(teamSlug);
-        if (team) {
-          leadAid = team.leaderAid;
+        try {
+          const target = this.orgChart.getDispatchTarget(teamSlug);
+          targetAid = target.aid;
+        } catch {
+          // No agents in team — targetAid stays empty
         }
       }
 
-      // Create a task for the team's lead agent with origin chatJid for response routing
+      // Create a task for the team's target agent with origin chatJid for response routing
       await this.orchestrator.dispatchTask({
         id: `msg-${msg.id}-${Date.now()}`,
         parent_id: '',
         team_slug: teamSlug,
-        agent_aid: leadAid,
+        agent_aid: targetAid,
         title: `Process message from ${msg.chatJid}`,
         status: 'pending',
         prompt: msg.content,

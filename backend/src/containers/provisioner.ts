@@ -6,11 +6,8 @@
  * directory tree that gets bind-mounted into the team's Docker container at
  * `/app/workspace`.
  *
- * // INV-01: Team lead always in parent container
- * The provisioner scaffolds the workspace structure but does NOT place the team
- * lead's agent definition inside the child workspace. The team lead always runs
- * in the parent container — its agent definition lives in the parent's workspace.
- * The child workspace only contains agent definitions for non-lead team members.
+ * The provisioner scaffolds the workspace structure and places all agent
+ * definitions inside the team workspace.
  *
  * ## Workspace Directory Structure
  *
@@ -49,10 +46,10 @@
  */
 
 import { resolve } from 'node:path';
-import { mkdir, writeFile, rm, stat } from 'node:fs/promises';
+import { mkdir, writeFile, readFile, rm, stat } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { stringify as yamlStringify } from 'yaml';
+import { stringify as yamlStringify, parse as yamlParse } from 'yaml';
 
 import type {
   ContainerProvisioner,
@@ -64,12 +61,13 @@ import { validateSlug, RESERVED_SLUGS } from '../domain/index.js';
 
 const execFileAsync = promisify(execFile);
 
-// INV-01: Team lead always in parent container
+// Agents are placed in their team's workspace
 
 /** Subdirectories created inside every scaffolded workspace. */
 const WORKSPACE_DIRS = [
   '.claude/agents',
   '.claude/skills',
+  '.credentials',
   'memory',
   'work/tasks',
   'integrations',
@@ -154,7 +152,7 @@ export class ContainerProvisionerImpl implements ContainerProvisioner {
       'utf-8',
     );
 
-    // Write each agent definition as an .md file (INV-01: lead is in parent, members go here)
+    // Write each agent definition as an .md file
     if (agents && agents.length > 0) {
       for (const agent of agents) {
         await this.writeAgentDefinition(fullPath, agent);
@@ -173,7 +171,7 @@ export class ContainerProvisionerImpl implements ContainerProvisioner {
   }
 
   async writeAgentDefinition(workspacePath: string, agent: AgentDefinition): Promise<void> {
-    // INV-01: Team lead always in parent container
+    // Agents are placed in their team's workspace
     this.assertWithinWorkspaceRoot(workspacePath);
     await this.assertDirectoryExists(workspacePath);
 
@@ -181,10 +179,12 @@ export class ContainerProvisionerImpl implements ContainerProvisioner {
     await mkdir(agentsDir, { recursive: true });
 
     // Build YAML frontmatter
-    const frontmatter: Record<string, unknown> = {
-      name: agent.name,
-      description: agent.description,
-    };
+    const frontmatter: Record<string, unknown> = {};
+    if (agent.aid) {
+      frontmatter.aid = agent.aid;
+    }
+    frontmatter.name = agent.name;
+    frontmatter.description = agent.description;
     if (agent.model) {
       frontmatter.model = agent.model;
     }
@@ -195,6 +195,47 @@ export class ContainerProvisionerImpl implements ContainerProvisioner {
     const content = `---\n${yamlStringify(frontmatter)}---\n${agent.content}\n`;
     const filePath = resolve(agentsDir, `${agent.name}.md`);
     await writeFile(filePath, content, 'utf-8');
+  }
+
+  async addAgentToTeamYaml(
+    workspacePath: string,
+    agent: {
+      aid: string;
+      name: string;
+      description: string;
+      model_tier?: string;
+      role?: string;
+      tools?: string[];
+      provider?: string;
+    },
+  ): Promise<void> {
+    this.assertWithinWorkspaceRoot(workspacePath);
+    const teamYamlPath = resolve(workspacePath, 'team.yaml');
+
+    let content: Record<string, unknown> = {};
+    try {
+      const raw = await readFile(teamYamlPath, 'utf-8');
+      content = (yamlParse(raw) as Record<string, unknown>) ?? {};
+    } catch {
+      // team.yaml doesn't exist yet — will create
+    }
+
+    const agents = (content['agents'] as Array<Record<string, unknown>>) ?? [];
+    // Idempotent: skip if AID already present
+    if (agents.some((a) => a['aid'] === agent.aid)) return;
+
+    agents.push({
+      aid: agent.aid,
+      name: agent.name,
+      description: agent.description,
+      role: agent.role ?? 'member',
+      model_tier: agent.model_tier ?? 'sonnet',
+      tools: agent.tools ?? [],
+      provider: agent.provider ?? 'default',
+    });
+    content['agents'] = agents;
+
+    await writeFile(teamYamlPath, yamlStringify(content), 'utf-8');
   }
 
   async writeSettings(workspacePath: string, allowedTools: string[]): Promise<void> {

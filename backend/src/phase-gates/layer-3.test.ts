@@ -14,7 +14,6 @@ import { WorkspaceLockImpl } from '../control-plane/workspace-lock.js';
 import { assertValidTransition } from '../domain/domain.js';
 import {
   InvalidTransitionError,
-  ValidationError,
   mapDomainErrorToWSError,
 } from '../domain/errors.js';
 import { AgentStatus, ContainerHealth, TaskStatus, WSErrorCode } from '../domain/enums.js';
@@ -195,8 +194,7 @@ describe('Layer 3 Phase Gate: Domain Core', () => {
       chart.addAgent(makeAgent({
         aid: 'aid-leada-001',
         teamSlug: 'root-team',
-        role: 'team_lead',
-        leadsTeam: 'team-a',
+        role: 'member',
       }));
 
       chart.addTeam(makeTeam({
@@ -213,8 +211,7 @@ describe('Layer 3 Phase Gate: Domain Core', () => {
       chart.addAgent(makeAgent({
         aid: 'aid-leada1-01',
         teamSlug: 'team-a',
-        role: 'team_lead',
-        leadsTeam: 'team-a1',
+        role: 'member',
       }));
 
       chart.addTeam(makeTeam({
@@ -236,20 +233,25 @@ describe('Layer 3 Phase Gate: Domain Core', () => {
       expect(chart.isAuthorized('aid-leada-001', 'aid-main-001')).toBe(true);
     });
 
-    it('team-A lead -> team-A member: YES (downward)', () => {
+    it('main_assistant -> any member: YES', () => {
       seedHierarchy();
-      expect(chart.isAuthorized('aid-leada-001', 'aid-mem1-001')).toBe(true);
-      expect(chart.isAuthorized('aid-leada-001', 'aid-mem2-001')).toBe(true);
+      // main_assistant is authorized to reach any agent in the hierarchy
+      expect(chart.isAuthorized('aid-main-001', 'aid-mem1-001')).toBe(true);
+      expect(chart.isAuthorized('aid-main-001', 'aid-mem2-001')).toBe(true);
+      expect(chart.isAuthorized('aid-main-001', 'aid-mem3-001')).toBe(true);
     });
 
-    it('team-A lead -> team-A1 member: YES (downward transitive)', () => {
+    it('main_assistant -> deep descendant: YES', () => {
       seedHierarchy();
-      expect(chart.isAuthorized('aid-leada-001', 'aid-mem3-001')).toBe(true);
+      expect(chart.isAuthorized('aid-main-001', 'aid-mem3-001')).toBe(true);
     });
 
-    it('team-A member -> team-A lead: YES (upward one level)', () => {
+    it('cross-team non-main_assistant -> NO (flat model)', () => {
       seedHierarchy();
-      expect(chart.isAuthorized('aid-mem1-001', 'aid-leada-001')).toBe(true);
+      // leada-001 (root-team) → mem1-001 (team-a): not same team, not main_assistant
+      expect(chart.isAuthorized('aid-leada-001', 'aid-mem1-001')).toBe(false);
+      // mem1-001 (team-a) → leada-001 (root-team): not same team, not main_assistant
+      expect(chart.isAuthorized('aid-mem1-001', 'aid-leada-001')).toBe(false);
     });
 
     it('team-A member -> team-A1 member: NO (cross-branch)', () => {
@@ -262,9 +264,10 @@ describe('Layer 3 Phase Gate: Domain Core', () => {
       expect(chart.isAuthorized('aid-mem3-001', 'aid-mem1-001')).toBe(false);
     });
 
-    it('team-A1 member -> team-A1 lead: YES (upward one level)', () => {
+    it('team-A1 member -> team-A lead: NO (cross-team in flat model)', () => {
       seedHierarchy();
-      expect(chart.isAuthorized('aid-mem3-001', 'aid-leada1-01')).toBe(true);
+      // mem3-001 (team-a1) → leada1-01 (team-a): different teams, not main_assistant
+      expect(chart.isAuthorized('aid-mem3-001', 'aid-leada1-01')).toBe(false);
     });
 
     it('non-existent agent: NO', () => {
@@ -274,55 +277,7 @@ describe('Layer 3 Phase Gate: Domain Core', () => {
     });
   });
 
-  // -----------------------------------------------------------------------
-  // 4. OrgChart INV-01 enforcement
-  // -----------------------------------------------------------------------
-
-  describe('OrgChart INV-01 enforcement', () => {
-    let chart: OrgChartImpl;
-    beforeEach(() => { chart = new OrgChartImpl(); });
-
-    it('rejects team with leader not in parent team', () => {
-      bootstrapRootTeam(chart);
-      chart.addAgent(makeAgent({ aid: 'aid-alice-001', teamSlug: 'root-team' }));
-
-      chart.addTeam(makeTeam({
-        tid: 'tid-teama-001',
-        slug: 'team-a',
-        leaderAid: 'aid-alice-001',
-        parentTid: 'tid-root-001',
-        depth: 1,
-      }));
-
-      // carol is in team-a, NOT in root-team
-      chart.addAgent(makeAgent({ aid: 'aid-carol-001', teamSlug: 'team-a' }));
-
-      // Try to create child of root led by carol (violates INV-01)
-      expect(() => {
-        chart.addTeam(makeTeam({
-          tid: 'tid-bad-001',
-          slug: 'bad-team',
-          leaderAid: 'aid-carol-001',
-          parentTid: 'tid-root-001',
-          depth: 1,
-        }));
-      }).toThrow(ValidationError);
-    });
-
-    it('rejects team with non-existent leader', () => {
-      bootstrapRootTeam(chart);
-
-      expect(() => {
-        chart.addTeam(makeTeam({
-          tid: 'tid-ghost-001',
-          slug: 'ghost-team',
-          leaderAid: 'aid-nobody-001',
-          parentTid: 'tid-root-001',
-          depth: 1,
-        }));
-      }).toThrow(/INV-01/);
-    });
-  });
+  // INV-01 enforcement tests removed — leader validation no longer enforced
 
   // -----------------------------------------------------------------------
   // 5. WorkspaceLock serialization

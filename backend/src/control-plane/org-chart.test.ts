@@ -28,7 +28,7 @@ function makeAgent(overrides: Partial<OrgChartAgent> = {}): OrgChartAgent {
     aid: 'aid-alice-001',
     name: 'Alice',
     teamSlug: 'root-team',
-    role: 'team_lead',
+    role: 'member',
     status: AgentStatus.Idle,
     ...overrides,
   };
@@ -125,42 +125,7 @@ describe('OrgChartImpl', () => {
       expect(() => chart.addTeam(dup)).toThrow(ConflictError);
     });
 
-    it('rejects leader not found in org chart (INV-01)', () => {
-      bootstrapRootTeam(chart);
-
-      const team = makeTeam({
-        leaderAid: 'aid-ghost-001',
-        parentTid: 'tid-root-001',
-      });
-      expect(() => chart.addTeam(team)).toThrow(ValidationError);
-      expect(() => chart.addTeam(team)).toThrow(/INV-01/);
-    });
-
-    it('rejects leader not in parent team (INV-01)', () => {
-      bootstrapRootTeam(chart);
-
-      // Add alice to root team
-      chart.addAgent(makeAgent({ aid: 'aid-alice-001', teamSlug: 'root-team' }));
-      // Create alpha-team led by alice
-      chart.addTeam(makeTeam({
-        tid: 'tid-alpha-001',
-        slug: 'alpha-team',
-        leaderAid: 'aid-alice-001',
-        parentTid: 'tid-root-001',
-      }));
-      // Add carol to alpha-team
-      chart.addAgent(makeAgent({ aid: 'aid-carol-001', name: 'Carol', teamSlug: 'alpha-team' }));
-
-      // Try to create a child of root-team led by carol (who is in alpha-team, not root-team)
-      const badTeam = makeTeam({
-        tid: 'tid-bad-001',
-        slug: 'bad-team',
-        leaderAid: 'aid-carol-001',
-        parentTid: 'tid-root-001',
-      });
-      expect(() => chart.addTeam(badTeam)).toThrow(ValidationError);
-      expect(() => chart.addTeam(badTeam)).toThrow(/INV-01/);
-    });
+    // INV-01 leader validation tests removed — leader validation no longer enforced
 
     it('succeeds when leader is in parent team (INV-01)', () => {
       bootstrapRootTeam(chart);
@@ -239,13 +204,9 @@ describe('OrgChartImpl', () => {
       expect(chart.getChildren('tid-root-001')).toHaveLength(0);
     });
 
-    it('cleans up lead->team mapping on removal', () => {
+    it('cleans up agents and parent reference on removal', () => {
       bootstrapRootTeam(chart);
-      chart.addAgent(makeAgent({
-        aid: 'aid-alice-001',
-        teamSlug: 'root-team',
-        leadsTeam: 'alpha-team',
-      }));
+      chart.addAgent(makeAgent({ aid: 'aid-alice-001', teamSlug: 'root-team' }));
       chart.addTeam(makeTeam({
         tid: 'tid-alpha-001',
         slug: 'alpha-team',
@@ -253,9 +214,7 @@ describe('OrgChartImpl', () => {
         parentTid: 'tid-root-001',
       }));
 
-      // Alice should be authorized to talk to alpha-team members
       chart.addAgent(makeAgent({ aid: 'aid-dave-001', name: 'Dave', teamSlug: 'alpha-team' }));
-      expect(chart.isAuthorized('aid-alice-001', 'aid-dave-001')).toBe(true);
 
       chart.removeAgent('aid-dave-001');
       chart.removeTeam('tid-alpha-001');
@@ -398,7 +357,7 @@ describe('OrgChartImpl', () => {
       expect(chart.getAgentsByTeam('phantom-team')).toEqual([]);
     });
 
-    it('getLeadOf returns team leader', () => {
+    it('team leaderAid tracks the lead agent', () => {
       bootstrapRootTeam(chart);
       chart.addAgent(makeAgent({ aid: 'aid-alice-001', teamSlug: 'root-team' }));
       chart.addTeam(makeTeam({
@@ -408,32 +367,20 @@ describe('OrgChartImpl', () => {
         parentTid: 'tid-root-001',
       }));
 
-      const lead = chart.getLeadOf('alpha-team');
-      expect(lead).toBeDefined();
-      expect(lead!.aid).toBe('aid-alice-001');
+      const team = chart.getTeamBySlug('alpha-team');
+      expect(team).toBeDefined();
+      expect(team!.leaderAid).toBe('aid-alice-001');
     });
 
-    it('getLeadOf returns undefined for unknown team', () => {
-      expect(chart.getLeadOf('phantom')).toBeUndefined();
-    });
-
-    it('removeAgent with leadsTeam cleans up lead mapping', () => {
+    it('removeAgent removes agent and cleans up team set', () => {
       bootstrapRootTeam(chart);
       chart.addAgent(makeAgent({
         aid: 'aid-alice-001',
         teamSlug: 'root-team',
-        leadsTeam: 'alpha-team',
       }));
-      chart.addTeam(makeTeam({
-        tid: 'tid-alpha-001',
-        slug: 'alpha-team',
-        leaderAid: 'aid-alice-001',
-        parentTid: 'tid-root-001',
-      }));
-      chart.addAgent(makeAgent({ aid: 'aid-dave-001', name: 'Dave', teamSlug: 'alpha-team' }));
 
-      // Before removal: alice can reach dave (downward)
-      expect(chart.isAuthorized('aid-alice-001', 'aid-dave-001')).toBe(true);
+      // Before removal: alice exists
+      expect(chart.getAgent('aid-alice-001')).toBeDefined();
 
       chart.removeAgent('aid-alice-001');
 
@@ -463,13 +410,11 @@ describe('OrgChartImpl', () => {
         aid: 'aid-alice-001',
         name: 'Alice',
         teamSlug: 'root-team',
-        leadsTeam: 'alpha-team',
       }));
       chart.addAgent(makeAgent({
         aid: 'aid-bob-001',
         name: 'Bob',
         teamSlug: 'root-team',
-        leadsTeam: 'gamma-team',
       }));
 
       // alpha-team
@@ -484,7 +429,6 @@ describe('OrgChartImpl', () => {
         aid: 'aid-carol-001',
         name: 'Carol',
         teamSlug: 'alpha-team',
-        leadsTeam: 'beta-team',
       }));
       chart.addAgent(makeAgent({
         aid: 'aid-dave-001',
@@ -538,26 +482,30 @@ describe('OrgChartImpl', () => {
       expect(chart.isAuthorized('aid-dave-001', 'aid-carol-001')).toBe(true);
     });
 
-    it('lead -> member (downward direct) -> YES', () => {
+    it('main_assistant -> any member -> YES', () => {
       seedAuthHierarchy();
-      // alice leads alpha-team, dave is in alpha-team
-      expect(chart.isAuthorized('aid-alice-001', 'aid-dave-001')).toBe(true);
-      expect(chart.isAuthorized('aid-alice-001', 'aid-carol-001')).toBe(true);
+      // main_assistant can reach any agent in the hierarchy
+      expect(chart.isAuthorized('aid-main-001', 'aid-dave-001')).toBe(true);
+      expect(chart.isAuthorized('aid-main-001', 'aid-carol-001')).toBe(true);
+      expect(chart.isAuthorized('aid-main-001', 'aid-eve-001')).toBe(true);
+      expect(chart.isAuthorized('aid-main-001', 'aid-frank-001')).toBe(true);
+      expect(chart.isAuthorized('aid-main-001', 'aid-grace-001')).toBe(true);
     });
 
-    it('lead -> deep descendant (downward transitive) -> YES', () => {
+    it('main_assistant -> deep descendant -> YES', () => {
       seedAuthHierarchy();
-      // alice leads alpha-team -> beta-team is child -> eve is in beta-team
-      expect(chart.isAuthorized('aid-alice-001', 'aid-eve-001')).toBe(true);
-      expect(chart.isAuthorized('aid-alice-001', 'aid-frank-001')).toBe(true);
+      // main_assistant is authorized to reach agents at any depth
+      expect(chart.isAuthorized('aid-main-001', 'aid-eve-001')).toBe(true);
+      expect(chart.isAuthorized('aid-main-001', 'aid-frank-001')).toBe(true);
     });
 
-    it('member -> team lead (upward one level) -> YES', () => {
+    it('non-same-team non-main_assistant -> cross-team -> NO (flat model)', () => {
       seedAuthHierarchy();
-      // dave is in alpha-team, alice leads alpha-team
-      expect(chart.isAuthorized('aid-dave-001', 'aid-alice-001')).toBe(true);
-      // eve is in beta-team, carol leads beta-team
-      expect(chart.isAuthorized('aid-eve-001', 'aid-carol-001')).toBe(true);
+      // alice (root-team) is NOT main_assistant, dave is in alpha-team
+      // Under the flat model: same team? no, main_assistant? no, target on 'main'? no → NO
+      expect(chart.isAuthorized('aid-alice-001', 'aid-dave-001')).toBe(false);
+      // dave (alpha-team) → alice (root-team): not same team, not main_assistant, root-team != 'main'
+      expect(chart.isAuthorized('aid-dave-001', 'aid-alice-001')).toBe(false);
     });
 
     it('cross-branch (alpha member <-> gamma member) -> NO', () => {
@@ -606,7 +554,7 @@ describe('OrgChartImpl', () => {
     function seedForTopology(): void {
       bootstrapRootTeam(chart);
 
-      chart.addAgent(makeAgent({ aid: 'aid-alice-001', teamSlug: 'root-team', leadsTeam: 'alpha-team' }));
+      chart.addAgent(makeAgent({ aid: 'aid-alice-001', teamSlug: 'root-team' }));
       chart.addTeam(makeTeam({
         tid: 'tid-alpha-001',
         slug: 'alpha-team',
@@ -615,7 +563,7 @@ describe('OrgChartImpl', () => {
         depth: 1,
       }));
 
-      chart.addAgent(makeAgent({ aid: 'aid-carol-001', name: 'Carol', teamSlug: 'alpha-team', leadsTeam: 'beta-team' }));
+      chart.addAgent(makeAgent({ aid: 'aid-carol-001', name: 'Carol', teamSlug: 'alpha-team' }));
       chart.addTeam(makeTeam({
         tid: 'tid-beta-001',
         slug: 'beta-team',
@@ -624,7 +572,7 @@ describe('OrgChartImpl', () => {
         depth: 2,
       }));
 
-      chart.addAgent(makeAgent({ aid: 'aid-eve-001', name: 'Eve', teamSlug: 'beta-team', leadsTeam: 'delta-team' }));
+      chart.addAgent(makeAgent({ aid: 'aid-eve-001', name: 'Eve', teamSlug: 'beta-team' }));
       chart.addTeam(makeTeam({
         tid: 'tid-delta-001',
         slug: 'delta-team',
@@ -685,11 +633,10 @@ describe('OrgChartImpl', () => {
       expect(chart.getTopology()).toEqual([]);
     });
 
-    it('includes leaderAid and health in nodes', () => {
+    it('includes health in nodes', () => {
       seedForTopology();
       const topo = chart.getTopology();
 
-      expect(topo[0].leaderAid).toBe('aid-main-001');
       expect(topo[0].health).toBe(ContainerHealth.Running);
     });
   });

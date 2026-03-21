@@ -141,9 +141,8 @@ export interface OrgChartAgent {
   aid: string;
   name: string;
   teamSlug: string;
-  role: string;
+  role: AgentRole;
   status: AgentStatus;
-  leadsTeam?: string;
   /**
    * Model tier this agent was created with ('haiku' | 'sonnet' | 'opus').
    * Optional because: (1) agents created before this field existed won't have it,
@@ -158,7 +157,7 @@ export interface OrgChartAgent {
 export interface OrgChartTeam {
   tid: string;
   slug: string;
-  leaderAid: string;
+  leaderAid?: string;
   parentTid: string;
   depth: number;
   containerId: string;
@@ -201,6 +200,7 @@ export interface SkillDefinition {
 
 /** Agent definition loaded from agent .md files. */
 export interface AgentDefinition {
+  aid?: string;
   name: string;
   description: string;
   model?: string;
@@ -225,7 +225,6 @@ export interface WSMessage {
 export interface TopologyNode {
   tid: string;
   slug: string;
-  leaderAid: string;
   health: ContainerHealth;
   agents: OrgChartAgent[];
   children: TopologyNode[];
@@ -250,6 +249,8 @@ export interface TaskStore {
   validateDependencies(taskId: string, blockedByIds: string[]): Promise<void>;
   /** Get recent user-originated root tasks for conversation history injection. */
   getRecentUserTasks(agentAid: string, limit: number): Promise<Task[]>;
+  /** Get the oldest pending task assigned to this agent. Returns null if none. */
+  getNextPendingForAgent(agentAid: string): Promise<Task | null>;
 }
 
 /** Chat message persistence. Throws on database error. */
@@ -402,6 +403,10 @@ export interface ContainerProvisioner {
   scaffoldWorkspace(parentPath: string, teamSlug: string, agents?: AgentDefinition[]): Promise<string>;
   writeTeamConfig(workspacePath: string, team: Team): Promise<void>;
   writeAgentDefinition(workspacePath: string, agent: AgentDefinition): Promise<void>;
+  addAgentToTeamYaml(workspacePath: string, agent: {
+    aid: string; name: string; description: string;
+    model_tier?: string; role?: string; tools?: string[]; provider?: string;
+  }): Promise<void>;
   writeSettings(workspacePath: string, allowedTools: string[]): Promise<void>;
   deleteWorkspace(workspacePath: string): Promise<void>;
   archiveWorkspace(workspacePath: string, archivePath: string): Promise<void>;
@@ -509,7 +514,8 @@ export interface OrgChart {
   removeAgent(aid: string): void;
   getAgent(aid: string): OrgChartAgent | undefined;
   getAgentsByTeam(teamSlug: string): OrgChartAgent[];
-  getLeadOf(teamSlug: string): OrgChartAgent | undefined;
+  /** Returns the best dispatch target for a team: prefers idle agents, sorts by AID for stability. Throws NotFoundError if team has no agents. */
+  getDispatchTarget(teamSlug: string): OrgChartAgent;
 
   isAuthorized(sourceAid: string, targetAid: string): boolean;
   getTopology(depth?: number): TopologyNode[];

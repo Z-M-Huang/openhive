@@ -114,6 +114,7 @@ function createMockToolContext(overrides?: Partial<ToolContext>): ToolContext {
       retryTask: vi.fn().mockResolvedValue(false),
       validateDependencies: vi.fn().mockResolvedValue(undefined),
       getRecentUserTasks: vi.fn().mockResolvedValue([]),
+      getNextPendingForAgent: vi.fn().mockResolvedValue(null),
     } satisfies TaskStore,
     messageStore: {
       create: vi.fn().mockResolvedValue(undefined),
@@ -153,6 +154,7 @@ function createMockToolContext(overrides?: Partial<ToolContext>): ToolContext {
         name: 'test-integration',
         config_path: '/app/workspace/integrations/test.yaml',
         status: IntegrationStatus.Proposed,
+        error_message: '',
         created_at: Date.now(),
       })),
       update: vi.fn().mockResolvedValue(undefined),
@@ -192,6 +194,7 @@ function createMockToolContext(overrides?: Partial<ToolContext>): ToolContext {
       writeSettings: vi.fn().mockResolvedValue(undefined),
       deleteWorkspace: vi.fn().mockResolvedValue(undefined),
       archiveWorkspace: vi.fn().mockResolvedValue(undefined),
+      addAgentToTeamYaml: vi.fn().mockResolvedValue(undefined),
     } satisfies ContainerProvisioner,
     keyManager: {
       unlock: vi.fn().mockResolvedValue(undefined),
@@ -227,6 +230,7 @@ function createMockToolContext(overrides?: Partial<ToolContext>): ToolContext {
       getAgentHealth: vi.fn().mockReturnValue(AgentStatus.Idle),
       getAllHealth: vi.fn().mockReturnValue(new Map()),
       getStuckAgents: vi.fn().mockReturnValue([]),
+      checkTimeouts: vi.fn(),
       start: vi.fn(),
       stop: vi.fn(),
     } satisfies HealthMonitor,
@@ -309,7 +313,7 @@ function setupOrgChart(orgChart: OrgChartImpl): {
     aid: leadAid,
     name: 'Team Lead',
     teamSlug: 'root-team',
-    role: 'team_lead',
+    role: 'member',
     status: AgentStatus.Idle,
   });
 
@@ -561,27 +565,27 @@ describe('Layer 6: MCP Tools + Skills', () => {
       expect(result.result).toEqual({ status: 'completed' });
     });
 
-    it('should allow team_lead to call create_task but deny container tools', async () => {
+    it('should allow member to call dispatch_subtask but deny container tools', async () => {
       const ctx = createMockToolContext();
-      const { leadAid } = setupOrgChart(ctx.orgChart as OrgChartImpl);
+      const { memberAid } = setupOrgChart(ctx.orgChart as OrgChartImpl);
 
       const handler = new SDKToolHandler(ctx);
 
-      // Lead can create tasks
-      const taskResult = await handler.handle(
-        'create_task',
-        { agent_aid: 'aid-member-ghi789', prompt: 'Do something' },
-        leadAid,
+      // Member can dispatch subtasks
+      const subtaskResult = await handler.handle(
+        'dispatch_subtask',
+        { parent_task_id: 'task-001', agent_aid: memberAid, prompt: 'Do something' },
+        memberAid,
         'call-5',
       );
-      expect(taskResult.success).toBe(true);
-      expect(taskResult.result).toHaveProperty('task_id');
+      expect(subtaskResult.success).toBe(true);
+      expect(subtaskResult.result).toHaveProperty('task_id');
 
-      // Lead cannot spawn containers
+      // Member cannot spawn containers
       const containerResult = await handler.handle(
         'spawn_container',
         { team_slug: 'new' },
-        leadAid,
+        memberAid,
         'call-6',
       );
       expect(containerResult.success).toBe(false);
@@ -596,7 +600,7 @@ describe('Layer 6: MCP Tools + Skills', () => {
   describe('Tool execution: create_task', () => {
     it('should create task with blocked_by dependencies', async () => {
       const ctx = createMockToolContext();
-      const { leadAid, memberAid } = setupOrgChart(ctx.orgChart as OrgChartImpl);
+      const { mainAid, memberAid } = setupOrgChart(ctx.orgChart as OrgChartImpl);
 
       const handler = new SDKToolHandler(ctx);
       const result = await handler.handle(
@@ -607,7 +611,7 @@ describe('Layer 6: MCP Tools + Skills', () => {
           blocked_by: ['dep-task-1', 'dep-task-2'],
           priority: 5,
         },
-        leadAid,
+        mainAid,
         'call-7',
       );
 
@@ -631,7 +635,7 @@ describe('Layer 6: MCP Tools + Skills', () => {
 
     it('should reject create_task when cycle detected in dependencies', async () => {
       const ctx = createMockToolContext();
-      const { leadAid, memberAid } = setupOrgChart(ctx.orgChart as OrgChartImpl);
+      const { mainAid, memberAid } = setupOrgChart(ctx.orgChart as OrgChartImpl);
 
       // Mock validateDependencies to throw CycleDetectedError
       (ctx.taskStore.validateDependencies as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
@@ -646,7 +650,7 @@ describe('Layer 6: MCP Tools + Skills', () => {
           prompt: 'Cyclic task',
           blocked_by: ['task-b'],
         },
-        leadAid,
+        mainAid,
         'call-8',
       );
 
@@ -1118,11 +1122,11 @@ describe('Layer 6: MCP Tools + Skills', () => {
 
       const handler = new SDKToolHandler(ctx);
 
-      // Step 1: Create a task (lead assigning to their team member)
+      // Step 1: Create a task (main_assistant assigning to team member)
       const createResult = await handler.handle(
         'create_task',
         { agent_aid: memberAid, prompt: 'Build the feature', priority: 3 },
-        leadAid,
+        mainAid,
         'call-flow-1',
       );
       expect(createResult.success).toBe(true);
@@ -1160,11 +1164,11 @@ describe('Layer 6: MCP Tools + Skills', () => {
       // Step 3: Tool call logging happened for both calls
       expect(ctx.toolCallStore.create).toHaveBeenCalledTimes(2);
 
-      // Step 4: Verify send_message between agents (member to their team lead)
+      // Step 4: Verify send_message from main_assistant to member (authorized)
       const sendResult = await handler.handle(
         'send_message',
-        { target_aid: leadAid, content: 'Task complete' },
-        memberAid,
+        { target_aid: memberAid, content: 'Task complete' },
+        mainAid,
         'call-flow-3',
       );
       expect(sendResult.success).toBe(true);
@@ -1175,10 +1179,10 @@ describe('Layer 6: MCP Tools + Skills', () => {
         }),
       );
 
-      // Step 5: Verify cross-branch messaging is denied
+      // Step 5: Verify cross-team messaging is denied (member to lead on different team)
       const crossResult = await handler.handle(
         'send_message',
-        { target_aid: mainAid, content: 'Should fail' },
+        { target_aid: leadAid, content: 'Should fail' },
         memberAid,
         'call-flow-4',
       );

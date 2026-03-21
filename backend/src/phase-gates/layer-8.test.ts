@@ -96,9 +96,9 @@ function createMockOrgChart(): OrgChart {
     removeAgent: vi.fn(),
     getAgent: vi.fn(),
     getAgentsByTeam: vi.fn().mockReturnValue([]),
-    getLeadOf: vi.fn(),
     isAuthorized: vi.fn().mockReturnValue(true),
     getTopology: vi.fn().mockReturnValue([]),
+    getDispatchTarget: vi.fn(),
   };
 }
 
@@ -134,6 +134,7 @@ function createMockTaskStore(): TaskStore {
     retryTask: vi.fn().mockResolvedValue(true),
     validateDependencies: vi.fn().mockResolvedValue(undefined),
     getRecentUserTasks: vi.fn().mockResolvedValue([]),
+    getNextPendingForAgent: vi.fn().mockResolvedValue(null),
   };
 }
 
@@ -164,6 +165,7 @@ function createMockHealthMonitor(): HealthMonitor {
     getAgentHealth: vi.fn().mockReturnValue(AgentStatus.Idle),
     getAllHealth: vi.fn().mockReturnValue(new Map()),
     getStuckAgents: vi.fn().mockReturnValue([]),
+    checkTimeouts: vi.fn(),
     start: vi.fn(),
     stop: vi.fn(),
   };
@@ -1019,9 +1021,9 @@ describe('Layer 8: Orchestrator Integration', () => {
       // Blocker fails with no retries left
       await dagManager.handleTaskResult('task-blocker', 'aid-worker-1', TaskStatus.Failed, '', 'Critical error');
 
-      // Should escalate to lead
+      // Should escalate — the DAGManager passes the worker's AID to the escalation callback
       expect(escalationHandler).toHaveBeenCalledWith(
-        'aid-lead',
+        'aid-worker-1',
         'task-blocker',
         'error',
         expect.objectContaining({
@@ -1175,17 +1177,24 @@ describe('Layer 8: Orchestrator Integration', () => {
       });
     });
 
-    it('escalates member to team lead (hop 1)', async () => {
-      vi.mocked(orgChart.getAgent).mockReturnValue({
-        aid: 'aid-member',
-        teamSlug: 'team-a',
-        role: AgentRole.Member,
-      } as OrgChartAgent);
-      vi.mocked(orgChart.getTeamBySlug).mockReturnValue({
-        tid: 'tid-a',
-        slug: 'team-a',
-        leaderAid: 'aid-lead',
-      } as OrgChartTeam);
+    it('escalates member to main assistant (flat escalation)', async () => {
+      vi.mocked(orgChart.getAgent).mockImplementation((aid: string) => {
+        if (aid === 'aid-member') {
+          return { aid: 'aid-member', teamSlug: 'team-a', role: AgentRole.Member } as OrgChartAgent;
+        }
+        if (aid === 'aid-main') {
+          return { aid: 'aid-main', teamSlug: 'main', role: 'main_assistant' } as OrgChartAgent;
+        }
+        return undefined;
+      });
+      vi.mocked(orgChart.getAgentsByTeam).mockReturnValue([
+        { aid: 'aid-main', teamSlug: 'main', role: 'main_assistant' } as OrgChartAgent,
+      ]);
+      vi.mocked(orgChart.getTeamBySlug).mockImplementation((slug: string) => {
+        if (slug === 'team-a') return { tid: 'tid-a', slug: 'team-a' } as OrgChartTeam;
+        if (slug === 'main') return { tid: 'tid-main', slug: 'main' } as OrgChartTeam;
+        return undefined;
+      });
       vi.mocked(taskStore.get).mockResolvedValue({
         id: 'task-1',
         status: TaskStatus.Active,
@@ -1200,134 +1209,24 @@ describe('Layer 8: Orchestrator Integration', () => {
       );
 
       expect(correlationId).toMatch(/^[0-9a-f-]{36}$/);
-      // Escalation response sent to the target lead's team with all 7 protocol fields
+      // Flat escalation sends to main assistant's team
       expect(wsHub.send).toHaveBeenCalledWith(
-        'tid-a',
+        'tid-main',
         expect.objectContaining({
           type: 'escalation_response',
           data: expect.objectContaining({
             correlation_id: correlationId,
             task_id: 'task-1',
-            agent_aid: 'aid-lead',
+            agent_aid: 'aid-main',
             source_team: 'team-a',
-            destination_team: 'team-a',
+            destination_team: 'main',
             resolution: 'pending',
           }),
         }),
       );
     });
 
-    it('escalates lead to parent lead (hop 2) - 3 level hierarchy', async () => {
-      // Set up a 3-level hierarchy:
-      // - team-grandchild (member: aid-member-grandchild, lead: aid-lead-child)
-      // - team-child (lead: aid-lead-parent)
-      // - team-parent (lead: aid-lead-root)
-
-      // Member in grandchild team escalates -> goes to child team lead
-      // Child team lead escalates -> goes to parent team lead
-
-      // Mock getAgent to return appropriate agent based on aid
-      vi.mocked(orgChart.getAgent).mockImplementation((aid: string) => {
-        if (aid === 'aid-member-grandchild') {
-          return {
-            aid: 'aid-member-grandchild',
-            teamSlug: 'team-grandchild',
-            role: AgentRole.Member,
-          } as OrgChartAgent;
-        }
-        if (aid === 'aid-lead-child') {
-          return {
-            aid: 'aid-lead-child',
-            teamSlug: 'team-child',
-            role: AgentRole.TeamLead,
-          } as OrgChartAgent;
-        }
-        if (aid === 'aid-lead-parent') {
-          return {
-            aid: 'aid-lead-parent',
-            teamSlug: 'team-parent',
-            role: AgentRole.TeamLead,
-          } as OrgChartAgent;
-        }
-        return undefined;
-      });
-
-      // Mock getTeamBySlug to return appropriate team
-      vi.mocked(orgChart.getTeamBySlug).mockImplementation((slug: string) => {
-        if (slug === 'team-grandchild') {
-          return {
-            tid: 'tid-grandchild',
-            slug: 'team-grandchild',
-            leaderAid: 'aid-lead-child', // Different from members
-          } as OrgChartTeam;
-        }
-        if (slug === 'team-child') {
-          return {
-            tid: 'tid-child',
-            slug: 'team-child',
-            leaderAid: 'aid-lead-parent', // Different from the team's own lead
-          } as OrgChartTeam;
-        }
-        if (slug === 'team-parent') {
-          return {
-            tid: 'tid-parent',
-            slug: 'team-parent',
-            leaderAid: 'aid-lead-root',
-          } as OrgChartTeam;
-        }
-        return undefined;
-      });
-
-      // getParent for grandchild -> child, child -> parent
-      vi.mocked(orgChart.getParent).mockImplementation((tid: string) => {
-        if (tid === 'tid-grandchild') {
-          return {
-            tid: 'tid-child',
-            slug: 'team-child',
-            leaderAid: 'aid-lead-parent',
-          } as OrgChartTeam;
-        }
-        if (tid === 'tid-child') {
-          return {
-            tid: 'tid-parent',
-            slug: 'team-parent',
-            leaderAid: 'aid-lead-root',
-          } as OrgChartTeam;
-        }
-        return undefined;
-      });
-
-      vi.mocked(taskStore.get).mockResolvedValue({
-        id: 'task-1',
-        status: TaskStatus.Active,
-      } as Task);
-      vi.mocked(taskStore.update).mockResolvedValue(undefined);
-
-      // Member escalates - should go to aid-lead-child
-      const correlationId = await router.handleEscalation(
-        'aid-member-grandchild',
-        'task-1',
-        'error' as never,
-        { reason: 'need help' },
-      );
-
-      expect(correlationId).toMatch(/^[0-9a-f-]{36}$/);
-      // Escalation should be sent to the lead's team with all 7 protocol fields
-      expect(wsHub.send).toHaveBeenCalledWith(
-        'tid-child', // The team where the target lead (aid-lead-child) belongs
-        expect.objectContaining({
-          type: 'escalation_response',
-          data: expect.objectContaining({
-            correlation_id: correlationId,
-            task_id: 'task-1',
-            agent_aid: 'aid-lead-child',
-            source_team: 'team-grandchild',
-            destination_team: 'team-child',
-            resolution: 'pending',
-          }),
-        }),
-      );
-    });
+    // Leader chain escalation test removed — flat escalation model (no leader walking)
 
     it('deduplicates re-escalation with same correlation_id', async () => {
       vi.mocked(orgChart.getAgent).mockReturnValue({
@@ -1405,24 +1304,27 @@ describe('Layer 8: Orchestrator Integration', () => {
     });
 
     it('AC09/AC10: handleEscalationResponse sends all 7 fields with reversed source/destination (Sender B)', async () => {
-      // Set up member in team-a, lead is in team-lead-home.
-      // After escalation: sourceTeam='team-a', destinationTeam='team-lead-home'.
-      // On response: source and destination are swapped (supervisor -> original agent).
+      // Set up member in team-a, main assistant in 'main' team.
+      // After flat escalation: sourceTeam='team-a', destinationTeam='main'.
+      // On response: source and destination are swapped (main -> team-a).
       vi.mocked(orgChart.getAgent).mockImplementation((aid: string) => {
         if (aid === 'aid-member') {
           return { aid: 'aid-member', teamSlug: 'team-a', role: AgentRole.Member } as OrgChartAgent;
         }
-        if (aid === 'aid-lead') {
-          return { aid: 'aid-lead', teamSlug: 'team-lead-home', role: AgentRole.TeamLead } as OrgChartAgent;
+        if (aid === 'aid-main') {
+          return { aid: 'aid-main', teamSlug: 'main', role: 'main_assistant' } as OrgChartAgent;
         }
         return undefined;
       });
+      vi.mocked(orgChart.getAgentsByTeam).mockReturnValue([
+        { aid: 'aid-main', teamSlug: 'main', role: 'main_assistant' } as OrgChartAgent,
+      ]);
       vi.mocked(orgChart.getTeamBySlug).mockImplementation((slug: string) => {
         if (slug === 'team-a') {
-          return { tid: 'tid-a', slug: 'team-a', leaderAid: 'aid-lead' } as OrgChartTeam;
+          return { tid: 'tid-a', slug: 'team-a' } as OrgChartTeam;
         }
-        if (slug === 'team-lead-home') {
-          return { tid: 'tid-lead', slug: 'team-lead-home', leaderAid: 'aid-lead' } as OrgChartTeam;
+        if (slug === 'main') {
+          return { tid: 'tid-main', slug: 'main' } as OrgChartTeam;
         }
         return undefined;
       });
@@ -1432,7 +1334,7 @@ describe('Layer 8: Orchestrator Integration', () => {
       } as Task);
       vi.mocked(taskStore.update).mockResolvedValue(undefined);
 
-      // Escalate member to lead — Sender A fires here (already tested above)
+      // Escalate member to main assistant — Sender A fires here
       const correlationId = await router.handleEscalation(
         'aid-member',
         'task-esc',
@@ -1449,7 +1351,7 @@ describe('Layer 8: Orchestrator Integration', () => {
         status: TaskStatus.Escalated,
       } as Task);
 
-      // Sender B: supervisor responds, escalation_response goes back to original agent
+      // Sender B: main assistant responds, escalation_response goes back to original agent
       await router.handleEscalationResponse(correlationId, 'retry', { guidance: 'try again' });
 
       expect(wsHub.send).toHaveBeenCalledOnce();
@@ -1462,8 +1364,8 @@ describe('Layer 8: Orchestrator Integration', () => {
             task_id: 'task-esc',
             agent_aid: 'aid-member',
             // Source/destination are REVERSED on the return trip:
-            // escalation went team-a -> team-lead-home, response goes team-lead-home -> team-a
-            source_team: 'team-lead-home',
+            // escalation went team-a -> main, response goes main -> team-a
+            source_team: 'main',
             destination_team: 'team-a',
             resolution: 'retry',
             context: { guidance: 'try again' },
@@ -2121,6 +2023,7 @@ describe('Layer 8: Orchestrator Integration', () => {
         kill: vi.fn(),
         isRunning: vi.fn().mockReturnValue(false),
         getStatus: vi.fn().mockReturnValue(undefined),
+        dispatchTask: vi.fn().mockResolvedValue({ output: '', sessionId: undefined }),
       };
 
       const mockConfigLoader: ConfigLoader = {

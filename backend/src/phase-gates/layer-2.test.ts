@@ -395,6 +395,7 @@ describe('Layer 2: Storage + Security', () => {
         name: 'test-integration',
         config_path: '/workspace/integrations/test.yaml',
         status: 'proposed',
+        error_message: '',
         created_at: now,
       };
 
@@ -423,6 +424,7 @@ describe('Layer 2: Storage + Security', () => {
         name: 'test-integration-2',
         config_path: '/workspace/integrations/test2.yaml',
         status: 'proposed',
+        error_message: '',
         created_at: now,
       };
       await store.create(integration2);

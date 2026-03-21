@@ -58,7 +58,6 @@ export type ModelTier = (typeof ModelTier)[keyof typeof ModelTier];
 /** Role of an agent within the hierarchy. */
 export const AgentRole = {
   MainAssistant: 'main_assistant',
-  TeamLead: 'team_lead',
   Member: 'member',
 } as const;
 

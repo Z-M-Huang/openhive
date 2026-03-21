@@ -31,7 +31,8 @@ function createMockOrgChart() {
     getChildren: vi.fn(), getParent: vi.fn(),
     addAgent: vi.fn(), updateAgent: vi.fn(), removeAgent: vi.fn(), getAgent: vi.fn(),
     getAgentsByTeam: vi.fn().mockReturnValue([]),
-    getLeadOf: vi.fn(), isAuthorized: vi.fn(), getTopology: vi.fn(),
+    isAuthorized: vi.fn(), getTopology: vi.fn(),
+    getDispatchTarget: vi.fn(),
   };
 }
 
@@ -58,6 +59,7 @@ function createMockTaskStore() {
     getSubtree: vi.fn(), getBlockedBy: vi.fn(), unblockTask: vi.fn(),
     validateDependencies: vi.fn(), retryTask: vi.fn(),
     getRecentUserTasks: vi.fn().mockResolvedValue([]),
+    getNextPendingForAgent: vi.fn().mockResolvedValue(null),
   };
 }
 
@@ -111,6 +113,7 @@ function createMockProvisioner() {
     scaffoldWorkspace: vi.fn(), writeTeamConfig: vi.fn(),
     writeAgentDefinition: vi.fn(), writeSettings: vi.fn(),
     deleteWorkspace: vi.fn(), archiveWorkspace: vi.fn(),
+    addAgentToTeamYaml: vi.fn().mockResolvedValue(undefined),
   };
 }
 
@@ -151,6 +154,7 @@ function createMockAgentExecutor() {
   return {
     start: vi.fn(), stop: vi.fn(), kill: vi.fn(),
     isRunning: vi.fn(), getStatus: vi.fn(),
+    dispatchTask: vi.fn().mockResolvedValue({ output: '', sessionId: undefined }),
   };
 }
 
@@ -455,8 +459,8 @@ describe('OrchestratorImpl', () => {
       await orchestrator.start();
 
       // filteredSubscribe should be called for:
-      // tool_call, task_result, escalation, heartbeat, health.state_changed
-      expect(deps.eventBus.filteredSubscribe).toHaveBeenCalledTimes(6);
+      // tool_call, task_result, session.cleanup, escalation, heartbeat, health.state_changed, container.restarted
+      expect(deps.eventBus.filteredSubscribe).toHaveBeenCalledTimes(7);
       expect(deps.eventBus.filteredSubscribe).toHaveBeenCalledWith(
         expect.any(Function),
         expect.any(Function)
@@ -689,7 +693,7 @@ describe('OrchestratorImpl', () => {
      */
     async function triggerHealthEvent(
       deps: OrchestratorDeps,
-      orchestrator: InstanceType<typeof OrchestratorImpl>,
+      _orchestrator: InstanceType<typeof OrchestratorImpl>,
       eventData: { tid: string; previousState: string; newState: string },
     ): Promise<void> {
       // Find the filteredSubscribe call whose filter matches 'health.state_changed'
@@ -967,6 +971,8 @@ describe('OrchestratorImpl', () => {
         trackDispatch: vi.fn(),
         acknowledgeDispatch: vi.fn(),
         getUnacknowledged: vi.fn().mockReturnValue([]),
+        getUnacknowledgedByAgent: vi.fn().mockReturnValue([]),
+        transferOwnership: vi.fn().mockReturnValue(0),
         start: vi.fn(),
         stop: vi.fn(),
       };

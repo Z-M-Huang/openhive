@@ -23,15 +23,15 @@ test_cases:
     expected_outcome: "201 Created with {slug: 'crud-test-team', containerId: '...', status: 'created'}"
 
   - name: List all teams via GET /api/teams
-    description: GET /api/teams returns array of teams with tid, slug, leaderAid, health, agentCount, depth, parentSlug
+    description: GET /api/teams returns array of teams with tid, slug, health, agentCount, depth, parentSlug
     steps:
       - action: "Query teams list"
         command: "curl -sf http://localhost:8080/api/teams 2>&1"
         expected: "crud-test-team"
-    expected_outcome: "Teams list includes crud-test-team with summary fields (slug, leaderAid, health, agentCount, depth)"
+    expected_outcome: "Teams list includes crud-test-team with summary fields (slug, health, agentCount, depth)"
 
   - name: Get team details via GET /api/teams/:slug
-    description: GET /api/teams/:slug returns detailed team with tid, slug, leaderAid, health, depth, containerId, agents, childTeams
+    description: GET /api/teams/:slug returns detailed team with tid, slug, health, depth, containerId, agents, childTeams
     steps:
       - action: "Query team details and verify slug value"
         command: "curl -sf http://localhost:8080/api/teams/crud-test-team 2>&1"
@@ -39,7 +39,7 @@ test_cases:
       - action: "Verify childTeams array present in detail response"
         command: "curl -sf http://localhost:8080/api/teams/crud-test-team 2>&1"
         expected: "\"childTeams\":["
-    expected_outcome: "Team detail response includes slug, tid, leaderAid, health, depth, containerId, agents array, childTeams array"
+    expected_outcome: "Team detail response includes slug, tid, health, depth, containerId, agents array, childTeams array"
 
   - name: Delete team via DELETE /api/teams/:slug
     description: DELETE /api/teams/:slug removes team and returns {slug, status: 'removed'}

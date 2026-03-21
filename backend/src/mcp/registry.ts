@@ -26,36 +26,26 @@
  * Not all tools are available to every agent. Access depends on the agent's
  * role in the hierarchy. The matrix below defines which tools each role can invoke:
  *
- * | Tool                    | main_assistant | team_lead | member |
- * |-------------------------|:-:|:-:|:-:|
- * | `spawn_container`       | Yes | --  | --  |
- * | `stop_container`        | Yes | --  | --  |
- * | `list_containers`       | Yes | --  | --  |
- * | `create_team`           | Yes | Yes | --  |
- * | `create_agent`          | Yes | Yes | --  |
- * | `create_task`           | Yes | Yes | --  |
- * | `dispatch_subtask`      | Yes | Yes | --  |
- * | `update_task_status`    | Yes | Yes | Yes |
- * | `send_message`          | Yes | Yes | Yes |
- * | `escalate`              | Yes | Yes | Yes |
- * | `save_memory`           | Yes | Yes | Yes |
- * | `recall_memory`         | Yes | Yes | Yes |
- * | `create_integration`    | Yes | Yes | --  |
- * | `test_integration`      | Yes | Yes | --  |
- * | `activate_integration`  | Yes | Yes | --  |
- * | `get_credential`        | Yes | Yes | Yes |
- * | `set_credential`        | Yes | Yes | --  |
- * | `get_team`              | Yes | Yes | --  |
- * | `get_task`              | Yes | Yes | Yes |
- * | `get_health`            | Yes | Yes | --  |
- * | `inspect_topology`      | Yes | Yes | --  |
- * | `register_webhook`      | Yes | Yes | --  |
- * | `register_trigger`      | Yes | Yes | --  |
+ * | Tool                    | main_assistant | member |
+ * |-------------------------|:-:|:-:|
+ * | `spawn_container`       | Yes | --  |
+ * | `stop_container`        | Yes | --  |
+ * | `list_containers`       | Yes | --  |
+ * | `create_team`           | Yes | --  |
+ * | `create_agent`          | Yes | --  |
+ * | `create_task`           | Yes | --  |
+ * | `dispatch_subtask`      | Yes | Yes |
+ * | `update_task_status`    | Yes | Yes |
+ * | `send_message`          | Yes | Yes |
+ * | `escalate`              | Yes | Yes |
+ * | `save_memory`           | Yes | Yes |
+ * | `recall_memory`         | Yes | Yes |
+ * | `get_credential`        | Yes | Yes |
+ * | `get_task`              | Yes | Yes |
  *
  * **Summary:**
- * - **main_assistant:** Full access to all 23 tools.
- * - **team_lead:** Team-scoped access (20 tools). Cannot manage containers directly.
- * - **member:** Minimal access (7 tools). Can update tasks, send messages, escalate,
+ * - **main_assistant:** Full access to all tools.
+ * - **member:** 8 tools. Can dispatch subtasks, update tasks, send messages, escalate,
  *   manage own memory, read credentials, and query own tasks.
  *
  * ## Enforcement
@@ -113,42 +103,12 @@ const MAIN_ASSISTANT_TOOLS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Tools accessible by the `team_lead` role.
- * Team-scoped access. Cannot manage containers directly.
- */
-const TEAM_LEAD_TOOLS: ReadonlySet<string> = new Set([
-  'create_team',
-  'create_agent',
-  'create_task',
-  'dispatch_subtask',
-  'update_task_status',
-  'send_message',
-  'escalate',
-  'save_memory',
-  'recall_memory',
-  'create_integration',
-  'test_integration',
-  'activate_integration',
-  'get_credential',
-  'set_credential',
-  'get_team',
-  'get_task',
-  'get_health',
-  'inspect_topology',
-  'register_webhook',
-  'register_trigger',
-  'search_skill',
-  'install_skill',
-  'invoke_integration',
-  'browse_web',
-]);
-
-/**
  * Tools accessible by the `member` role.
- * Minimal access (7 tools). Can update task status, send messages, escalate,
- * manage own memory, read credentials, and query own tasks.
+ * Minimal access (8 tools). Can update task status, dispatch subtasks,
+ * send messages, escalate, manage own memory, read credentials, and query own tasks.
  */
 const MEMBER_TOOLS: ReadonlySet<string> = new Set([
+  'dispatch_subtask',
   'update_task_status',
   'send_message',
   'escalate',
@@ -163,7 +123,6 @@ const MEMBER_TOOLS: ReadonlySet<string> = new Set([
  */
 const ROLE_TOOL_MATRIX: Readonly<Record<AgentRole, ReadonlySet<string>>> = {
   main_assistant: MAIN_ASSISTANT_TOOLS,
-  team_lead: TEAM_LEAD_TOOLS,
   member: MEMBER_TOOLS,
 };
 
@@ -237,10 +196,9 @@ export class MCPRegistryImpl implements MCPRegistry {
    *     type: 'object',
    *     properties: {
    *       slug: { type: 'string', description: 'Team slug (directory name)' },
-   *       leader_aid: { type: 'string', description: 'AID of the team lead agent' },
    *       purpose: { type: 'string', description: 'Team purpose/scope' },
    *     },
-   *     required: ['slug', 'leader_aid', 'purpose'],
+   *     required: ['slug', 'purpose'],
    *   },
    *   async (args, agentAid) => {
    *     // Tool implementation
@@ -319,14 +277,14 @@ export class MCPRegistryImpl implements MCPRegistry {
    * This is used by the orchestrator to generate the `allowedTools` list
    * for `.claude/settings.json` when setting up an agent's workspace.
    *
-   * @param _role - Agent role to query (main_assistant, team_lead, member)
+   * @param _role - Agent role to query (main_assistant, member)
    * @returns Array of tool entries (name + schema) available to the role
    *
    * @example
    * ```ts
-   * // Get all tools available to a team lead
-   * const tools = registry.getToolsForRole('team_lead');
-   * // Returns 20 tools (all except container management tools)
+   * // Get all tools available to a member
+   * const tools = registry.getToolsForRole('member');
+   * // Returns 8 tools
    *
    * // Get minimal tools for a member
    * const memberTools = registry.getToolsForRole('member');
@@ -361,7 +319,6 @@ export class MCPRegistryImpl implements MCPRegistry {
    * @example
    * ```ts
    * registry.isAllowed('spawn_container', 'main_assistant'); // → true
-   * registry.isAllowed('spawn_container', 'team_lead');      // → false
    * registry.isAllowed('spawn_container', 'member');         // → false
    * registry.isAllowed('update_task_status', 'member');      // → true
    * ```
@@ -372,4 +329,4 @@ export class MCPRegistryImpl implements MCPRegistry {
 }
 
 // Re-export role-based tool sets for testing and external use
-export { MAIN_ASSISTANT_TOOLS, TEAM_LEAD_TOOLS, MEMBER_TOOLS, ROLE_TOOL_MATRIX };
+export { MAIN_ASSISTANT_TOOLS, MEMBER_TOOLS, ROLE_TOOL_MATRIX };
