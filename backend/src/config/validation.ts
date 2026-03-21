@@ -123,6 +123,7 @@ const assistantConfigSchema = z.object({
 
 const channelConfigSchema = z.object({
   enabled: z.boolean(),
+  token: z.string().optional(),
   token_env: z.string().optional(),
   prefix: z.string().optional(),
   channel_id: z.string().optional(),
@@ -332,6 +333,7 @@ const triggerConfigSchema: z.ZodType<TriggerConfig> = z.union([
 const oauthSchema = z.object({
   type: z.literal('oauth'),
   oauth_token: z.string().min(1),
+  model: z.string().optional(),
   models: z.record(z.string()).optional(),
 }).passthrough();
 
@@ -339,6 +341,7 @@ const anthropicDirectSchema = z.object({
   type: z.literal('anthropic_direct'),
   api_key: z.string().min(1),
   base_url: z.string().optional(),
+  model: z.string().optional(),
   models: z.record(z.string()).optional(),
 }).passthrough();
 

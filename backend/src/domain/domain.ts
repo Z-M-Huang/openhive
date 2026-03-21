@@ -190,6 +190,9 @@ export interface Provider {
   base_url?: string;
   api_key?: string;
   oauth_token?: string;
+  /** Single model name — auto-mapped to all tiers (haiku/sonnet/opus). */
+  model?: string;
+  /** Per-tier model mapping. Takes precedence over `model` if set. */
   models?: Record<string, string>;
 }
 

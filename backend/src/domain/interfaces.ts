@@ -570,6 +570,10 @@ export interface ChannelAdapter {
   disconnect(): Promise<void>;
   sendMessage(msg: OutboundMessage): Promise<void>;
   onMessage(handler: MessageHandler): void;
+  /** Start showing a processing indicator (typing, spinner, etc.). Optional. */
+  startProcessing?(chatJid: string): void;
+  /** Stop showing the processing indicator. Optional. */
+  stopProcessing?(chatJid: string): void;
 }
 
 /** Maps inbound channel messages to teams/agents via two-tier routing. */

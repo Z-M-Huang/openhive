@@ -78,7 +78,7 @@ describe('DiscordAdapter', () => {
       delete process.env.DISCORD_BOT_TOKEN;
 
       await expect(adapter.connect()).rejects.toThrow(
-        'DISCORD_BOT_TOKEN environment variable is not set'
+        'Discord bot token not provided'
       );
     });
   });
@@ -192,7 +192,7 @@ describe('DiscordAdapter', () => {
       expect(receivedMessages[0].content).toBe('Hello!');
     });
 
-    it('sends typing indicator on message receive (AC-L9-05)', async () => {
+    it('typing indicator is handled by startProcessing via router, not in handleDiscordMessage', async () => {
       process.env.DISCORD_BOT_TOKEN = 'test-token';
       await adapter.connect();
 
@@ -219,7 +219,9 @@ describe('DiscordAdapter', () => {
 
       await messageHandler(mockDiscordMessage);
 
-      expect(sendTyping).toHaveBeenCalled();
+      // Typing is NOT sent in handleDiscordMessage anymore —
+      // it's handled by startProcessing() called by the router
+      expect(sendTyping).not.toHaveBeenCalled();
     });
   });
 

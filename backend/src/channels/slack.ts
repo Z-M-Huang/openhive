@@ -4,8 +4,8 @@
  * Uses the Slack Web API to receive and send messages. Connects via
  * Socket Mode for real-time events without a public endpoint.
  *
- * **Authentication:** The bot token is read from the `SLACK_BOT_TOKEN`
- * environment variable, and the app-level token from `SLACK_APP_TOKEN`.
+ * **Authentication:** The bot token is read from openhive.yaml
+ * (channels.slack.token) or the SLACK_BOT_TOKEN environment variable.
  *
  * **Channel routing:** Each Slack channel is mapped to an OpenHive
  * chat JID of the form `slack:<team_id>:<channel_id>`.
@@ -28,18 +28,23 @@ const SLACK_MAX_MESSAGE_LENGTH = 4000;
  */
 export class SlackAdapter extends BaseChannelAdapter {
   private connected = false;
+  private readonly configToken?: string;
+
+  constructor(botToken?: string) {
+    super();
+    this.configToken = botToken;
+  }
 
   /**
    * Connect to Slack via Socket Mode.
    *
-   * Reads tokens from environment:
-   * - SLACK_BOT_TOKEN: Bot user OAuth token (xoxb-...)
-   * - SLACK_APP_TOKEN: App-level token for Socket Mode (xapp-...)
+   * Uses the token provided in the constructor (from openhive.yaml),
+   * falling back to the SLACK_BOT_TOKEN environment variable.
    */
   async connect(): Promise<void> {
-    const botToken = process.env['SLACK_BOT_TOKEN'];
+    const botToken = this.configToken || process.env['SLACK_BOT_TOKEN'];
     if (!botToken) {
-      throw new Error('SLACK_BOT_TOKEN environment variable is required');
+      throw new Error('Slack bot token not provided (set channels.slack.token in openhive.yaml or SLACK_BOT_TOKEN env var)');
     }
 
     // Use Slack Web API for posting messages
@@ -63,7 +68,7 @@ export class SlackAdapter extends BaseChannelAdapter {
       throw new Error('Slack adapter is not connected');
     }
 
-    const botToken = process.env['SLACK_BOT_TOKEN'];
+    const botToken = this.configToken || process.env['SLACK_BOT_TOKEN'];
     if (!botToken) return;
 
     // Parse channel from JID: slack:<team_id>:<channel_id>

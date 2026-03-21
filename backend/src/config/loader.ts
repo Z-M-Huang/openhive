@@ -174,6 +174,7 @@ export class ConfigLoaderImpl implements ConfigLoader {
         ...(entry['base_url'] !== undefined ? { base_url: entry['base_url'] as string } : {}),
         ...(entry['api_key'] !== undefined ? { api_key: entry['api_key'] as string } : {}),
         ...(entry['oauth_token'] !== undefined ? { oauth_token: entry['oauth_token'] as string } : {}),
+        ...(entry['model'] !== undefined ? { model: entry['model'] as string } : {}),
         ...(entry['models'] !== undefined ? { models: entry['models'] as Record<string, string> } : {}),
       };
     }

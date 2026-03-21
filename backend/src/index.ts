@@ -180,6 +180,7 @@ interface ShutdownState {
   apiServer: APIServer | null;
   healthMonitor: HealthMonitorImpl | null;
   discordAdapter: DiscordAdapter | null;
+  slackAdapter: import('./channels/slack.js').SlackAdapter | null;
   messageRouter: MessageRouterImpl | null;
   triggerScheduler: TriggerSchedulerImpl | null;
   orchestrator: OrchestratorImpl | null;
@@ -208,6 +209,7 @@ const shutdownState: ShutdownState = {
   apiServer: null,
   healthMonitor: null,
   discordAdapter: null,
+  slackAdapter: null,
   messageRouter: null,
   triggerScheduler: null,
   orchestrator: null,
@@ -514,7 +516,14 @@ async function initializeRootMode(
       ...(preset['api_key'] !== undefined ? { apiKey: String(preset['api_key']) } : {}),
       ...(preset['base_url'] !== undefined ? { baseUrl: String(preset['base_url']) } : {}),
       ...(preset['oauth_token'] !== undefined ? { oauthToken: String(preset['oauth_token']) } : {}),
-      models: ((preset['models'] as Record<string, string>) ?? {}) as ResolvedProvider['models'],
+      models: (() => {
+        const explicitModels = preset['models'] as Record<string, string> | undefined;
+        if (explicitModels && Object.keys(explicitModels).length > 0) return explicitModels;
+        // Single-model shorthand: auto-map to all tiers
+        const singleModel = preset['model'] as string | undefined;
+        if (singleModel) return { haiku: singleModel, sonnet: singleModel, opus: singleModel };
+        return {};
+      })() as ResolvedProvider['models'],
     };
 
     // If preset exists but has no credentials, fall back to CLAUDE_CODE_OAUTH_TOKEN env var
@@ -1275,11 +1284,12 @@ async function initializeRootMode(
     logger.info('CLI channel adapter connected');
   }
 
-  // 16b. Discord adapter — enabled via config
+  // 16b. Discord adapter — enabled via config, token from YAML or env
   if (masterConfig.channels.discord.enabled) {
-    const discordToken = process.env['DISCORD_BOT_TOKEN'];
+    const discordToken = masterConfig.channels.discord.token
+      || process.env['DISCORD_BOT_TOKEN'];
     if (discordToken) {
-      const discordAdapter = new DiscordAdapter();
+      const discordAdapter = new DiscordAdapter(discordToken);
       try {
         await discordAdapter.connect();
         messageRouter.registerChannel(ChannelType.Discord, discordAdapter);
@@ -1291,7 +1301,28 @@ async function initializeRootMode(
         });
       }
     } else {
-      logger.warn('Discord enabled but DISCORD_BOT_TOKEN not set');
+      logger.warn('Discord enabled but no token set (channels.discord.token in openhive.yaml or DISCORD_BOT_TOKEN env)');
+    }
+  }
+
+  // 16c. Slack adapter — enabled via config, token from YAML or env
+  if (masterConfig.channels.slack.enabled) {
+    const slackToken = masterConfig.channels.slack.token || process.env['SLACK_BOT_TOKEN'];
+    if (slackToken) {
+      const { SlackAdapter } = await import('./channels/slack.js');
+      const slackAdapter = new SlackAdapter(slackToken);
+      try {
+        await slackAdapter.connect();
+        messageRouter.registerChannel(ChannelType.Slack, slackAdapter);
+        shutdownState.slackAdapter = slackAdapter;
+        logger.info('Slack adapter connected');
+      } catch (err) {
+        logger.error('Failed to connect Slack adapter', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    } else {
+      logger.warn('Slack enabled but no token set (channels.slack.token in openhive.yaml or SLACK_BOT_TOKEN env)');
     }
   }
 
@@ -1480,6 +1511,10 @@ async function gracefulShutdown(): Promise<void> {
   if (shutdownState.discordAdapter) {
     logger?.info('Disconnecting Discord adapter');
     await shutdownState.discordAdapter.disconnect();
+  }
+  if (shutdownState.slackAdapter) {
+    logger?.info('Disconnecting Slack adapter');
+    await shutdownState.slackAdapter.disconnect();
   }
 
   // Stop orchestrator

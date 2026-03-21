@@ -13,3 +13,4 @@ paths:
 - File naming: kebab-case (`container-manager.ts`, not `ContainerManager.ts`)
 - No `any` in production code — use `unknown` + type guards instead of `as` casts
 - Import order: node builtins → external packages → internal modules → domain types
+- **Aggressive logging:** NEVER silently swallow errors. Every `catch` block MUST either re-throw, log the error with context, or have a comment explaining why silence is intentional. Empty `catch {}` is forbidden for non-trivial operations. Use `logger.error()` for failures, `logger.warn()` for recoverable issues. Crashes are data — silence hides bugs.

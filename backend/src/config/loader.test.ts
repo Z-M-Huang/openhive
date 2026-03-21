@@ -102,7 +102,7 @@ describe('ConfigLoaderImpl', () => {
     it('returns cached config after loadMaster()', async () => {
       await loader.loadMaster();
       const config = loader.getMaster();
-      expect(config.server.listen_address).toBe('127.0.0.1:8080');
+      expect(config.server.listen_address).toBe('0.0.0.0:8080');
     });
   });
 

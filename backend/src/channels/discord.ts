@@ -53,21 +53,58 @@ const DISCORD_MAX_MESSAGE_LENGTH = 2000;
  */
 export class DiscordAdapter extends BaseChannelAdapter {
   private client: Client | null = null;
+  private readonly configToken?: string;
+  private readonly typingIntervals = new Map<string, NodeJS.Timeout>();
+
+  constructor(botToken?: string) {
+    super();
+    this.configToken = botToken;
+  }
+
+  /**
+   * Start persistent typing indicator for a Discord channel.
+   * Sends typing every 8s (Discord expires at 10s). Auto-clears after 5min.
+   */
+  startProcessing(chatJid: string): void {
+    if (this.typingIntervals.has(chatJid)) return;
+    if (!chatJid.startsWith('discord:') || !this.client) return;
+    try {
+      const { channelId } = this.parseChatJid(chatJid);
+      this.client.channels.fetch(channelId).then(channel => {
+        if (!channel || !('sendTyping' in channel)) return;
+        const textChannel = channel as { sendTyping: () => Promise<void> };
+        textChannel.sendTyping().catch(() => {});
+        const interval = setInterval(() => {
+          textChannel.sendTyping().catch(() => {});
+        }, 8000);
+        this.typingIntervals.set(chatJid, interval);
+        // Safety: auto-clear after 5 minutes to prevent leaks on agent failure
+        setTimeout(() => this.stopProcessing(chatJid), 300_000);
+      }).catch(() => {});
+    } catch { /* invalid JID — skip */ }
+  }
+
+  /** Stop the typing indicator for a channel. */
+  stopProcessing(chatJid: string): void {
+    const interval = this.typingIntervals.get(chatJid);
+    if (interval) {
+      clearInterval(interval);
+      this.typingIntervals.delete(chatJid);
+    }
+  }
 
   /**
    * Connect to the Discord Gateway.
    *
-   * Reads the bot token from the `DISCORD_BOT_TOKEN` environment variable,
-   * instantiates a discord.js `Client` with the required intents, and logs in.
-   * Registers an internal `messageCreate` listener that converts each Discord
-   * `Message` into an {@link InboundMessage} and calls {@link notifyHandlers}.
+   * Uses the token provided in the constructor (from openhive.yaml),
+   * falling back to the DISCORD_BOT_TOKEN environment variable.
    *
-   * @throws Error if DISCORD_BOT_TOKEN is not set or login fails.
+   * @throws Error if no token is available or login fails.
    */
   async connect(): Promise<void> {
-    const token = process.env.DISCORD_BOT_TOKEN;
+    const token = this.configToken || process.env['DISCORD_BOT_TOKEN'];
     if (!token) {
-      throw new Error('DISCORD_BOT_TOKEN environment variable is not set');
+      throw new Error('Discord bot token not provided (set channels.discord.token in openhive.yaml or DISCORD_BOT_TOKEN env var)');
     }
 
     this.client = new Client({
@@ -95,6 +132,12 @@ export class DiscordAdapter extends BaseChannelAdapter {
    * to call when already disconnected.
    */
   async disconnect(): Promise<void> {
+    // Clear all typing intervals
+    for (const interval of this.typingIntervals.values()) {
+      clearInterval(interval);
+    }
+    this.typingIntervals.clear();
+
     if (this.client) {
       this.client.destroy();
       this.client = null;
@@ -162,10 +205,9 @@ export class DiscordAdapter extends BaseChannelAdapter {
       timestamp: msg.createdTimestamp,
     };
 
-    // Immediate acknowledgment: send typing indicator (AC-L9-05)
-    if (msg.channel.isTextBased() && 'sendTyping' in msg.channel) {
-      await (msg.channel as { sendTyping: () => Promise<void> }).sendTyping();
-    }
+    // Typing indicator is now handled by startProcessing() via the router.
+    // No single sendTyping() call here — the router calls startProcessing()
+    // when routeMessage() fires, which starts a persistent 8s interval.
 
     // Notify registered handlers
     await this.notifyHandlers(inboundMsg);

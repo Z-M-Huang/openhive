@@ -44,7 +44,7 @@ import type {
   Orchestrator,
   OrgChart,
 } from '../domain/interfaces.js';
-import type { ChannelType } from '../domain/enums.js';
+import { ChannelType } from '../domain/enums.js';
 import type { Message } from '../domain/domain.js';
 
 /**
@@ -88,6 +88,9 @@ export class MessageRouterImpl implements MessageRouter {
    * @param msg - The inbound message received from a channel adapter.
    */
   async routeMessage(msg: InboundMessage): Promise<void> {
+    // Start processing indicator (typing, spinner) on the originating channel
+    this.getAdapterForJid(msg.chatJid)?.startProcessing?.(msg.chatJid);
+
     // Always persist the message first
     const dbMessage: Message = {
       id: msg.id,
@@ -210,18 +213,36 @@ export class MessageRouterImpl implements MessageRouter {
    * @param content - The message content to send.
    */
   async sendResponse(chatJid: string, content: string): Promise<void> {
-    // Find the adapter by checking which registered adapter handles this JID prefix
-    for (const [_channelType, adapter] of this.channels) {
-      // Try sending — adapter will handle if JID matches its format
-      try {
+    // Deterministic prefix-based adapter selection — avoids silent no-op returns
+    // being treated as success (which caused the Discord reply bug).
+    let targetType: ChannelType | undefined;
+    if (chatJid.startsWith('discord:')) targetType = ChannelType.Discord;
+    else if (chatJid.startsWith('slack:')) targetType = ChannelType.Slack;
+    else if (chatJid.startsWith('whatsapp:')) targetType = ChannelType.WhatsApp;
+    else if (chatJid.startsWith('cli:ws:')) targetType = ChannelType.Api;  // must check before 'cli:'
+    else if (chatJid.startsWith('cli:')) targetType = ChannelType.Cli;
+
+    if (targetType) {
+      const adapter = this.channels.get(targetType);
+      if (adapter) {
+        adapter.stopProcessing?.(chatJid);
         await adapter.sendMessage({ chatJid, content });
         return;
-      } catch {
-        // This adapter doesn't handle this JID — try next
       }
     }
-    // No adapter found — log warning
+
     console.warn(`[MessageRouter] No adapter found for chatJid: ${chatJid}`);
+  }
+
+  /** Resolve the adapter for a JID by prefix. */
+  private getAdapterForJid(chatJid: string): ChannelAdapter | undefined {
+    let type: ChannelType | undefined;
+    if (chatJid.startsWith('discord:')) type = ChannelType.Discord;
+    else if (chatJid.startsWith('slack:')) type = ChannelType.Slack;
+    else if (chatJid.startsWith('whatsapp:')) type = ChannelType.WhatsApp;
+    else if (chatJid.startsWith('cli:ws:')) type = ChannelType.Api;
+    else if (chatJid.startsWith('cli:')) type = ChannelType.Cli;
+    return type ? this.channels.get(type) : undefined;
   }
 
   /**

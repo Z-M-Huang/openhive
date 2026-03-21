@@ -21,6 +21,7 @@ data/providers.yaml
 !.env.example
 
 # Database
+*.db
 *.db-wal
 *.db-shm
 

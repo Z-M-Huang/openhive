@@ -90,6 +90,7 @@ export interface AssistantConfig {
 
 export interface ChannelConfig {
   enabled: boolean;
+  token?: string;
   token_env?: string;
   prefix?: string;
   channel_id?: string;
@@ -173,7 +174,7 @@ export interface MasterConfig {
 export function defaultMasterConfig(): MasterConfig {
   return {
     server: {
-      listen_address: '127.0.0.1:8080',
+      listen_address: '0.0.0.0:8080',
       data_dir: 'data',
       log_level: 'info',
       log_archive: {
@@ -194,7 +195,7 @@ export function defaultMasterConfig(): MasterConfig {
       },
     },
     database: {
-      path: 'data/openhive.db',
+      path: '/app/workspace/openhive.db',
       wal_mode: true,
       pragma: {
         journal_size_limit: 67_108_864,

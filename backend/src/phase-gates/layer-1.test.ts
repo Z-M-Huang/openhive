@@ -108,7 +108,7 @@ describe('Layer 1: Config+Logging', () => {
       // Load and verify defaults merged with YAML
       const config = await loader.loadMaster();
       expect(config.limits.max_depth).toBe(5);
-      expect(config.server.listen_address).toBe('127.0.0.1:8080');
+      expect(config.server.listen_address).toBe('0.0.0.0:8080');
       expect(config.assistant.name).toBe('OpenHive Assistant');
 
       // Modify and save
@@ -119,7 +119,7 @@ describe('Layer 1: Config+Logging', () => {
       const reloaded = await loader.loadMaster();
       expect(reloaded.limits.max_depth).toBe(5);
       expect(reloaded.limits.max_teams).toBe(20);
-      expect(reloaded.server.listen_address).toBe('127.0.0.1:8080');
+      expect(reloaded.server.listen_address).toBe('0.0.0.0:8080');
     });
   });
 
