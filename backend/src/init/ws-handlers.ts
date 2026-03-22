@@ -416,6 +416,9 @@ export function createOnConnectHandler(
       const rawAgents = rawTeamConfig['agents'];
       const agents = Array.isArray(rawAgents) ? rawAgents : [];
 
+      // Read team-level system_prompt from team.yaml (used for coordinator enrichment)
+      const teamSystemPrompt = rawTeamConfig['system_prompt'] ? String(rawTeamConfig['system_prompt']) : '';
+
       // Generate a session token for reconnect authentication (AC-A2).
       // This is a long-lived token delivered via container_init so the container
       // can re-authenticate on reconnect without needing a new one-time token.
@@ -427,23 +430,47 @@ export function createOnConnectHandler(
         is_main_assistant: team.slug === 'main',
         coordinator_aid: team.coordinatorAid ?? null,
         team_config: rawTeamConfig as unknown,
-        agents: agents.map((a: Record<string, unknown>) => {
+        agents: await Promise.all(agents.map(async (a: Record<string, unknown>) => {
           // Resolve the provider preset for this agent (fall back to 'default')
           const resolvedProvider = resolveProviderPreset(String(a['provider'] || 'default'));
           const isCoordinator = String(a['aid'] || '') === team.coordinatorAid;
-          let systemPrompt = String(a['system_prompt'] ?? a['description'] ?? '');
+          const agentName = String(a['name'] || '');
 
-          // Enrich coordinator's system prompt with team roster
-          if (isCoordinator && agents.length > 1) {
-            const roster = agents.map((m: Record<string, unknown>) =>
-              `- ${String(m['name'] || '')} (${String(m['aid'] || '')}): ${String(m['description'] ?? '').slice(0, 100)}`
-            ).join('\n');
-            systemPrompt = `You are the team coordinator for "${team.slug}".\n\nTeam Members:\n${roster}\n\n${systemPrompt}`;
+          // Read agent .md file body as system prompt (single source of truth)
+          let systemPrompt = '';
+          try {
+            const fs = await import('node:fs/promises');
+            const mdPath = resolve(team.workspacePath, '.claude', 'agents', `${agentName}.md`);
+            const mdContent = await fs.readFile(mdPath, 'utf-8');
+            // Parse out YAML frontmatter (between --- markers), use the body
+            const bodyMatch = mdContent.match(/^---[\s\S]*?---\n([\s\S]*)$/);
+            systemPrompt = bodyMatch ? bodyMatch[1].trim() : mdContent.trim();
+          } catch {
+            // No .md file — fall back to team.yaml description
+            systemPrompt = String(a['system_prompt'] ?? a['description'] ?? '');
+          }
+
+          // For coordinator: prepend team-level system_prompt and team roster
+          if (isCoordinator) {
+            const parts: string[] = [];
+            if (teamSystemPrompt) {
+              parts.push(teamSystemPrompt);
+            }
+            if (agents.length > 1) {
+              const roster = agents.map((m: Record<string, unknown>) =>
+                `- ${String(m['name'] || '')} (${String(m['aid'] || '')}): ${String(m['description'] ?? '').slice(0, 100)}`
+              ).join('\n');
+              parts.push(`You are the team coordinator for "${team.slug}".\n\nTeam Members:\n${roster}`);
+            }
+            if (systemPrompt) {
+              parts.push(systemPrompt);
+            }
+            systemPrompt = parts.join('\n\n');
           }
 
           return {
             aid: String(a['aid'] || ''),
-            name: String(a['name'] || ''),
+            name: agentName,
             description: String(a['description'] || ''),
             role: String(a['role'] || 'member'),
             model: resolveModel(String(a['model_tier'] || 'sonnet'), resolvedProvider),
@@ -452,7 +479,7 @@ export function createOnConnectHandler(
             ...(systemPrompt ? { systemPrompt } : {}),
             ...(mcpServers?.length ? { mcpServers } : {}),
           };
-        }),
+        })),
         secrets,
         mcp_servers: mcpServers,
         session_token: sessionToken,

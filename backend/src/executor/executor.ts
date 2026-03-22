@@ -237,6 +237,11 @@ export class AgentExecutorImpl implements AgentExecutor {
       }
       sdkEnv['CLAUDE_CODE_SUBAGENT_MODEL'] = modelAlias;
 
+      // Credential preflight — fail fast with clear error instead of silent empty output
+      if (!sdkEnv['ANTHROPIC_API_KEY'] && !sdkEnv['CLAUDE_CODE_OAUTH_TOKEN']) {
+        throw new Error(`No API credentials for agent ${agentAid}. Provider type: ${provider.type}. Check providers.yaml or CLAUDE_CODE_OAUTH_TOKEN env var.`);
+      }
+
       // --- Tier 1: Session continuity (within same connection) ---
       // Reuse tracked.sessionId for subsequent queries from the same agent.
       // On first query (new WS connection), sessionId is undefined → fresh session.
@@ -298,6 +303,9 @@ export class AgentExecutorImpl implements AgentExecutor {
       // --- Behavioral instructions + tool catalog ---
       enrichedSystemPrompt += `\n\n${BEHAVIORAL_INSTRUCTIONS}`;
 
+      // Track query start time for empty-output detection
+      const queryStart = Date.now();
+
       // --- Fix 3A: 5-minute query timeout via AbortController ---
       const timeoutId = setTimeout(() => {
         tracked.abortController?.abort();
@@ -352,13 +360,13 @@ export class AgentExecutorImpl implements AgentExecutor {
       tracked.abortController = undefined;
 
       if (!result.success) {
-        this.logger.error(`Agent query failed: ${result.error ?? 'unknown error'}`, {
+        const errorMsg = result.error ?? 'Agent query failed';
+        this.logger.error(`Agent query failed: ${errorMsg}`, {
           aid: agentAid,
           taskId,
-          error: String(result.error ?? 'unknown'),
+          error: String(errorMsg),
         });
-        // Also log to stderr for immediate visibility
-        console.error(`[AgentExecutor] Query failed for ${agentAid}: ${result.error}`);
+        console.error(`[AgentExecutor] Query failed for ${agentAid}: ${errorMsg}`);
 
         this.eventBus.publish({
           type: 'task_result',
@@ -366,11 +374,14 @@ export class AgentExecutorImpl implements AgentExecutor {
             task_id: taskId,
             agent_aid: agentAid,
             status: 'failed',
-            error: result.error ?? 'Agent query failed',
+            error: errorMsg,
           },
           timestamp: Date.now(),
           source: 'executor',
         });
+
+        // Throw so non-root handleTaskDispatch sends failed status back to root
+        throw new Error(errorMsg);
       } else {
         this.eventBus.publish({
           type: 'task_result',
@@ -426,6 +437,15 @@ export class AgentExecutorImpl implements AgentExecutor {
             }
           } catch { /* best-effort */ }
         }
+      }
+
+      // Detect suspiciously fast empty output (SDK subprocess likely crashed silently)
+      const queryDuration = Date.now() - queryStart;
+      if (!result.output && queryDuration < 5000) {
+        this.logger.error('Agent query returned empty output suspiciously fast', {
+          aid: agentAid, taskId, duration_ms: queryDuration, success: result.success,
+        });
+        throw new Error(`Agent query returned empty output in ${queryDuration}ms — likely SDK subprocess failure. Check provider credentials and model configuration.`);
       }
 
       return { output: result.output, sessionId: result.sessionId };

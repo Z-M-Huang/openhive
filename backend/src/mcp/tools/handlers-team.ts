@@ -228,10 +228,18 @@ export function createTeamHandlers(ctx: ToolContext): Map<string, ToolHandler> {
 
       // Send agent_added WS to container for hot-reload (new agents only)
       if (ctx.wsHub.isConnected(team.tid)) {
+        // Resolve provider so non-root container gets API credentials
+        const resolvedProvider = ctx.resolveProviderPreset?.('default');
         ctx.wsHub.send(team.tid, {
           type: 'agent_added',
           data: {
-            agent: { aid, name: parsed.name, description: parsed.description, model: parsed.model ?? 'sonnet', role: 'member', tools: [] },
+            agent: {
+              aid, name: parsed.name, description: parsed.description,
+              model: parsed.model ?? 'sonnet', modelTier: parsed.model ?? 'sonnet',
+              role: 'member', tools: [],
+              provider: resolvedProvider,
+              systemPrompt: parsed.description,
+            },
           },
         });
       }

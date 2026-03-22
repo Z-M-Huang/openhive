@@ -103,6 +103,8 @@ export interface OrchestratorDeps {
   dataDir?: string;
   /** Configured skill registry URLs from openhive.yaml. */
   skillRegistries?: string[];
+  /** Provider resolver for agent_added WS messages (root only). */
+  resolveProviderPreset?: (presetName: string) => import('../domain/interfaces.js').ResolvedProvider;
 }
 
 /**
@@ -345,6 +347,7 @@ export class OrchestratorImpl implements Orchestrator {
       memoryFileWriter,
       pendingMemoryWrites,
       skillRegistries: this.deps.skillRegistries,
+      resolveProviderPreset: this.deps.resolveProviderPreset,
       limits: Object.freeze({
         max_depth: this.deps.limits?.max_depth ?? 3,
         max_teams: this.deps.limits?.max_teams ?? 10,
@@ -1212,6 +1215,28 @@ export class OrchestratorImpl implements Orchestrator {
           }
         } catch (err) {
           this.logger.warn('sendResponse.failed', {
+            task_id: taskId,
+            error: String(err),
+          });
+        }
+      }
+    }
+
+    // Notify originating channel on terminal failure (C3 — silent failure fix).
+    // Terminal states: Failed (no retries left) or Escalated (retries exhausted → escalated).
+    // Only notify for root-level tasks (no parent_id) with an origin channel.
+    if ((status === TS.Failed || status === TS.Escalated) && this.messageRouter) {
+      const taskStore = this.deps.stores?.taskStore;
+      if (taskStore) {
+        try {
+          const updatedTask = await taskStore.get(taskId);
+          const isTerminal = updatedTask.status === TS.Failed || updatedTask.status === TS.Escalated;
+          if (isTerminal && updatedTask.origin_chat_jid && !updatedTask.parent_id) {
+            const failMsg = `Task ${updatedTask.status}: ${error || 'Unknown error'}\nTask: ${updatedTask.title}`;
+            await this.messageRouter.sendResponse(updatedTask.origin_chat_jid, failMsg);
+          }
+        } catch (err) {
+          this.logger.warn('sendResponse.terminal.failed', {
             task_id: taskId,
             error: String(err),
           });

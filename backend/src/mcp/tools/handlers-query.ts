@@ -137,7 +137,7 @@ export function createQueryHandlers(ctx: ToolContext): Map<string, ToolHandler> 
 
   handlers.set('register_trigger', async (args, agentAid, teamSlug) => {
     const parsed = TOOL_SCHEMAS['register_trigger'].parse(args) as {
-      name: string; schedule: string; target_team: string; prompt: string;
+      name: string; schedule: string; target_team: string; prompt: string; reply_to?: string;
     };
 
     const callerAgent = ctx.orgChart.getAgent(agentAid);
@@ -157,10 +157,13 @@ export function createQueryHandlers(ctx: ToolContext): Map<string, ToolHandler> 
       throw new Error(`Trigger limit reached: team '${parsed.target_team}' already has ${teamTriggerCount} triggers (max 10)`);
     }
 
-    let replyTo: string | undefined;
-    const teamTasks = await ctx.taskStore.listByTeam(teamSlug);
-    const sorted = teamTasks.sort((a, b) => b.created_at - a.created_at);
-    replyTo = sorted.find(t => t.origin_chat_jid)?.origin_chat_jid ?? undefined;
+    // Use explicit reply_to if provided; fall back to current task's channel
+    let replyTo: string | undefined = parsed.reply_to;
+    if (!replyTo) {
+      const teamTasks = await ctx.taskStore.listByTeam(teamSlug);
+      const sorted = teamTasks.sort((a, b) => b.created_at - a.created_at);
+      replyTo = sorted.find(t => t.origin_chat_jid)?.origin_chat_jid ?? undefined;
+    }
 
     ctx.triggerScheduler.addCronTrigger(parsed.name, parsed.schedule, parsed.target_team, parsed.prompt, undefined, replyTo);
 

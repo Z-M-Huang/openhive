@@ -69,7 +69,7 @@ const WORKSPACE_DIRS = [
   '.claude/skills',
   '.credentials',
   'memory',
-  'work/tasks',
+  'work',
   'integrations',
   'plugins/sinks',
   'teams',
@@ -125,7 +125,12 @@ export class ContainerProvisionerImpl implements ContainerProvisioner {
     // Write default files
     await writeFile(
       resolve(fullPath, 'team.yaml'),
-      yamlStringify({ slug: teamSlug, agents: agentRefs }),
+      yamlStringify({
+        slug: teamSlug,
+        coordinator_aid: null,
+        system_prompt: purpose || '',
+        agents: agentRefs,
+      }),
       'utf-8',
     );
 

@@ -108,6 +108,7 @@ export const GetCredentialSchema = z.object({
 export const SetCredentialSchema = z.object({
   key: z.string().min(1),
   value: z.string().min(1),
+  team_slug: z.string().optional(),
 });
 
 export const GetTeamSchema = z.object({
@@ -142,6 +143,7 @@ export const RegisterTriggerSchema = z.object({
   schedule: z.string().min(1),
   target_team: z.string().min(1),
   prompt: z.string().min(1).max(2000),
+  reply_to: z.string().optional(),
 });
 
 export const SearchSkillSchema = z.object({

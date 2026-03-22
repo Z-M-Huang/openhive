@@ -121,6 +121,6 @@ USER node
 EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-    CMD curl -sf http://localhost:8080/api/health || exit 1
+    CMD if [ "$OPENHIVE_IS_ROOT" = "true" ]; then curl -sf http://localhost:8080/api/health || exit 1; else kill -0 1 || exit 1; fi
 
 CMD ["node", "backend/dist/index.js"]

@@ -24,18 +24,34 @@ export function createCredentialHandlers(ctx: ToolContext): Map<string, ToolHand
     return { value: cred.encrypted_value };
   });
 
-  handlers.set('set_credential', async (args, _agentAid, teamSlug) => {
+  handlers.set('set_credential', async (args, agentAid, teamSlug) => {
     const parsed = SetCredentialSchema.parse(args);
+
+    // Determine target team: explicit team_slug (cross-team) or caller's team
+    let targetTeam = teamSlug;
+    if (parsed.team_slug && parsed.team_slug !== teamSlug) {
+      // Only main_assistant can store credentials for other teams
+      const callerAgent = ctx.orgChart.getAgent(agentAid);
+      if (callerAgent?.role !== 'main_assistant') {
+        throw new Error(`Unauthorized: only main_assistant can set credentials for other teams (attempted: '${parsed.team_slug}')`);
+      }
+      // Verify target team exists
+      const targetTeamEntry = ctx.orgChart.getTeamBySlug(parsed.team_slug);
+      if (!targetTeamEntry) {
+        throw new NotFoundError(`Target team '${parsed.team_slug}' not found`);
+      }
+      targetTeam = parsed.team_slug;
+    }
 
     await ctx.credentialStore.create({
       id: crypto.randomUUID(),
       name: parsed.key,
       encrypted_value: parsed.value,
-      team_id: teamSlug,
+      team_id: targetTeam,
       created_at: Date.now(),
     });
 
-    return { message: `Credential '${parsed.key}' stored` };
+    return { message: `Credential '${parsed.key}' stored for team '${targetTeam}'` };
   });
 
   return handlers;

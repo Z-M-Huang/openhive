@@ -161,7 +161,7 @@ describe('Layer 5: Containers', () => {
         '.claude/agents',
         '.claude/skills',
         'memory',
-        'work/tasks',
+        'work',
         'integrations',
         'plugins/sinks',
         'teams',

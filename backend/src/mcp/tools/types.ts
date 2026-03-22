@@ -24,6 +24,7 @@ import type {
   Logger,
   WorkspaceLock,
   EmbeddingService,
+  ResolvedProvider,
 } from '../../domain/index.js';
 
 /** Pending memory write for retry on reconnection (AC-L6-07). */
@@ -77,6 +78,8 @@ export interface ToolContext {
   workspaceLock?: WorkspaceLock;
   /** Configured skill registry URLs for search_skill/install_skill tools. */
   skillRegistries?: string[];
+  /** Provider resolver for agent_added WS messages. Optional — only wired in root mode. */
+  resolveProviderPreset?: (presetName: string) => ResolvedProvider;
   /** Frozen configurable limits (CON-01, CON-02, CON-03). Object.freeze() applied at construction site (orchestrator.ts). */
   limits: Readonly<{
     max_depth: number;

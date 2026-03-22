@@ -8,7 +8,8 @@
  */
 
 import { join } from 'node:path';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile, readFile } from 'node:fs/promises';
+import { stringify as yamlStringify, parse as yamlParse } from 'yaml';
 
 import { ConfigLoaderImpl } from '../config/loader.js';
 import { OrchestratorImpl } from '../control-plane/orchestrator.js';
@@ -93,6 +94,7 @@ export async function initializeRootMode(
     archiveDir: masterConfig.server.log_archive.archive_dir,
     dataDir: masterConfig.server.data_dir,
     skillRegistries: masterConfig.skill_registries,
+    resolveProviderPreset: coordination.resolveProviderPreset,
   }, true);
 
   shutdownState.stores = {
@@ -128,17 +130,28 @@ export async function initializeRootMode(
   // Build AgentInitConfig for the main assistant
   const assistantConfig = masterConfig.assistant;
   const mainAssistantProvider = coordination.resolveProviderPreset(assistantConfig.provider);
-  const mainAssistantInitConfig: AgentInitConfig = {
-    aid: assistantConfig.aid,
-    name: assistantConfig.name,
-    description: assistantConfig.name,
-    role: 'main_assistant',
-    model: coordination.resolveModel(assistantConfig.model_tier, mainAssistantProvider),
-    modelTier: assistantConfig.model_tier ?? 'sonnet',
-    tools: [],
-    provider: mainAssistantProvider,
-    systemPrompt: `You are ${assistantConfig.name}, the primary AI assistant for the OpenHive platform. You manage teams of specialized AI agents, handle user requests, and orchestrate complex tasks. Always identify yourself as ${assistantConfig.name} — never as "Claude", "Claude Code", or any other identity.`,
-  };
+
+  // Default system prompt for root team.yaml
+  const defaultRootSystemPrompt = `You are ${assistantConfig.name}, the primary AI assistant for the OpenHive platform. You manage teams of specialized AI agents, handle user requests, and orchestrate complex tasks. Always identify yourself as ${assistantConfig.name} — never as "Claude", "Claude Code", or any other identity.
+
+## Credential Management
+
+When setting up teams that need API keys or secrets:
+- Use \`set_credential\` with \`team_slug\` to store credentials for the target team BEFORE creating agents that need them.
+- Agents retrieve their own team's credentials via \`get_credential\`.
+- Never embed API keys in agent descriptions — use \`set_credential\` / \`get_credential\` instead.
+
+## Agent Descriptions
+
+When creating agents with \`create_agent\`, the description becomes the agent's system prompt. Include:
+- Full job description and workflow steps
+- API endpoints and entity IDs (credentials via get_credential, not hardcoded)
+- Decision rules, thresholds, and error handling
+- Expected output format
+
+## Trigger Notifications
+
+When registering triggers with \`register_trigger\`, pass \`reply_to\` with the current channel JID so results are sent back to the conversation.`;
 
   // Write root workspace config so the SDK subprocess knows about MCP tools
   try {
@@ -156,10 +169,49 @@ export async function initializeRootMode(
       },
       enableAllProjectMcpServers: true,
     }, null, 2), 'utf-8');
-    logger.info('Root workspace CLAUDE.md + settings.json written');
+
+    // Generate root team.yaml (H2 — recursive design: root has team.yaml like every container)
+    const rootTeamYaml = {
+      slug: 'main',
+      coordinator_aid: assistantConfig.aid,
+      system_prompt: defaultRootSystemPrompt,
+      agents: [{
+        aid: assistantConfig.aid,
+        name: assistantConfig.name,
+        role: 'main_assistant',
+        model_tier: assistantConfig.model_tier ?? 'sonnet',
+        provider: assistantConfig.provider ?? 'default',
+      }],
+    };
+    await writeFile(join('/app/workspace', 'team.yaml'), yamlStringify(rootTeamYaml), 'utf-8');
+
+    logger.info('Root workspace CLAUDE.md + settings.json + team.yaml written');
   } catch (err) {
     logger.warn('Failed to write root workspace config', { error: String(err) });
   }
+
+  // Read system_prompt from generated team.yaml (single source of truth)
+  let rootSystemPrompt = defaultRootSystemPrompt;
+  try {
+    const rootTeamConfig = yamlParse(await readFile(join('/app/workspace', 'team.yaml'), 'utf-8')) as Record<string, unknown>;
+    if (rootTeamConfig['system_prompt']) {
+      rootSystemPrompt = String(rootTeamConfig['system_prompt']);
+    }
+  } catch {
+    // Fall back to default if team.yaml read fails
+  }
+
+  const mainAssistantInitConfig: AgentInitConfig = {
+    aid: assistantConfig.aid,
+    name: assistantConfig.name,
+    description: assistantConfig.name,
+    role: 'main_assistant',
+    model: coordination.resolveModel(assistantConfig.model_tier, mainAssistantProvider),
+    modelTier: assistantConfig.model_tier ?? 'sonnet',
+    tools: [],
+    provider: mainAssistantProvider,
+    systemPrompt: rootSystemPrompt,
+  };
 
   try {
     await agentExecutor.start(mainAssistantInitConfig, '/app/workspace');
