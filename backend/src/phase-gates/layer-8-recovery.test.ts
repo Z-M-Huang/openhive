@@ -69,7 +69,7 @@ describe('Layer 8: Recovery + Retention', () => {
 
       vi.mocked(taskStore.listByStatus).mockResolvedValue([taskWithRetries, taskNoRetries]);
       vi.mocked(orgChart.getTeamBySlug).mockReturnValue({
-        leaderAid: 'aid-lead',
+        coordinatorAid: 'aid-lead',
       } as OrgChartTeam);
 
       const escalationHandler = vi.fn().mockResolvedValue('esc-1');

@@ -167,16 +167,43 @@ export class TaskDAGManager {
         });
       } else if (targetTeam && targetTeam.containerId) {
         // Container agent: dispatch via WebSocket
-        this.wsHub.send(targetTeam.tid, {
-          type: 'task_dispatch',
-          data: {
+        try {
+          this.wsHub.send(targetTeam.tid, {
+            type: 'task_dispatch',
+            data: {
+              task_id: task.id,
+              agent_aid: task.agent_aid,
+              prompt: this.prependChannelContext(task),
+              blocked_by: task.blocked_by ?? [],
+              ...(sessionId !== undefined && { session_id: sessionId }),
+            },
+          });
+        } catch (sendErr) {
+          // WS send failed (container disconnected) — revert to pending for orphan GC or container ready replay
+          this.logger.error('WS task dispatch failed, reverting to pending', {
             task_id: task.id,
-            agent_aid: task.agent_aid,
-            prompt: this.prependChannelContext(task),
-            blocked_by: task.blocked_by ?? [],
-            ...(sessionId !== undefined && { session_id: sessionId }),
-          },
-        });
+            tid: targetTeam.tid,
+            error: String(sendErr),
+          });
+          this.eventBus.publish({
+            type: 'session.cleanup',
+            data: { task_id: task.id, agent_aid: task.agent_aid },
+            timestamp: Date.now(),
+          });
+          try {
+            await this.taskStore.update({
+              ...task,
+              status: TaskStatus.Pending,
+              updated_at: Date.now(),
+            });
+          } catch (updateErr) {
+            this.logger.error('Failed to revert task to pending after WS send failure', {
+              task_id: task.id,
+              error: String(updateErr),
+            });
+          }
+          return; // Don't publish task.dispatched
+        }
       }
     }
 

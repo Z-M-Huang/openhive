@@ -27,7 +27,7 @@ function makeEvent(type: string, source?: string): BusEvent {
   return { type, data: {}, timestamp: Date.now(), source };
 }
 
-function makeTeam(overrides: Partial<OrgChartTeam> & { tid: string; slug: string; leaderAid: string }): OrgChartTeam {
+function makeTeam(overrides: Partial<OrgChartTeam> & { tid: string; slug: string; coordinatorAid: string }): OrgChartTeam {
   return {
     parentTid: '',
     depth: 0,
@@ -64,7 +64,7 @@ function bootstrapRootTeam(chart: OrgChartImpl): void {
   const rootTeam = makeTeam({
     tid: 'tid-root-001',
     slug: 'root-team',
-    leaderAid: 'aid-main-001',
+    coordinatorAid: 'aid-main-001',
     depth: 0,
   });
   const mainAgent = makeAgent({
@@ -200,7 +200,7 @@ describe('Layer 3 Phase Gate: Domain Core', () => {
       chart.addTeam(makeTeam({
         tid: 'tid-teama-001',
         slug: 'team-a',
-        leaderAid: 'aid-leada-001',
+        coordinatorAid: 'aid-leada-001',
         parentTid: 'tid-root-001',
         depth: 1,
       }));
@@ -217,7 +217,7 @@ describe('Layer 3 Phase Gate: Domain Core', () => {
       chart.addTeam(makeTeam({
         tid: 'tid-teama1-01',
         slug: 'team-a1',
-        leaderAid: 'aid-leada1-01',
+        coordinatorAid: 'aid-leada1-01',
         parentTid: 'tid-teama-001',
         depth: 2,
       }));

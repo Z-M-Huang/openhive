@@ -50,6 +50,7 @@ export function createMockOrgChart(): OrgChart {
     getAgentsByTeam: vi.fn().mockReturnValue([]),
     isAuthorized: vi.fn().mockReturnValue(true),
     getTopology: vi.fn().mockReturnValue([]),
+    updateTeamTid: vi.fn(),
     getDispatchTarget: vi.fn(),
   };
 }

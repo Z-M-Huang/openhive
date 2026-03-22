@@ -50,6 +50,7 @@ import {
 } from './orchestrator-ws-handlers.js';
 import {
   checkStuckAgents as checkStuckAgentsFn,
+  cleanupOrphanedTasks as cleanupOrphanedTasksFn,
   handleHealthStateChanged as handleHealthStateChangedFn,
   startProactiveScheduler as startProactiveSchedulerFn,
 } from './orchestrator-proactive.js';
@@ -527,11 +528,14 @@ export class OrchestratorImpl implements Orchestrator {
     // stuckAgentTimer. One setInterval(30000) calls both checks sequentially.
     const CONSOLIDATED_INTERVAL_MS = 30_000;
     const STUCK_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+    const ORPHAN_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
     this.consolidatedCheckTimer = setInterval(() => {
       // (a) Detect unhealthy/unreachable containers and emit health.state_changed
       healthMonitor.checkTimeouts();
       // (b) Detect stuck agent processes
       void this.checkStuckAgents(STUCK_TIMEOUT_MS);
+      // (c) Clean up orphaned active tasks (no running agent or dispatch tracker entry)
+      void this.cleanupOrphanedTasks(ORPHAN_TIMEOUT_MS);
     }, CONSOLIDATED_INTERVAL_MS);
   }
 
@@ -549,6 +553,16 @@ export class OrchestratorImpl implements Orchestrator {
       wsHub: this.deps.wsHub,
       handleEscalation: this.handleEscalation.bind(this),
     }, timeoutMs);
+  }
+
+  private async cleanupOrphanedTasks(thresholdMs: number): Promise<void> {
+    return cleanupOrphanedTasksFn({
+      logger: this.logger,
+      stores: this.deps.stores ? { taskStore: this.deps.stores.taskStore } : undefined,
+      orgChart: this.deps.orgChart,
+      agentExecutor: this.deps.agentExecutor,
+      dispatchTracker: this.deps.dispatchTracker,
+    }, thresholdMs);
   }
 
   private subscribeToEvents(): void {
@@ -866,7 +880,7 @@ export class OrchestratorImpl implements Orchestrator {
         this.deps.orgChart.addTeam({
           tid,
           slug: teamConfig.slug,
-          leaderAid: teamConfig.leader_aid,
+          coordinatorAid: teamConfig.coordinator_aid,
           parentTid,
           depth,
           containerId: '',

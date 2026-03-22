@@ -59,7 +59,7 @@ export interface Agent {
 export interface Team {
   tid: string;
   slug: string;
-  leader_aid?: string;
+  coordinator_aid?: string;
   parent_tid: string;
   depth: number;
   container_id: string;
@@ -247,7 +247,7 @@ export function assertValidTransition(from: TaskStatus, to: TaskStatus): void {
 // ---------------------------------------------------------------------------
 
 const AID_PATTERN = /^aid-[a-z0-9]+-[a-z0-9]+$/;
-const TID_PATTERN = /^tid-[a-z0-9]+-[a-z0-9]+$/;
+const TID_PATTERN = /^tid-[a-z0-9]+(?:-[a-z0-9]+)+$/;
 const SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const MAX_SLUG_LENGTH = 63;
 

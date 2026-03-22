@@ -125,6 +125,10 @@ export class DispatchTrackerImpl implements DispatchTracker {
     return result;
   }
 
+  isTracked(taskId: string): boolean {
+    return this.entries.has(taskId);
+  }
+
   /**
    * Start the tracker. Must be called before `trackDispatch`.
    * Idempotent — calling start() twice has no effect.

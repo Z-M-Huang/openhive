@@ -68,7 +68,7 @@ RUN apt-get update && \
         curl \
         libnss3 libatk-bridge2.0-0 libdrm2 libxcomposite1 \
         libxdamage1 libxrandr2 libgbm1 libasound2 libpango-1.0-0 \
-        libcairo2 libatspi2.0-0 libcups2 && \
+        libcairo2 libatspi2.0-0 libcups2 libxfixes3 libxkbcommon0 && \
     rm -rf /var/lib/apt/lists/*
 
 # Install bun runtime (pinned)

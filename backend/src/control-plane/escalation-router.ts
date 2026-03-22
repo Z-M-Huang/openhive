@@ -86,7 +86,7 @@ export class EscalationRouter {
     }
     this.dedupSet.add(dedupKey);
 
-    // Flat escalation: member -> main assistant -> user
+    // Escalation chain: member -> coordinator (if exists) -> main assistant -> user
     const agent = this.orgChart.getAgent(agentAid);
     let hopCount = 0;
     let targetAid: string | undefined;
@@ -96,14 +96,21 @@ export class EscalationRouter {
         // Agent is on main team — escalate to user
         targetAid = undefined;
       } else {
-        // Find main assistant AID (first agent on 'main' team)
-        const mainAgents = this.orgChart.getAgentsByTeam('main');
-        if (mainAgents.length > 0) {
-          targetAid = mainAgents[0].aid;
+        const agentTeam = this.orgChart.getTeamBySlug(agent.teamSlug);
+        // If team has a coordinator AND this agent is NOT the coordinator → route to coordinator
+        if (agentTeam?.coordinatorAid && agent.aid !== agentTeam.coordinatorAid
+            && this.orgChart.getAgent(agentTeam.coordinatorAid)) {
+          targetAid = agentTeam.coordinatorAid;
           hopCount = 1;
         } else {
-          // No main assistant found — escalate to user
-          targetAid = undefined;
+          // Coordinator escalates to main assistant, or team has no coordinator
+          const mainAgents = this.orgChart.getAgentsByTeam('main');
+          if (mainAgents.length > 0) {
+            targetAid = mainAgents[0].aid;
+            hopCount = 1;
+          } else {
+            targetAid = undefined;
+          }
         }
       }
     }

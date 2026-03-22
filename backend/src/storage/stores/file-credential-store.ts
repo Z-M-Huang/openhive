@@ -14,6 +14,10 @@ import { NotFoundError } from '../../domain/errors.js';
 
 export function createFileCredentialStore(workspaceRoot: string): CredentialStore {
   function credDir(teamId: string): string {
+    // Root team ("main" or empty) stores at workspace root, not in teams/main/
+    if (teamId === 'main' || teamId === '') {
+      return resolve(workspaceRoot, '.credentials');
+    }
     return resolve(workspaceRoot, 'teams', teamId, '.credentials');
   }
 
@@ -59,10 +63,22 @@ export function createFileCredentialStore(workspaceRoot: string): CredentialStor
     async listByTeam(teamId: string): Promise<Credential[]> {
       const dir = credDir(teamId);
       let files: string[];
+      let readDir = dir;
       try {
         files = await readdir(dir);
       } catch {
-        return []; // No .credentials dir — no credentials
+        // Migration fallback: check old path for "main" team
+        if (teamId === 'main' || teamId === '') {
+          try {
+            const oldDir = resolve(workspaceRoot, 'teams', 'main', '.credentials');
+            files = await readdir(oldDir);
+            readDir = oldDir;
+          } catch {
+            return [];
+          }
+        } else {
+          return [];
+        }
       }
 
       const results: Credential[] = [];
@@ -70,7 +86,7 @@ export function createFileCredentialStore(workspaceRoot: string): CredentialStor
         if (!file.endsWith('.txt')) continue;
         const name = file.replace(/\.txt$/, '');
         try {
-          const value = await readFile(resolve(dir, file), 'utf-8');
+          const value = await readFile(resolve(readDir, file), 'utf-8');
           results.push({
             id: `file-${teamId}-${name}`,
             name,

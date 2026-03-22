@@ -196,7 +196,7 @@ describe('Layer 1: Config+Logging', () => {
       const team = {
         tid: 'tid-weather-001',
         slug: 'weather-team',
-        leader_aid: 'aid-lead-001',
+        coordinator_aid: 'aid-lead-001',
         parent_tid: '',
         depth: 0,
         container_id: '',
@@ -210,7 +210,7 @@ describe('Layer 1: Config+Logging', () => {
       // Load and verify round-trip
       const loaded = await loader.loadTeam(teamPath);
       expect(loaded.slug).toBe('weather-team');
-      expect(loaded.leader_aid).toBe('aid-lead-001');
+      expect(loaded.coordinator_aid).toBe('aid-lead-001');
 
       // List teams (should include weather-team)
       const teams = await loader.listTeams();

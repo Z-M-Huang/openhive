@@ -207,6 +207,8 @@ export interface DispatchTracker {
   getUnacknowledgedByAgent(agentAid: string): string[];
   /** Transfer dispatch ownership from old TID to new TID (container restart). */
   transferOwnership(oldTid: string, newTid: string): number;
+  /** Check if a task is currently tracked (dispatched but not yet acknowledged). */
+  isTracked(taskId: string): boolean;
   /** Start the tracker (sets up any internal timers). */
   start(): void;
   /** Stop the tracker and clear any internal timers. */

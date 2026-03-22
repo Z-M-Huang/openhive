@@ -31,7 +31,7 @@ function createMockOrgChart() {
     getAgentsByTeam: vi.fn(),
     getChildren: vi.fn(), isAuthorized: vi.fn(),
     getTopology: vi.fn(), listTeams: vi.fn(),
-    getDispatchTarget: vi.fn(),
+    updateTeamTid: vi.fn(), getDispatchTarget: vi.fn(),
   };
 }
 

@@ -79,7 +79,7 @@ describe('Layer 8: TaskDAGManager', () => {
       vi.mocked(orgChart.getTeamBySlug).mockReturnValue({
         tid: 'tid-a',
         slug: 'team-a',
-        leaderAid: 'aid-lead',
+        coordinatorAid: 'aid-lead',
         parentTid: '',
         depth: 0,
         containerId: 'container-1',
@@ -138,7 +138,7 @@ describe('Layer 8: TaskDAGManager', () => {
       vi.mocked(orgChart.getTeamBySlug).mockReturnValue({
         tid: 'tid-a',
         slug: 'team-a',
-        leaderAid: 'aid-lead',
+        coordinatorAid: 'aid-lead',
         parentTid: '',
         depth: 0,
         containerId: 'container-1',
@@ -264,7 +264,7 @@ describe('Layer 8: TaskDAGManager', () => {
       vi.mocked(orgChart.getTeamBySlug).mockReturnValue({
         tid: 'tid-a',
         slug: 'team-a',
-        leaderAid: 'aid-lead',
+        coordinatorAid: 'aid-lead',
         parentTid: '',
         depth: 0,
         containerId: 'container-1',
@@ -333,7 +333,7 @@ describe('Layer 8: TaskDAGManager', () => {
       vi.mocked(orgChart.getTeamBySlug).mockReturnValue({
         tid: 'tid-a',
         slug: 'team-a',
-        leaderAid: 'aid-lead',
+        coordinatorAid: 'aid-lead',
       } as OrgChartTeam);
 
       // Blocker fails with no retries left

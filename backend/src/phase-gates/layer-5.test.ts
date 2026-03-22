@@ -191,7 +191,7 @@ describe('Layer 5: Containers', () => {
       const team = {
         tid: 'tid-code-team-abc123',
         slug: 'code-team',
-        leader_aid: 'aid-lead-abc123',
+        coordinator_aid: 'aid-lead-abc123',
         parent_tid: 'tid-root-000000',
         depth: 1,
         container_id: '',
@@ -207,7 +207,7 @@ describe('Layer 5: Containers', () => {
       const parsed = yamlParse(readBack) as Record<string, unknown>;
       expect(parsed.slug).toBe('code-team');
       expect(parsed.tid).toBe('tid-code-team-abc123');
-      expect(parsed.leader_aid).toBe('aid-lead-abc123');
+      expect(parsed.coordinator_aid).toBe('aid-lead-abc123');
     });
 
     it('should create default CLAUDE.md and settings.json', async () => {

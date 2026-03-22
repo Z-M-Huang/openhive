@@ -77,7 +77,12 @@ Live E2E Suites (ALL must run):
   01 Basic Connectivity:       PASS/FAIL
   04 REST API Baseline:        PASS/FAIL
   ...
-  32 Identity & Channel:       PASS/FAIL
+  33 Web Browsing Tool:        PASS/FAIL
+  34 Agent Dedup:              PASS/FAIL
+  35 Coordinator Dispatch:     PASS/FAIL
+  36 Coordinator Escalation:   PASS/FAIL
+  37 Container Restart TID:    PASS/FAIL
+  38 Tool Call Logging:        PASS/FAIL
 
 Total: N/N suites passed
 Failures: [details]
@@ -116,6 +121,7 @@ curl -sf http://localhost:8080/api/logs     # expect: "entries"
 curl -sf http://localhost:8080/api/teams
 ```
 - PASS if main team exists with health=running
+- Verify response uses `coordinatorAid` field (not `leaderAid`)
 
 ### Suite 08: Logs & Settings
 ```bash
@@ -238,3 +244,61 @@ echo 'Use browse_web with action extract_links on url https://example.com' | tim
 echo 'Use browse_web with action screenshot on url https://example.com' | timeout 120 bun run cli/index.ts 2>&1
 ```
 - PASS if response mentions screenshot file path
+
+### Suite 34: Agent Dedup
+```bash
+echo 'Create an agent called dedup-test with description "Test agent for dedup verification" for the main team' | timeout 300 bun run cli/index.ts 2>&1
+echo 'Create an agent called dedup-test with description "Updated test agent" for the main team' | timeout 300 bun run cli/index.ts 2>&1
+```
+- Use `echo 'Use inspect_topology to show all teams and agents' | timeout 120 bun run cli/index.ts 2>&1` to verify
+- PASS if only one agent with name `dedup-test` exists (not two)
+
+### Suite 35: Coordinator Dispatch
+```bash
+echo 'Create a team called coord-test with purpose "Test coordinator routing". Then create an agent called coord-lead for coord-test and mark it as coordinator using is_coordinator true. Then create an agent called coord-worker for coord-test.' | timeout 300 bun run cli/index.ts 2>&1
+```
+- Verify via `echo 'Use get_team to check the coord-test team' | timeout 120 bun run cli/index.ts 2>&1`
+- PASS if response shows `coordinator_aid` is set to the coord-lead agent's AID
+- Cleanup: `curl -sf -X DELETE http://localhost:8080/api/teams/coord-test`
+- **Important:** Restart Docker after this suite
+
+### Suite 36: Coordinator Escalation Chain
+Test that member escalation goes to coordinator, not directly to main assistant.
+```bash
+echo 'Create a team called esc-test with purpose "Escalation chain test". Create agent called esc-coord for esc-test as coordinator. Create agent called esc-worker for esc-test.' | timeout 300 bun run cli/index.ts 2>&1
+sleep 10
+echo 'Use dispatch_subtask to send "Please escalate this with reason need_guidance" to esc-worker on team esc-test' | timeout 300 bun run cli/index.ts 2>&1
+```
+- Check `GET /api/logs?limit=50` for escalation log entries
+- PASS if escalation log shows routing through coordinator
+- Cleanup: `curl -sf -X DELETE http://localhost:8080/api/teams/esc-test` + restart Docker
+
+### Suite 37: Container Restart TID Recovery
+```bash
+curl -sf -X POST http://localhost:8080/api/teams \
+  -H 'Content-Type: application/json' \
+  -d '{"slug":"restart-test","purpose":"TID recovery test"}'
+sleep 10
+INITIAL_TID=$(curl -sf http://localhost:8080/api/teams | jq -r '.teams[] | select(.slug=="restart-test") | .tid')
+echo 'Use register_trigger to create a trigger named restart-check with schedule "*/1 * * * *" targeting team restart-test with prompt "health check"' | timeout 120 bun run cli/index.ts 2>&1
+curl -sf -X POST http://localhost:8080/api/containers/restart-test/restart \
+  -H 'Content-Type: application/json' -d '{"reason":"e2e-tid-test"}'
+sleep 15
+NEW_TID=$(curl -sf http://localhost:8080/api/teams | jq -r '.teams[] | select(.slug=="restart-test") | .tid')
+for i in $(seq 1 18); do
+  TRIGGERED=$(curl -sf http://localhost:8080/api/tasks | jq '[.tasks[] | select(.team_slug=="restart-test" and .title | contains("Triggered:"))] | length')
+  [ "$TRIGGERED" -gt "0" ] && break; sleep 5
+done
+curl -sf http://localhost:8080/api/health
+```
+- PASS if `INITIAL_TID != NEW_TID` AND trigger fired post-restart AND health is healthy
+- Cleanup: `curl -sf -X DELETE http://localhost:8080/api/teams/restart-test` + restart Docker
+
+### Suite 38: Tool Call Logging
+```bash
+echo 'Use get_health to check system health' | timeout 120 bun run cli/index.ts 2>&1
+sleep 5
+curl -sf 'http://localhost:8080/api/logs?limit=50'
+```
+- PASS if log entries with `event_type: "tool_call"` are present AND include `tool_name` in params
+- Note: Full verification requires DB query (`sqlite3 .run/workspace/openhive.db "SELECT count(*) FROM tool_calls"`)

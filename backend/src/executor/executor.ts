@@ -78,6 +78,8 @@ export class AgentExecutorImpl implements AgentExecutor {
   private memoryFileWriter?: (agentAid: string, teamSlug: string, entry: {
     id: number; content: string; memory_type: 'curated' | 'daily'; created_at: number;
   }) => Promise<void>;
+  private logStoreForHooks?: import('../domain/interfaces.js').LogStore;
+  private toolCallStoreForHooks?: import('../domain/interfaces.js').ToolCallStore;
 
   constructor(eventBus: EventBus, logger: Logger, toolHandlers?: Map<string, ToolHandler>) {
     this.eventBus = eventBus;
@@ -106,6 +108,12 @@ export class AgentExecutorImpl implements AgentExecutor {
   /** Sets the memory store for auto-extracted facts SQLite indexing (dual-write). */
   setMemoryStore(store: import('../domain/interfaces.js').MemoryStore): void {
     this.memoryStore = store;
+  }
+
+  /** Sets the log + tool call stores for tool_calls table logging via SDK hooks. */
+  setToolCallStores(logStore: import('../domain/interfaces.js').LogStore, toolCallStore: import('../domain/interfaces.js').ToolCallStore): void {
+    this.logStoreForHooks = logStore;
+    this.toolCallStoreForHooks = toolCallStore;
   }
 
   /**
@@ -295,8 +303,13 @@ export class AgentExecutorImpl implements AgentExecutor {
         tracked.abortController?.abort();
       }, DEFAULT_QUERY_TIMEOUT_MS);
 
-      // Create SDK hooks for tool call audit logging
-      const sdkHooks = createSDKHooks(this.logger, agentAid);
+      // Create SDK hooks for tool call audit logging (+ tool_calls table if stores available)
+      const teamSlug = this._resolveTeamSlug(tracked.config);
+      const sdkHooks = createSDKHooks(this.logger, agentAid, {
+        toolCallStore: this.toolCallStoreForHooks,
+        logStore: this.logStoreForHooks,
+        teamSlug,
+      });
       const hooksConfig: Record<string, Array<{ hooks: Array<(input: Record<string, unknown>) => Promise<Record<string, unknown>>> }>> = {
         PreToolUse: [{ hooks: sdkHooks.PreToolUse as Array<(input: Record<string, unknown>) => Promise<Record<string, unknown>>> }],
         PostToolUse: [{ hooks: sdkHooks.PostToolUse as Array<(input: Record<string, unknown>) => Promise<Record<string, unknown>>> }],

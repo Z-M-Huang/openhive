@@ -24,7 +24,7 @@
  *
  * ### teamConfigSchema (validateTeam)
  * - slug: Must pass validateSlug (lowercase kebab-case, max 63 chars, not reserved)
- * - leader_aid: Required, must match aid-xxx-xxx format
+ * - coordinator_aid: Optional, must match aid-xxx-xxx format (accepts legacy leader_aid)
  * - tid: Must match tid-xxx-xxx format (if set)
  * - agents[*].aid: Must match aid-xxx-xxx format
  * - agents[*].name: Must be non-empty
@@ -387,8 +387,24 @@ export const providerConfigSchema: z.ZodType<Record<string, unknown>> = z
   ) as z.ZodType<Record<string, unknown>>;
 
 /**
+ * AID validation refinement reused for coordinator_aid / leader_aid (backward compat).
+ */
+const aidOptionalField = z.string().refine(
+  (val) => {
+    try {
+      validateAID(val);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  { message: 'Invalid AID format' }
+).optional();
+
+/**
  * Zod schema for per-team config (team.yaml).
- * Validates slug format, leader_aid, tid, and agent entries.
+ * Validates slug format, coordinator_aid, tid, and agent entries.
+ * Accepts legacy `leader_aid` and normalizes it to `coordinator_aid`.
  * See Configuration-Schemas.md § "Validation Rules (validateTeam)".
  */
 export const teamConfigSchema: z.ZodType<TeamConfig> = z.object({
@@ -404,17 +420,9 @@ export const teamConfigSchema: z.ZodType<TeamConfig> = z.object({
     { message: 'Invalid slug format' }
   ),
   parent_slug: z.string().optional(),
-  leader_aid: z.string().refine(
-    (val) => {
-      try {
-        validateAID(val);
-        return true;
-      } catch {
-        return false;
-      }
-    },
-    { message: 'Invalid AID format' }
-  ).optional(),
+  coordinator_aid: aidOptionalField,
+  /** @deprecated Use coordinator_aid. Accepted for backward compatibility. */
+  leader_aid: aidOptionalField,
   tid: z.string().refine(
     (val) => {
       try {
@@ -433,7 +441,14 @@ export const teamConfigSchema: z.ZodType<TeamConfig> = z.object({
   resource_limits: teamResourceLimitsSchema.optional(),
   children: z.array(z.string()).optional(),
   env_vars: z.record(z.string(), z.string()).optional(),
-}).passthrough();
+}).passthrough().transform((data) => {
+  // Normalize legacy leader_aid -> coordinator_aid
+  const { leader_aid, ...rest } = data as Record<string, unknown>;
+  if (leader_aid && !rest.coordinator_aid) {
+    rest.coordinator_aid = leader_aid;
+  }
+  return rest as unknown as TeamConfig;
+}) as unknown as z.ZodType<TeamConfig>;
 
 // ---------------------------------------------------------------------------
 // Validation Functions
@@ -470,7 +485,7 @@ export function validateProviders(_providers: unknown): Record<string, unknown> 
 /**
  * Validates a parsed team config against the teamConfigSchema.
  *
- * Checks slug format (via domain validateSlug), leader_aid format,
+ * Checks slug format (via domain validateSlug), coordinator_aid format,
  * optional tid format, and all agent entries.
  *
  * @param team - The parsed team.yaml content

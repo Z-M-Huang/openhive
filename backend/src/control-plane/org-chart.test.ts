@@ -12,7 +12,7 @@ function makeTeam(overrides: Partial<OrgChartTeam> = {}): OrgChartTeam {
   return {
     tid: 'tid-alpha-001',
     slug: 'alpha-team',
-    leaderAid: 'aid-alice-001',
+    coordinatorAid: 'aid-alice-001',
     parentTid: '',
     depth: 0,
     containerId: 'cid-alpha',
@@ -54,7 +54,7 @@ describe('OrgChartImpl', () => {
     const rootTeam = makeTeam({
       tid: 'tid-root-001',
       slug: 'root-team',
-      leaderAid: 'aid-main-001',
+      coordinatorAid: 'aid-main-001',
       parentTid: '',
       depth: 0,
     });
@@ -88,7 +88,7 @@ describe('OrgChartImpl', () => {
       const team = makeTeam({
         tid: 'tid-alpha-001',
         slug: 'alpha-team',
-        leaderAid: 'aid-alice-001',
+        coordinatorAid: 'aid-alice-001',
         parentTid: 'tid-root-001',
       });
       chart.addTeam(team);
@@ -97,7 +97,7 @@ describe('OrgChartImpl', () => {
       const dup = makeTeam({
         tid: 'tid-alpha-001',
         slug: 'beta-team',
-        leaderAid: 'aid-bob-001',
+        coordinatorAid: 'aid-bob-001',
         parentTid: 'tid-root-001',
       });
       expect(() => chart.addTeam(dup)).toThrow(ConflictError);
@@ -110,7 +110,7 @@ describe('OrgChartImpl', () => {
       const team = makeTeam({
         tid: 'tid-alpha-001',
         slug: 'alpha-team',
-        leaderAid: 'aid-alice-001',
+        coordinatorAid: 'aid-alice-001',
         parentTid: 'tid-root-001',
       });
       chart.addTeam(team);
@@ -119,7 +119,7 @@ describe('OrgChartImpl', () => {
       const dup = makeTeam({
         tid: 'tid-alpha-002',
         slug: 'alpha-team',
-        leaderAid: 'aid-bob-001',
+        coordinatorAid: 'aid-bob-001',
         parentTid: 'tid-root-001',
       });
       expect(() => chart.addTeam(dup)).toThrow(ConflictError);
@@ -134,7 +134,7 @@ describe('OrgChartImpl', () => {
       const team = makeTeam({
         tid: 'tid-alpha-001',
         slug: 'alpha-team',
-        leaderAid: 'aid-alice-001',
+        coordinatorAid: 'aid-alice-001',
         parentTid: 'tid-root-001',
       });
 
@@ -148,7 +148,7 @@ describe('OrgChartImpl', () => {
       chart.addAgent(makeAgent({ aid: 'aid-alice-001', teamSlug: 'root-team' }));
 
       const team = makeTeam({
-        leaderAid: 'aid-alice-001',
+        coordinatorAid: 'aid-alice-001',
         parentTid: 'tid-nonexistent-001',
       });
       expect(() => chart.addTeam(team)).toThrow(ValidationError);
@@ -170,14 +170,14 @@ describe('OrgChartImpl', () => {
       chart.addTeam(makeTeam({
         tid: 'tid-alpha-001',
         slug: 'alpha-team',
-        leaderAid: 'aid-alice-001',
+        coordinatorAid: 'aid-alice-001',
         parentTid: 'tid-root-001',
       }));
       chart.addAgent(makeAgent({ aid: 'aid-carol-001', name: 'Carol', teamSlug: 'alpha-team' }));
       chart.addTeam(makeTeam({
         tid: 'tid-beta-001',
         slug: 'beta-team',
-        leaderAid: 'aid-carol-001',
+        coordinatorAid: 'aid-carol-001',
         parentTid: 'tid-alpha-001',
         depth: 2,
       }));
@@ -191,7 +191,7 @@ describe('OrgChartImpl', () => {
       chart.addTeam(makeTeam({
         tid: 'tid-alpha-001',
         slug: 'alpha-team',
-        leaderAid: 'aid-alice-001',
+        coordinatorAid: 'aid-alice-001',
         parentTid: 'tid-root-001',
       }));
       chart.addAgent(makeAgent({ aid: 'aid-dave-001', name: 'Dave', teamSlug: 'alpha-team' }));
@@ -210,7 +210,7 @@ describe('OrgChartImpl', () => {
       chart.addTeam(makeTeam({
         tid: 'tid-alpha-001',
         slug: 'alpha-team',
-        leaderAid: 'aid-alice-001',
+        coordinatorAid: 'aid-alice-001',
         parentTid: 'tid-root-001',
       }));
 
@@ -245,7 +245,7 @@ describe('OrgChartImpl', () => {
       chart.addTeam(makeTeam({
         tid: 'tid-alpha-001',
         slug: 'alpha-team',
-        leaderAid: 'aid-alice-001',
+        coordinatorAid: 'aid-alice-001',
         parentTid: 'tid-root-001',
       }));
 
@@ -268,7 +268,7 @@ describe('OrgChartImpl', () => {
       chart.addTeam(makeTeam({
         tid: 'tid-alpha-001',
         slug: 'alpha-team',
-        leaderAid: 'aid-alice-001',
+        coordinatorAid: 'aid-alice-001',
         parentTid: 'tid-root-001',
       }));
 
@@ -283,7 +283,7 @@ describe('OrgChartImpl', () => {
       chart.addTeam(makeTeam({
         tid: 'tid-alpha-001',
         slug: 'alpha-team',
-        leaderAid: 'aid-alice-001',
+        coordinatorAid: 'aid-alice-001',
         parentTid: 'tid-root-001',
       }));
 
@@ -357,19 +357,19 @@ describe('OrgChartImpl', () => {
       expect(chart.getAgentsByTeam('phantom-team')).toEqual([]);
     });
 
-    it('team leaderAid tracks the lead agent', () => {
+    it('team coordinatorAid tracks the lead agent', () => {
       bootstrapRootTeam(chart);
       chart.addAgent(makeAgent({ aid: 'aid-alice-001', teamSlug: 'root-team' }));
       chart.addTeam(makeTeam({
         tid: 'tid-alpha-001',
         slug: 'alpha-team',
-        leaderAid: 'aid-alice-001',
+        coordinatorAid: 'aid-alice-001',
         parentTid: 'tid-root-001',
       }));
 
       const team = chart.getTeamBySlug('alpha-team');
       expect(team).toBeDefined();
-      expect(team!.leaderAid).toBe('aid-alice-001');
+      expect(team!.coordinatorAid).toBe('aid-alice-001');
     });
 
     it('removeAgent removes agent and cleans up team set', () => {
@@ -421,7 +421,7 @@ describe('OrgChartImpl', () => {
       chart.addTeam(makeTeam({
         tid: 'tid-alpha-001',
         slug: 'alpha-team',
-        leaderAid: 'aid-alice-001',
+        coordinatorAid: 'aid-alice-001',
         parentTid: 'tid-root-001',
         depth: 1,
       }));
@@ -440,7 +440,7 @@ describe('OrgChartImpl', () => {
       chart.addTeam(makeTeam({
         tid: 'tid-beta-001',
         slug: 'beta-team',
-        leaderAid: 'aid-carol-001',
+        coordinatorAid: 'aid-carol-001',
         parentTid: 'tid-alpha-001',
         depth: 2,
       }));
@@ -459,7 +459,7 @@ describe('OrgChartImpl', () => {
       chart.addTeam(makeTeam({
         tid: 'tid-gamma-001',
         slug: 'gamma-team',
-        leaderAid: 'aid-bob-001',
+        coordinatorAid: 'aid-bob-001',
         parentTid: 'tid-root-001',
         depth: 1,
       }));
@@ -558,7 +558,7 @@ describe('OrgChartImpl', () => {
       chart.addTeam(makeTeam({
         tid: 'tid-alpha-001',
         slug: 'alpha-team',
-        leaderAid: 'aid-alice-001',
+        coordinatorAid: 'aid-alice-001',
         parentTid: 'tid-root-001',
         depth: 1,
       }));
@@ -567,7 +567,7 @@ describe('OrgChartImpl', () => {
       chart.addTeam(makeTeam({
         tid: 'tid-beta-001',
         slug: 'beta-team',
-        leaderAid: 'aid-carol-001',
+        coordinatorAid: 'aid-carol-001',
         parentTid: 'tid-alpha-001',
         depth: 2,
       }));
@@ -576,7 +576,7 @@ describe('OrgChartImpl', () => {
       chart.addTeam(makeTeam({
         tid: 'tid-delta-001',
         slug: 'delta-team',
-        leaderAid: 'aid-eve-001',
+        coordinatorAid: 'aid-eve-001',
         parentTid: 'tid-beta-001',
         depth: 3,
       }));

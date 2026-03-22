@@ -105,7 +105,7 @@ describe('Layer 8: Escalation + Proactive', () => {
       vi.mocked(orgChart.getTeamBySlug).mockReturnValue({
         tid: 'tid-a',
         slug: 'team-a',
-        leaderAid: 'aid-lead',
+        coordinatorAid: 'aid-lead',
       } as OrgChartTeam);
       vi.mocked(taskStore.get).mockResolvedValue({
         id: 'task-1',
@@ -143,7 +143,7 @@ describe('Layer 8: Escalation + Proactive', () => {
       } as OrgChartAgent);
       vi.mocked(orgChart.getTeamBySlug).mockReturnValue({
         tid: 'tid-a',
-        leaderAid: 'aid-lead',
+        coordinatorAid: 'aid-lead',
       } as OrgChartTeam);
       vi.mocked(taskStore.get).mockResolvedValue({
         id: 'task-1',

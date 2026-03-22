@@ -38,6 +38,7 @@ interface ContainerEntry {
   slug: string;
   tid: string;
   status: string;
+  workspacePath: string;
 }
 
 /** Configuration for container spawning. */
@@ -159,6 +160,7 @@ export class ContainerManagerImpl implements ContainerManager {
       slug: teamSlug,
       tid,
       status: 'running',
+      workspacePath: explicitWorkspacePath ?? `${this.config.workspaceRoot}/teams/${teamSlug}`,
     };
     this.containers.set(teamSlug, entry);
 
@@ -206,7 +208,7 @@ export class ContainerManagerImpl implements ContainerManager {
     }
   }
 
-  async restartTeamContainer(teamSlug: string, reason: string): Promise<void> {
+  async restartTeamContainer(teamSlug: string, reason: string): Promise<ContainerInfo> {
     // Validate slug format
     if (!SLUG_REGEX.test(teamSlug) || teamSlug.length < 3 || teamSlug.length > 63) {
       throw new ValidationError(`Invalid team slug: "${teamSlug}". Must match ^[a-z0-9]+(-[a-z0-9]+)*$ and be 3-63 chars.`);
@@ -220,9 +222,10 @@ export class ContainerManagerImpl implements ContainerManager {
     this.restartingSet.add(teamSlug);
 
     try {
-      // Capture old TID BEFORE stopTeamContainer deletes the entry
+      // Capture old TID and workspace path BEFORE stopTeamContainer deletes the entry
       const oldEntry = this.containers.get(teamSlug);
       const oldTid = oldEntry?.tid;
+      const savedWorkspacePath = oldEntry?.workspacePath;
 
       await this.stopTeamContainer(teamSlug, reason);
 
@@ -231,19 +234,21 @@ export class ContainerManagerImpl implements ContainerManager {
         this.tokenManager.revokeSessionsForTid(oldTid);
       }
 
-      // Spawn fresh container with new TID and new token
-      await this.spawnTeamContainer(teamSlug);
+      // Spawn fresh container with new TID, preserving workspace path for nested teams
+      const newInfo = await this.spawnTeamContainer(teamSlug, savedWorkspacePath);
 
       // Increment restart count
       this.restartCounts.set(teamSlug, (this.restartCounts.get(teamSlug) ?? 0) + 1);
 
-      // Publish restart lifecycle event
+      // Publish restart lifecycle event with both old and new TIDs
       this.eventBus.publish({
         type: 'container.restarted',
-        data: { slug: teamSlug, oldTid: oldTid ?? '', reason },
+        data: { slug: teamSlug, oldTid: oldTid ?? '', newTid: newInfo.tid, reason },
         timestamp: Date.now(),
         source: 'container-manager',
       });
+
+      return newInfo;
     } finally {
       this.restartingSet.delete(teamSlug);
     }

@@ -131,7 +131,7 @@ export interface TeamResourceLimits {
 export interface TeamConfig {
   slug: string;
   parent_slug?: string;
-  leader_aid?: string;
+  coordinator_aid?: string;
   tid?: string;
   description?: string;
   agents?: TeamAgentConfig[];

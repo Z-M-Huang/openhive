@@ -92,7 +92,7 @@ export class ContainerProvisionerImpl implements ContainerProvisioner {
     this.workspaceRoot = resolve(workspaceRoot);
   }
 
-  async scaffoldWorkspace(parentPath: string, teamSlug: string, agents?: AgentDefinition[]): Promise<string> {
+  async scaffoldWorkspace(parentPath: string, teamSlug: string, agents?: AgentDefinition[], purpose?: string): Promise<string> {
     // Validate slug format (throws generic Error on invalid)
     try {
       validateSlug(teamSlug);
@@ -131,7 +131,7 @@ export class ContainerProvisionerImpl implements ContainerProvisioner {
 
     await writeFile(
       resolve(fullPath, '.claude/CLAUDE.md'),
-      `# ${teamSlug}\n\nTeam instructions go here.\n`,
+      `# ${teamSlug}\n\n${purpose || 'Team instructions go here.'}\n\n## MCP Tools\n\nUse the openhive-tools MCP server for system operations.\n`,
       'utf-8',
     );
 
@@ -221,10 +221,7 @@ export class ContainerProvisionerImpl implements ContainerProvisioner {
     }
 
     const agents = (content['agents'] as Array<Record<string, unknown>>) ?? [];
-    // Idempotent: skip if AID already present
-    if (agents.some((a) => a['aid'] === agent.aid)) return;
-
-    agents.push({
+    const agentEntry = {
       aid: agent.aid,
       name: agent.name,
       description: agent.description,
@@ -232,7 +229,15 @@ export class ContainerProvisionerImpl implements ContainerProvisioner {
       model_tier: agent.model_tier ?? 'sonnet',
       tools: agent.tools ?? [],
       provider: agent.provider ?? 'default',
-    });
+    };
+
+    // Deduplicate by name: update existing entry or append new
+    const existingIdx = agents.findIndex((a) => a['name'] === agent.name);
+    if (existingIdx >= 0) {
+      agents[existingIdx] = agentEntry;
+    } else {
+      agents.push(agentEntry);
+    }
     content['agents'] = agents;
 
     await writeFile(teamYamlPath, yamlStringify(content), 'utf-8');

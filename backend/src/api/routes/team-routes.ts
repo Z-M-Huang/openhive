@@ -27,7 +27,7 @@ export function registerTeamRoutes(app: FastifyInstance, ctx: RouteContext): voi
       return {
         tid: team.tid,
         slug: team.slug,
-        leaderAid: team.leaderAid ?? null,
+        coordinatorAid: team.coordinatorAid ?? null,
         health: team.health,
         agentCount: agents.length,
         depth: team.depth,
@@ -58,7 +58,7 @@ export function registerTeamRoutes(app: FastifyInstance, ctx: RouteContext): voi
     reply.send({
       tid: team.tid,
       slug: team.slug,
-      leaderAid: team.leaderAid ?? null,
+      coordinatorAid: team.coordinatorAid ?? null,
       health: team.health,
       depth: team.depth,
       containerId: team.containerId,
@@ -149,12 +149,21 @@ export function registerTeamRoutes(app: FastifyInstance, ctx: RouteContext): voi
     const { slug } = request.params as { slug: string };
 
     try {
-      await ctx.containerManager.stopTeamContainer(slug, 'api_delete');
+      // Stop container (may not exist for rebuilt-from-filesystem teams)
+      try {
+        await ctx.containerManager.stopTeamContainer(slug, 'api_delete');
+      } catch (stopErr) {
+        if (!(stopErr instanceof NotFoundError)) throw stopErr;
+        // Container not running — proceed with org chart cleanup
+      }
 
       if (ctx.orgChart) {
         const team = ctx.orgChart.getTeamBySlug(slug);
         if (team) {
           ctx.orgChart.removeTeam(team.tid);
+        } else {
+          reply.code(404).send({ error: `Team not found: ${slug}` });
+          return;
         }
       }
 

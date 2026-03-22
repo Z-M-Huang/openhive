@@ -137,7 +137,7 @@ const heartbeatSchema = z.object({
 const taskResultMsgSchema = z.object({
   task_id: z.string(),
   agent_aid: z.string(),
-  status: z.enum(['completed', 'failed']),
+  status: z.enum(['completed', 'failed', 'pending']),
   result: z.string().optional(),
   error: z.string().optional(),
   files_created: z.array(z.string()).optional(),

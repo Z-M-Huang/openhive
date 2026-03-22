@@ -199,7 +199,7 @@ describe('ConfigLoaderImpl', () => {
       const team = {
         tid: 'tid-test-001',
         slug: 'test-team',
-        leader_aid: 'aid-lead-001',
+        coordinator_aid: 'aid-lead-001',
         parent_tid: '',
         depth: 0,
         container_id: '',
@@ -213,7 +213,7 @@ describe('ConfigLoaderImpl', () => {
       const loaded = await loader.loadTeam(teamPath);
 
       expect(loaded.slug).toBe('test-team');
-      expect(loaded.leader_aid).toBe('aid-lead-001');
+      expect(loaded.coordinator_aid).toBe('aid-lead-001');
       expect(loaded.tid).toBe('tid-test-001');
     });
   });
@@ -304,7 +304,7 @@ describe('ConfigLoaderImpl', () => {
       await loader.createTeamDir('beta-team');
 
       // Write team.yaml to alpha
-      const alphaTeamYaml = YAML.stringify({ slug: 'alpha-team', leader_aid: 'aid-lead-001' });
+      const alphaTeamYaml = YAML.stringify({ slug: 'alpha-team', coordinator_aid: 'aid-lead-001' });
       await writeFile(
         join(runDir, 'workspace', 'teams', 'alpha-team', 'team.yaml'),
         alphaTeamYaml,
@@ -323,7 +323,7 @@ describe('ConfigLoaderImpl', () => {
       for (const slug of ['zoo-team', 'alpha-team']) {
         await writeFile(
           join(runDir, 'workspace', 'teams', slug, 'team.yaml'),
-          YAML.stringify({ slug, leader_aid: 'aid-lead-001' }),
+          YAML.stringify({ slug, coordinator_aid: 'aid-lead-001' }),
           'utf-8',
         );
       }
@@ -345,7 +345,7 @@ describe('ConfigLoaderImpl', () => {
       const team = {
         tid: 'tid-crud-001',
         slug: 'crud-team',
-        leader_aid: 'aid-lead-001',
+        coordinator_aid: 'aid-lead-001',
         parent_tid: '',
         depth: 0,
         container_id: '',

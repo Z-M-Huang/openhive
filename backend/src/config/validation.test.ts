@@ -223,21 +223,21 @@ describe('Config Validation', () => {
   });
 
   describe('validateTeam', () => {
-    it('accepts valid team with slug and leader_aid', () => {
+    it('accepts valid team with slug and coordinator_aid', () => {
       const team = {
         slug: 'test-team',
-        leader_aid: 'aid-lead-001',
+        coordinator_aid: 'aid-lead-001',
       };
       expect(() => validateTeam(team)).not.toThrow();
       const result = validateTeam(team);
       expect(result.slug).toBe('test-team');
-      expect(result.leader_aid).toBe('aid-lead-001');
+      expect(result.coordinator_aid).toBe('aid-lead-001');
     });
 
     it('rejects invalid slug format (uppercase)', () => {
       const team = {
         slug: 'BAD-SLUG',
-        leader_aid: 'aid-lead-001',
+        coordinator_aid: 'aid-lead-001',
       };
       expect(() => validateTeam(team)).toThrow(ZodError);
     });
@@ -245,7 +245,7 @@ describe('Config Validation', () => {
     it('rejects invalid slug format (special chars)', () => {
       const team = {
         slug: 'bad_slug',
-        leader_aid: 'aid-lead-001',
+        coordinator_aid: 'aid-lead-001',
       };
       expect(() => validateTeam(team)).toThrow(ZodError);
     });
@@ -253,7 +253,7 @@ describe('Config Validation', () => {
     it('rejects slug too short (less than 3 chars)', () => {
       const team = {
         slug: 'ab',
-        leader_aid: 'aid-lead-001',
+        coordinator_aid: 'aid-lead-001',
       };
       expect(() => validateTeam(team)).toThrow(ZodError);
     });
@@ -262,7 +262,7 @@ describe('Config Validation', () => {
       const longSlug = 'a'.repeat(64);
       const team = {
         slug: longSlug,
-        leader_aid: 'aid-lead-001',
+        coordinator_aid: 'aid-lead-001',
       };
       expect(() => validateTeam(team)).toThrow(ZodError);
     });
@@ -270,7 +270,7 @@ describe('Config Validation', () => {
     it('rejects reserved slug "root"', () => {
       const team = {
         slug: 'root',
-        leader_aid: 'aid-lead-001',
+        coordinator_aid: 'aid-lead-001',
       };
       expect(() => validateTeam(team)).toThrow(ZodError);
     });
@@ -278,7 +278,7 @@ describe('Config Validation', () => {
     it('rejects reserved slug "main"', () => {
       const team = {
         slug: 'main',
-        leader_aid: 'aid-lead-001',
+        coordinator_aid: 'aid-lead-001',
       };
       expect(() => validateTeam(team)).toThrow(ZodError);
     });
@@ -286,7 +286,7 @@ describe('Config Validation', () => {
     it('rejects reserved slug "admin"', () => {
       const team = {
         slug: 'admin',
-        leader_aid: 'aid-lead-001',
+        coordinator_aid: 'aid-lead-001',
       };
       expect(() => validateTeam(team)).toThrow(ZodError);
     });
@@ -294,7 +294,7 @@ describe('Config Validation', () => {
     it('rejects reserved slug "system"', () => {
       const team = {
         slug: 'system',
-        leader_aid: 'aid-lead-001',
+        coordinator_aid: 'aid-lead-001',
       };
       expect(() => validateTeam(team)).toThrow(ZodError);
     });
@@ -302,15 +302,15 @@ describe('Config Validation', () => {
     it('rejects reserved slug "openhive"', () => {
       const team = {
         slug: 'openhive',
-        leader_aid: 'aid-lead-001',
+        coordinator_aid: 'aid-lead-001',
       };
       expect(() => validateTeam(team)).toThrow(ZodError);
     });
 
-    it('rejects invalid leader_aid format', () => {
+    it('rejects invalid coordinator_aid format', () => {
       const team = {
         slug: 'test-team',
-        leader_aid: 'invalid-id',
+        coordinator_aid: 'invalid-id',
       };
       expect(() => validateTeam(team)).toThrow(ZodError);
     });
@@ -318,7 +318,7 @@ describe('Config Validation', () => {
     it('rejects invalid nested agents[*].aid format', () => {
       const team = {
         slug: 'test-team',
-        leader_aid: 'aid-lead-001',
+        coordinator_aid: 'aid-lead-001',
         agents: [
           {
             aid: 'not-a-valid-aid',
@@ -332,7 +332,7 @@ describe('Config Validation', () => {
     it('accepts valid tid in team config', () => {
       const team = {
         slug: 'test-team',
-        leader_aid: 'aid-lead-001',
+        coordinator_aid: 'aid-lead-001',
         tid: 'tid-123-456',
       };
       expect(() => validateTeam(team)).not.toThrow();
@@ -341,7 +341,7 @@ describe('Config Validation', () => {
     it('rejects invalid tid format', () => {
       const team = {
         slug: 'test-team',
-        leader_aid: 'aid-lead-001',
+        coordinator_aid: 'aid-lead-001',
         tid: 'bad-tid',
       };
       expect(() => validateTeam(team)).toThrow(ZodError);
@@ -350,7 +350,7 @@ describe('Config Validation', () => {
     it('accepts optional fields: description, agents, triggers', () => {
       const team = {
         slug: 'test-team',
-        leader_aid: 'aid-lead-001',
+        coordinator_aid: 'aid-lead-001',
         description: 'Test team description',
         agents: [
           {
@@ -379,7 +379,7 @@ describe('Config Validation', () => {
     it('passes through unknown fields at top level (passthrough mode)', () => {
       const team = {
         slug: 'test-team',
-        leader_aid: 'aid-lead-001',
+        coordinator_aid: 'aid-lead-001',
         unknown_field: 'should pass through',
       };
       const result = validateTeam(team);
@@ -391,7 +391,7 @@ describe('Config Validation', () => {
     it('accepts trigger with target_team field', () => {
       const team = {
         slug: 'test-team',
-        leader_aid: 'aid-lead-001',
+        coordinator_aid: 'aid-lead-001',
         triggers: [
           {
             name: 'new-trigger',
@@ -410,7 +410,7 @@ describe('Config Validation', () => {
     it('accepts legacy team_slug and maps it to target_team', () => {
       const team = {
         slug: 'test-team',
-        leader_aid: 'aid-lead-001',
+        coordinator_aid: 'aid-lead-001',
         triggers: [
           {
             name: 'legacy-trigger',
@@ -429,7 +429,7 @@ describe('Config Validation', () => {
     it('when both team_slug and target_team provided, target_team wins', () => {
       const team = {
         slug: 'test-team',
-        leader_aid: 'aid-lead-001',
+        coordinator_aid: 'aid-lead-001',
         triggers: [
           {
             name: 'both-fields',
@@ -449,7 +449,7 @@ describe('Config Validation', () => {
     it('trigger missing both team_slug and target_team fails validation', () => {
       const team = {
         slug: 'test-team',
-        leader_aid: 'aid-lead-001',
+        coordinator_aid: 'aid-lead-001',
         triggers: [
           {
             name: 'bad-trigger',
@@ -465,7 +465,7 @@ describe('Config Validation', () => {
     it('accepts webhook trigger with target_team', () => {
       const team = {
         slug: 'test-team',
-        leader_aid: 'aid-lead-001',
+        coordinator_aid: 'aid-lead-001',
         triggers: [
           {
             name: 'wh-trigger',
@@ -481,7 +481,7 @@ describe('Config Validation', () => {
     it('accepts legacy team_slug on webhook trigger', () => {
       const team = {
         slug: 'test-team',
-        leader_aid: 'aid-lead-001',
+        coordinator_aid: 'aid-lead-001',
         triggers: [
           {
             name: 'wh-legacy',
@@ -501,7 +501,7 @@ describe('Config Validation', () => {
     it('accepts nested action object on cron trigger', () => {
       const team = {
         slug: 'test-team',
-        leader_aid: 'aid-lead-001',
+        coordinator_aid: 'aid-lead-001',
         triggers: [
           {
             name: 'action-trigger',
@@ -530,7 +530,7 @@ describe('Config Validation', () => {
     it('normalizes flat prompt string to action object', () => {
       const team = {
         slug: 'test-team',
-        leader_aid: 'aid-lead-001',
+        coordinator_aid: 'aid-lead-001',
         triggers: [
           {
             name: 'flat-trigger',
@@ -559,7 +559,7 @@ describe('Config Validation', () => {
     it('accepts optional agent field with valid AID on cron trigger', () => {
       const team = {
         slug: 'test-team',
-        leader_aid: 'aid-lead-001',
+        coordinator_aid: 'aid-lead-001',
         triggers: [
           {
             name: 'agent-trigger',
@@ -580,7 +580,7 @@ describe('Config Validation', () => {
     it('rejects agent field with invalid AID format', () => {
       const team = {
         slug: 'test-team',
-        leader_aid: 'aid-lead-001',
+        coordinator_aid: 'aid-lead-001',
         triggers: [
           {
             name: 'bad-agent-trigger',
@@ -598,7 +598,7 @@ describe('Config Validation', () => {
     it('rejects action with invalid priority value', () => {
       const team = {
         slug: 'test-team',
-        leader_aid: 'aid-lead-001',
+        coordinator_aid: 'aid-lead-001',
         triggers: [
           {
             name: 'bad-priority-trigger',
@@ -615,7 +615,7 @@ describe('Config Validation', () => {
     it('cron trigger without action or prompt fails validation', () => {
       const team = {
         slug: 'test-team',
-        leader_aid: 'aid-lead-001',
+        coordinator_aid: 'aid-lead-001',
         triggers: [
           {
             name: 'no-action-trigger',
@@ -655,7 +655,7 @@ describe('Config Validation', () => {
     it('teamConfigSchema passes through unknown fields', () => {
       const team = {
         slug: 'test-team',
-        leader_aid: 'aid-lead-001',
+        coordinator_aid: 'aid-lead-001',
         extra: 'passed through',
       };
       const result = teamConfigSchema.parse(team);

@@ -21,7 +21,7 @@ export interface HealthResponse {
 export interface TeamSummary {
   tid: string;
   slug: string;
-  leaderAid: string;
+  coordinatorAid: string;
   health: string;
   agentCount: number;
   depth: number;
@@ -31,7 +31,7 @@ export interface TeamSummary {
 export interface TeamDetail {
   tid: string;
   slug: string;
-  leaderAid: string;
+  coordinatorAid: string;
   health: string;
   depth: number;
   containerId: string;

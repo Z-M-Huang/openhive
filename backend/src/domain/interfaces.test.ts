@@ -128,6 +128,7 @@ describe('DispatchTracker interface', () => {
     getUnacknowledged: vi.fn().mockReturnValue([]),
     getUnacknowledgedByAgent: vi.fn().mockReturnValue([]),
     transferOwnership: vi.fn().mockReturnValue(0),
+    isTracked: vi.fn().mockReturnValue(false),
     start: vi.fn(),
     stop: vi.fn(),
   });
@@ -152,6 +153,7 @@ describe('DispatchTracker interface', () => {
       getUnacknowledged,
       getUnacknowledgedByAgent: vi.fn().mockReturnValue([]),
       transferOwnership: vi.fn().mockReturnValue(0),
+      isTracked: vi.fn().mockReturnValue(false),
       start: vi.fn(),
       stop: vi.fn(),
     };

@@ -328,7 +328,9 @@ export function createOnMessageHandler(
 export function createOnConnectHandler(
   deps: WSHandlerDeps,
 ): (tid: string, isReconnect: boolean) => void {
-  const { logger, orgChart, tokenManager, credentialStore, wsServer } = deps;
+  // NOTE: Do NOT destructure wsServer here — it's a forward reference (null at construction,
+  // patched later in phase-coordination.ts). Access via deps.wsServer at call time.
+  const { logger, orgChart, tokenManager, credentialStore } = deps;
   const { resolveProviderPreset, resolveModel } = deps;
 
   return async (tid: string, isReconnect: boolean) => {
@@ -342,7 +344,32 @@ export function createOnConnectHandler(
     }
 
     // Send container_init with resolved secrets templates (AC-L6-11)
-    const team = orgChart.getTeam(tid);
+    let team = orgChart.getTeam(tid);
+    if (!team) {
+      // Fallback: container may have been restarted with a new TID.
+      // Extract slug from TID format tid-<slug>-<hexsuffix> and look up by slug.
+      const slugMatch = tid.match(/^tid-(.+)-[0-9a-f]{6,}$/);
+      if (slugMatch) {
+        const slug = slugMatch[1];
+        team = orgChart.getTeamBySlug(slug);
+        if (team && team.tid !== tid) {
+          orgChart.updateTeamTid(slug, tid);
+          logger.info('Reconciled team TID on connect', { tid, slug, old_tid: team.tid });
+          // Persist new TID to team.yaml (best-effort)
+          try {
+            const fs = await import('node:fs/promises');
+            const yaml = await import('yaml');
+            const teamYamlPath = resolve(team.workspacePath, 'team.yaml');
+            const raw = await fs.readFile(teamYamlPath, 'utf-8');
+            const content = yaml.parse(raw) as Record<string, unknown>;
+            content.tid = tid;
+            await fs.writeFile(teamYamlPath, yaml.stringify(content), 'utf-8');
+          } catch { /* best-effort */ }
+          // Re-fetch after TID update
+          team = orgChart.getTeam(tid);
+        }
+      }
+    }
     if (!team) {
       logger.warn('Connected team not found in org chart', { tid });
       return;
@@ -398,10 +425,22 @@ export function createOnConnectHandler(
       const containerInitData = {
         protocol_version: '1.0',
         is_main_assistant: team.slug === 'main',
+        coordinator_aid: team.coordinatorAid ?? null,
         team_config: rawTeamConfig as unknown,
         agents: agents.map((a: Record<string, unknown>) => {
           // Resolve the provider preset for this agent (fall back to 'default')
           const resolvedProvider = resolveProviderPreset(String(a['provider'] || 'default'));
+          const isCoordinator = String(a['aid'] || '') === team.coordinatorAid;
+          let systemPrompt = String(a['system_prompt'] ?? a['description'] ?? '');
+
+          // Enrich coordinator's system prompt with team roster
+          if (isCoordinator && agents.length > 1) {
+            const roster = agents.map((m: Record<string, unknown>) =>
+              `- ${String(m['name'] || '')} (${String(m['aid'] || '')}): ${String(m['description'] ?? '').slice(0, 100)}`
+            ).join('\n');
+            systemPrompt = `You are the team coordinator for "${team.slug}".\n\nTeam Members:\n${roster}\n\n${systemPrompt}`;
+          }
+
           return {
             aid: String(a['aid'] || ''),
             name: String(a['name'] || ''),
@@ -410,7 +449,7 @@ export function createOnConnectHandler(
             model: resolveModel(String(a['model_tier'] || 'sonnet'), resolvedProvider),
             tools: (a['tools'] as string[]) || [],
             provider: resolvedProvider,
-            ...(a['system_prompt'] ? { systemPrompt: String(a['system_prompt']) } : {}),
+            ...(systemPrompt ? { systemPrompt } : {}),
             ...(mcpServers?.length ? { mcpServers } : {}),
           };
         }),
@@ -423,10 +462,11 @@ export function createOnConnectHandler(
       // NOTE: Do NOT log containerInitData -- it contains API keys in each agent's provider field.
       // The log below intentionally omits the payload (AC16).
       const messageStr = JSON.stringify({ type: 'container_init', data: containerInitData });
-      wsServer.send(tid, JSON.parse(messageStr));
+      deps.wsServer.send(tid, JSON.parse(messageStr));
       logger.info('Sent container_init to team', { tid, team_slug: team.slug, agent_count: agents.length });
     } catch (initError) {
-      logger.error('Failed to send container_init', { tid, error: String(initError) });
+      logger.error('Failed to send container_init — disconnecting', { tid, error: String(initError) });
+      deps.wsServer.disconnect(tid, 1011, 'container_init failed');
     }
   };
 }

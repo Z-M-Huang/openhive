@@ -44,7 +44,7 @@ function makeOrgChartTeam(overrides: Partial<OrgChartTeam> = {}): OrgChartTeam {
   return {
     tid: 'tid-main-abc123',
     slug: 'main',
-    leaderAid: 'aid-main-leader',
+    coordinatorAid: 'aid-main-leader',
     parentTid: '',
     depth: 0,
     containerId: 'container-123',
@@ -176,7 +176,7 @@ function createMockContainerManager(): ContainerManager {
       createdAt: Date.now(),
     })),
     stopTeamContainer: vi.fn(async () => {}),
-    restartTeamContainer: vi.fn(async () => {}),
+    restartTeamContainer: vi.fn(async () => ({ id: 'cid-1', name: 'openhive-test', state: 'running', teamSlug: 'test', tid: 'tid-test-new', health: 'running' as any, createdAt: Date.now() })),
     getContainerByTeam: vi.fn(async () => undefined),
     listRunningContainers: vi.fn(async () => []),
     cleanupStoppedContainers: vi.fn(async () => 0),

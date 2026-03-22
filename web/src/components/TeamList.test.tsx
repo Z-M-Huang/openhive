@@ -4,7 +4,7 @@
  * Covers:
  * - Default tree view rendering
  * - Hierarchical nesting up to 3 levels (CON-01)
- * - Tree node content: slug, health badge, agent count, leader AID
+ * - Tree node content: slug, health badge, agent count, coordinator AID
  * - Expandable/collapsible nodes
  * - Inline team info on expand
  * - CSS indentation pattern
@@ -70,7 +70,7 @@ const MOCK_ROOT_TEAMS = [
   {
     tid: 'tid-weather-aaa',
     slug: 'weather-team',
-    leaderAid: 'aid-lead-weather-abc1',
+    coordinatorAid: 'aid-lead-weather-abc1',
     health: 'running',
     agentCount: 3,
     depth: 1,
@@ -79,7 +79,7 @@ const MOCK_ROOT_TEAMS = [
   {
     tid: 'tid-code-bbb',
     slug: 'code-team',
-    leaderAid: 'aid-lead-code-abc2',
+    coordinatorAid: 'aid-lead-code-abc2',
     health: 'degraded',
     agentCount: 2,
     depth: 1,
@@ -91,7 +91,7 @@ const MOCK_NESTED_TEAMS = [
   {
     tid: 'tid-weather-aaa',
     slug: 'weather-team',
-    leaderAid: 'aid-lead-weather-abc1',
+    coordinatorAid: 'aid-lead-weather-abc1',
     health: 'running',
     agentCount: 3,
     depth: 1,
@@ -100,7 +100,7 @@ const MOCK_NESTED_TEAMS = [
   {
     tid: 'tid-forecast-ccc',
     slug: 'forecast-team',
-    leaderAid: 'aid-lead-forecast-abc3',
+    coordinatorAid: 'aid-lead-forecast-abc3',
     health: 'starting',
     agentCount: 1,
     depth: 2,
@@ -112,7 +112,7 @@ const MOCK_THREE_LEVEL_TEAMS = [
   {
     tid: 'tid-root-aaa',
     slug: 'root-team',
-    leaderAid: 'aid-root-abc1',
+    coordinatorAid: 'aid-root-abc1',
     health: 'running',
     agentCount: 2,
     depth: 1,
@@ -121,7 +121,7 @@ const MOCK_THREE_LEVEL_TEAMS = [
   {
     tid: 'tid-mid-bbb',
     slug: 'mid-team',
-    leaderAid: 'aid-mid-abc2',
+    coordinatorAid: 'aid-mid-abc2',
     health: 'running',
     agentCount: 2,
     depth: 2,
@@ -130,7 +130,7 @@ const MOCK_THREE_LEVEL_TEAMS = [
   {
     tid: 'tid-leaf-ccc',
     slug: 'leaf-team',
-    leaderAid: 'aid-leaf-abc3',
+    coordinatorAid: 'aid-leaf-abc3',
     health: 'stopped',
     agentCount: 1,
     depth: 3,
@@ -241,7 +241,7 @@ describe('TeamList', () => {
       });
     });
 
-    it('renders leader AID for each team', async () => {
+    it('renders coordinator AID for each team', async () => {
       vi.mocked(getTeams).mockResolvedValue({ teams: MOCK_ROOT_TEAMS });
 
       render(<TeamList />, { wrapper: makeWrapper() });
@@ -441,7 +441,7 @@ describe('TeamList', () => {
         {
           tid: 'tid-orphan-xxx',
           slug: 'orphan-team',
-          leaderAid: 'aid-orphan-abc1',
+          coordinatorAid: 'aid-orphan-abc1',
           health: 'running',
           agentCount: 1,
           depth: 2,

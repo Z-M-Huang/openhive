@@ -145,7 +145,7 @@ describe('ContainerProvisionerImpl', () => {
       const team: Team = {
         tid: 'tid-cfg-abc123',
         slug: 'cfg-team',
-        leader_aid: 'aid-lead-abc123',
+        coordinator_aid: 'aid-lead-abc123',
         parent_tid: 'tid-root-000000',
         depth: 1,
         container_id: '',
@@ -160,7 +160,7 @@ describe('ContainerProvisionerImpl', () => {
       const raw = await readFile(join(wsPath, 'team.yaml'), 'utf-8');
       const parsed = yamlParse(raw) as Team;
       expect(parsed.slug).toBe('cfg-team');
-      expect(parsed.leader_aid).toBe('aid-lead-abc123');
+      expect(parsed.coordinator_aid).toBe('aid-lead-abc123');
       expect(parsed.agent_aids).toEqual(['aid-mem1-abc123']);
     });
 

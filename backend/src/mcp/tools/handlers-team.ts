@@ -57,7 +57,7 @@ export function createTeamHandlers(ctx: ToolContext): Map<string, ToolHandler> {
     }
     let workspacePath: string;
     try {
-      workspacePath = await ctx.provisioner.scaffoldWorkspace(parentPath, parsed.slug);
+      workspacePath = await ctx.provisioner.scaffoldWorkspace(parentPath, parsed.slug, undefined, parsed.purpose);
     } finally {
       if (ctx.workspaceLock) {
         ctx.workspaceLock.release(parentPath);
@@ -106,6 +106,7 @@ export function createTeamHandlers(ctx: ToolContext): Map<string, ToolHandler> {
     ctx.orgChart.addTeam({
       tid,
       slug: parsed.slug,
+      coordinatorAid: parsed.coordinator_aid,
       parentTid,
       depth: parentDepth + 1,
       containerId: containerInfo.id,
@@ -151,26 +152,38 @@ export function createTeamHandlers(ctx: ToolContext): Map<string, ToolHandler> {
       throw new NotFoundError(`Team '${parsed.team_slug}' not found`);
     }
 
-    // CON-03: Enforce max agents per team
-    const existingAgents = ctx.orgChart.getAgentsByTeam(parsed.team_slug);
-    if (existingAgents.length >= ctx.limits.max_agents_per_team) {
-      ctx.logger.audit('security.limit_breach', {
-        type: 'max_agents_per_team',
-        current: existingAgents.length,
-        limit: ctx.limits.max_agents_per_team,
-        team_slug: parsed.team_slug,
-        agent_aid: agentAid,
-      });
-      throw new ValidationError(
-        `Team '${parsed.team_slug}' already has ${existingAgents.length} agents (max: ${ctx.limits.max_agents_per_team})`
-      );
+    // Check for existing agent with same name (update instead of duplicate)
+    const teamAgents = ctx.orgChart.getAgentsByTeam(parsed.team_slug);
+    const existingAgent = teamAgents.find(a => a.name === parsed.name);
+    let aid: string;
+    let isUpdate = false;
+
+    if (existingAgent) {
+      aid = existingAgent.aid;
+      isUpdate = true;
+    } else {
+      // CON-03: Enforce max agents per team (only for new agents)
+      if (teamAgents.length >= ctx.limits.max_agents_per_team) {
+        ctx.logger.audit('security.limit_breach', {
+          type: 'max_agents_per_team',
+          current: teamAgents.length,
+          limit: ctx.limits.max_agents_per_team,
+          team_slug: parsed.team_slug,
+          agent_aid: agentAid,
+        });
+        throw new ValidationError(
+          `Team '${parsed.team_slug}' already has ${teamAgents.length} agents (max: ${ctx.limits.max_agents_per_team})`
+        );
+      }
+      aid = generateId('aid', parsed.name);
     }
 
-    const aid = generateId('aid', parsed.name);
-
-    // All agent definitions go to the team workspace
     const agentRole = 'member' as const;
     const definitionPath = team.workspacePath;
+
+    // Short summary for .md frontmatter, full description in body (cosmetic — runtime reads team.yaml)
+    const firstSentence = parsed.description.split(/(?<=[.!?])\s/)[0] || parsed.description;
+    const summary = firstSentence.length > 200 ? firstSentence.slice(0, 197) + '...' : firstSentence;
 
     // Write agent definition file
     if (ctx.workspaceLock) {
@@ -180,14 +193,13 @@ export function createTeamHandlers(ctx: ToolContext): Map<string, ToolHandler> {
       await ctx.provisioner.writeAgentDefinition(definitionPath, {
         aid,
         name: parsed.name,
-        description: parsed.description,
+        description: summary,
         model: parsed.model,
         tools: [],
         content: parsed.description,
       });
-      // Update team.yaml so the agent survives container restart
-      const teamWorkspacePath = team.workspacePath;
-      await ctx.provisioner.addAgentToTeamYaml(teamWorkspacePath, {
+      // Update team.yaml (addAgentToTeamYaml deduplicates by name)
+      await ctx.provisioner.addAgentToTeamYaml(team.workspacePath, {
         aid,
         name: parsed.name,
         description: parsed.description,
@@ -200,16 +212,67 @@ export function createTeamHandlers(ctx: ToolContext): Map<string, ToolHandler> {
         ctx.workspaceLock.release(definitionPath);
       }
     }
-    ctx.orgChart.addAgent({
-      aid,
-      name: parsed.name,
-      teamSlug: parsed.team_slug,
-      role: agentRole,
-      status: AgentStatus.Idle,
-      modelTier: parsed.model,
-    });
 
-    return { aid, role: agentRole };
+    // Update or add to org chart
+    if (isUpdate) {
+      ctx.orgChart.updateAgent({ ...existingAgent!, modelTier: parsed.model });
+    } else {
+      ctx.orgChart.addAgent({
+        aid,
+        name: parsed.name,
+        teamSlug: parsed.team_slug,
+        role: agentRole,
+        status: AgentStatus.Idle,
+        modelTier: parsed.model,
+      });
+
+      // Send agent_added WS to container for hot-reload (new agents only)
+      if (ctx.wsHub.isConnected(team.tid)) {
+        ctx.wsHub.send(team.tid, {
+          type: 'agent_added',
+          data: {
+            agent: { aid, name: parsed.name, description: parsed.description, model: parsed.model ?? 'sonnet', role: 'member', tools: [] },
+          },
+        });
+      }
+    }
+
+    // Set coordinator designation if requested
+    if (parsed.is_coordinator) {
+      const targetTeam = ctx.orgChart.getTeamBySlug(parsed.team_slug);
+      if (targetTeam) {
+        targetTeam.coordinatorAid = aid;
+        // Persist to team.yaml
+        try {
+          const fs = await import('node:fs/promises');
+          const yaml = await import('yaml');
+          const teamYamlPath = `${team.workspacePath}/team.yaml`;
+          const raw = await fs.readFile(teamYamlPath, 'utf-8');
+          const content = yaml.parse(raw) as Record<string, unknown>;
+          content['coordinator_aid'] = aid;
+          await fs.writeFile(teamYamlPath, yaml.stringify(content), 'utf-8');
+        } catch { /* best-effort */ }
+      }
+    }
+
+    // Credential warning
+    const CREDENTIAL_PATTERNS = [
+      /api[_-]?key\s*[:=]\s*\S{8,}/i,
+      /token\s*[:=]\s*[a-f0-9-]{20,}/i,
+      /password\s*[:=]\s*\S{8,}/i,
+      /secret\s*[:=]\s*\S{8,}/i,
+      /Bearer\s+[A-Za-z0-9._-]{20,}/,
+    ];
+    let warning: string | undefined;
+    for (const pattern of CREDENTIAL_PATTERNS) {
+      if (pattern.test(parsed.description)) {
+        warning = 'Agent description appears to contain credentials. Use set_credential + get_credential instead.';
+        ctx.logger.warn('create_agent.credential_in_description', { agent_name: parsed.name, team_slug: parsed.team_slug });
+        break;
+      }
+    }
+
+    return { aid, role: agentRole, ...(isUpdate ? { updated: true } : {}), ...(warning ? { warning } : {}) };
   });
 
   return handlers;

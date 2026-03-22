@@ -79,7 +79,7 @@ export function teamConfigToTeam(config: TeamConfig, workspacePath: string): Tea
   return {
     tid: config.tid ?? '',
     slug: config.slug,
-    leader_aid: config.leader_aid ?? '',
+    coordinator_aid: config.coordinator_aid ?? '',
     parent_tid: config.parent_slug ?? '',
     depth: 0,
     container_id: '',
@@ -93,7 +93,7 @@ export function teamConfigToTeam(config: TeamConfig, workspacePath: string): Tea
 export function teamToTeamConfig(team: Team): TeamConfig {
   return {
     slug: team.slug,
-    ...(team.leader_aid ? { leader_aid: team.leader_aid } : {}),
+    ...(team.coordinator_aid ? { coordinator_aid: team.coordinator_aid } : {}),
     ...(team.tid ? { tid: team.tid } : {}),
     ...(team.parent_tid ? { parent_slug: team.parent_tid } : {}),
   };

@@ -185,10 +185,53 @@ export class OrgChartImpl implements OrgChart {
     this.agentsByAid.set(agent.aid, agent);
   }
 
+  updateTeamTid(slug: string, newTid: string): void {
+    const team = this.teamsBySlug.get(slug);
+    if (!team) {
+      throw new NotFoundError(`Team '${slug}' not found`);
+    }
+
+    const oldTid = team.tid;
+    if (oldTid === newTid) return;
+
+    // 1. Re-key teamsByTid
+    this.teamsByTid.delete(oldTid);
+    team.tid = newTid;
+    this.teamsByTid.set(newTid, team);
+
+    // 2. Move children set from old TID to new TID
+    const children = this.childrenByTid.get(oldTid);
+    if (children) {
+      this.childrenByTid.delete(oldTid);
+      this.childrenByTid.set(newTid, children);
+    }
+
+    // 3. Update parentTid on all child teams
+    for (const childTid of children ?? []) {
+      const child = this.teamsByTid.get(childTid);
+      if (child) child.parentTid = newTid;
+    }
+
+    // 4. Update this team's entry in parent's children set
+    if (team.parentTid) {
+      const parentChildren = this.childrenByTid.get(team.parentTid);
+      if (parentChildren) {
+        parentChildren.delete(oldTid);
+        parentChildren.add(newTid);
+      }
+    }
+  }
+
   removeAgent(aid: string): void {
     const agent = this.agentsByAid.get(aid);
     if (!agent) {
       throw new NotFoundError(`Agent '${aid}' not found`);
+    }
+
+    // Clear coordinator designation if this agent was the coordinator
+    const team = this.teamsBySlug.get(agent.teamSlug);
+    if (team && team.coordinatorAid === aid) {
+      team.coordinatorAid = undefined;
     }
 
     this.agentsByAid.delete(aid);
@@ -216,7 +259,8 @@ export class OrgChartImpl implements OrgChart {
 
   /**
    * Returns the best dispatch target for a team.
-   * Prefers idle agents, sorts by AID for deterministic selection.
+   * If team has a coordinator, always prefers it (unless error/starting).
+   * Otherwise prefers idle agents, sorts by AID for deterministic selection.
    * Throws NotFoundError if the team has no agents.
    */
   getDispatchTarget(teamSlug: string): OrgChartAgent {
@@ -225,14 +269,19 @@ export class OrgChartImpl implements OrgChart {
       throw new NotFoundError(`No agents found in team '${teamSlug}'`);
     }
 
-    // Sort by AID for stability
-    const sorted = [...agents].sort((a, b) => a.aid.localeCompare(b.aid));
+    // Coordinator preference: always dispatch to coordinator unless it's in error/starting state
+    const team = this.teamsBySlug.get(teamSlug);
+    if (team?.coordinatorAid) {
+      const coordinator = this.agentsByAid.get(team.coordinatorAid);
+      if (coordinator && coordinator.status !== AgentStatus.Error && coordinator.status !== 'starting') {
+        return coordinator;
+      }
+    }
 
-    // Prefer idle agents
+    // Fall back to existing logic: sort by AID, prefer idle
+    const sorted = [...agents].sort((a, b) => a.aid.localeCompare(b.aid));
     const idle = sorted.find(a => a.status === AgentStatus.Idle);
     if (idle) return idle;
-
-    // Fall back to first agent by AID order
     return sorted[0];
   }
 

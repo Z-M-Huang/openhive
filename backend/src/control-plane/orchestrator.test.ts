@@ -32,7 +32,7 @@ function createMockOrgChart() {
     addAgent: vi.fn(), updateAgent: vi.fn(), removeAgent: vi.fn(), getAgent: vi.fn(),
     getAgentsByTeam: vi.fn().mockReturnValue([]),
     isAuthorized: vi.fn(), getTopology: vi.fn(),
-    getDispatchTarget: vi.fn(),
+    updateTeamTid: vi.fn(), getDispatchTarget: vi.fn(),
   };
 }
 
@@ -274,7 +274,7 @@ describe('OrchestratorImpl', () => {
       vi.mocked(deps.orgChart.getTeamBySlug).mockReturnValue({
         tid: 'tid-a',
         slug: 'team-a',
-        leaderAid: 'aid-lead',
+        coordinatorAid: 'aid-lead',
         containerId: 'container-1',
       } as any);
 
@@ -340,7 +340,7 @@ describe('OrchestratorImpl', () => {
       vi.mocked(deps.orgChart.getTeamBySlug).mockReturnValue({
         tid: 'tid-a',
         slug: 'team-a',
-        leaderAid: 'aid-lead',
+        coordinatorAid: 'aid-lead',
       } as any);
       vi.mocked(deps.orgChart.getAgent).mockReturnValue({
         aid: 'aid-lead',
@@ -400,7 +400,7 @@ describe('OrchestratorImpl', () => {
       vi.mocked(deps.orgChart.getTeamBySlug).mockReturnValue({
         tid: 'tid-a',
         slug: 'team-a',
-        leaderAid: 'aid-lead',
+        coordinatorAid: 'aid-lead',
       } as any);
       vi.mocked(deps.orgChart.getAgent).mockReturnValue({
         aid: 'aid-lead',
@@ -713,12 +713,12 @@ describe('OrchestratorImpl', () => {
     it('restarts container when newState is unreachable (AC-B1)', async () => {
       const deps = createRootDeps();
       vi.mocked(deps.orgChart.listTeams).mockReturnValue([
-        { tid: 'tid-team-a', slug: 'team-a', leaderAid: 'aid-lead' } as any,
+        { tid: 'tid-team-a', slug: 'team-a', coordinatorAid: 'aid-lead' } as any,
       ]);
       vi.mocked(deps.orgChart.getTeamBySlug).mockReturnValue(
         { tid: 'tid-team-a', slug: 'team-a' } as any,
       );
-      vi.mocked(deps.containerManager!.restartTeamContainer).mockResolvedValue(undefined);
+      vi.mocked(deps.containerManager!.restartTeamContainer).mockResolvedValue({ id: 'cid-1', name: 'openhive-test', state: 'running', teamSlug: 'test', tid: 'tid-test-new', health: 'running' as any, createdAt: Date.now() });
 
       const orchestrator = new OrchestratorImpl(deps, true);
       await orchestrator.start();
@@ -740,7 +740,7 @@ describe('OrchestratorImpl', () => {
     it('does NOT restart container when newState is not unreachable', async () => {
       const deps = createRootDeps();
       vi.mocked(deps.orgChart.listTeams).mockReturnValue([
-        { tid: 'tid-team-a', slug: 'team-a', leaderAid: 'aid-lead' } as any,
+        { tid: 'tid-team-a', slug: 'team-a', coordinatorAid: 'aid-lead' } as any,
       ]);
 
       const orchestrator = new OrchestratorImpl(deps, true);
@@ -760,12 +760,12 @@ describe('OrchestratorImpl', () => {
     it('revokes session tokens before restarting (AC-B6)', async () => {
       const deps = createRootDeps();
       vi.mocked(deps.orgChart.listTeams).mockReturnValue([
-        { tid: 'tid-team-a', slug: 'team-a', leaderAid: 'aid-lead' } as any,
+        { tid: 'tid-team-a', slug: 'team-a', coordinatorAid: 'aid-lead' } as any,
       ]);
       vi.mocked(deps.orgChart.getTeamBySlug).mockReturnValue(
         { tid: 'tid-team-a', slug: 'team-a' } as any,
       );
-      vi.mocked(deps.containerManager!.restartTeamContainer).mockResolvedValue(undefined);
+      vi.mocked(deps.containerManager!.restartTeamContainer).mockResolvedValue({ id: 'cid-1', name: 'openhive-test', state: 'running', teamSlug: 'test', tid: 'tid-test-new', health: 'running' as any, createdAt: Date.now() });
 
       const orchestrator = new OrchestratorImpl(deps, true);
       await orchestrator.start();
@@ -789,12 +789,12 @@ describe('OrchestratorImpl', () => {
     it('rate limits auto-restart to 3 per hour per slug (AC-B2)', async () => {
       const deps = createRootDeps();
       vi.mocked(deps.orgChart.listTeams).mockReturnValue([
-        { tid: 'tid-team-a', slug: 'team-a', leaderAid: 'aid-lead' } as any,
+        { tid: 'tid-team-a', slug: 'team-a', coordinatorAid: 'aid-lead' } as any,
       ]);
       vi.mocked(deps.orgChart.getTeamBySlug).mockReturnValue(
         { tid: 'tid-team-a', slug: 'team-a' } as any,
       );
-      vi.mocked(deps.containerManager!.restartTeamContainer).mockResolvedValue(undefined);
+      vi.mocked(deps.containerManager!.restartTeamContainer).mockResolvedValue({ id: 'cid-1', name: 'openhive-test', state: 'running', teamSlug: 'test', tid: 'tid-test-new', health: 'running' as any, createdAt: Date.now() });
 
       const orchestrator = new OrchestratorImpl(deps, true);
       await orchestrator.start();
@@ -820,12 +820,12 @@ describe('OrchestratorImpl', () => {
     it('logs auto-restart at audit level (AC-B1)', async () => {
       const deps = createRootDeps();
       vi.mocked(deps.orgChart.listTeams).mockReturnValue([
-        { tid: 'tid-team-a', slug: 'team-a', leaderAid: 'aid-lead' } as any,
+        { tid: 'tid-team-a', slug: 'team-a', coordinatorAid: 'aid-lead' } as any,
       ]);
       vi.mocked(deps.orgChart.getTeamBySlug).mockReturnValue(
         { tid: 'tid-team-a', slug: 'team-a' } as any,
       );
-      vi.mocked(deps.containerManager!.restartTeamContainer).mockResolvedValue(undefined);
+      vi.mocked(deps.containerManager!.restartTeamContainer).mockResolvedValue({ id: 'cid-1', name: 'openhive-test', state: 'running', teamSlug: 'test', tid: 'tid-test-new', health: 'running' as any, createdAt: Date.now() });
 
       const orchestrator = new OrchestratorImpl(deps, true);
       await orchestrator.start();
@@ -973,6 +973,7 @@ describe('OrchestratorImpl', () => {
         getUnacknowledged: vi.fn().mockReturnValue([]),
         getUnacknowledgedByAgent: vi.fn().mockReturnValue([]),
         transferOwnership: vi.fn().mockReturnValue(0),
+        isTracked: vi.fn().mockReturnValue(false),
         start: vi.fn(),
         stop: vi.fn(),
       };
@@ -1011,7 +1012,7 @@ describe('OrchestratorImpl', () => {
       vi.mocked(deps.orgChart.getTeamBySlug).mockReturnValue({
         tid: 'tid-team-a',
         slug: 'team-a',
-        leaderAid: 'aid-lead',
+        coordinatorAid: 'aid-lead',
         containerId: 'container-1',
       } as any);
 
@@ -1134,7 +1135,7 @@ describe('OrchestratorImpl', () => {
       vi.mocked(deps.orgChart.getTeamBySlug).mockReturnValue({
         tid: 'tid-team-a',
         slug: 'team-a',
-        leaderAid: 'aid-lead',
+        coordinatorAid: 'aid-lead',
         containerId: 'container-1',
       } as any);
 
@@ -1186,7 +1187,7 @@ describe('OrchestratorImpl', () => {
       vi.mocked(deps.orgChart.getTeamBySlug).mockReturnValue({
         tid: 'tid-team-a',
         slug: 'team-a',
-        leaderAid: 'aid-lead',
+        coordinatorAid: 'aid-lead',
         containerId: 'container-1',
       } as any);
 
@@ -1217,7 +1218,7 @@ describe('OrchestratorImpl', () => {
       vi.mocked(deps.orgChart.getTeamBySlug).mockReturnValue({
         tid: 'tid-team-a',
         slug: 'team-a',
-        leaderAid: 'aid-lead',
+        coordinatorAid: 'aid-lead',
         containerId: 'container-1',
       } as any);
 
@@ -1255,7 +1256,7 @@ describe('OrchestratorImpl', () => {
       vi.mocked(deps.orgChart.getTeamBySlug).mockReturnValue({
         tid: 'tid-team-a',
         slug: 'team-a',
-        leaderAid: 'aid-lead',
+        coordinatorAid: 'aid-lead',
         containerId: 'container-1',
       } as any);
 
@@ -1294,7 +1295,7 @@ describe('OrchestratorImpl', () => {
       vi.mocked(deps.orgChart.getTeamBySlug).mockReturnValue({
         tid: 'tid-team-a',
         slug: 'team-a',
-        leaderAid: 'aid-lead',
+        coordinatorAid: 'aid-lead',
         containerId: 'container-1',
       } as any);
 
@@ -1376,7 +1377,7 @@ describe('OrchestratorImpl', () => {
       vi.mocked(deps.orgChart.getTeamBySlug).mockReturnValue({
         tid: 'tid-team-a',
         slug: 'team-a',
-        leaderAid: 'aid-lead',
+        coordinatorAid: 'aid-lead',
       } as any);
       vi.mocked(deps.orgChart.getAgent).mockReturnValue({
         aid: 'aid-lead',

@@ -95,7 +95,7 @@ describe('Layer 8: Orchestrator Integration', () => {
       vi.mocked(orgChart.getTeamBySlug).mockReturnValue({
         tid: 'tid-a',
         slug: 'team-a',
-        leaderAid: 'aid-lead',
+        coordinatorAid: 'aid-lead',
         containerId: 'container-1',
       } as OrgChartTeam);
       vi.mocked(mcpRegistry.isAllowed).mockReturnValue(true);

@@ -635,7 +635,7 @@ describe('SDKToolHandler', () => {
     it('scaffolds workspace, adds to org chart, publishes event', async () => {
       const result = await handler.handle(
         'create_team',
-        { slug: 'new-team', leader_aid: 'aid-alice-001', purpose: 'Testing' },
+        { slug: 'new-team', coordinator_aid: 'aid-alice-001', purpose: 'Testing' },
         'aid-alice-001',
         'call-080',
       );
@@ -657,7 +657,7 @@ describe('SDKToolHandler', () => {
 
       const result = await handler.handle(
         'create_team',
-        { slug: 'deep-team', leader_aid: 'aid-alice-001', purpose: 'Too deep' },
+        { slug: 'deep-team', coordinator_aid: 'aid-alice-001', purpose: 'Too deep' },
         'aid-alice-001',
         'call-082',
       );
@@ -682,7 +682,7 @@ describe('SDKToolHandler', () => {
 
       const result = await handler.handle(
         'create_team',
-        { slug: 'one-too-many', leader_aid: 'aid-alice-001', purpose: 'Overflow' },
+        { slug: 'one-too-many', coordinator_aid: 'aid-alice-001', purpose: 'Overflow' },
         'aid-alice-001',
         'call-083',
       );

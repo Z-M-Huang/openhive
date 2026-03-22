@@ -42,7 +42,7 @@ export interface ContainerRuntime {
 export interface ContainerManager {
   spawnTeamContainer(teamSlug: string, workspacePath?: string): Promise<ContainerInfo>;
   stopTeamContainer(teamSlug: string, reason: string): Promise<void>;
-  restartTeamContainer(teamSlug: string, reason: string): Promise<void>;
+  restartTeamContainer(teamSlug: string, reason: string): Promise<ContainerInfo>;
   getContainerByTeam(teamSlug: string): Promise<ContainerInfo | undefined>;
   listRunningContainers(): Promise<ContainerInfo[]>;
   cleanupStoppedContainers(): Promise<number>;
@@ -50,7 +50,7 @@ export interface ContainerManager {
 
 /** Workspace scaffolding and team provisioning. */
 export interface ContainerProvisioner {
-  scaffoldWorkspace(parentPath: string, teamSlug: string, agents?: AgentDefinition[]): Promise<string>;
+  scaffoldWorkspace(parentPath: string, teamSlug: string, agents?: AgentDefinition[], purpose?: string): Promise<string>;
   writeTeamConfig(workspacePath: string, team: Team): Promise<void>;
   writeAgentDefinition(workspacePath: string, agent: AgentDefinition): Promise<void>;
   addAgentToTeamYaml(workspacePath: string, agent: {
@@ -166,6 +166,9 @@ export interface OrgChart {
   getAgentsByTeam(teamSlug: string): OrgChartAgent[];
   /** Returns the best dispatch target for a team: prefers idle agents, sorts by AID for stability. Throws NotFoundError if team has no agents. */
   getDispatchTarget(teamSlug: string): OrgChartAgent;
+
+  /** Update a team's TID (e.g., after container restart). Re-keys all TID-based lookups. */
+  updateTeamTid(slug: string, newTid: string): void;
 
   isAuthorized(sourceAid: string, targetAid: string): boolean;
   getTopology(depth?: number): TopologyNode[];

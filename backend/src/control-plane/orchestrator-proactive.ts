@@ -16,6 +16,7 @@ import type {
   HealthMonitor,
   TokenManager,
   ContainerManager,
+  DispatchTracker,
 } from '../domain/interfaces.js';
 import type { EscalationReason } from '../domain/enums.js';
 import { TaskStatus as TS } from '../domain/enums.js';
@@ -42,6 +43,7 @@ export interface HealthStateChangedDeps {
   orgChart: OrgChart;
   containerManager?: ContainerManager;
   tokenManager?: TokenManager;
+  dispatchTracker?: DispatchTracker;
   restartCounts: Map<string, { count: number; windowStart: number }>;
 }
 
@@ -179,13 +181,76 @@ export async function handleHealthStateChanged(
     tokenManager.revokeSessionsForTid(oldTid);
   }
 
-  // (c) Restart the container
+  // (c) Restart the container — returns new ContainerInfo with new TID
   logger.audit('health.auto_restart', { slug, tid, reason, restart_count: rateEntry.count });
   try {
-    await containerManager.restartTeamContainer(slug, reason);
-    logger.info('health.auto_restart.done', { slug, tid, reason });
+    const newInfo = await containerManager.restartTeamContainer(slug, reason);
+    // Update org chart with new TID so WS connect handler and dispatch find the team
+    orgChart.updateTeamTid(slug, newInfo.tid);
+    // Transfer dispatch ownership from old TID to new TID for state replay
+    if (deps.dispatchTracker) {
+      deps.dispatchTracker.transferOwnership(oldTid ?? '', newInfo.tid);
+    }
+    logger.info('health.auto_restart.done', { slug, oldTid: tid, newTid: newInfo.tid, reason });
   } catch (err) {
     logger.error('health.auto_restart.failed', { slug, tid, error: String(err) });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// cleanupOrphanedTasks
+// ---------------------------------------------------------------------------
+
+/** Dependencies for orphaned task cleanup. */
+export interface OrphanedTaskDeps {
+  logger: Logger;
+  stores?: { taskStore: TaskStore };
+  orgChart: OrgChart;
+  agentExecutor: AgentExecutor;
+  dispatchTracker?: DispatchTracker;
+}
+
+/**
+ * Clean up tasks stuck in 'active' status with no running agent.
+ * These occur when container restarts lose dispatch state or WS send fails.
+ * Last-resort cleanup — immediate recovery (WS send catch, container ready replay) handles most cases.
+ */
+export async function cleanupOrphanedTasks(
+  deps: OrphanedTaskDeps,
+  thresholdMs: number,
+): Promise<void> {
+  const { logger, stores, orgChart, dispatchTracker } = deps;
+  if (!stores) return;
+
+  const activeTasks = await stores.taskStore.listByStatus(TS.Active);
+  const now = Date.now();
+
+  for (const task of activeTasks) {
+    const age = now - task.updated_at;
+    if (age < thresholdMs) continue;
+
+    const agent = orgChart.getAgent(task.agent_aid);
+    const isAgentBusy = agent?.status === 'busy';
+    const isTracked = dispatchTracker?.isTracked(task.id) ?? false;
+
+    if (!isAgentBusy && !isTracked) {
+      try {
+        await stores.taskStore.update({
+          ...task,
+          status: TS.Failed,
+          error: `Task orphaned — no active agent or dispatch (age: ${Math.round(age / 60000)}min)`,
+          updated_at: now,
+        });
+        logger.warn('Cleaned up orphaned task', {
+          task_id: task.id,
+          agent_aid: task.agent_aid,
+          team_slug: task.team_slug,
+          age_ms: age,
+        });
+      } catch (err) {
+        logger.error('Failed to clean up orphaned task', { task_id: task.id, error: String(err) });
+      }
+    }
   }
 }
 

@@ -26,7 +26,7 @@ function HealthBadge({ health }: { health: string }) {
 function ContainerCard({ team }: { team: {
   tid: string;
   slug: string;
-  leaderAid: string;
+  coordinatorAid: string;
   health: string;
   agentCount: number;
   depth: number;
@@ -53,7 +53,7 @@ function ContainerCard({ team }: { team: {
       </div>
 
       <div className="mt-3 text-xs text-gray-500">
-        Leader: {team.leaderAid}
+        Coordinator: {team.coordinatorAid}
       </div>
     </div>
   );

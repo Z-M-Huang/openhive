@@ -135,7 +135,7 @@ export interface OrgChartAgent {
 export interface OrgChartTeam {
   tid: string;
   slug: string;
-  leaderAid?: string;
+  coordinatorAid?: string;
   parentTid: string;
   depth: number;
   containerId: string;

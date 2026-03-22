@@ -21,16 +21,17 @@ export const ListContainersSchema = z.object({});
 
 export const CreateTeamSchema = z.object({
   slug: z.string().min(3).max(63),
-  leader_aid: z.string().optional(),
+  coordinator_aid: z.string().optional(),
   purpose: z.string().min(1),
 });
 
 export const CreateAgentSchema = z.object({
-  name: z.string().min(1),
+  name: z.string().min(1).max(63).regex(/^[a-z0-9]+(-[a-z0-9]+)*$/, 'Agent name must be lowercase alphanumeric with hyphens'),
   description: z.string().min(1),
   team_slug: z.string().min(1),
   model: z.string().optional(),
   skills: z.array(z.string()).optional(),
+  is_coordinator: z.boolean().optional(),
 });
 
 export const CreateTaskSchema = z.object({

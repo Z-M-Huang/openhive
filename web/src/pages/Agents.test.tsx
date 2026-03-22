@@ -102,8 +102,8 @@ const MOCK_AGENTS = [
 
 const MOCK_TEAMS = {
   teams: [
-    { tid: 'tid-weather-aaa', slug: 'weather-team', leaderAid: 'aid-beta-abc222', health: 'healthy', agentCount: 2, depth: 1 },
-    { tid: 'tid-code-bbb', slug: 'code-team', leaderAid: 'aid-beta-abc222', health: 'healthy', agentCount: 1, depth: 1 },
+    { tid: 'tid-weather-aaa', slug: 'weather-team', coordinatorAid: 'aid-beta-abc222', health: 'healthy', agentCount: 2, depth: 1 },
+    { tid: 'tid-code-bbb', slug: 'code-team', coordinatorAid: 'aid-beta-abc222', health: 'healthy', agentCount: 1, depth: 1 },
   ],
 };
 

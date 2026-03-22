@@ -192,9 +192,9 @@ function TeamTreeRow({ node, depth }: TeamTreeRowProps) {
           {team.agentCount}
         </span>
 
-        {/* Leader AID */}
-        <span className="text-xs text-gray-500 ml-2 truncate max-w-[160px]" title={team.leaderAid}>
-          {team.leaderAid}
+        {/* Coordinator AID */}
+        <span className="text-xs text-gray-500 ml-2 truncate max-w-[160px]" title={team.coordinatorAid}>
+          {team.coordinatorAid}
         </span>
       </div>
 
@@ -286,7 +286,7 @@ export function TeamList() {
         <span className="flex-1">Slug</span>
         <span>Health</span>
         <span className="ml-2">Agents</span>
-        <span className="ml-2 max-w-[160px]">Leader</span>
+        <span className="ml-2 max-w-[160px]">Coordinator</span>
       </div>
 
       {/* Tree */}

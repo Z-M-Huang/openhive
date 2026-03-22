@@ -123,6 +123,7 @@ export async function initializeRootMode(
     agentExecutor.setMemoryFileWriter(memoryFileWriter);
   }
   agentExecutor.setMemoryStore(persistence.memoryStore);
+  agentExecutor.setToolCallStores(persistence.logStore, persistence.toolCallStore);
 
   // Build AgentInitConfig for the main assistant
   const assistantConfig = masterConfig.assistant;

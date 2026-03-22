@@ -36,7 +36,7 @@ Behavioral decisions live in skills. Structural guarantees live in code. This se
 
 | ID | Rule | Description |
 |----|------|-------------|
-| INV-01 | RETIRED | Team lead role eliminated. All agents are members or main_assistant. |
+| INV-01 | Coordinator, not team_lead | No team_lead role. Teams may designate a coordinator (regular member with dispatch preference + escalation routing). Coordinator behavior defined by skills (INV-09). |
 | INV-02 | All messages through root WS hub | All inter-container messages route through root's WebSocket hub. |
 | INV-03 | No container-to-container communication | ICC disabled. All traffic goes through root. No direct links between non-root containers. |
 | INV-04 | Single SQLite writer | Only the root container writes to SQLite. Non-root containers forward data via WebSocket. |
@@ -406,7 +406,7 @@ bun run docker                 # Build image + start via docker compose
 - **Agent-as-Feature** -- capabilities are compositions of Teams + Agents + Skills + Triggers, not coded services
 - **Hub-and-spoke WebSocket** -- single persistent connection per container, all through root
 - **Team creation** -- `create_team` provisions workspace and container; agents added via `create_agent`
-- **Escalation chain** -- flat: member escalates to main assistant, main assistant escalates to user
+- **Escalation chain** -- member escalates to coordinator (if team has one), then to main assistant, then to user
 - **Proactive behavior** -- orchestrator-driven timers, skip-if-busy, idempotent check IDs
 - **Self-developing integrations** -- agents create, test, and activate their own declarative integration configs
 

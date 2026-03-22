@@ -56,7 +56,7 @@ export function makeTeam(overrides: Partial<OrgChartTeam> = {}): OrgChartTeam {
   return {
     tid: 'tid-test-001',
     slug: 'test-team',
-    leaderAid: 'aid-alice-001',
+    coordinatorAid: 'aid-alice-001',
     parentTid: '',
     depth: 0,
     containerId: 'cid-test',
@@ -110,6 +110,7 @@ export function createMockContext(): ToolContext {
     getAgentsByTeam: vi.fn(() => [makeAgent()]),
     isAuthorized: vi.fn(() => true),
     getTopology: vi.fn(() => []),
+    updateTeamTid: vi.fn(),
     getDispatchTarget: vi.fn(() => makeAgent()),
   };
 
@@ -217,7 +218,7 @@ export function createMockContext(): ToolContext {
       createdAt: Date.now(),
     })),
     stopTeamContainer: vi.fn(async () => {}),
-    restartTeamContainer: vi.fn(async () => {}),
+    restartTeamContainer: vi.fn(async () => ({ id: 'cid-1', name: 'openhive-test', state: 'running', teamSlug: 'test', tid: 'tid-test-new', health: 'running' as any, createdAt: Date.now() })),
     getContainerByTeam: vi.fn(async () => undefined),
     listRunningContainers: vi.fn(async (): Promise<ContainerInfo[]> => [{
       id: 'cid-alpha',

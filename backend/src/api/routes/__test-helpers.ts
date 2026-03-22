@@ -133,7 +133,7 @@ export function makeTeam(overrides?: Partial<OrgChartTeam>): OrgChartTeam {
   return {
     tid: 'tid-weather-team-abc123',
     slug: 'weather-team',
-    leaderAid: 'aid-lead-abc123',
+    coordinatorAid: 'aid-lead-abc123',
     parentTid: '',
     depth: 1,
     containerId: 'cid-weather-team',
@@ -200,6 +200,7 @@ export function createMockOrgChart(): OrgChart {
     ),
     isAuthorized: vi.fn(() => true),
     getTopology: vi.fn(() => []),
+    updateTeamTid: vi.fn(),
     getDispatchTarget: vi.fn(),
   } as OrgChart;
 }
@@ -211,6 +212,7 @@ export function createMockContainerManager(): ContainerManager & { getRestartCou
     stopTeamContainer: vi.fn(async () => {}),
     restartTeamContainer: vi.fn(async (slug: string) => {
       restartCounts.set(slug, (restartCounts.get(slug) ?? 0) + 1);
+      return makeContainerInfo(slug);
     }),
     getContainerByTeam: vi.fn(async () => undefined),
     listRunningContainers: vi.fn(async () => []),

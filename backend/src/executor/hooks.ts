@@ -63,7 +63,7 @@
  * @module executor/hooks
  */
 
-import type { Logger } from '../domain/index.js';
+import type { Logger, ToolCallStore, LogStore } from '../domain/index.js';
 import { LogLevel } from '../domain/index.js';
 
 /**
@@ -121,15 +121,23 @@ export function redactParams(
  * // session.init({ ...config, hooks });
  * ```
  */
-export function createSDKHooks(logger: Logger, agentAid: string): SDKHooks {
-  const startTimes = new Map<string, number>();
+/** Options for tool_calls table logging in createSDKHooks. */
+export interface SDKHookOptions {
+  toolCallStore?: ToolCallStore;
+  logStore?: LogStore;
+  teamSlug?: string;
+}
+
+export function createSDKHooks(logger: Logger, agentAid: string, options?: SDKHookOptions): SDKHooks {
+  // Track start time + tool name from preToolUse so postToolUse can log to tool_calls
+  const startTimes = new Map<string, { start: number; toolName: string }>();
 
   const preToolUse = async (input: {
     tool_name: string;
     tool_input: Record<string, unknown>;
     tool_use_id: string;
   }): Promise<Record<string, never>> => {
-    startTimes.set(input.tool_use_id, Date.now());
+    startTimes.set(input.tool_use_id, { start: Date.now(), toolName: input.tool_name });
     const redacted = redactParams(input.tool_input);
     logger.log({
       level: LogLevel.Info,
@@ -149,8 +157,9 @@ export function createSDKHooks(logger: Logger, agentAid: string): SDKHooks {
     tool_use_id: string;
     error?: string;
   }): Promise<Record<string, never>> => {
-    const startTime = startTimes.get(input.tool_use_id);
-    const durationMs = startTime != null ? Date.now() - startTime : 0;
+    const info = startTimes.get(input.tool_use_id);
+    const durationMs = info ? Date.now() - info.start : 0;
+    const toolName = info?.toolName ?? 'unknown';
     startTimes.delete(input.tool_use_id);
 
     logger.log({
@@ -160,8 +169,48 @@ export function createSDKHooks(logger: Logger, agentAid: string): SDKHooks {
       agent_aid: agentAid,
       duration_ms: durationMs,
       error: input.error ?? '',
-      params: JSON.stringify({ tool_use_id: input.tool_use_id }),
+      params: JSON.stringify({ tool_use_id: input.tool_use_id, tool_name: toolName }),
     });
+
+    // Best-effort write to tool_calls table (main assistant tool calls)
+    if (options?.toolCallStore && options?.logStore) {
+      try {
+        const [logEntryId] = await options.logStore.createWithIds([{
+          id: 0,
+          level: LogLevel.Info,
+          event_type: 'tool_call',
+          component: 'executor',
+          action: toolName,
+          message: 'tool_call',
+          params: JSON.stringify({ tool_name: toolName }),
+          team_slug: options.teamSlug ?? '',
+          task_id: '',
+          agent_aid: agentAid,
+          request_id: '',
+          correlation_id: input.tool_use_id,
+          error: input.error ?? '',
+          duration_ms: durationMs,
+          created_at: Date.now(),
+        }]);
+        await options.toolCallStore.create({
+          id: 0,
+          log_entry_id: logEntryId,
+          tool_use_id: input.tool_use_id,
+          tool_name: toolName,
+          agent_aid: agentAid,
+          team_slug: options.teamSlug ?? '',
+          task_id: '',
+          params: JSON.stringify({ tool_name: toolName }),
+          result_summary: '',
+          error: input.error ?? '',
+          duration_ms: durationMs,
+          created_at: Date.now(),
+        });
+      } catch {
+        // Best-effort — don't break tool execution
+      }
+    }
+
     return {};
   };
 

@@ -24,7 +24,7 @@ export function createQueryHandlers(ctx: ToolContext): Map<string, ToolHandler> 
     return {
       slug: team.slug,
       tid: team.tid,
-      ...(team.leaderAid ? { leader_aid: team.leaderAid } : {}),
+      ...(team.coordinatorAid ? { coordinator_aid: team.coordinatorAid } : {}),
       agent_aids: team.agentAids,
       health: team.health,
     };

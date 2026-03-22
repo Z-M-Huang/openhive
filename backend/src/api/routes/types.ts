@@ -94,7 +94,7 @@ export const patchTaskBodySchema = z.object({
 /** Schema for POST /api/teams request body. */
 export const createTeamBodySchema = z.object({
   slug: slugSchema,
-  leaderAid: z.string().optional(),
+  coordinatorAid: z.string().optional(),
   purpose: z.string().optional(),
 });
 

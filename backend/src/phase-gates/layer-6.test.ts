@@ -267,7 +267,7 @@ function bootstrapRootTeam(
   const rootTeam: OrgChartTeam = {
     tid: rootTid,
     slug: 'root-team',
-    leaderAid: mainAid,
+    coordinatorAid: mainAid,
     parentTid: '',
     depth: 0,
     containerId: 'root-container',
@@ -319,7 +319,7 @@ function setupOrgChart(orgChart: OrgChartImpl): {
   orgChart.addTeam({
     tid,
     slug: teamSlug,
-    leaderAid: leadAid,
+    coordinatorAid: leadAid,
     parentTid: rootTid,
     depth: 1,
     containerId: 'container-test',
@@ -518,7 +518,7 @@ describe('Layer 6: MCP Tools + Skills', () => {
       const handler = new SDKToolHandler(ctx, createToolHandlers(ctx));
       const result = await handler.handle(
         'create_team',
-        { slug: 'new-team', leader_aid: 'aid-lead-def456', purpose: 'testing' },
+        { slug: 'new-team', coordinator_aid: 'aid-lead-def456', purpose: 'testing' },
         memberAid,
         'call-3',
       );

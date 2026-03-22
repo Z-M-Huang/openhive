@@ -124,7 +124,7 @@ export const HeartbeatSchema = z.object({
 export const TaskResultSchema = z.object({
   task_id: z.string().min(1),
   agent_aid: z.string().min(1),
-  status: z.enum(['completed', 'failed']),
+  status: z.enum(['completed', 'failed', 'pending']),
   result: z.string().optional(),
   error: z.string().optional(),
   files_created: z.array(z.string()).optional(),
