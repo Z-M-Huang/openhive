@@ -1,1022 +1,607 @@
 /**
- * Layer 6 Phase Gate: MCP Tools + Skills integration tests.
+ * Layer 6 Phase Gate -- Sessions
  *
- * Tests MCPBridge round-trip and timeout, SDKToolHandler authorization and
- * error mapping, tool execution (create_task with blocked_by, cycle detection),
- * save_memory dual-write, SkillLoader workspace shadowing and CON-12 truncation,
- * SkillRegistry team-scoped isolation (INV-08), and full integration wiring.
+ * Tests:
+ * - UT-8:  canUseTool blocks/allows exact, prefix, Bash default deny
+ * - UT-9:  MCP builder includes only listed servers, skips unknown
+ * - UT-18: Provider resolver maps api/oauth profiles, throws on missing
+ * - UT-7:  Context builder + query options assembler
+ * - Session manager: tracks active, stop removes, idle timeout
+ * - E2E-6/E2E-11 simulation: full flow with mocked query
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import * as fs from 'node:fs';
-import * as os from 'node:os';
-import * as path from 'node:path';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { join } from 'node:path';
 
-import type {
-  OrgChartAgent,
-  OrgChartTeam,
-  BusEvent,
-  MemoryEntry,
-  TaskStore,
-  MessageStore,
-  LogStore,
-  MemoryStore,
-  IntegrationStore,
-  CredentialStore,
-  ToolCallStore,
-  ContainerManager,
-  ContainerProvisioner,
-  KeyManager,
-  WSHub,
-  TriggerScheduler,
-  HealthMonitor,
-  Logger,
-} from '../domain/index.js';
+import { createCanUseTool } from '../sessions/can-use-tool.js';
+import { buildMcpServers } from '../sessions/mcp-builder.js';
+import { resolveProvider } from '../sessions/provider-resolver.js';
+import { buildSessionContext } from '../sessions/context-builder.js';
+import { buildQueryOptions } from '../sessions/query-options.js';
+import { spawnSession } from '../sessions/spawner.js';
+import { SessionManager } from '../sessions/manager.js';
+import { SecretString } from '../secrets/secret-string.js';
+import { ConfigError } from '../domain/errors.js';
+import type { ProvidersOutput } from '../config/validation.js';
+import type { TeamConfig } from '../domain/types.js';
+import type { QueryFn, SdkMessage } from '../sessions/spawner.js';
+import type { BuildQueryOptionsInput } from '../sessions/query-options.js';
 
-import {
-  TaskStatus,
-  AgentStatus,
-  ContainerHealth,
-  WSErrorCode,
-  IntegrationStatus,
-} from '../domain/index.js';
+// ── Helpers ────────────────────────────────────────────────────────────────
 
-import {
-  NotFoundError,
-  CycleDetectedError,
-} from '../domain/errors.js';
+/** Test-only placeholder. Not a real key. */
+const TEST_KEY_VALUE = 'test-placeholder-key-not-real';
+const TEST_DB_VALUE = 'test-db-placeholder';
 
-import { MCPBridgeImpl, TIMEOUT_QUERY_MS, TIMEOUT_MUTATING_MS, TIMEOUT_BLOCKING_MS } from '../mcp/bridge.js';
-import { SDKToolHandler, createToolHandlers, TOOL_SCHEMAS } from '../mcp/tools/index.js';
-import type { ToolContext } from '../mcp/tools/index.js';
-import { MCPRegistryImpl } from '../mcp/registry.js';
-import { OrgChartImpl } from '../control-plane/org-chart.js';
-import { EventBusImpl } from '../control-plane/event-bus.js';
-
-// ---------------------------------------------------------------------------
-// Test helpers: mock logger
-// ---------------------------------------------------------------------------
-
-function createMockLogger(): Logger {
+function makeProviders(overrides?: Partial<ProvidersOutput>): ProvidersOutput {
   return {
-    log: vi.fn(),
-    trace: vi.fn(),
-    debug: vi.fn(),
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    audit: vi.fn(),
-    flush: vi.fn().mockResolvedValue(undefined),
-    stop: vi.fn().mockResolvedValue(undefined),
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Test helpers: mock ToolContext
-// ---------------------------------------------------------------------------
-
-function createMockToolContext(overrides?: Partial<ToolContext>): ToolContext {
-  const orgChart = new OrgChartImpl();
-  const eventBus = new EventBusImpl();
-  const mcpRegistry = new MCPRegistryImpl();
-
-  return {
-    orgChart,
-    taskStore: {
-      create: vi.fn().mockResolvedValue(undefined),
-      get: vi.fn().mockImplementation(async (id: string) => ({
-        id,
-        parent_id: '',
-        team_slug: 'test-team',
-        agent_aid: 'aid-test-abc123',
-        title: 'Test task',
-        status: TaskStatus.Pending,
-        prompt: 'Test prompt',
-        result: '',
-        error: '',
-        blocked_by: null,
-        priority: 0,
-        retry_count: 0,
-        max_retries: 0,
-        created_at: Date.now(),
-        updated_at: Date.now(),
-        completed_at: null,
-      })),
-      update: vi.fn().mockResolvedValue(undefined),
-      delete: vi.fn().mockResolvedValue(undefined),
-      listByTeam: vi.fn().mockResolvedValue([]),
-      listByStatus: vi.fn().mockResolvedValue([]),
-      getSubtree: vi.fn().mockResolvedValue([]),
-      getBlockedBy: vi.fn().mockResolvedValue([]),
-      unblockTask: vi.fn().mockResolvedValue(false),
-      retryTask: vi.fn().mockResolvedValue(false),
-      validateDependencies: vi.fn().mockResolvedValue(undefined),
-      getRecentUserTasks: vi.fn().mockResolvedValue([]),
-      getNextPendingForAgent: vi.fn().mockResolvedValue(null),
-    } satisfies TaskStore,
-    messageStore: {
-      create: vi.fn().mockResolvedValue(undefined),
-      getByChat: vi.fn().mockResolvedValue([]),
-      getLatest: vi.fn().mockResolvedValue([]),
-      deleteByChat: vi.fn().mockResolvedValue(undefined),
-      deleteBefore: vi.fn().mockResolvedValue(0),
-    } satisfies MessageStore,
-    logStore: {
-      create: vi.fn().mockResolvedValue(undefined),
-      createWithIds: vi.fn().mockResolvedValue([1]),
-      query: vi.fn().mockResolvedValue([]),
-      deleteBefore: vi.fn().mockResolvedValue(0),
-      deleteByLevelBefore: vi.fn().mockResolvedValue(0),
-      count: vi.fn().mockResolvedValue(0),
-      getOldest: vi.fn().mockResolvedValue([]),
-    } satisfies LogStore,
-    memoryStore: {
-      save: vi.fn().mockResolvedValue(1),
-      search: vi.fn().mockResolvedValue([]),
-      getByAgent: vi.fn().mockResolvedValue([]),
-      deleteBefore: vi.fn().mockResolvedValue(0),
-      softDeleteByAgent: vi.fn().mockResolvedValue(0),
-      softDeleteByTeam: vi.fn().mockResolvedValue(0),
-      purgeDeleted: vi.fn().mockResolvedValue(0),
-      searchBM25: vi.fn().mockResolvedValue([]),
-      searchHybrid: vi.fn().mockResolvedValue([]),
-      saveChunks: vi.fn().mockResolvedValue(undefined),
-      getChunks: vi.fn().mockResolvedValue([]),
-      deleteChunks: vi.fn().mockResolvedValue(undefined),
-    } satisfies MemoryStore,
-    integrationStore: {
-      create: vi.fn().mockResolvedValue(undefined),
-      get: vi.fn().mockImplementation(async (id: string) => ({
-        id,
-        team_id: 'test-team',
-        name: 'test-integration',
-        config_path: '/app/workspace/integrations/test.yaml',
-        status: IntegrationStatus.Proposed,
-        error_message: '',
-        created_at: Date.now(),
-      })),
-      update: vi.fn().mockResolvedValue(undefined),
-      delete: vi.fn().mockResolvedValue(undefined),
-      listByTeam: vi.fn().mockResolvedValue([]),
-      updateStatus: vi.fn().mockResolvedValue(undefined),
-    } satisfies IntegrationStore,
-    credentialStore: {
-      create: vi.fn().mockResolvedValue(undefined),
-      get: vi.fn().mockResolvedValue({ id: 'cred-1', name: 'api-key', encrypted_value: 'enc', team_id: 'test-team', created_at: Date.now() }),
-      update: vi.fn().mockResolvedValue(undefined),
-      delete: vi.fn().mockResolvedValue(undefined),
-      listByTeam: vi.fn().mockResolvedValue([]),
-    } satisfies CredentialStore,
-    toolCallStore: {
-      create: vi.fn().mockResolvedValue(undefined),
-      getByTask: vi.fn().mockResolvedValue([]),
-      getByAgent: vi.fn().mockResolvedValue([]),
-      getByToolName: vi.fn().mockResolvedValue([]),
-    } satisfies ToolCallStore,
-    containerManager: {
-      spawnTeamContainer: vi.fn().mockResolvedValue({
-        id: 'container-1', name: 'openhive-test', state: 'running',
-        teamSlug: 'test-team', tid: 'tid-test-abc123',
-        health: ContainerHealth.Running, createdAt: Date.now(),
-      }),
-      stopTeamContainer: vi.fn().mockResolvedValue(undefined),
-      restartTeamContainer: vi.fn().mockResolvedValue(undefined),
-      getContainerByTeam: vi.fn().mockResolvedValue(undefined),
-      listRunningContainers: vi.fn().mockResolvedValue([]),
-      cleanupStoppedContainers: vi.fn().mockResolvedValue(0),
-    } satisfies ContainerManager,
-    provisioner: {
-      scaffoldWorkspace: vi.fn().mockResolvedValue('/app/workspace/teams/test-team'),
-      writeTeamConfig: vi.fn().mockResolvedValue(undefined),
-      writeAgentDefinition: vi.fn().mockResolvedValue(undefined),
-      writeSettings: vi.fn().mockResolvedValue(undefined),
-      deleteWorkspace: vi.fn().mockResolvedValue(undefined),
-      archiveWorkspace: vi.fn().mockResolvedValue(undefined),
-      addAgentToTeamYaml: vi.fn().mockResolvedValue(undefined),
-    } satisfies ContainerProvisioner,
-    keyManager: {
-      unlock: vi.fn().mockResolvedValue(undefined),
-      lock: vi.fn().mockResolvedValue(undefined),
-      rekey: vi.fn().mockResolvedValue(undefined),
-      encrypt: vi.fn().mockResolvedValue('encrypted-value'),
-      decrypt: vi.fn().mockResolvedValue('decrypted-value'),
-      isUnlocked: vi.fn().mockReturnValue(true),
-    } satisfies KeyManager,
-    wsHub: {
-      handleUpgrade: vi.fn(),
-      send: vi.fn(),
-      broadcast: vi.fn(),
-      isConnected: vi.fn().mockReturnValue(true),
-      setReady: vi.fn(),
-      isReady: vi.fn().mockReturnValue(true),
-      getConnectedTeams: vi.fn().mockReturnValue([]),
-      close: vi.fn().mockResolvedValue(undefined),
-    } satisfies WSHub,
-    eventBus,
-    triggerScheduler: {
-      loadTriggers: vi.fn().mockResolvedValue(undefined),
-      addCronTrigger: vi.fn(),
-      removeTrigger: vi.fn(),
-      listTriggers: vi.fn().mockReturnValue([]),
-      start: vi.fn(),
-      stop: vi.fn(),
-    } satisfies TriggerScheduler,
-    mcpRegistry,
-    healthMonitor: {
-      recordHeartbeat: vi.fn(),
-      getHealth: vi.fn().mockReturnValue(ContainerHealth.Running),
-      getAgentHealth: vi.fn().mockReturnValue(AgentStatus.Idle),
-      getAllHealth: vi.fn().mockReturnValue(new Map()),
-      getStuckAgents: vi.fn().mockReturnValue([]),
-      checkTimeouts: vi.fn(),
-      start: vi.fn(),
-      stop: vi.fn(),
-    } satisfies HealthMonitor,
-    logger: createMockLogger(),
-    limits: Object.freeze({
-      max_depth: 3,
-      max_teams: 10,
-      max_agents_per_team: 5,
-      max_concurrent_tasks: 50,
-    }),
+    profiles: {
+      default: {
+        type: 'api',
+        api_key_ref: 'ANTHROPIC_KEY',
+        model: 'claude-sonnet-4-20250514',
+      },
+      oauth: {
+        type: 'oauth',
+        oauth_token_env: 'MY_OAUTH_TOKEN',
+      },
+    },
     ...overrides,
   };
 }
 
-// ---------------------------------------------------------------------------
-// Test helpers: setup org chart with standard hierarchy
-// ---------------------------------------------------------------------------
-
-/**
- * Bootstrap a root team by directly seeding OrgChart's private maps.
- * Works around the chicken-and-egg: addTeam requires leader in agentsByAid,
- * addAgent requires team in teamsBySlug. The real orchestrator handles this at init.
- */
-function bootstrapRootTeam(
-  orgChart: OrgChartImpl,
-  mainAid: string,
-  rootTid: string,
-): void {
-  const raw = orgChart as unknown as {
-    teamsByTid: Map<string, OrgChartTeam>;
-    teamsBySlug: Map<string, OrgChartTeam>;
-    agentsByAid: Map<string, OrgChartAgent>;
-    agentsByTeam: Map<string, Set<string>>;
-  };
-
-  const rootTeam: OrgChartTeam = {
-    tid: rootTid,
-    slug: 'root-team',
-    coordinatorAid: mainAid,
-    parentTid: '',
-    depth: 0,
-    containerId: 'root-container',
-    health: ContainerHealth.Running,
-    agentAids: [mainAid],
-    workspacePath: '/app/workspace',
-  };
-  const mainAgent: OrgChartAgent = {
-    aid: mainAid,
-    name: 'Main Assistant',
-    teamSlug: 'root-team',
-    role: 'main_assistant',
-    status: AgentStatus.Idle,
-  };
-
-  raw.teamsByTid.set(rootTeam.tid, rootTeam);
-  raw.teamsBySlug.set(rootTeam.slug, rootTeam);
-  raw.agentsByAid.set(mainAgent.aid, mainAgent);
-  raw.agentsByTeam.set('root-team', new Set([mainAgent.aid]));
+function makeSecrets(): Map<string, SecretString> {
+  const m = new Map<string, SecretString>();
+  m.set('ANTHROPIC_KEY', new SecretString(TEST_KEY_VALUE));
+  m.set('DB_PASSWORD', new SecretString(TEST_DB_VALUE));
+  return m;
 }
 
-function setupOrgChart(orgChart: OrgChartImpl): {
-  mainAid: string;
-  leadAid: string;
-  memberAid: string;
-  teamSlug: string;
-  tid: string;
-} {
-  const mainAid = 'aid-main-abc123';
-  const leadAid = 'aid-lead-def456';
-  const memberAid = 'aid-member-ghi789';
-  const teamSlug = 'test-team';
-  const tid = 'tid-test-aaa111';
-  const rootTid = 'tid-root-000000';
-
-  // Bootstrap root team (chicken-and-egg workaround)
-  bootstrapRootTeam(orgChart, mainAid, rootTid);
-
-  // Add lead agent to root team (INV-01: lead runs in parent container)
-  orgChart.addAgent({
-    aid: leadAid,
-    name: 'Team Lead',
-    teamSlug: 'root-team',
-    role: 'member',
-    status: AgentStatus.Idle,
-  });
-
-  // Add child team
-  orgChart.addTeam({
-    tid,
-    slug: teamSlug,
-    coordinatorAid: leadAid,
-    parentTid: rootTid,
-    depth: 1,
-    containerId: 'container-test',
-    health: ContainerHealth.Running,
-    agentAids: [],
-    workspacePath: '/app/workspace/teams/test-team',
-  });
-
-  // Add member agent to the child team
-  orgChart.addAgent({
-    aid: memberAid,
-    name: 'Member Agent',
-    teamSlug: teamSlug,
-    role: 'member',
-    status: AgentStatus.Idle,
-  });
-
-  return { mainAid, leadAid, memberAid, teamSlug, tid };
+function makeTeamConfig(overrides?: Partial<TeamConfig>): TeamConfig {
+  return {
+    name: 'test-team',
+    parent: null,
+    description: 'A test team',
+    scope: { accepts: ['weather'], rejects: ['admin'] },
+    allowed_tools: ['Read', 'Write', 'Edit', 'mcp__org__*'],
+    secret_refs: ['ANTHROPIC_KEY'],
+    mcp_servers: ['org'],
+    provider_profile: 'default',
+    maxTurns: 25,
+    ...overrides,
+  };
 }
 
-// ---------------------------------------------------------------------------
-// Test helpers: temp directory management
-// ---------------------------------------------------------------------------
-
-let tmpRoot: string;
-
-function createTmpRoot(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'openhive-l6-'));
+function captureLog(): { messages: Array<{ msg: string; meta?: Record<string, unknown> }>; logger: { info: (msg: string, meta?: Record<string, unknown>) => void } } {
+  const messages: Array<{ msg: string; meta?: Record<string, unknown> }> = [];
+  return {
+    messages,
+    logger: { info: (msg: string, meta?: Record<string, unknown>) => { messages.push({ msg, meta }); } },
+  };
 }
 
-// ===========================================================================
-// Layer 6 Phase Gate Tests
-// ===========================================================================
+// ── UT-8: canUseTool ──────────────────────────────────────────────────────
 
-describe('Layer 6: MCP Tools + Skills', () => {
+describe('UT-8: canUseTool', () => {
+  it('allows exact match', () => {
+    const check = createCanUseTool(['Read', 'Write']);
+    expect(check('Read').allowed).toBe(true);
+    expect(check('Write').allowed).toBe(true);
+  });
+
+  it('denies unlisted tools', () => {
+    const check = createCanUseTool(['Read']);
+    expect(check('Edit').allowed).toBe(false);
+    expect(check('Grep').allowed).toBe(false);
+  });
+
+  it('allows prefix match with star', () => {
+    const check = createCanUseTool(['mcp__org__*']);
+    expect(check('mcp__org__escalate').allowed).toBe(true);
+    expect(check('mcp__org__spawn_team').allowed).toBe(true);
+    expect(check('mcp__other__tool').allowed).toBe(false);
+  });
+
+  it('denies Bash by default', () => {
+    const check = createCanUseTool(['Read', 'Write', 'Edit']);
+    expect(check('Bash').allowed).toBe(false);
+  });
+
+  it('allows Bash if explicitly listed', () => {
+    const check = createCanUseTool(['Read', 'Bash']);
+    expect(check('Bash').allowed).toBe(true);
+  });
+
+  it('logs denied attempts', () => {
+    const log = captureLog();
+    const check = createCanUseTool(['Read'], log.logger);
+    check('Bash');
+    expect(log.messages).toHaveLength(1);
+    expect(log.messages[0].msg).toContain('denied');
+    expect(log.messages[0].meta).toEqual({ tool: 'Bash' });
+  });
+
+  it('handles empty allowedTools (deny all)', () => {
+    const check = createCanUseTool([]);
+    expect(check('Read').allowed).toBe(false);
+    expect(check('Bash').allowed).toBe(false);
+  });
+
+  it('mixed exact and prefix entries', () => {
+    const check = createCanUseTool(['Read', 'mcp__org__*', 'Bash']);
+    expect(check('Read').allowed).toBe(true);
+    expect(check('Bash').allowed).toBe(true);
+    expect(check('mcp__org__escalate').allowed).toBe(true);
+    expect(check('Write').allowed).toBe(false);
+  });
+});
+
+// ── UT-9: MCP Builder ─────────────────────────────────────────────────────
+
+describe('UT-9: MCP Builder', () => {
+  const available = {
+    org: { url: 'http://org:3000' },
+    analytics: { url: 'http://analytics:3001' },
+    secrets: { url: 'http://secrets:3002' },
+  };
+
+  it('includes only listed servers', () => {
+    const result = buildMcpServers(['org', 'analytics'], available);
+    expect(Object.keys(result)).toEqual(['org', 'analytics']);
+    expect(result['org']).toEqual({ url: 'http://org:3000' });
+    expect(result['analytics']).toEqual({ url: 'http://analytics:3001' });
+  });
+
+  it('excludes unlisted servers', () => {
+    const result = buildMcpServers(['org'], available);
+    expect(Object.keys(result)).toEqual(['org']);
+    expect(result['analytics']).toBeUndefined();
+    expect(result['secrets']).toBeUndefined();
+  });
+
+  it('skips unknown servers without crashing', () => {
+    const result = buildMcpServers(['org', 'nonexistent'], available);
+    expect(Object.keys(result)).toEqual(['org']);
+  });
+
+  it('returns empty object when no servers configured', () => {
+    const result = buildMcpServers([], available);
+    expect(result).toEqual({});
+  });
+
+  it('returns empty object when all servers unknown', () => {
+    const result = buildMcpServers(['ghost1', 'ghost2'], available);
+    expect(result).toEqual({});
+  });
+});
+
+// ── UT-18: Provider Resolver ──────────────────────────────────────────────
+
+describe('UT-18: Provider Resolver', () => {
+  it('maps api profile correctly', () => {
+    const providers = makeProviders();
+    const secrets = makeSecrets();
+    const resolved = resolveProvider('default', providers, secrets);
+
+    expect(resolved.model).toBe('claude-sonnet-4-20250514');
+    expect(resolved.env).toEqual({ ANTHROPIC_API_KEY: TEST_KEY_VALUE });
+  });
+
+  it('includes ANTHROPIC_BASE_URL when api_url is set', () => {
+    const providers = makeProviders({
+      profiles: {
+        custom: {
+          type: 'api',
+          api_key_ref: 'ANTHROPIC_KEY',
+          model: 'claude-haiku-2',
+          api_url: 'https://custom.api.example.com',
+        },
+      },
+    });
+    const secrets = makeSecrets();
+    const resolved = resolveProvider('custom', providers, secrets);
+
+    expect(resolved.env['ANTHROPIC_BASE_URL']).toBe('https://custom.api.example.com');
+    expect(resolved.env['ANTHROPIC_API_KEY']).toBe(TEST_KEY_VALUE);
+    expect(resolved.model).toBe('claude-haiku-2');
+  });
+
+  it('maps oauth profile correctly', () => {
+    const original = process.env['MY_OAUTH_TOKEN'];
+    try {
+      process.env['MY_OAUTH_TOKEN'] = 'oauth-test-placeholder';
+      const providers = makeProviders();
+      const secrets = makeSecrets();
+      const resolved = resolveProvider('oauth', providers, secrets);
+
+      expect(resolved.env).toEqual({ CLAUDE_CODE_OAUTH_TOKEN: 'oauth-test-placeholder' });
+    } finally {
+      if (original === undefined) {
+        delete process.env['MY_OAUTH_TOKEN'];
+      } else {
+        process.env['MY_OAUTH_TOKEN'] = original;
+      }
+    }
+  });
+
+  it('throws ConfigError on missing profile', () => {
+    const providers = makeProviders();
+    const secrets = makeSecrets();
+
+    expect(() => resolveProvider('nonexistent', providers, secrets)).toThrow(ConfigError);
+    expect(() => resolveProvider('nonexistent', providers, secrets)).toThrow('not found');
+  });
+
+  it('throws ConfigError when api secret ref missing', () => {
+    const providers = makeProviders();
+    const emptySecrets = new Map<string, SecretString>();
+
+    expect(() => resolveProvider('default', providers, emptySecrets)).toThrow(ConfigError);
+    expect(() => resolveProvider('default', providers, emptySecrets)).toThrow(
+      'Secret "ANTHROPIC_KEY" not found',
+    );
+  });
+
+  it('throws ConfigError when oauth env var not set', () => {
+    const original = process.env['MY_OAUTH_TOKEN'];
+    try {
+      delete process.env['MY_OAUTH_TOKEN'];
+      const providers = makeProviders();
+      const secrets = makeSecrets();
+
+      expect(() => resolveProvider('oauth', providers, secrets)).toThrow(ConfigError);
+      expect(() => resolveProvider('oauth', providers, secrets)).toThrow('not set');
+    } finally {
+      if (original !== undefined) {
+        process.env['MY_OAUTH_TOKEN'] = original;
+      }
+    }
+  });
+});
+
+// ── UT-7: Context Builder ─────────────────────────────────────────────────
+
+describe('UT-7: Context Builder', () => {
+  it('produces correct env from secrets (no filter)', () => {
+    const secrets = makeSecrets();
+    const ctx = buildSessionContext('weather-team', '/data', secrets);
+
+    expect(ctx.env['ANTHROPIC_KEY']).toBe(TEST_KEY_VALUE);
+    expect(ctx.env['DB_PASSWORD']).toBe(TEST_DB_VALUE);
+  });
+
+  it('filters env by secretRefs when provided', () => {
+    const secrets = makeSecrets();
+    const ctx = buildSessionContext('weather-team', '/data', secrets, ['ANTHROPIC_KEY']);
+
+    expect(ctx.env['ANTHROPIC_KEY']).toBe(TEST_KEY_VALUE);
+    expect(ctx.env['DB_PASSWORD']).toBeUndefined();
+  });
+
+  it('produces correct cwd', () => {
+    const ctx = buildSessionContext('weather-team', '/data', new Map());
+    expect(ctx.cwd).toBe(join('/data', 'teams', 'weather-team', 'workspace'));
+  });
+
+  it('produces correct additionalDirectories', () => {
+    const ctx = buildSessionContext('weather-team', '/data', new Map());
+    const expected = [
+      join('/data', 'teams', 'weather-team', 'memory'),
+      join('/data', 'teams', 'weather-team', 'org-rules'),
+      join('/data', 'teams', 'weather-team', 'team-rules'),
+      join('/data', 'teams', 'weather-team', 'skills'),
+      join('/data', 'teams', 'weather-team', 'subagents'),
+    ];
+    expect(ctx.additionalDirectories).toEqual(expected);
+  });
+});
+
+// ── UT-7: Query Options Assembler ─────────────────────────────────────────
+
+describe('UT-7: Query Options Assembler', () => {
+  it('produces correct structure with all fields', () => {
+    const log = captureLog();
+    const secrets = makeSecrets();
+
+    const input: BuildQueryOptionsInput = {
+      teamName: 'weather-team',
+      teamConfig: makeTeamConfig(),
+      dataDir: '/data',
+      providers: makeProviders(),
+      secrets,
+      orgMcpServer: { url: 'http://org:3000' },
+      availableMcpServers: { analytics: { url: 'http://analytics:3001' } },
+      ancestors: ['root-team'],
+      logger: log.logger,
+    };
+
+    const opts = buildQueryOptions(input);
+
+    // System prompt
+    expect(opts.systemPrompt.type).toBe('preset');
+    expect(opts.systemPrompt.preset).toBe('claude_code');
+    expect(typeof opts.systemPrompt.append).toBe('string');
+
+    // Tools
+    expect(opts.tools).toEqual({ type: 'preset', preset: 'claude_code' });
+
+    // Model from provider
+    expect(opts.model).toBe('claude-sonnet-4-20250514');
+
+    // Permissions
+    expect(opts.permissionMode).toBe('bypassPermissions');
+    expect(opts.allowDangerouslySkipPermissions).toBe(true);
+
+    // maxTurns
+    expect(opts.maxTurns).toBe(25);
+
+    // MCP servers (org from orgMcpServer, not analytics since not in mcp_servers)
+    expect(opts.mcpServers['org']).toEqual({ url: 'http://org:3000' });
+    expect(opts.mcpServers['analytics']).toBeUndefined();
+
+    // canUseTool
+    expect(opts.canUseTool('Read').allowed).toBe(true);
+    expect(opts.canUseTool('Bash').allowed).toBe(false);
+    expect(opts.canUseTool('mcp__org__escalate').allowed).toBe(true);
+
+    // Hooks
+    expect(opts.hooks.PreToolUse.length).toBeGreaterThan(0);
+    expect(opts.hooks.PostToolUse.length).toBeGreaterThan(0);
+
+    // stderr scrubber
+    expect(typeof opts.stderr).toBe('function');
+    const scrubbed = opts.stderr('leaked ' + TEST_KEY_VALUE + ' here');
+    expect(scrubbed).not.toContain(TEST_KEY_VALUE);
+
+    // env (provider env merged with context env)
+    expect(opts.env['ANTHROPIC_API_KEY']).toBe(TEST_KEY_VALUE);
+
+    // cwd
+    expect(opts.cwd).toBe(join('/data', 'teams', 'weather-team', 'workspace'));
+
+    // additionalDirectories
+    expect(opts.additionalDirectories.length).toBe(5);
+  });
+});
+
+// ── Session Manager ───────────────────────────────────────────────────────
+
+describe('Session Manager', () => {
+  let manager: SessionManager;
+
   beforeEach(() => {
-    tmpRoot = createTmpRoot();
+    vi.useFakeTimers();
+    manager = new SessionManager({ idleTimeoutMs: 5000 });
   });
 
   afterEach(() => {
-    fs.rmSync(tmpRoot, { recursive: true, force: true });
+    manager.stopAll();
+    vi.useRealTimers();
   });
 
-  // -------------------------------------------------------------------------
-  // 1. MCPBridge round-trip
-  // -------------------------------------------------------------------------
+  it('spawn tracks active session', () => {
+    manager.spawn('team-a');
+    expect(manager.isActive('team-a')).toBe(true);
+    expect(manager.getActive()).toEqual(['team-a']);
+  });
 
-  describe('MCPBridge round-trip', () => {
-    it('should send tool_call via WS and resolve when handleResult is called', async () => {
-      const sent: Record<string, unknown>[] = [];
-      const sendFn = (msg: Record<string, unknown>) => sent.push(msg);
-      const bridge = new MCPBridgeImpl(sendFn, createMockLogger());
+  it('stop removes session', () => {
+    manager.spawn('team-a');
+    manager.stop('team-a');
+    expect(manager.isActive('team-a')).toBe(false);
+    expect(manager.getActive()).toEqual([]);
+  });
 
-      // Start the call (non-blocking)
-      const resultPromise = bridge.callTool('get_team', { slug: 'my-team' }, 'aid-caller-abc123');
-      expect(bridge.getPendingCalls()).toBe(1);
+  it('stop on non-existent team is a no-op', () => {
+    expect(() => manager.stop('ghost')).not.toThrow();
+  });
 
-      // Verify WS message was sent
-      expect(sent).toHaveLength(1);
-      const wsMsg = sent[0];
-      expect(wsMsg.type).toBe('tool_call');
+  it('spawn returns abort controller', () => {
+    const ac = manager.spawn('team-a');
+    expect(ac).toBeInstanceOf(AbortController);
+    expect(ac.signal.aborted).toBe(false);
+  });
 
-      const data = wsMsg.data as Record<string, unknown>;
-      expect(data.tool_name).toBe('get_team');
-      expect(data.arguments).toEqual({ slug: 'my-team' });
-      expect(data.agent_aid).toBe('aid-caller-abc123');
-      expect(typeof data.call_id).toBe('string');
+  it('stop aborts the controller', () => {
+    const ac = manager.spawn('team-a');
+    manager.stop('team-a');
+    expect(ac.signal.aborted).toBe(true);
+  });
 
-      // Simulate root responding with the result
-      const callId = data.call_id as string;
-      bridge.handleResult(callId, { slug: 'my-team', tid: 'tid-my-abc123' });
+  it('idle timeout triggers stop', () => {
+    const ac = manager.spawn('team-a');
+    expect(manager.isActive('team-a')).toBe(true);
 
-      // Promise should resolve
-      const result = await resultPromise;
-      expect(result).toEqual({ slug: 'my-team', tid: 'tid-my-abc123' });
-      expect(bridge.getPendingCalls()).toBe(0);
-    });
+    vi.advanceTimersByTime(5000);
 
-    it('should reject when handleError is called', async () => {
-      const sent: Record<string, unknown>[] = [];
-      const sendFn = (msg: Record<string, unknown>) => sent.push(msg);
-      const bridge = new MCPBridgeImpl(sendFn, createMockLogger());
+    expect(manager.isActive('team-a')).toBe(false);
+    expect(ac.signal.aborted).toBe(true);
+  });
 
-      const resultPromise = bridge.callTool('get_team', { slug: 'missing' }, 'aid-caller-abc123');
+  it('touch resets idle timeout', () => {
+    manager.spawn('team-a');
 
-      const data = (sent[0].data as Record<string, unknown>);
-      const callId = data.call_id as string;
+    vi.advanceTimersByTime(3000);
+    manager.touch('team-a');
+    vi.advanceTimersByTime(3000);
 
-      bridge.handleError(callId, WSErrorCode.NotFound, "Team 'missing' not found");
+    // Should still be active (3s + touch + 3s < 5s from touch)
+    expect(manager.isActive('team-a')).toBe(true);
 
-      await expect(resultPromise).rejects.toThrow("Team 'missing' not found");
-      expect(bridge.getPendingCalls()).toBe(0);
-    });
+    vi.advanceTimersByTime(2000);
 
-    it('should time out query tools at 10s (CON-09)', async () => {
-      vi.useFakeTimers();
-      try {
-        const sendFn = vi.fn();
-        const bridge = new MCPBridgeImpl(sendFn, createMockLogger());
+    // Now 5s since touch, should be timed out
+    expect(manager.isActive('team-a')).toBe(false);
+  });
 
-        const resultPromise = bridge.callTool('get_team', { slug: 'test' }, 'aid-caller-abc123');
-        expect(bridge.getPendingCalls()).toBe(1);
+  it('getStatus returns active with uptime', () => {
+    manager.spawn('team-a');
+    vi.advanceTimersByTime(1000);
 
-        // Advance past the query timeout
-        vi.advanceTimersByTime(TIMEOUT_QUERY_MS + 100);
+    const status = manager.getStatus('team-a');
+    expect(status.active).toBe(true);
+    expect(status.uptimeMs).toBe(1000);
+  });
 
-        await expect(resultPromise).rejects.toThrow(/timed out.*get_team/);
-        expect(bridge.getPendingCalls()).toBe(0);
-      } finally {
-        vi.useRealTimers();
+  it('getStatus returns inactive for unknown team', () => {
+    const status = manager.getStatus('ghost');
+    expect(status.active).toBe(false);
+    expect(status.uptimeMs).toBe(0);
+  });
+
+  it('spawn replaces existing session for same team', () => {
+    const ac1 = manager.spawn('team-a');
+    const ac2 = manager.spawn('team-a');
+
+    expect(ac1.signal.aborted).toBe(true);
+    expect(ac2.signal.aborted).toBe(false);
+    expect(manager.getActive()).toEqual(['team-a']);
+  });
+
+  it('stopAll clears everything', () => {
+    manager.spawn('team-a');
+    manager.spawn('team-b');
+    manager.stopAll();
+
+    expect(manager.getActive()).toEqual([]);
+    expect(manager.isActive('team-a')).toBe(false);
+    expect(manager.isActive('team-b')).toBe(false);
+  });
+
+  it('uses default 30min timeout when not configured', () => {
+    const defaultManager = new SessionManager();
+    defaultManager.spawn('team-x');
+
+    vi.advanceTimersByTime(29 * 60 * 1000);
+    expect(defaultManager.isActive('team-x')).toBe(true);
+
+    vi.advanceTimersByTime(2 * 60 * 1000);
+    expect(defaultManager.isActive('team-x')).toBe(false);
+
+    defaultManager.stopAll();
+  });
+});
+
+// ── Session Spawner ───────────────────────────────────────────────────────
+
+describe('Session Spawner', () => {
+  it('collects all messages from query iterator', async () => {
+    const messages: SdkMessage[] = [
+      { type: 'text', content: 'Hello' },
+      { type: 'tool_use', content: { tool: 'Read' } },
+      { type: 'text', content: 'Done' },
+    ];
+
+    const queryFn: QueryFn = async function* () {
+      for (const msg of messages) {
+        yield msg;
       }
-    });
+    };
 
-    it('should assign correct timeout tiers', () => {
-      const sendFn = vi.fn();
-      const bridge = new MCPBridgeImpl(sendFn);
+    const opts: Record<string, unknown> = { maxTurns: 10 };
+    const result = await spawnSession('do something', opts, queryFn);
 
-      // Query tier (10s)
-      expect(bridge.getTimeoutForTool('get_team')).toBe(TIMEOUT_QUERY_MS);
-      expect(bridge.getTimeoutForTool('recall_memory')).toBe(TIMEOUT_QUERY_MS);
-      expect(bridge.getTimeoutForTool('list_containers')).toBe(TIMEOUT_QUERY_MS);
-
-      // Mutating tier (60s)
-      expect(bridge.getTimeoutForTool('create_task')).toBe(TIMEOUT_MUTATING_MS);
-      expect(bridge.getTimeoutForTool('save_memory')).toBe(TIMEOUT_MUTATING_MS);
-
-      // Blocking tier (5 min)
-      expect(bridge.getTimeoutForTool('spawn_container')).toBe(TIMEOUT_BLOCKING_MS);
-      expect(bridge.getTimeoutForTool('stop_container')).toBe(TIMEOUT_BLOCKING_MS);
-
-      // Unknown defaults to mutating
-      expect(bridge.getTimeoutForTool('unknown_tool')).toBe(TIMEOUT_MUTATING_MS);
-    });
-
-    it('should ignore handleResult for unknown call_id', () => {
-      const sendFn = vi.fn();
-      const logger = createMockLogger();
-      const bridge = new MCPBridgeImpl(sendFn, logger);
-
-      // Should not throw
-      bridge.handleResult('nonexistent-id', { data: 'test' });
-      expect(logger.warn).toHaveBeenCalledWith(
-        'Received result for unknown call_id',
-        expect.objectContaining({ call_id: 'nonexistent-id' }),
-      );
-    });
-
-    it('should cancel all pending calls on cancelAll()', async () => {
-      const sendFn = vi.fn();
-      const bridge = new MCPBridgeImpl(sendFn, createMockLogger());
-
-      const p1 = bridge.callTool('get_team', { slug: 'a' }, 'aid-a-abc123');
-      const p2 = bridge.callTool('get_task', { task_id: 'b' }, 'aid-b-def456');
-      expect(bridge.getPendingCalls()).toBe(2);
-
-      bridge.cancelAll('shutdown');
-
-      await expect(p1).rejects.toThrow('shutdown');
-      await expect(p2).rejects.toThrow('shutdown');
-      expect(bridge.getPendingCalls()).toBe(0);
-    });
+    expect(result.messages).toHaveLength(3);
+    expect(result.messages[0]).toEqual({ type: 'text', content: 'Hello' });
+    expect(result.messages[2]).toEqual({ type: 'text', content: 'Done' });
   });
 
-  // -------------------------------------------------------------------------
-  // 2. Tool authorization (SDKToolHandler RBAC)
-  // -------------------------------------------------------------------------
+  it('handles empty iterator', async () => {
+    const queryFn: QueryFn = async function* () {
+      // yields nothing
+    };
 
-  describe('Tool authorization', () => {
-    it('should allow main_assistant to call spawn_container', async () => {
-      const ctx = createMockToolContext();
-      const { mainAid } = setupOrgChart(ctx.orgChart as OrgChartImpl);
+    const opts: Record<string, unknown> = { maxTurns: 10 };
+    const result = await spawnSession('empty', opts, queryFn);
 
-      const handler = new SDKToolHandler(ctx, createToolHandlers(ctx));
-      const result = await handler.handle('spawn_container', { team_slug: 'new-team' }, mainAid, 'call-1');
+    expect(result.messages).toHaveLength(0);
+  });
+});
 
-      expect(result.success).toBe(true);
-      expect(result.result).toHaveProperty('container_id');
-    });
+// ── E2E-6/E2E-11 Simulation: Full Flow ───────────────────────────────────
 
-    it('should deny member from calling spawn_container', async () => {
-      const ctx = createMockToolContext();
-      const { memberAid } = setupOrgChart(ctx.orgChart as OrgChartImpl);
-
-      const handler = new SDKToolHandler(ctx, createToolHandlers(ctx));
-      const result = await handler.handle('spawn_container', { team_slug: 'new-team' }, memberAid, 'call-2');
-
-      expect(result.success).toBe(false);
-      expect(result.error_code).toBe(WSErrorCode.AccessDenied);
-      expect(result.error_message).toContain('not authorized');
-    });
-
-    it('should deny member from calling create_team', async () => {
-      const ctx = createMockToolContext();
-      const { memberAid } = setupOrgChart(ctx.orgChart as OrgChartImpl);
-
-      const handler = new SDKToolHandler(ctx, createToolHandlers(ctx));
-      const result = await handler.handle(
-        'create_team',
-        { slug: 'new-team', coordinator_aid: 'aid-lead-def456', purpose: 'testing' },
-        memberAid,
-        'call-3',
-      );
-
-      expect(result.success).toBe(false);
-      expect(result.error_code).toBe(WSErrorCode.AccessDenied);
-    });
-
-    it('should allow member to call update_task_status', async () => {
-      const ctx = createMockToolContext();
-      const { memberAid } = setupOrgChart(ctx.orgChart as OrgChartImpl);
-
-      // Task must be in Active state to transition to Completed
-      (ctx.taskStore.get as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
-        id: 'task-1',
-        parent_id: '',
-        team_slug: 'test-team',
-        agent_aid: memberAid,
-        title: 'Test',
-        status: TaskStatus.Active,
-        prompt: 'Test',
-        result: '',
-        error: '',
-        blocked_by: null,
-        priority: 0,
-        retry_count: 0,
-        max_retries: 0,
-        created_at: Date.now(),
-        updated_at: Date.now(),
-        completed_at: null,
-      });
-
-      const handler = new SDKToolHandler(ctx, createToolHandlers(ctx));
-      const result = await handler.handle(
-        'update_task_status',
-        { task_id: 'task-1', status: 'completed', result: 'Done' },
-        memberAid,
-        'call-4',
-      );
-
-      expect(result.success).toBe(true);
-      expect(result.result).toEqual({ status: 'completed' });
-    });
-
-    it('should allow member to call dispatch_subtask but deny container tools', async () => {
-      const ctx = createMockToolContext();
-      const { memberAid } = setupOrgChart(ctx.orgChart as OrgChartImpl);
-
-      const handler = new SDKToolHandler(ctx, createToolHandlers(ctx));
-
-      // Member can dispatch subtasks
-      const subtaskResult = await handler.handle(
-        'dispatch_subtask',
-        { parent_task_id: 'task-001', agent_aid: memberAid, prompt: 'Do something' },
-        memberAid,
-        'call-5',
-      );
-      expect(subtaskResult.success).toBe(true);
-      expect(subtaskResult.result).toHaveProperty('task_id');
-
-      // Member cannot spawn containers
-      const containerResult = await handler.handle(
-        'spawn_container',
-        { team_slug: 'new' },
-        memberAid,
-        'call-6',
-      );
-      expect(containerResult.success).toBe(false);
-      expect(containerResult.error_code).toBe(WSErrorCode.AccessDenied);
-    });
+describe('E2E-6/E2E-11: Full session flow simulation', () => {
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
-  // -------------------------------------------------------------------------
-  // 3. Tool execution: create_task with blocked_by
-  // -------------------------------------------------------------------------
+  it('assembles options, spawns session, tracks in manager', async () => {
+    vi.useFakeTimers();
+    const log = captureLog();
+    const secrets = makeSecrets();
 
-  describe('Tool execution: create_task', () => {
-    it('should create task with blocked_by dependencies', async () => {
-      const ctx = createMockToolContext();
-      const { mainAid, memberAid } = setupOrgChart(ctx.orgChart as OrgChartImpl);
+    // 1. Build query options
+    const input: BuildQueryOptionsInput = {
+      teamName: 'weather-team',
+      teamConfig: makeTeamConfig(),
+      dataDir: '/data',
+      providers: makeProviders(),
+      secrets,
+      orgMcpServer: { url: 'http://org:3000' },
+      availableMcpServers: {},
+      ancestors: [],
+      logger: log.logger,
+    };
 
-      const handler = new SDKToolHandler(ctx, createToolHandlers(ctx));
-      const result = await handler.handle(
-        'create_task',
-        {
-          agent_aid: memberAid,
-          prompt: 'Run tests',
-          blocked_by: ['dep-task-1', 'dep-task-2'],
-          priority: 5,
-        },
-        mainAid,
-        'call-7',
-      );
+    const queryOpts = buildQueryOptions(input);
 
-      expect(result.success).toBe(true);
-      expect(result.result).toHaveProperty('task_id');
+    // 2. Create session manager and register session
+    const manager = new SessionManager({ idleTimeoutMs: 10_000 });
+    const ac = manager.spawn('weather-team');
+    expect(manager.isActive('weather-team')).toBe(true);
 
-      // Verify validateDependencies was called
-      expect(ctx.taskStore.validateDependencies).toHaveBeenCalledWith(
-        expect.any(String),
-        ['dep-task-1', 'dep-task-2'],
-      );
+    // 3. Mock query function that returns messages
+    const mockMessages: SdkMessage[] = [
+      { type: 'text', content: 'Checking weather...' },
+      { type: 'tool_use', content: { tool: 'mcp__org__escalate' } },
+      { type: 'text', content: 'Weather report complete' },
+    ];
 
-      // Verify task was created with the blocked_by array
-      expect(ctx.taskStore.create).toHaveBeenCalledWith(
-        expect.objectContaining({
-          blocked_by: ['dep-task-1', 'dep-task-2'],
-          priority: 5,
-        }),
-      );
-    });
-
-    it('should reject create_task when cycle detected in dependencies', async () => {
-      const ctx = createMockToolContext();
-      const { mainAid, memberAid } = setupOrgChart(ctx.orgChart as OrgChartImpl);
-
-      // Mock validateDependencies to throw CycleDetectedError
-      (ctx.taskStore.validateDependencies as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
-        new CycleDetectedError('Dependency cycle detected: task-a -> task-b -> task-a'),
-      );
-
-      const handler = new SDKToolHandler(ctx, createToolHandlers(ctx));
-      const result = await handler.handle(
-        'create_task',
-        {
-          agent_aid: memberAid,
-          prompt: 'Cyclic task',
-          blocked_by: ['task-b'],
-        },
-        mainAid,
-        'call-8',
-      );
-
-      expect(result.success).toBe(false);
-      expect(result.error_code).toBe(WSErrorCode.CycleDetected);
-      expect(result.error_message).toContain('cycle');
-    });
-  });
-
-  // -------------------------------------------------------------------------
-  // 4. Tool error mapping: domain errors -> WS error codes
-  // -------------------------------------------------------------------------
-
-  describe('Tool error mapping', () => {
-    it('should map NotFoundError to NOT_FOUND', async () => {
-      const ctx = createMockToolContext();
-      const { mainAid } = setupOrgChart(ctx.orgChart as OrgChartImpl);
-
-      // get_task throws NotFoundError for unknown task
-      (ctx.taskStore.get as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
-        new NotFoundError("Task 'nonexistent' not found"),
-      );
-
-      const handler = new SDKToolHandler(ctx, createToolHandlers(ctx));
-      const result = await handler.handle(
-        'get_task',
-        { task_id: 'nonexistent' },
-        mainAid,
-        'call-9',
-      );
-
-      expect(result.success).toBe(false);
-      expect(result.error_code).toBe(WSErrorCode.NotFound);
-      expect(result.error_message).toContain('not found');
-    });
-
-    it('should map ValidationError to VALIDATION_ERROR', async () => {
-      const ctx = createMockToolContext();
-      const { mainAid } = setupOrgChart(ctx.orgChart as OrgChartImpl);
-
-      // Trigger validation by attempting invalid state transition
-      (ctx.taskStore.get as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
-        id: 'task-1',
-        parent_id: '',
-        team_slug: 'test-team',
-        agent_aid: mainAid,
-        title: 'Test',
-        status: TaskStatus.Completed, // terminal state
-        prompt: 'Test',
-        result: 'Done',
-        error: '',
-        blocked_by: null,
-        priority: 0,
-        retry_count: 0,
-        max_retries: 0,
-        created_at: Date.now(),
-        updated_at: Date.now(),
-        completed_at: Date.now(),
-      });
-
-      const handler = new SDKToolHandler(ctx, createToolHandlers(ctx));
-      const result = await handler.handle(
-        'update_task_status',
-        { task_id: 'task-1', status: 'active' },
-        mainAid,
-        'call-10',
-      );
-
-      expect(result.success).toBe(false);
-      expect(result.error_code).toBe(WSErrorCode.ValidationError);
-      expect(result.error_message).toContain('Invalid task state transition');
-    });
-
-    it('should map AccessDeniedError to ACCESS_DENIED', async () => {
-      const ctx = createMockToolContext();
-      const { memberAid } = setupOrgChart(ctx.orgChart as OrgChartImpl);
-
-      const handler = new SDKToolHandler(ctx, createToolHandlers(ctx));
-      const result = await handler.handle(
-        'list_containers',
-        {},
-        memberAid,
-        'call-11',
-      );
-
-      expect(result.success).toBe(false);
-      expect(result.error_code).toBe(WSErrorCode.AccessDenied);
-    });
-
-    it('should map unknown errors to INTERNAL_ERROR', async () => {
-      const ctx = createMockToolContext();
-      const { mainAid } = setupOrgChart(ctx.orgChart as OrgChartImpl);
-
-      // Simulate an unexpected runtime error in the handler
-      (ctx.containerManager.listRunningContainers as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
-        new Error('Docker socket connection refused'),
-      );
-
-      const handler = new SDKToolHandler(ctx, createToolHandlers(ctx));
-      const result = await handler.handle(
-        'list_containers',
-        {},
-        mainAid,
-        'call-12',
-      );
-
-      expect(result.success).toBe(false);
-      expect(result.error_code).toBe(WSErrorCode.InternalError);
-      expect(result.error_message).toContain('Docker socket');
-    });
-
-    it('should log tool calls on both success and failure', async () => {
-      const ctx = createMockToolContext();
-      const { mainAid } = setupOrgChart(ctx.orgChart as OrgChartImpl);
-
-      const handler = new SDKToolHandler(ctx, createToolHandlers(ctx));
-
-      // Success case
-      await handler.handle('list_containers', {}, mainAid, 'call-success');
-      expect(ctx.toolCallStore.create).toHaveBeenCalledWith(
-        expect.objectContaining({
-          tool_use_id: 'call-success',
-          tool_name: 'list_containers',
-          agent_aid: mainAid,
-          error: '',
-        }),
-      );
-
-      // Failure case
-      (ctx.containerManager.listRunningContainers as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
-        new Error('fail'),
-      );
-      await handler.handle('list_containers', {}, mainAid, 'call-failure');
-      expect(ctx.toolCallStore.create).toHaveBeenCalledWith(
-        expect.objectContaining({
-          tool_use_id: 'call-failure',
-          tool_name: 'list_containers',
-          error: 'fail',
-        }),
-      );
-    });
-  });
-
-  // -------------------------------------------------------------------------
-  // 5. save_memory dual-write: MemoryStore index write
-  // -------------------------------------------------------------------------
-
-  describe('save_memory dual-write', () => {
-    it('should persist memory via MemoryStore with correct fields', async () => {
-      const ctx = createMockToolContext();
-      const { memberAid, teamSlug } = setupOrgChart(ctx.orgChart as OrgChartImpl);
-
-      const handler = new SDKToolHandler(ctx, createToolHandlers(ctx));
-      const result = await handler.handle(
-        'save_memory',
-        { content: 'Important discovery about API rate limits', memory_type: 'curated' },
-        memberAid,
-        'call-13',
-      );
-
-      expect(result.success).toBe(true);
-      expect(result.result).toHaveProperty('memory_id');
-      expect(result.result!.status).toBe('saved');
-
-      // Verify MemoryStore.save was called with correct data
-      expect(ctx.memoryStore.save).toHaveBeenCalledWith(
-        expect.objectContaining({
-          agent_aid: memberAid,
-          team_slug: teamSlug,
-          content: 'Important discovery about API rate limits',
-          memory_type: 'curated',
-          deleted_at: null,
-        }),
-      );
-    });
-
-    it('should recall memories via MemoryStore search', async () => {
-      const ctx = createMockToolContext();
-      const { memberAid } = setupOrgChart(ctx.orgChart as OrgChartImpl);
-
-      const mockMemories: MemoryEntry[] = [
-        {
-          id: 1,
-          agent_aid: memberAid,
-          team_slug: 'test-team',
-          content: 'Rate limit is 100 req/min',
-          memory_type: 'curated',
-          created_at: Date.now(),
-          deleted_at: null,
-        },
-      ];
-      (ctx.memoryStore.searchHybrid as ReturnType<typeof vi.fn>).mockResolvedValueOnce(mockMemories);
-
-      const handler = new SDKToolHandler(ctx, createToolHandlers(ctx));
-      const result = await handler.handle(
-        'recall_memory',
-        { query: 'rate limit', limit: 5 },
-        memberAid,
-        'call-14',
-      );
-
-      expect(result.success).toBe(true);
-      const memories = (result.result as Record<string, unknown>).memories as Array<Record<string, unknown>>;
-      expect(memories).toHaveLength(1);
-      expect(memories[0].content).toBe('Rate limit is 100 req/min');
-
-      // Verify searchHybrid was called (recall_memory now uses hybrid search)
-      expect(ctx.memoryStore.searchHybrid).toHaveBeenCalledWith(
-        'rate limit',
-        memberAid,
-        undefined, // no embedding service
-        5,
-      );
-    });
-  });
-
-
-  // SkillLoader + SkillRegistry tests extracted to layer-6-skills.test.ts
-
-  // -------------------------------------------------------------------------
-  // 8. Integration wiring: full tool call flow
-  // -------------------------------------------------------------------------
-
-  describe('Integration wiring', () => {
-    it('should execute full tool call flow: SDKToolHandler -> handler -> stores -> result', async () => {
-      const ctx = createMockToolContext();
-      const orgChart = ctx.orgChart as OrgChartImpl;
-      const { mainAid, leadAid, memberAid, teamSlug } = setupOrgChart(orgChart);
-
-      const events: BusEvent[] = [];
-      (ctx.eventBus as EventBusImpl).subscribe((event) => events.push(event));
-
-      const handler = new SDKToolHandler(ctx, createToolHandlers(ctx));
-
-      // Step 1: Create a task (main_assistant assigning to team member)
-      const createResult = await handler.handle(
-        'create_task',
-        { agent_aid: memberAid, prompt: 'Build the feature', priority: 3 },
-        mainAid,
-        'call-flow-1',
-      );
-      expect(createResult.success).toBe(true);
-      const taskId = (createResult.result as Record<string, unknown>).task_id as string;
-      expect(taskId).toBeTruthy();
-
-      // Verify task was created in store
-      expect(ctx.taskStore.create).toHaveBeenCalledWith(
-        expect.objectContaining({
-          id: taskId,
-          agent_aid: memberAid,
-          prompt: 'Build the feature',
-          status: TaskStatus.Pending,
-          priority: 3,
-        }),
-      );
-
-      // Step 2: Save memory (member)
-      const memResult = await handler.handle(
-        'save_memory',
-        { content: 'Figured out the API structure', memory_type: 'daily' },
-        memberAid,
-        'call-flow-2',
-      );
-      expect(memResult.success).toBe(true);
-      expect(ctx.memoryStore.save).toHaveBeenCalledWith(
-        expect.objectContaining({
-          agent_aid: memberAid,
-          team_slug: teamSlug,
-          content: 'Figured out the API structure',
-          memory_type: 'daily',
-        }),
-      );
-
-      // Step 3: Tool call logging happened for both calls
-      expect(ctx.toolCallStore.create).toHaveBeenCalledTimes(2);
-
-      // Step 4: Verify send_message from main_assistant to member (authorized)
-      const sendResult = await handler.handle(
-        'send_message',
-        { target_aid: memberAid, content: 'Task complete' },
-        mainAid,
-        'call-flow-3',
-      );
-      expect(sendResult.success).toBe(true);
-      expect(ctx.messageStore.create).toHaveBeenCalledWith(
-        expect.objectContaining({
-          content: 'Task complete',
-          role: 'agent',
-        }),
-      );
-
-      // Step 5: Verify cross-team messaging is denied (member to lead on different team)
-      const crossResult = await handler.handle(
-        'send_message',
-        { target_aid: leadAid, content: 'Should fail' },
-        memberAid,
-        'call-flow-4',
-      );
-      expect(crossResult.success).toBe(false);
-      expect(crossResult.error_code).toBe(WSErrorCode.AccessDenied);
-    });
-
-    it('should verify all 27 tool schemas are defined', () => {
-      const schemaKeys = Object.keys(TOOL_SCHEMAS);
-      expect(schemaKeys).toHaveLength(27);
-
-      // Verify critical tools are present
-      const expectedTools = [
-        'spawn_container', 'stop_container', 'list_containers',
-        'create_team', 'create_agent',
-        'create_task', 'dispatch_subtask', 'update_task_status',
-        'send_message', 'escalate',
-        'save_memory', 'recall_memory',
-        'create_integration', 'test_integration', 'activate_integration',
-        'get_credential', 'set_credential',
-        'get_team', 'get_task', 'get_health', 'inspect_topology',
-        'register_webhook', 'register_trigger',
-        'browse_web',
-      ];
-
-      for (const tool of expectedTools) {
-        expect(schemaKeys).toContain(tool);
+    const queryFn: QueryFn = async function* () {
+      for (const msg of mockMessages) {
+        yield msg;
       }
-    });
+    };
 
-    it('should verify createToolHandlers returns 27 handlers', () => {
-      const ctx = createMockToolContext();
-      setupOrgChart(ctx.orgChart as OrgChartImpl);
+    // 4. Spawn the session (simulated SDK call)
+    const result = await spawnSession('get weather for NYC', queryOpts, queryFn);
 
-      const handlers = createToolHandlers(ctx);
-      expect(handlers.size).toBe(27);
-    });
+    expect(result.messages).toHaveLength(3);
+    expect(result.messages[0].type).toBe('text');
 
-    it('should wire MCPBridge round-trip with SDKToolHandler', async () => {
-      const ctx = createMockToolContext();
-      const { mainAid } = setupOrgChart(ctx.orgChart as OrgChartImpl);
-      const sdkHandler = new SDKToolHandler(ctx, createToolHandlers(ctx));
+    // 5. Verify canUseTool works with assembled options
+    expect(queryOpts.canUseTool('Read').allowed).toBe(true);
+    expect(queryOpts.canUseTool('Bash').allowed).toBe(false);
+    expect(queryOpts.canUseTool('mcp__org__escalate').allowed).toBe(true);
 
-      // Simulate the bridge sending a tool call, root handling it, and sending result back
-      const sent: Record<string, unknown>[] = [];
-      const sendFn = (msg: Record<string, unknown>) => sent.push(msg);
-      const bridge = new MCPBridgeImpl(sendFn, createMockLogger());
+    // 6. Verify stderr scrubber works
+    const scrubbed = queryOpts.stderr('Error: ' + TEST_KEY_VALUE + ' leaked');
+    expect(scrubbed).not.toContain(TEST_KEY_VALUE);
 
-      // Agent calls get_team through the bridge
-      const resultPromise = bridge.callTool('get_team', { slug: 'test-team' }, mainAid);
+    // 7. Stop session and verify cleanup
+    manager.stop('weather-team');
+    expect(manager.isActive('weather-team')).toBe(false);
+    expect(ac.signal.aborted).toBe(true);
 
-      // Root receives the WS message and processes it through SDKToolHandler
-      const wsMsg = sent[0];
-      const data = wsMsg.data as Record<string, unknown>;
-      const callId = data.call_id as string;
-      const toolName = data.tool_name as string;
-      const args = data.arguments as Record<string, unknown>;
-      const agentAid = data.agent_aid as string;
+    manager.stopAll();
+  });
 
-      const handlerResult = await sdkHandler.handle(toolName, args, agentAid, callId);
+  it('provider error prevents session from starting', () => {
+    const log = captureLog();
+    const secrets = makeSecrets();
 
-      // Root sends result back over WS (simulated by calling handleResult)
-      if (handlerResult.success) {
-        bridge.handleResult(callId, handlerResult.result!);
-      } else {
-        bridge.handleError(callId, handlerResult.error_code!, handlerResult.error_message!);
-      }
+    const input: BuildQueryOptionsInput = {
+      teamName: 'broken-team',
+      teamConfig: makeTeamConfig({ provider_profile: 'nonexistent' }),
+      dataDir: '/data',
+      providers: makeProviders(),
+      secrets,
+      orgMcpServer: {},
+      availableMcpServers: {},
+      ancestors: [],
+      logger: log.logger,
+    };
 
-      // Agent receives the resolved result
-      const result = await resultPromise;
-      expect(result).toHaveProperty('slug', 'test-team');
-      expect(result).toHaveProperty('tid');
-      expect(bridge.getPendingCalls()).toBe(0);
-    });
+    expect(() => buildQueryOptions(input)).toThrow(ConfigError);
   });
 });

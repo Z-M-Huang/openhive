@@ -1,124 +1,48 @@
 /**
- * Domain error classes for OpenHive.
+ * Domain error hierarchy for OpenHive v3.
  *
- * Base DomainError carries a WSErrorCode. Specialized subclasses provide
- * semantic error types used throughout the codebase. The mapDomainErrorToWSError()
- * function converts any DomainError to its WSErrorCode for wire responses.
+ * All domain errors extend OpenHiveError so callers can catch
+ * a single base class when they don't care about the specific kind.
  */
 
-import { WSErrorCode } from './enums.js';
-
-// ---------------------------------------------------------------------------
-// Base
-// ---------------------------------------------------------------------------
-
-/** Base class for all domain errors. Carries a WSErrorCode for wire mapping. */
-export class DomainError extends Error {
-  readonly code: WSErrorCode;
-
-  constructor(code: WSErrorCode, message: string) {
+export class OpenHiveError extends Error {
+  constructor(message: string) {
     super(message);
-    this.name = 'DomainError';
-    this.code = code;
+    this.name = 'OpenHiveError';
   }
 }
 
-// ---------------------------------------------------------------------------
-// Specialized Errors
-// ---------------------------------------------------------------------------
-
-export class NotFoundError extends DomainError {
+export class ConfigError extends OpenHiveError {
   constructor(message: string) {
-    super(WSErrorCode.NotFound, message);
-    this.name = 'NotFoundError';
+    super(message);
+    this.name = 'ConfigError';
   }
 }
 
-export class ValidationError extends DomainError {
+export class ValidationError extends OpenHiveError {
   constructor(message: string) {
-    super(WSErrorCode.ValidationError, message);
+    super(message);
     this.name = 'ValidationError';
   }
 }
 
-export class ConflictError extends DomainError {
+export class ScopeRejectionError extends OpenHiveError {
   constructor(message: string) {
-    super(WSErrorCode.Conflict, message);
-    this.name = 'ConflictError';
+    super(message);
+    this.name = 'ScopeRejectionError';
   }
 }
 
-export class EncryptionLockedError extends DomainError {
+export class WorkspaceBoundaryError extends OpenHiveError {
   constructor(message: string) {
-    super(WSErrorCode.EncryptionLocked, message);
-    this.name = 'EncryptionLockedError';
+    super(message);
+    this.name = 'WorkspaceBoundaryError';
   }
 }
 
-export class RateLimitedError extends DomainError {
+export class SecretLeakError extends OpenHiveError {
   constructor(message: string) {
-    super(WSErrorCode.RateLimited, message);
-    this.name = 'RateLimitedError';
+    super(message);
+    this.name = 'SecretLeakError';
   }
-}
-
-export class AccessDeniedError extends DomainError {
-  constructor(message: string) {
-    super(WSErrorCode.AccessDenied, message);
-    this.name = 'AccessDeniedError';
-  }
-}
-
-export class InternalError extends DomainError {
-  constructor(message: string) {
-    super(WSErrorCode.InternalError, message);
-    this.name = 'InternalError';
-  }
-}
-
-export class DepthLimitExceededError extends DomainError {
-  constructor(message: string) {
-    super(WSErrorCode.DepthLimitExceeded, message);
-    this.name = 'DepthLimitExceededError';
-  }
-}
-
-export class CycleDetectedError extends DomainError {
-  constructor(message: string) {
-    super(WSErrorCode.CycleDetected, message);
-    this.name = 'CycleDetectedError';
-  }
-}
-
-/** Thrown when a task state transition violates the state machine. */
-export class InvalidTransitionError extends DomainError {
-  constructor(message: string) {
-    super(WSErrorCode.ValidationError, message);
-    this.name = 'InvalidTransitionError';
-  }
-}
-
-/** Thrown when an AID or TID does not match the expected format. */
-export class InvalidIDError extends DomainError {
-  constructor(message: string) {
-    super(WSErrorCode.ValidationError, message);
-    this.name = 'InvalidIDError';
-  }
-}
-
-/** Thrown when a team slug matches a reserved name. */
-export class ReservedSlugError extends DomainError {
-  constructor(message: string) {
-    super(WSErrorCode.ValidationError, message);
-    this.name = 'ReservedSlugError';
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Mapper
-// ---------------------------------------------------------------------------
-
-/** Maps a DomainError to its WSErrorCode for wire-protocol responses. */
-export function mapDomainErrorToWSError(err: DomainError): WSErrorCode {
-  return err.code;
 }

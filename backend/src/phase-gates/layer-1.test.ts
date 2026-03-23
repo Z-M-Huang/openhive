@@ -1,404 +1,291 @@
 /**
- * Layer 1 Phase Gate: Config + Logging integration tests.
+ * Layer 1 Phase Gate — Config + Logging + Secrets
  *
- * Exercises real ConfigLoader and Logger against real filesystem,
- * real YAML parser, and real pino. Uses fs.mkdtemp for isolation.
+ * UT-11: SecretString expose/redaction
+ * UT-12: Secret resolver loading and path traversal rejection
+ * UT-1:  Config loader validation and fail-fast
+ * UT-13: Credential scrubber known values and patterns
+ * UT-24: Logger smoke test
  */
 
-import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
-import { mkdtemp, writeFile, rm, stat, mkdir } from 'node:fs/promises';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { writeFileSync, mkdirSync, rmSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { inspect } from 'node:util';
 import { tmpdir } from 'node:os';
-import * as YAML from 'yaml';
+import { randomBytes } from 'node:crypto';
 
-import { ConfigLoaderImpl } from '../config/loader.js';
-import { LoggerImpl } from '../logging/logger.js';
-import { SQLiteSink } from '../logging/sinks.js';
-import { LogLevel } from '../domain/enums.js';
-import type { LogEntry } from '../domain/domain.js';
-import type { LogSink, LogStore } from '../domain/interfaces.js';
+import { SecretString } from '../secrets/secret-string.js';
+import { resolveSecrets } from '../secrets/resolver.js';
+import { loadTeamConfig, loadProviders, loadTriggers, loadLogging } from '../config/loader.js';
+import { scrubSecrets, createStderrScrubber } from '../logging/credential-scrubber.js';
+import { createLogger } from '../logging/logger.js';
+import { ConfigError, ValidationError } from '../domain/errors.js';
 
-// ---------------------------------------------------------------------------
-// Shared temp dir + cleanup
-// ---------------------------------------------------------------------------
+// ── Helpers ────────────────────────────────────────────────────────────────
 
-let tempRoot: string;
-const cleanups: Array<() => Promise<void>> = [];
+function makeTmpDir(): string {
+  const dir = join(tmpdir(), `openhive-test-${randomBytes(8).toString('hex')}`);
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
 
-beforeEach(async () => {
-  tempRoot = await mkdtemp(join(tmpdir(), 'l1-gate-'));
+// ── UT-11: SecretString ────────────────────────────────────────────────────
+
+describe('UT-11: SecretString', () => {
+  const raw = 'super-secret-api-key-12345';
+  const secret = new SecretString(raw);
+
+  it('expose() returns the raw value', () => {
+    expect(secret.expose()).toBe(raw);
+  });
+
+  it('toString() returns [REDACTED]', () => {
+    expect(secret.toString()).toBe('[REDACTED]');
+  });
+
+  it('toJSON() returns [REDACTED]', () => {
+    expect(secret.toJSON()).toBe('[REDACTED]');
+    expect(JSON.stringify({ key: secret })).toBe('{"key":"[REDACTED]"}');
+  });
+
+  it('Symbol.toPrimitive returns [REDACTED]', () => {
+    // eslint-disable-next-line @typescript-eslint/restrict-template-expressions
+    expect(`${secret}`).toBe('[REDACTED]');
+  });
+
+  it('util.inspect returns [REDACTED]', () => {
+    expect(inspect(secret)).toBe('[REDACTED]');
+  });
+
+  it('prototype is frozen', () => {
+    expect(Object.isFrozen(SecretString.prototype)).toBe(true);
+  });
+
+  it('instance is frozen', () => {
+    expect(Object.isFrozen(secret)).toBe(true);
+  });
 });
 
-afterEach(async () => {
-  for (const fn of cleanups) {
-    await fn();
-  }
-  cleanups.length = 0;
-  if (tempRoot) {
-    await rm(tempRoot, { recursive: true, force: true });
-  }
+// ── UT-12: Secret Resolver ─────────────────────────────────────────────────
+
+describe('UT-12: Secret Resolver', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = makeTmpDir();
+  });
+
+  afterEach(() => {
+    if (existsSync(tmpDir)) rmSync(tmpDir, { recursive: true });
+  });
+
+  it('loads .env file with KEY=VALUE pairs', () => {
+    writeFileSync(join(tmpDir, 'global.env'), 'GLOBAL_KEY=global-value\n');
+    writeFileSync(join(tmpDir, 'myteam.env'), 'TEAM_KEY=team-value\n');
+    const secrets = resolveSecrets('myteam', tmpDir);
+    expect(secrets.get('GLOBAL_KEY')?.expose()).toBe('global-value');
+    expect(secrets.get('TEAM_KEY')?.expose()).toBe('team-value');
+  });
+
+  it('team secrets override global secrets', () => {
+    writeFileSync(join(tmpDir, 'global.env'), 'SHARED=from-global\n');
+    writeFileSync(join(tmpDir, 'myteam.env'), 'SHARED=from-team\n');
+    const secrets = resolveSecrets('myteam', tmpDir);
+    expect(secrets.get('SHARED')?.expose()).toBe('from-team');
+  });
+
+  it('skips empty lines and comments', () => {
+    writeFileSync(
+      join(tmpDir, 'global.env'),
+      '# comment\n\nKEY=val\n  \n# another\n',
+    );
+    const secrets = resolveSecrets('myteam', tmpDir);
+    expect(secrets.size).toBe(1);
+    expect(secrets.get('KEY')?.expose()).toBe('val');
+  });
+
+  it('handles missing files gracefully', () => {
+    const secrets = resolveSecrets('myteam', tmpDir);
+    expect(secrets.size).toBe(0);
+  });
+
+  it('rejects path traversal in team slug', () => {
+    expect(() => resolveSecrets('../etc', tmpDir)).toThrow(ValidationError);
+  });
+
+  it('rejects invalid slug format', () => {
+    expect(() => resolveSecrets('UPPER_CASE', tmpDir)).toThrow(ValidationError);
+    expect(() => resolveSecrets('has spaces', tmpDir)).toThrow(ValidationError);
+    expect(() => resolveSecrets('', tmpDir)).toThrow(ValidationError);
+  });
 });
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+// ── UT-1: Config Loader ────────────────────────────────────────────────────
 
-// Test-only placeholder values (kept short to avoid security gate false positives)
-const FAKE_OAUTH = 'tok-test-123';
-const FAKE_KEY = 'key-456';
+describe('UT-1: Config Loader', () => {
+  let tmpDir: string;
 
-async function makeLoader() {
-  const dataDir = join(tempRoot, 'data');
-  const runDir = join(tempRoot, 'run');
-  await mkdir(dataDir, { recursive: true });
-  await mkdir(runDir, { recursive: true });
-  const loader = new ConfigLoaderImpl({ dataDir, runDir });
-  cleanups.push(async () => loader.stopWatching());
-  return { loader, dataDir, runDir };
-}
-
-function makeMockLogStore(): LogStore & { createCalls: LogEntry[][] } {
-  const createCalls: LogEntry[][] = [];
-  return {
-    createCalls,
-    create: vi.fn(async (entries: LogEntry[]) => {
-      createCalls.push([...entries]);
-    }),
-    createWithIds: vi.fn().mockResolvedValue([1]),
-    query: vi.fn().mockResolvedValue([]),
-    deleteBefore: vi.fn().mockResolvedValue(0),
-    deleteByLevelBefore: vi.fn().mockResolvedValue(0),
-    count: vi.fn().mockResolvedValue(0),
-    getOldest: vi.fn().mockResolvedValue([]),
-  };
-}
-
-function makeCaptureSink(): LogSink & { entries: LogEntry[][] } {
-  const entries: LogEntry[][] = [];
-  return {
-    entries,
-    write: vi.fn(async (batch: LogEntry[]) => {
-      entries.push([...batch]);
-    }),
-    close: vi.fn(async () => {}),
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Integration tests
-// ---------------------------------------------------------------------------
-
-describe('Layer 1: Config+Logging', () => {
-
-  // -------------------------------------------------------------------------
-  // 1. Config round-trip
-  // -------------------------------------------------------------------------
-
-  describe('Config round-trip', () => {
-    it('write YAML -> loadMaster -> verify defaults merged -> saveMaster(modified) -> reload -> verify persisted', async () => {
-      const { loader, dataDir } = await makeLoader();
-
-      // Write partial YAML
-      await writeFile(
-        join(dataDir, 'openhive.yaml'),
-        YAML.stringify({ limits: { max_depth: 5 } }),
-        'utf-8',
-      );
-
-      // Load and verify defaults merged with YAML
-      const config = await loader.loadMaster();
-      expect(config.limits.max_depth).toBe(5);
-      expect(config.server.listen_address).toBe('0.0.0.0:8080');
-      expect(config.assistant.name).toBe('OpenHive Assistant');
-
-      // Modify and save
-      const modified = { ...config, limits: { ...config.limits, max_teams: 20 } };
-      await loader.saveMaster(modified);
-
-      // Reload and verify modified values persisted
-      const reloaded = await loader.loadMaster();
-      expect(reloaded.limits.max_depth).toBe(5);
-      expect(reloaded.limits.max_teams).toBe(20);
-      expect(reloaded.server.listen_address).toBe('0.0.0.0:8080');
-    });
+  beforeEach(() => {
+    tmpDir = makeTmpDir();
   });
 
-  // -------------------------------------------------------------------------
-  // 2. Provider round-trip
-  // -------------------------------------------------------------------------
-
-  describe('Provider round-trip', () => {
-    it('write providers.yaml -> loadProviders -> verify -> saveProviders(modified) -> reload -> verify', async () => {
-      const { loader, dataDir } = await makeLoader();
-
-      // Write initial providers
-      const initial = {
-        default: {
-          type: 'oauth' as const,
-          oauth_token: FAKE_OAUTH,
-          models: { haiku: 'claude-3-haiku-20240307' },
-        },
-      };
-      await writeFile(join(dataDir, 'providers.yaml'), YAML.stringify(initial), 'utf-8');
-
-      // Load and verify
-      const loaded = await loader.loadProviders();
-      expect(loaded['default'].type).toBe('oauth');
-      expect(loaded['default'].oauth_token).toBe(FAKE_OAUTH);
-      expect(loaded['default'].name).toBe('default');
-
-      // Save with additional provider
-      const modified = {
-        ...loaded,
-        secondary: {
-          name: 'secondary',
-          type: 'anthropic_direct' as const,
-          api_key: FAKE_KEY,
-        },
-      };
-      await loader.saveProviders(modified);
-
-      // Reload and verify both providers
-      const reloaded = await loader.loadProviders();
-      expect(reloaded['default'].oauth_token).toBe(FAKE_OAUTH);
-      expect(reloaded['secondary'].type).toBe('anthropic_direct');
-      expect(reloaded['secondary'].api_key).toBe(FAKE_KEY);
-    });
+  afterEach(() => {
+    if (existsSync(tmpDir)) rmSync(tmpDir, { recursive: true });
   });
 
-  // -------------------------------------------------------------------------
-  // 3. Team lifecycle
-  // -------------------------------------------------------------------------
-
-  describe('Team lifecycle', () => {
-    it('createTeamDir -> verify structure -> saveTeam -> loadTeam -> listTeams -> deleteTeamDir -> verify removed', async () => {
-      const { loader, runDir } = await makeLoader();
-
-      // Create team directory
-      await loader.createTeamDir('weather-team');
-      const teamPath = join(runDir, 'workspace', 'teams', 'weather-team');
-
-      // Verify full directory structure
-      const dirs = [
-        '.claude/agents',
-        '.claude/skills',
-        'memory',
-        'work',
-        'integrations',
-        'teams',
-      ];
-      for (const dir of dirs) {
-        const info = await stat(join(teamPath, dir));
-        expect(info.isDirectory()).toBe(true);
-      }
-
-      // Save team config
-      const team = {
-        tid: 'tid-weather-001',
-        slug: 'weather-team',
-        coordinator_aid: 'aid-lead-001',
-        parent_tid: '',
-        depth: 0,
-        container_id: '',
-        health: 'unknown',
-        agent_aids: ['aid-member-001'],
-        workspace_path: teamPath,
-        created_at: Date.now(),
-      };
-      await loader.saveTeam(teamPath, team);
-
-      // Load and verify round-trip
-      const loaded = await loader.loadTeam(teamPath);
-      expect(loaded.slug).toBe('weather-team');
-      expect(loaded.coordinator_aid).toBe('aid-lead-001');
-
-      // List teams (should include weather-team)
-      const teams = await loader.listTeams();
-      expect(teams).toContain('weather-team');
-
-      // Delete
-      await loader.deleteTeamDir('weather-team');
-
-      // Verify removed
-      const teamsAfter = await loader.listTeams();
-      expect(teamsAfter).not.toContain('weather-team');
-      await expect(stat(teamPath)).rejects.toThrow();
-    });
+  it('loadTeamConfig validates valid YAML', () => {
+    const yaml = `
+name: weather-team
+provider_profile: default-sonnet
+description: Handles weather queries
+scope:
+  accepts: ["weather", "forecast"]
+  rejects: []
+`;
+    const file = join(tmpDir, 'team.yaml');
+    writeFileSync(file, yaml);
+    const config = loadTeamConfig(file);
+    expect(config.name).toBe('weather-team');
+    expect(config.maxTurns).toBe(50); // default
+    expect(config.parent).toBeNull();
   });
 
-  // -------------------------------------------------------------------------
-  // 4. Logger + StdoutSink (capture sink as proxy)
-  // -------------------------------------------------------------------------
-
-  describe('Logger + StdoutSink', () => {
-    it('logs at various levels, flush produces structured entries', async () => {
-      const sink = makeCaptureSink();
-      const logger = new LoggerImpl({
-        minLevel: LogLevel.Trace,
-        sinks: [sink],
-        batchSize: 100,
-        flushIntervalMs: 60_000,
-      });
-
-      logger.trace('trace msg');
-      logger.debug('debug msg');
-      logger.info('info msg');
-      logger.warn('warn msg');
-      logger.error('error msg');
-      logger.audit('audit msg');
-
-      await logger.flush();
-
-      expect(sink.entries).toHaveLength(1);
-      expect(sink.entries[0]).toHaveLength(6);
-
-      // Verify level ordering
-      expect(sink.entries[0][0].level).toBe(LogLevel.Trace);
-      expect(sink.entries[0][1].level).toBe(LogLevel.Debug);
-      expect(sink.entries[0][2].level).toBe(LogLevel.Info);
-      expect(sink.entries[0][3].level).toBe(LogLevel.Warn);
-      expect(sink.entries[0][4].level).toBe(LogLevel.Error);
-      expect(sink.entries[0][5].level).toBe(LogLevel.Audit);
-
-      // Each entry has required fields
-      for (const entry of sink.entries[0]) {
-        expect(entry.id).toBeGreaterThan(0);
-        expect(entry.created_at).toBeGreaterThan(0);
-        expect(typeof entry.message).toBe('string');
-      }
-
-      await logger.stop();
-    });
+  it('loadTeamConfig rejects missing required fields', () => {
+    const yaml = `description: no name or profile`;
+    const file = join(tmpDir, 'team.yaml');
+    writeFileSync(file, yaml);
+    expect(() => loadTeamConfig(file)).toThrow(ConfigError);
   });
 
-  // -------------------------------------------------------------------------
-  // 5. Logger + mock SQLiteSink
-  // -------------------------------------------------------------------------
-
-  describe('Logger + mock SQLiteSink', () => {
-    it('log entries flow through to store.create with correct entries', async () => {
-      const store = makeMockLogStore();
-      const sqliteSink = new SQLiteSink(store);
-      const logger = new LoggerImpl({
-        minLevel: LogLevel.Info,
-        sinks: [sqliteSink],
-        batchSize: 100,
-        flushIntervalMs: 60_000,
-      });
-
-      logger.info('test event', { component: 'orchestrator' });
-      logger.warn('warning event');
-      await logger.flush();
-
-      expect(store.create).toHaveBeenCalledTimes(1);
-      expect(store.createCalls).toHaveLength(1);
-      expect(store.createCalls[0]).toHaveLength(2);
-      expect(store.createCalls[0][0].message).toBe('test event');
-      expect(store.createCalls[0][0].level).toBe(LogLevel.Info);
-      expect(store.createCalls[0][1].message).toBe('warning event');
-      expect(store.createCalls[0][1].level).toBe(LogLevel.Warn);
-
-      await logger.stop();
-    });
+  it('loadProviders validates valid YAML', () => {
+    const yaml = `
+profiles:
+  sonnet:
+    type: api
+    api_key_ref: ANTHROPIC_KEY
+    model: claude-sonnet-4-20250514
+`;
+    const file = join(tmpDir, 'providers.yaml');
+    writeFileSync(file, yaml);
+    const result = loadProviders(file);
+    expect(result.profiles['sonnet']?.type).toBe('api');
   });
 
-  // -------------------------------------------------------------------------
-  // 6. Env var override
-  // -------------------------------------------------------------------------
-
-  describe('Env var override', () => {
-    afterEach(() => {
-      delete process.env['OPENHIVE_LOG_LEVEL'];
-    });
-
-    it('OPENHIVE_LOG_LEVEL=debug overrides server.log_level', async () => {
-      const { loader } = await makeLoader();
-      process.env['OPENHIVE_LOG_LEVEL'] = 'debug';
-
-      const config = await loader.loadMaster();
-      expect(config.server.log_level).toBe('debug');
-    });
-
-    it('env var wins over YAML value', async () => {
-      const { loader, dataDir } = await makeLoader();
-      await writeFile(
-        join(dataDir, 'openhive.yaml'),
-        YAML.stringify({ server: { log_level: 'warn' } }),
-        'utf-8',
-      );
-      process.env['OPENHIVE_LOG_LEVEL'] = 'error';
-
-      const config = await loader.loadMaster();
-      expect(config.server.log_level).toBe('error');
-    });
+  it('loadProviders rejects invalid provider type', () => {
+    const yaml = `
+profiles:
+  bad:
+    type: invalid
+`;
+    const file = join(tmpDir, 'providers.yaml');
+    writeFileSync(file, yaml);
+    expect(() => loadProviders(file)).toThrow(ConfigError);
   });
 
-  // -------------------------------------------------------------------------
-  // 7. Redaction integration
-  // -------------------------------------------------------------------------
+  it('loadTriggers validates valid YAML', () => {
+    const yaml = `
+triggers:
+  - name: daily-check
+    type: schedule
+    config:
+      cron: "0 9 * * *"
+    team: weather
+    task: health check
+`;
+    const file = join(tmpDir, 'triggers.yaml');
+    writeFileSync(file, yaml);
+    const result = loadTriggers(file);
+    expect(result.triggers).toHaveLength(1);
+    expect(result.triggers[0]?.name).toBe('daily-check');
+  });
 
-  describe('Redaction integration', () => {
-    it('sensitive keys in params are replaced with [REDACTED]', async () => {
-      const sink = makeCaptureSink();
-      const logger = new LoggerImpl({
-        minLevel: LogLevel.Trace,
-        sinks: [sink],
-        batchSize: 100,
-        flushIntervalMs: 60_000,
-      });
+  it('loadLogging validates and applies defaults', () => {
+    const yaml = `level: debug`;
+    const file = join(tmpDir, 'logging.yaml');
+    writeFileSync(file, yaml);
+    const result = loadLogging(file);
+    expect(result.level).toBe('debug');
+    expect(result.retention).toBeUndefined();
+  });
 
-      // Build params with sensitive key programmatically to avoid security gate regex
-      const sensitiveParams: Record<string, unknown> = { host: 'api.example.com' };
-      sensitiveParams['api_' + 'key'] = 'test-val';
-      logger.info('connecting to provider', sensitiveParams);
-      await logger.flush();
+  it('throws ConfigError for nonexistent file', () => {
+    expect(() => loadTeamConfig('/nonexistent/file.yaml')).toThrow(ConfigError);
+  });
 
-      expect(sink.entries).toHaveLength(1);
-      const params = JSON.parse(sink.entries[0][0].params) as Record<string, unknown>;
-      expect(params['api_key']).toBe('[REDACTED]');
-      expect(params['host']).toBe('api.example.com');
+  it('throws ConfigError for invalid YAML syntax', () => {
+    const file = join(tmpDir, 'bad.yaml');
+    writeFileSync(file, '{{{{invalid yaml');
+    expect(() => loadTeamConfig(file)).toThrow(ConfigError);
+  });
+});
 
-      await logger.stop();
-    });
+// ── UT-13: Credential Scrubber ─────────────────────────────────────────────
 
-    it('sensitive patterns in message strings are replaced with [REDACTED]', async () => {
-      const sink = makeCaptureSink();
-      const logger = new LoggerImpl({
-        minLevel: LogLevel.Trace,
-        sinks: [sink],
-        batchSize: 100,
-        flushIntervalMs: 60_000,
-      });
+describe('UT-13: Credential Scrubber', () => {
+  it('scrubs known secret values', () => {
+    const secret = new SecretString('my-api-key-12345');
+    const text = 'Authorization: my-api-key-12345 is used here';
+    const scrubbed = scrubSecrets(text, [secret]);
+    expect(scrubbed).not.toContain('my-api-key-12345');
+    expect(scrubbed).toContain('[REDACTED]');
+  });
 
-      logger.info('auth token=abc123 for user');
-      await logger.flush();
+  it('scrubs sk- prefixed keys', () => {
+    const text = 'key is sk-abcdefghijklmnopqrstuvwxyz in logs';
+    const scrubbed = scrubSecrets(text, []);
+    expect(scrubbed).not.toContain('sk-abcdefghijklmnopqrstuvwxyz');
+    expect(scrubbed).toContain('[REDACTED]');
+  });
 
-      expect(sink.entries[0][0].message).toBe('auth token=[REDACTED] for user');
+  it('scrubs Bearer tokens', () => {
+    const text = 'Header: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig';
+    const scrubbed = scrubSecrets(text, []);
+    expect(scrubbed).not.toContain('eyJhbGciOiJIUzI1NiJ9');
+    expect(scrubbed).toContain('[REDACTED]');
+  });
 
-      await logger.stop();
-    });
+  it('scrubs token= parameters', () => {
+    const text = 'url?token=abc123def456&foo=bar';
+    const scrubbed = scrubSecrets(text, []);
+    expect(scrubbed).not.toContain('token=abc123def456');
+    expect(scrubbed).toContain('[REDACTED]');
+  });
 
-    it('redaction flows through to SQLiteSink', async () => {
-      const store = makeMockLogStore();
-      const sqliteSink = new SQLiteSink(store);
-      const logger = new LoggerImpl({
-        minLevel: LogLevel.Trace,
-        sinks: [sqliteSink],
-        batchSize: 100,
-        flushIntervalMs: 60_000,
-      });
+  it('handles empty secrets list', () => {
+    const text = 'no secrets here';
+    expect(scrubSecrets(text, [])).toBe('no secrets here');
+  });
 
-      // Build params with sensitive key programmatically
-      const sensitiveParams: Record<string, unknown> = { url: '/api/v1' };
-      sensitiveParams['pass' + 'word'] = 'test-val';
-      logger.info('request', sensitiveParams);
-      await logger.flush();
+  it('createStderrScrubber returns a working scrubber', () => {
+    const secret = new SecretString('secret-val');
+    const scrubber = createStderrScrubber([secret]);
+    const result = scrubber('error: secret-val leaked');
+    expect(result).not.toContain('secret-val');
+    expect(result).toContain('[REDACTED]');
+  });
+});
 
-      const storedParams = JSON.parse(store.createCalls[0][0].params) as Record<string, unknown>;
-      expect(storedParams['password']).toBe('[REDACTED]');
-      expect(storedParams['url']).toBe('/api/v1');
+// ── UT-24: Logger Smoke Test ───────────────────────────────────────────────
 
-      await logger.stop();
-    });
+describe('UT-24: Logger', () => {
+  it('creates a logger with default level', () => {
+    const logger = createLogger();
+    expect(logger).toBeDefined();
+    expect(logger.level).toBe('info');
+  });
+
+  it('creates a logger with custom level', () => {
+    const logger = createLogger({ level: 'debug' });
+    expect(logger.level).toBe('debug');
+  });
+
+  it('logger has standard methods', () => {
+    const logger = createLogger();
+    expect(typeof logger.info).toBe('function');
+    expect(typeof logger.warn).toBe('function');
+    expect(typeof logger.error).toBe('function');
+    expect(typeof logger.debug).toBe('function');
+    expect(typeof logger.trace).toBe('function');
   });
 });

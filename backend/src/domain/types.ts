@@ -1,0 +1,101 @@
+/**
+ * Core domain types for OpenHive v3.
+ */
+
+// ── Enums ──────────────────────────────────────────────────────────────────
+
+export enum TaskPriority {
+  Critical = 'critical',
+  High = 'high',
+  Normal = 'normal',
+  Low = 'low',
+}
+
+export enum TeamStatus {
+  Active = 'active',
+  Idle = 'idle',
+  Shutdown = 'shutdown',
+}
+
+export enum TaskStatus {
+  Pending = 'pending',
+  Running = 'running',
+  Completed = 'completed',
+  Failed = 'failed',
+}
+
+// ── Config Types ───────────────────────────────────────────────────────────
+
+export interface TeamScope {
+  readonly accepts: readonly string[];
+  readonly rejects: readonly string[];
+}
+
+export interface TeamConfig {
+  readonly name: string;
+  readonly parent: string | null;
+  readonly description: string;
+  readonly scope: TeamScope;
+  readonly allowed_tools: readonly string[];
+  readonly secret_refs: readonly string[];
+  readonly mcp_servers: readonly string[];
+  readonly provider_profile: string;
+  readonly maxTurns: number;
+}
+
+export interface TriggerConfig {
+  readonly name: string;
+  readonly type: 'schedule' | 'keyword' | 'message';
+  readonly config: Record<string, unknown>;
+  readonly team: string;
+  readonly task: string;
+  readonly skill?: string;
+}
+
+export interface ProviderProfile {
+  readonly name: string;
+  readonly type: 'api' | 'oauth';
+  readonly api_url?: string;
+  readonly api_key_ref?: string;
+  readonly model?: string;
+  readonly oauth_token_env?: string;
+}
+
+// ── Runtime Types ──────────────────────────────────────────────────────────
+
+export interface EscalationCorrelation {
+  readonly correlationId: string;
+  readonly sourceTeam: string;
+  readonly targetTeam: string;
+  readonly taskId: string | null;
+  readonly status: string;
+  readonly createdAt: string;
+}
+
+export interface TaskEntry {
+  readonly id: string;
+  readonly teamId: string;
+  readonly task: string;
+  readonly priority: TaskPriority;
+  readonly status: TaskStatus;
+  readonly createdAt: string;
+  readonly correlationId: string | null;
+}
+
+export interface LogEntry {
+  readonly id: string;
+  readonly level: 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'audit';
+  readonly message: string;
+  readonly timestamp: number;
+  readonly source: string;
+  readonly metadata?: Record<string, unknown>;
+}
+
+export interface OrgTreeNode {
+  readonly teamId: string;
+  readonly name: string;
+  readonly parentId: string | null;
+  readonly status: TeamStatus;
+  readonly agents: readonly string[];
+  readonly children: readonly OrgTreeNode[];
+}

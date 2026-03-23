@@ -1,38 +1,13 @@
-# =============================================================================
-# OpenHive v2 Docker Compose -- AC17
-# Network: ICC disabled for container isolation
-# No privileged mode, no host networking
-# =============================================================================
+version: "3.8"
 
 services:
   openhive:
-    container_name: openhive-root
     build:
       context: ..
       dockerfile: deployments/Dockerfile
-    image: openhive:latest
+    environment:
+      - OPENHIVE_IS_ROOT=true
+    volumes:
+      - ../data:/app/data
     ports:
       - "8080:8080"
-    volumes:
-      - ${HOST_PROJECT_DIR:-..}/.run/workspace:/app/workspace
-      - ${HOST_PROJECT_DIR:-..}/data:/app/data
-      - /var/run/docker.sock:/var/run/docker.sock
-    env_file:
-      - ../.env
-    environment:
-      OPENHIVE_IS_ROOT: "true"
-      OPENHIVE_SYSTEM_LISTEN_ADDRESS: "0.0.0.0"
-      HOST_PROJECT_DIR: "${HOST_PROJECT_DIR:-}"
-    networks:
-      - openhive-network
-    stdin_open: true
-    tty: true
-
-networks:
-  openhive-network:
-    name: openhive-network
-    driver: bridge
-    # Note: ICC must be enabled so child containers can reach root via WebSocket (INV-02).
-    # Container isolation is enforced at the application layer: all tool calls validated
-    # at root (INV-10), no direct container-to-container messaging (INV-03 enforced via
-    # hub-and-spoke routing, not network-level ICC).

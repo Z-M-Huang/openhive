@@ -1,408 +1,408 @@
 /**
- * Layer 3 Phase Gate: Domain Core integration tests.
+ * Layer 3 Phase Gate — Rules + Domain
  *
- * Exercises EventBus (async delivery, filtering, isolation), OrgChart
- * (3-level hierarchy, authorization matrix, INV-01 enforcement),
- * WorkspaceLock (serialization), and domain error mapping.
+ * Tests:
+ * - UT-3: Rule loader reads .md files sorted, ignores non-.md, handles missing/empty dirs
+ * - Rule cascade: concatenates global -> main org -> ancestor org -> team org -> team-rules
+ * - [OVERRIDE] rules replace parent rules without conflict warning
+ * - Conflicts detected for same-topic at different levels without [OVERRIDE]
+ * - Org tree: addTeam, getTeam, getChildren, getAncestors (root->parent), isDescendant, removeTeam
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { randomBytes } from 'node:crypto';
 
-import { EventBusImpl } from '../control-plane/event-bus.js';
-import { OrgChartImpl } from '../control-plane/org-chart.js';
-import { WorkspaceLockImpl } from '../control-plane/workspace-lock.js';
-import { assertValidTransition } from '../domain/domain.js';
-import {
-  InvalidTransitionError,
-  mapDomainErrorToWSError,
-} from '../domain/errors.js';
-import { AgentStatus, ContainerHealth, TaskStatus, WSErrorCode } from '../domain/enums.js';
-import type { BusEvent, OrgChartAgent, OrgChartTeam } from '../domain/interfaces.js';
+import { loadRulesFromDirectory } from '../rules/loader.js';
+import { buildRuleCascade } from '../rules/cascade.js';
+import { validateRuleCascade } from '../rules/validator.js';
+import type { AnnotatedRule } from '../rules/validator.js';
+import { OrgTree } from '../domain/org-tree.js';
+import type { IOrgStore } from '../domain/interfaces.js';
+import type { OrgTreeNode } from '../domain/types.js';
+import { TeamStatus } from '../domain/types.js';
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+// ── Helpers ────────────────────────────────────────────────────────────────
 
-function makeEvent(type: string, source?: string): BusEvent {
-  return { type, data: {}, timestamp: Date.now(), source };
+function makeTmpDir(): string {
+  const dir = join(tmpdir(), `openhive-l3-${randomBytes(8).toString('hex')}`);
+  mkdirSync(dir, { recursive: true });
+  return dir;
 }
 
-function makeTeam(overrides: Partial<OrgChartTeam> & { tid: string; slug: string; coordinatorAid: string }): OrgChartTeam {
+function makeNode(overrides: Partial<OrgTreeNode> & { teamId: string; name: string }): OrgTreeNode {
   return {
-    parentTid: '',
-    depth: 0,
-    containerId: '',
-    health: ContainerHealth.Running,
-    agentAids: [],
-    workspacePath: '/app/workspace',
+    parentId: null,
+    status: TeamStatus.Idle,
+    agents: [],
+    children: [],
     ...overrides,
   };
 }
 
-function makeAgent(overrides: Partial<OrgChartAgent> & { aid: string; teamSlug: string }): OrgChartAgent {
+/** Simple in-memory IOrgStore for testing OrgTree without SQLite. */
+function createMemoryOrgStore(): IOrgStore {
+  const data = new Map<string, OrgTreeNode>();
+
   return {
-    name: overrides.aid,
-    role: 'member',
-    status: AgentStatus.Idle,
-    ...overrides,
-  };
-}
-
-/**
- * Bootstrap a root team by directly seeding the OrgChart's private maps.
- * This works around the chicken-and-egg: addTeam requires leader in agentsByAid,
- * addAgent requires team in teamsBySlug. The real orchestrator handles this at init.
- */
-function bootstrapRootTeam(chart: OrgChartImpl): void {
-  const raw = chart as unknown as {
-    teamsByTid: Map<string, OrgChartTeam>;
-    teamsBySlug: Map<string, OrgChartTeam>;
-    agentsByAid: Map<string, OrgChartAgent>;
-    agentsByTeam: Map<string, Set<string>>;
-  };
-
-  const rootTeam = makeTeam({
-    tid: 'tid-root-001',
-    slug: 'root-team',
-    coordinatorAid: 'aid-main-001',
-    depth: 0,
-  });
-  const mainAgent = makeAgent({
-    aid: 'aid-main-001',
-    teamSlug: 'root-team',
-    role: 'main_assistant',
-  });
-
-  raw.teamsByTid.set(rootTeam.tid, rootTeam);
-  raw.teamsBySlug.set(rootTeam.slug, rootTeam);
-  raw.agentsByAid.set(mainAgent.aid, mainAgent);
-  raw.agentsByTeam.set('root-team', new Set([mainAgent.aid]));
-}
-
-/** Flush pending microtasks. */
-function flushMicrotasks(): Promise<void> {
-  return new Promise((resolve) => queueMicrotask(resolve));
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-describe('Layer 3 Phase Gate: Domain Core', () => {
-
-  // -----------------------------------------------------------------------
-  // 1. EventBus publish + subscribe round-trip
-  // -----------------------------------------------------------------------
-
-  describe('EventBus publish+subscribe round-trip', () => {
-    let bus: EventBusImpl;
-    beforeEach(() => { bus = new EventBusImpl(); });
-
-    it('delivers events to subscribers via microtask', async () => {
-      const received: BusEvent[] = [];
-      bus.subscribe((e) => received.push(e));
-
-      const event = makeEvent('test.created');
-      bus.publish(event);
-
-      expect(received).toHaveLength(0); // not synchronous
-      await flushMicrotasks();
-      expect(received).toHaveLength(1);
-      expect(received[0]).toBe(event);
-    });
-
-    it('filtered subscriber only receives matching events', async () => {
-      const all: BusEvent[] = [];
-      const filtered: BusEvent[] = [];
-
-      bus.subscribe((e) => all.push(e));
-      bus.filteredSubscribe(
-        (e) => e.type === 'team.created',
-        (e) => filtered.push(e),
-      );
-
-      bus.publish(makeEvent('task.completed'));
-      bus.publish(makeEvent('team.created'));
-      bus.publish(makeEvent('agent.ready'));
-      await flushMicrotasks();
-
-      expect(all).toHaveLength(3);
-      expect(filtered).toHaveLength(1);
-      expect(filtered[0]!.type).toBe('team.created');
-    });
-  });
-
-  // -----------------------------------------------------------------------
-  // 2. EventBus async isolation
-  // -----------------------------------------------------------------------
-
-  describe('EventBus async isolation', () => {
-    let bus: EventBusImpl;
-    beforeEach(() => { bus = new EventBusImpl(); });
-
-    it('throwing handler does not prevent other handlers from running', async () => {
-      const received: string[] = [];
-      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-
-      bus.subscribe(() => { throw new Error('handler boom'); });
-      bus.subscribe(() => { received.push('second'); });
-
-      bus.publish(makeEvent('test'));
-      await flushMicrotasks();
-
-      expect(received).toEqual(['second']);
-      expect(consoleSpy).toHaveBeenCalled();
-      consoleSpy.mockRestore();
-    });
-
-    it('each handler dispatched independently via queueMicrotask', async () => {
-      const order: string[] = [];
-
-      bus.subscribe(() => {
-        order.push('slow-start');
-        for (let i = 0; i < 1000; i++) { /* busy-wait */ }
-        order.push('slow-end');
-      });
-      bus.subscribe(() => { order.push('fast'); });
-
-      bus.publish(makeEvent('test'));
-      await flushMicrotasks();
-
-      // Both ran — each in its own microtask, isolated from each other
-      expect(order).toContain('slow-start');
-      expect(order).toContain('slow-end');
-      expect(order).toContain('fast');
-    });
-  });
-
-  // -----------------------------------------------------------------------
-  // 3. OrgChart 3-level hierarchy + authorization matrix
-  // -----------------------------------------------------------------------
-
-  describe('OrgChart 3-level hierarchy + authorization', () => {
-    let chart: OrgChartImpl;
-
-    /**
-     * Hierarchy:
-     *   root-team: main-assistant, team-a-lead (leads team-a)
-     *   team-a (led by team-a-lead): member-1, member-2, team-a1-lead (leads team-a1)
-     *   team-a1 (led by team-a1-lead): member-3
-     */
-    function seedHierarchy(): void {
-      bootstrapRootTeam(chart);
-
-      chart.addAgent(makeAgent({
-        aid: 'aid-leada-001',
-        teamSlug: 'root-team',
-        role: 'member',
-      }));
-
-      chart.addTeam(makeTeam({
-        tid: 'tid-teama-001',
-        slug: 'team-a',
-        coordinatorAid: 'aid-leada-001',
-        parentTid: 'tid-root-001',
-        depth: 1,
-      }));
-
-      chart.addAgent(makeAgent({ aid: 'aid-mem1-001', teamSlug: 'team-a' }));
-      chart.addAgent(makeAgent({ aid: 'aid-mem2-001', teamSlug: 'team-a' }));
-
-      chart.addAgent(makeAgent({
-        aid: 'aid-leada1-01',
-        teamSlug: 'team-a',
-        role: 'member',
-      }));
-
-      chart.addTeam(makeTeam({
-        tid: 'tid-teama1-01',
-        slug: 'team-a1',
-        coordinatorAid: 'aid-leada1-01',
-        parentTid: 'tid-teama-001',
-        depth: 2,
-      }));
-
-      chart.addAgent(makeAgent({ aid: 'aid-mem3-001', teamSlug: 'team-a1' }));
-    }
-
-    beforeEach(() => { chart = new OrgChartImpl(); });
-
-    it('root agent <-> team-A lead: YES (same team)', () => {
-      seedHierarchy();
-      expect(chart.isAuthorized('aid-main-001', 'aid-leada-001')).toBe(true);
-      expect(chart.isAuthorized('aid-leada-001', 'aid-main-001')).toBe(true);
-    });
-
-    it('main_assistant -> any member: YES', () => {
-      seedHierarchy();
-      // main_assistant is authorized to reach any agent in the hierarchy
-      expect(chart.isAuthorized('aid-main-001', 'aid-mem1-001')).toBe(true);
-      expect(chart.isAuthorized('aid-main-001', 'aid-mem2-001')).toBe(true);
-      expect(chart.isAuthorized('aid-main-001', 'aid-mem3-001')).toBe(true);
-    });
-
-    it('main_assistant -> deep descendant: YES', () => {
-      seedHierarchy();
-      expect(chart.isAuthorized('aid-main-001', 'aid-mem3-001')).toBe(true);
-    });
-
-    it('cross-team non-main_assistant -> NO (flat model)', () => {
-      seedHierarchy();
-      // leada-001 (root-team) → mem1-001 (team-a): not same team, not main_assistant
-      expect(chart.isAuthorized('aid-leada-001', 'aid-mem1-001')).toBe(false);
-      // mem1-001 (team-a) → leada-001 (root-team): not same team, not main_assistant
-      expect(chart.isAuthorized('aid-mem1-001', 'aid-leada-001')).toBe(false);
-    });
-
-    it('team-A member -> team-A1 member: NO (cross-branch)', () => {
-      seedHierarchy();
-      expect(chart.isAuthorized('aid-mem1-001', 'aid-mem3-001')).toBe(false);
-    });
-
-    it('team-A1 member -> team-A member: NO (cross-team, not upward to own lead)', () => {
-      seedHierarchy();
-      expect(chart.isAuthorized('aid-mem3-001', 'aid-mem1-001')).toBe(false);
-    });
-
-    it('team-A1 member -> team-A lead: NO (cross-team in flat model)', () => {
-      seedHierarchy();
-      // mem3-001 (team-a1) → leada1-01 (team-a): different teams, not main_assistant
-      expect(chart.isAuthorized('aid-mem3-001', 'aid-leada1-01')).toBe(false);
-    });
-
-    it('non-existent agent: NO', () => {
-      seedHierarchy();
-      expect(chart.isAuthorized('aid-nobody-001', 'aid-mem1-001')).toBe(false);
-      expect(chart.isAuthorized('aid-mem1-001', 'aid-nobody-001')).toBe(false);
-    });
-  });
-
-  // INV-01 enforcement tests removed — leader validation no longer enforced
-
-  // -----------------------------------------------------------------------
-  // 5. WorkspaceLock serialization
-  // -----------------------------------------------------------------------
-
-  describe('WorkspaceLock', () => {
-    let lock: WorkspaceLockImpl;
-    beforeEach(() => { lock = new WorkspaceLockImpl(); });
-
-    it('two concurrent acquires on same path serialize', async () => {
-      const order: string[] = [];
-
-      await lock.acquire('/app/workspace');
-      order.push('first-acquired');
-      expect(lock.isLocked('/app/workspace')).toBe(true);
-
-      let secondResolved = false;
-      const second = lock.acquire('/app/workspace').then(() => {
-        secondResolved = true;
-        order.push('second-acquired');
-      });
-
-      await flushMicrotasks();
-      expect(secondResolved).toBe(false);
-
-      lock.release('/app/workspace');
-      await second;
-
-      expect(order).toEqual(['first-acquired', 'second-acquired']);
-    });
-
-    it('release wakes blocked waiter', async () => {
-      await lock.acquire('/app/workspace');
-
-      let woken = false;
-      const waiter = lock.acquire('/app/workspace').then(() => { woken = true; });
-
-      await flushMicrotasks();
-      expect(woken).toBe(false);
-
-      lock.release('/app/workspace');
-      await waiter;
-      expect(woken).toBe(true);
-    });
-
-    it('different paths do not block each other', async () => {
-      await lock.acquire('/path/a');
-      await lock.acquire('/path/b');
-
-      expect(lock.isLocked('/path/a')).toBe(true);
-      expect(lock.isLocked('/path/b')).toBe(true);
-
-      lock.release('/path/a');
-      lock.release('/path/b');
-    });
-  });
-
-  // -----------------------------------------------------------------------
-  // 6. EventBus + OrgChart integration
-  // -----------------------------------------------------------------------
-
-  describe('EventBus + OrgChart integration', () => {
-    it('both components coexist and events reflect OrgChart mutations', async () => {
-      const bus = new EventBusImpl();
-      const chart = new OrgChartImpl();
-      const events: BusEvent[] = [];
-
-      bus.subscribe((e) => events.push(e));
-
-      bootstrapRootTeam(chart);
-
-      // Simulate orchestrator publishing event after OrgChart mutation
-      bus.publish({
-        type: 'team.created',
-        data: { tid: 'tid-root-001', slug: 'root-team' },
-        timestamp: Date.now(),
-        source: 'orchestrator',
-      });
-      await flushMicrotasks();
-
-      expect(events).toHaveLength(1);
-      expect(events[0]!.type).toBe('team.created');
-      expect(chart.getTeam('tid-root-001')).toBeDefined();
-
-      bus.close();
-    });
-  });
-
-  // -----------------------------------------------------------------------
-  // 7. assertValidTransition + error mapping
-  // -----------------------------------------------------------------------
-
-  describe('assertValidTransition + error mapping', () => {
-    it('valid transitions do not throw', () => {
-      expect(() => assertValidTransition(TaskStatus.Pending, TaskStatus.Active)).not.toThrow();
-      expect(() => assertValidTransition(TaskStatus.Active, TaskStatus.Completed)).not.toThrow();
-      expect(() => assertValidTransition(TaskStatus.Active, TaskStatus.Failed)).not.toThrow();
-      expect(() => assertValidTransition(TaskStatus.Failed, TaskStatus.Pending)).not.toThrow();
-      expect(() => assertValidTransition(TaskStatus.Failed, TaskStatus.Escalated)).not.toThrow();
-      expect(() => assertValidTransition(TaskStatus.Escalated, TaskStatus.Pending)).not.toThrow();
-    });
-
-    it('invalid transition throws InvalidTransitionError (not plain Error)', () => {
-      expect(() =>
-        assertValidTransition(TaskStatus.Completed, TaskStatus.Active),
-      ).toThrow(InvalidTransitionError);
-
-      expect(() =>
-        assertValidTransition(TaskStatus.Cancelled, TaskStatus.Pending),
-      ).toThrow(InvalidTransitionError);
-
-      expect(() =>
-        assertValidTransition(TaskStatus.Pending, TaskStatus.Completed),
-      ).toThrow(InvalidTransitionError);
-    });
-
-    it('mapDomainErrorToWSError maps InvalidTransitionError to VALIDATION_ERROR', () => {
-      try {
-        assertValidTransition(TaskStatus.Completed, TaskStatus.Active);
-        expect.unreachable('should have thrown');
-      } catch (err) {
-        expect(err).toBeInstanceOf(InvalidTransitionError);
-        const code = mapDomainErrorToWSError(err as InvalidTransitionError);
-        expect(code).toBe(WSErrorCode.ValidationError);
+    addTeam(node: OrgTreeNode): void {
+      data.set(node.teamId, node);
+    },
+    removeTeam(id: string): void {
+      data.delete(id);
+    },
+    getTeam(id: string): OrgTreeNode | undefined {
+      return data.get(id);
+    },
+    getChildren(parentId: string): OrgTreeNode[] {
+      return [...data.values()].filter((n) => n.parentId === parentId);
+    },
+    getAncestors(id: string): OrgTreeNode[] {
+      const ancestors: OrgTreeNode[] = [];
+      let current = data.get(id);
+      while (current?.parentId) {
+        const parent = data.get(current.parentId);
+        if (!parent) break;
+        ancestors.push(parent);
+        current = parent;
       }
-    });
+      return ancestors;
+    },
+    getAll(): OrgTreeNode[] {
+      return [...data.values()];
+    },
+  };
+}
+
+// ── UT-3: Rule Loader ─────────────────────────────────────────────────────
+
+describe('UT-3: Rule Loader', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = makeTmpDir();
+  });
+
+  afterEach(() => {
+    if (existsSync(tmpDir)) rmSync(tmpDir, { recursive: true });
+  });
+
+  it('reads .md files sorted by filename', () => {
+    writeFileSync(join(tmpDir, 'b-rule.md'), '# B Rule\nContent B');
+    writeFileSync(join(tmpDir, 'a-rule.md'), '# A Rule\nContent A');
+    writeFileSync(join(tmpDir, 'c-rule.md'), '# C Rule\nContent C');
+
+    const rules = loadRulesFromDirectory(tmpDir);
+    expect(rules).toHaveLength(3);
+    expect(rules[0]?.filename).toBe('a-rule.md');
+    expect(rules[1]?.filename).toBe('b-rule.md');
+    expect(rules[2]?.filename).toBe('c-rule.md');
+    expect(rules[0]?.content).toBe('# A Rule\nContent A');
+  });
+
+  it('ignores non-.md files', () => {
+    writeFileSync(join(tmpDir, 'valid.md'), '# Valid');
+    writeFileSync(join(tmpDir, 'readme.txt'), 'not a rule');
+    writeFileSync(join(tmpDir, 'config.yaml'), 'key: value');
+    writeFileSync(join(tmpDir, '.hidden'), 'hidden');
+
+    const rules = loadRulesFromDirectory(tmpDir);
+    expect(rules).toHaveLength(1);
+    expect(rules[0]?.filename).toBe('valid.md');
+  });
+
+  it('returns empty array for missing directory', () => {
+    const rules = loadRulesFromDirectory(join(tmpDir, 'nonexistent'));
+    expect(rules).toEqual([]);
+  });
+
+  it('returns empty array for empty directory', () => {
+    const emptyDir = join(tmpDir, 'empty');
+    mkdirSync(emptyDir);
+
+    const rules = loadRulesFromDirectory(emptyDir);
+    expect(rules).toEqual([]);
+  });
+
+  it('returns empty array for directory with no .md files', () => {
+    writeFileSync(join(tmpDir, 'data.json'), '{}');
+    writeFileSync(join(tmpDir, 'notes.txt'), 'hello');
+
+    const rules = loadRulesFromDirectory(tmpDir);
+    expect(rules).toEqual([]);
+  });
+});
+
+// ── Rule Cascade ──────────────────────────────────────────────────────────
+
+describe('Rule Cascade', () => {
+  let dataDir: string;
+
+  beforeEach(() => {
+    dataDir = makeTmpDir();
+  });
+
+  afterEach(() => {
+    if (existsSync(dataDir)) rmSync(dataDir, { recursive: true });
+  });
+
+  it('concatenates all levels in correct order', () => {
+    // Global rules
+    const globalDir = join(dataDir, 'rules', 'global');
+    mkdirSync(globalDir, { recursive: true });
+    writeFileSync(join(globalDir, '01-safety.md'), '# Safety\nGlobal safety');
+
+    // Main org-rules
+    const mainDir = join(dataDir, 'main', 'org-rules');
+    mkdirSync(mainDir, { recursive: true });
+    writeFileSync(join(mainDir, '01-org.md'), '# Org\nMain org rule');
+
+    // Ancestor org-rules (grandparent -> parent)
+    const gpDir = join(dataDir, 'teams', 'grandparent', 'org-rules');
+    mkdirSync(gpDir, { recursive: true });
+    writeFileSync(join(gpDir, '01-gp.md'), '# GP\nGrandparent rule');
+
+    const parentDir = join(dataDir, 'teams', 'parent', 'org-rules');
+    mkdirSync(parentDir, { recursive: true });
+    writeFileSync(join(parentDir, '01-parent.md'), '# Parent\nParent rule');
+
+    // Team's own org-rules
+    const teamOrgDir = join(dataDir, 'teams', 'my-team', 'org-rules');
+    mkdirSync(teamOrgDir, { recursive: true });
+    writeFileSync(join(teamOrgDir, '01-team-org.md'), '# Team Org\nTeam org rule');
+
+    // Team-only rules
+    const teamRulesDir = join(dataDir, 'teams', 'my-team', 'team-rules');
+    mkdirSync(teamRulesDir, { recursive: true });
+    writeFileSync(join(teamRulesDir, '01-local.md'), '# Local\nTeam-only rule');
+
+    const result = buildRuleCascade('my-team', ['grandparent', 'parent'], dataDir);
+
+    // Verify section order
+    const globalIdx = result.indexOf('--- Global Rules ---');
+    const mainIdx = result.indexOf('--- Main Org Rules ---');
+    const gpIdx = result.indexOf('--- Org Rules: grandparent ---');
+    const parentIdx = result.indexOf('--- Org Rules: parent ---');
+    const teamOrgIdx = result.indexOf('--- Org Rules: my-team ---');
+    const teamRulesIdx = result.indexOf('--- Team Rules: my-team ---');
+
+    expect(globalIdx).toBeGreaterThanOrEqual(0);
+    expect(mainIdx).toBeGreaterThan(globalIdx);
+    expect(gpIdx).toBeGreaterThan(mainIdx);
+    expect(parentIdx).toBeGreaterThan(gpIdx);
+    expect(teamOrgIdx).toBeGreaterThan(parentIdx);
+    expect(teamRulesIdx).toBeGreaterThan(teamOrgIdx);
+
+    // Verify content present
+    expect(result).toContain('Global safety');
+    expect(result).toContain('Main org rule');
+    expect(result).toContain('Grandparent rule');
+    expect(result).toContain('Parent rule');
+    expect(result).toContain('Team org rule');
+    expect(result).toContain('Team-only rule');
+  });
+
+  it('skips empty/missing levels gracefully', () => {
+    // Only create team-rules, nothing else
+    const teamRulesDir = join(dataDir, 'teams', 'solo-team', 'team-rules');
+    mkdirSync(teamRulesDir, { recursive: true });
+    writeFileSync(join(teamRulesDir, '01-only.md'), '# Only\nThe only rule');
+
+    const result = buildRuleCascade('solo-team', [], dataDir);
+
+    expect(result).toContain('--- Team Rules: solo-team ---');
+    expect(result).toContain('The only rule');
+    expect(result).not.toContain('--- Global Rules ---');
+    expect(result).not.toContain('--- Main Org Rules ---');
+  });
+
+  it('returns empty string when no rules exist anywhere', () => {
+    const result = buildRuleCascade('ghost-team', [], dataDir);
+    expect(result).toBe('');
+  });
+});
+
+// ── Rule Conflict Validator ───────────────────────────────────────────────
+
+describe('Rule Conflict Validator', () => {
+  it('detects conflict for same topic at different levels without [OVERRIDE]', () => {
+    const rules: AnnotatedRule[] = [
+      { filename: 'tone.md', content: '# Communication Tone\nBe friendly', source: 'global' },
+      { filename: 'tone.md', content: '# Communication Tone\nBe formal', source: 'team-org' },
+    ];
+
+    const result = validateRuleCascade(rules);
+
+    expect(result.conflicts).toHaveLength(1);
+    expect(result.conflicts[0]?.topic).toBe('Communication Tone');
+    expect(result.conflicts[0]?.sources).toEqual(['global', 'team-org']);
+    expect(result.conflicts[0]?.hasOverride).toBe(false);
+    expect(result.warnings).toHaveLength(1);
+    expect(result.warnings[0]).toContain('Communication Tone');
+  });
+
+  it('[OVERRIDE] suppresses conflict warning', () => {
+    const rules: AnnotatedRule[] = [
+      { filename: 'tone.md', content: '# Communication Tone\nBe friendly', source: 'global' },
+      { filename: 'tone.md', content: '# Communication Tone\n[OVERRIDE] Be formal', source: 'team-org' },
+    ];
+
+    const result = validateRuleCascade(rules);
+
+    expect(result.conflicts).toHaveLength(1);
+    expect(result.conflicts[0]?.hasOverride).toBe(true);
+    // No warnings when override is present
+    expect(result.warnings).toHaveLength(0);
+  });
+
+  it('returns no conflicts for unique topics', () => {
+    const rules: AnnotatedRule[] = [
+      { filename: 'safety.md', content: '# Safety\nBe safe', source: 'global' },
+      { filename: 'tone.md', content: '# Tone\nBe friendly', source: 'team-org' },
+    ];
+
+    const result = validateRuleCascade(rules);
+
+    expect(result.conflicts).toHaveLength(0);
+    expect(result.warnings).toHaveLength(0);
+  });
+
+  it('ignores rules without a heading', () => {
+    const rules: AnnotatedRule[] = [
+      { filename: 'no-heading.md', content: 'No heading here', source: 'global' },
+      { filename: 'also-no-heading.md', content: 'Also no heading', source: 'team-org' },
+    ];
+
+    const result = validateRuleCascade(rules);
+
+    expect(result.conflicts).toHaveLength(0);
+    expect(result.warnings).toHaveLength(0);
+  });
+
+  it('detects conflict across three levels', () => {
+    const rules: AnnotatedRule[] = [
+      { filename: 'log.md', content: '# Logging\nVerbose', source: 'global' },
+      { filename: 'log.md', content: '# Logging\nMinimal', source: 'parent-org' },
+      { filename: 'log.md', content: '# Logging\nDebug only', source: 'team-org' },
+    ];
+
+    const result = validateRuleCascade(rules);
+
+    expect(result.conflicts).toHaveLength(1);
+    expect(result.conflicts[0]?.sources).toHaveLength(3);
+    expect(result.warnings).toHaveLength(1);
+  });
+});
+
+// ── Org Tree ──────────────────────────────────────────────────────────────
+
+describe('Org Tree', () => {
+  let tree: OrgTree;
+  let store: IOrgStore;
+
+  beforeEach(() => {
+    store = createMemoryOrgStore();
+    tree = new OrgTree(store);
+  });
+
+  it('addTeam + getTeam round-trips', () => {
+    const node = makeNode({ teamId: 'tid-root-001', name: 'root' });
+    tree.addTeam(node);
+
+    const result = tree.getTeam('tid-root-001');
+    expect(result).toBeDefined();
+    expect(result?.teamId).toBe('tid-root-001');
+    expect(result?.name).toBe('root');
+  });
+
+  it('getTeam returns undefined for unknown id', () => {
+    expect(tree.getTeam('nonexistent')).toBeUndefined();
+  });
+
+  it('getChildren returns direct children', () => {
+    tree.addTeam(makeNode({ teamId: 'tid-parent', name: 'parent' }));
+    tree.addTeam(makeNode({ teamId: 'tid-child-a', name: 'child-a', parentId: 'tid-parent' }));
+    tree.addTeam(makeNode({ teamId: 'tid-child-b', name: 'child-b', parentId: 'tid-parent' }));
+    tree.addTeam(makeNode({ teamId: 'tid-other', name: 'other' }));
+
+    const children = tree.getChildren('tid-parent');
+    expect(children).toHaveLength(2);
+    expect(children.map((c) => c.name).sort()).toEqual(['child-a', 'child-b']);
+  });
+
+  it('getAncestors returns root -> parent order', () => {
+    tree.addTeam(makeNode({ teamId: 'tid-root', name: 'root' }));
+    tree.addTeam(makeNode({ teamId: 'tid-mid', name: 'mid', parentId: 'tid-root' }));
+    tree.addTeam(makeNode({ teamId: 'tid-leaf', name: 'leaf', parentId: 'tid-mid' }));
+
+    const ancestors = tree.getAncestors('tid-leaf');
+    expect(ancestors).toHaveLength(2);
+    // Root first (outermost), then mid (parent)
+    expect(ancestors[0]?.name).toBe('root');
+    expect(ancestors[1]?.name).toBe('mid');
+  });
+
+  it('getAncestors returns empty for root node', () => {
+    tree.addTeam(makeNode({ teamId: 'tid-root', name: 'root' }));
+    const ancestors = tree.getAncestors('tid-root');
+    expect(ancestors).toHaveLength(0);
+  });
+
+  it('isDescendant returns true for child of ancestor', () => {
+    tree.addTeam(makeNode({ teamId: 'tid-root', name: 'root' }));
+    tree.addTeam(makeNode({ teamId: 'tid-mid', name: 'mid', parentId: 'tid-root' }));
+    tree.addTeam(makeNode({ teamId: 'tid-leaf', name: 'leaf', parentId: 'tid-mid' }));
+
+    expect(tree.isDescendant('tid-leaf', 'tid-root')).toBe(true);
+    expect(tree.isDescendant('tid-leaf', 'tid-mid')).toBe(true);
+    expect(tree.isDescendant('tid-mid', 'tid-root')).toBe(true);
+  });
+
+  it('isDescendant returns false for non-ancestor', () => {
+    tree.addTeam(makeNode({ teamId: 'tid-a', name: 'a' }));
+    tree.addTeam(makeNode({ teamId: 'tid-b', name: 'b' }));
+
+    expect(tree.isDescendant('tid-a', 'tid-b')).toBe(false);
+    expect(tree.isDescendant('tid-b', 'tid-a')).toBe(false);
+  });
+
+  it('isDescendant returns false for self', () => {
+    tree.addTeam(makeNode({ teamId: 'tid-a', name: 'a' }));
+    expect(tree.isDescendant('tid-a', 'tid-a')).toBe(false);
+  });
+
+  it('removeTeam removes from tree and store', () => {
+    tree.addTeam(makeNode({ teamId: 'tid-rm', name: 'doomed' }));
+    expect(tree.getTeam('tid-rm')).toBeDefined();
+
+    tree.removeTeam('tid-rm');
+    expect(tree.getTeam('tid-rm')).toBeUndefined();
+    expect(store.getTeam('tid-rm')).toBeUndefined();
+  });
+
+  it('loadFromStore populates tree from store', () => {
+    // Add directly to store, bypassing tree
+    store.addTeam(makeNode({ teamId: 'tid-pre', name: 'pre-existing' }));
+
+    // Tree shouldn't have it yet
+    expect(tree.getTeam('tid-pre')).toBeUndefined();
+
+    // Load from store
+    tree.loadFromStore();
+    expect(tree.getTeam('tid-pre')).toBeDefined();
+    expect(tree.getTeam('tid-pre')?.name).toBe('pre-existing');
+  });
+
+  it('loadFromStore clears previous in-memory state', () => {
+    tree.addTeam(makeNode({ teamId: 'tid-mem', name: 'memory-only' }));
+
+    // Remove from store directly but not from tree's cache
+    store.removeTeam('tid-mem');
+
+    // After reload, the memory-only node should be gone
+    tree.loadFromStore();
+    expect(tree.getTeam('tid-mem')).toBeUndefined();
   });
 });

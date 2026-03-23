@@ -1,176 +1,80 @@
 /**
- * Logger implementation — structured logging with fan-out to sinks.
+ * Structured JSON logger built on Pino.
  *
- * - Six log levels: trace=0, debug=10, info=20, warn=30, error=40, audit=50
- * - Audit level bypasses the minimum-level filter (always emitted)
- * - Batch writer: flushes every batchSize entries or flushIntervalMs, whichever comes first
- * - Fan-out to all registered LogSink instances via Promise.allSettled (sink error isolation)
- * - Redaction of sensitive keys in params and message strings (NFR09)
+ * Outputs to stdout (primary). When a LogStore is provided, each log entry
+ * is also written to SQLite (secondary, best-effort — errors are swallowed
+ * to avoid recursive logging failures).
  */
 
-import type { LogEntry } from '../domain/domain.js';
-import { LogLevel } from '../domain/enums.js';
-import type { Logger, LogSink } from '../domain/interfaces.js';
-import { redactMessage, redactParams } from './redaction.js';
+import { Writable } from 'node:stream';
+import pino from 'pino';
+import type { ILogStore } from '../domain/interfaces.js';
+import type { LogEntry } from '../domain/types.js';
 
 export interface LoggerOptions {
-  minLevel: LogLevel;
-  sinks: LogSink[];
-  batchSize?: number;
-  flushIntervalMs?: number;
+  readonly level?: string;
+  readonly logStore?: ILogStore;
 }
 
-let nextId = 1;
+/** Pino level names that map to our LogEntry levels. */
+const VALID_LOG_LEVELS = new Set<string>(['trace', 'debug', 'info', 'warn', 'error']);
 
-export class LoggerImpl implements Logger {
-  private readonly minLevel: LogLevel;
-  private readonly sinks: LogSink[];
-  private readonly batchSize: number;
-  private readonly flushIntervalMs: number;
+let logEntryCounter = 0;
 
-  /**
-   * Dynamically add a sink to the live logging pipeline.
-   * Used by PluginManager hot-reload so newly loaded plugins receive log entries
-   * without requiring a restart (AC-F3).
-   */
-  addSink(sink: LogSink): void {
-    if (!this.sinks.includes(sink)) {
-      this.sinks.push(sink);
-    }
-  }
+export function createLogger(options?: LoggerOptions): pino.Logger {
+  const logStore = options?.logStore;
 
-  /**
-   * Remove a previously added sink from the logging pipeline.
-   * Called when a plugin is unloaded or replaced during hot-reload (AC-F3).
-   */
-  removeSink(sink: LogSink): void {
-    const idx = this.sinks.indexOf(sink);
-    if (idx !== -1) {
-      this.sinks.splice(idx, 1);
-    }
-  }
-
-  private batch: LogEntry[] = [];
-  private flushTimer: ReturnType<typeof setInterval>;
-  private stopped = false;
-
-  constructor(options: LoggerOptions) {
-    this.minLevel = options.minLevel;
-    this.sinks = options.sinks;
-    this.batchSize = options.batchSize ?? 50;
-    this.flushIntervalMs = options.flushIntervalMs ?? 100;
-
-    this.flushTimer = setInterval(() => {
-      void this.flush();
-    }, this.flushIntervalMs);
-  }
-
-  log(entry: Partial<LogEntry> & { level: LogLevel; message: string }): void {
-    if (this.stopped) {
-      return;
-    }
-
-    // Audit always passes; otherwise check minLevel
-    if (entry.level !== LogLevel.Audit && entry.level < this.minLevel) {
-      return;
-    }
-
-    // Build full LogEntry with defaults
-    const full: LogEntry = {
-      id: entry.id ?? nextId++,
-      level: entry.level,
-      event_type: entry.event_type ?? '',
-      component: entry.component ?? '',
-      action: entry.action ?? '',
-      message: redactMessage(entry.message),
-      params: entry.params != null
-        ? JSON.stringify(redactParams(JSON.parse(entry.params)))
-        : '{}',
-      team_slug: entry.team_slug ?? '',
-      task_id: entry.task_id ?? '',
-      agent_aid: entry.agent_aid ?? '',
-      request_id: entry.request_id ?? '',
-      correlation_id: entry.correlation_id ?? '',
-      error: entry.error ?? '',
-      duration_ms: entry.duration_ms ?? 0,
-      created_at: entry.created_at ?? Date.now(),
-    };
-
-    this.batch.push(full);
-
-    if (this.batch.length >= this.batchSize) {
-      void this.flush();
-    }
-  }
-
-  trace(message: string, params?: Record<string, unknown>): void {
-    this.log({
-      level: LogLevel.Trace,
-      message,
-      params: params ? JSON.stringify(params) : undefined,
+  if (!logStore) {
+    return pino({
+      level: options?.level ?? 'info',
+      timestamp: pino.stdTimeFunctions.isoTime,
+      formatters: {
+        level(label) {
+          return { level: label };
+        },
+      },
     });
   }
 
-  debug(message: string, params?: Record<string, unknown>): void {
-    this.log({
-      level: LogLevel.Debug,
-      message,
-      params: params ? JSON.stringify(params) : undefined,
-    });
-  }
+  // Tee stream: write to stdout and also persist to the log store.
+  const tee = new Writable({
+    write(chunk: Buffer, _encoding, callback) {
+      const line = chunk.toString();
 
-  info(message: string, params?: Record<string, unknown>): void {
-    this.log({
-      level: LogLevel.Info,
-      message,
-      params: params ? JSON.stringify(params) : undefined,
-    });
-  }
+      // Always write to stdout first
+      process.stdout.write(line);
 
-  warn(message: string, params?: Record<string, unknown>): void {
-    this.log({
-      level: LogLevel.Warn,
-      message,
-      params: params ? JSON.stringify(params) : undefined,
-    });
-  }
+      // Best-effort store write
+      try {
+        const parsed = JSON.parse(line) as Record<string, unknown>;
+        const rawLevel = parsed['level'];
+        const level = typeof rawLevel === 'string' ? rawLevel : 'info';
+        const rawMsg = parsed['msg'];
+        const message = typeof rawMsg === 'string' ? rawMsg : '';
+        const entry: LogEntry = {
+          id: `log-${Date.now()}-${++logEntryCounter}`,
+          level: (VALID_LOG_LEVELS.has(level) ? level : 'info') as LogEntry['level'],
+          message,
+          timestamp: Date.now(),
+          source: 'logger',
+          metadata: parsed,
+        };
+        logStore.append(entry);
+      } catch {
+        // Swallow — never let store errors break logging
+      }
 
-  error(message: string, params?: Record<string, unknown>): void {
-    this.log({
-      level: LogLevel.Error,
-      message,
-      params: params ? JSON.stringify(params) : undefined,
-    });
-  }
+      callback();
+    },
+  });
 
-  audit(message: string, params?: Record<string, unknown>): void {
-    this.log({
-      level: LogLevel.Audit,
-      message,
-      params: params ? JSON.stringify(params) : undefined,
-    });
-  }
-
-  async flush(): Promise<void> {
-    // Swap-and-reset: atomic grab of pending entries
-    const pending = this.batch;
-    this.batch = [];
-
-    if (pending.length === 0) {
-      return;
-    }
-
-    await Promise.allSettled(
-      this.sinks.map((sink) => sink.write(pending)),
-    );
-  }
-
-  async stop(): Promise<void> {
-    this.stopped = true;
-    clearInterval(this.flushTimer);
-    await this.flush();
-    await Promise.allSettled(
-      this.sinks.map((sink) => sink.close()),
-    );
-  }
+  return pino({
+    level: options?.level ?? 'info',
+    timestamp: pino.stdTimeFunctions.isoTime,
+    formatters: {
+      level(label) {
+        return { level: label };
+      },
+    },
+  }, tee);
 }

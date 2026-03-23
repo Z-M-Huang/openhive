@@ -1,170 +1,263 @@
 /**
- * OpenHive entry point.
- *
- * Bootstraps the unified orchestrator in either **root** or **non-root** mode
- * based on the `OPENHIVE_IS_ROOT` environment variable.
- *
- * ## Root mode (`OPENHIVE_IS_ROOT=true`)
- *
- * Activates all services:
- * - Messaging channel adapters (Discord)
- * - SQLite database (WAL mode, async write queue)
- * - REST API server (Fastify, bound to 127.0.0.1 by default)
- * - WebSocket hub (container connections, hub-and-spoke topology)
- * - Docker container runtime (sibling containers)
- * - Trigger scheduler (cron, webhook, channel_event, task_completion)
- *
- * ## Non-root mode
- *
- * Activates minimal services:
- * - Orchestrator (local agent management)
- * - WebSocket client (connects to root hub)
- *
- * ## Startup validation order
- *
- * 1. Load and validate provider presets (`providers.yaml`)
- * 2. Load and validate master configuration (`openhive.yaml`)
- * 3. Validate environment variables (`OPENHIVE_IS_ROOT`, `OPENHIVE_HOST_DIR`, etc.)
- * 4. Validate and unlock master encryption key (`OPENHIVE_MASTER_KEY`)
- * 5. Discover and validate team configurations (`team.yaml` files)
- * 6. Build initial org chart from team configs
- *
- * ## Graceful shutdown order
- *
- * Triggered by SIGINT / SIGTERM:
- * 1. Stop config file watchers
- * 2. Flush and stop the logger
- * 3. Close the EventBus
- * 4. Close the database (flush write queue, checkpoint WAL)
- * 5. Close WebSocket connections (hub or client)
- * 6. Disconnect channel adapters
- * 7. Terminate child processes (agent SDK instances, with timeout)
- *
- * // INV-09: Invariants in code, policies in skills
- * // INV-10: Root is a control plane
- *
- * @module
+ * OpenHive v3 entry point — bootstrap and graceful shutdown.
  */
 
-// INV-09: Invariants in code, policies in skills
-// INV-10: Root is a control plane
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import Fastify from 'fastify';
+import { createLogger } from './logging/logger.js';
+import { loadProviders, loadTriggers } from './config/loader.js';
+import { createDatabase, createTables } from './storage/database.js';
+import { OrgStore } from './storage/stores/org-store.js';
+import { TaskQueueStore } from './storage/stores/task-queue-store.js';
+import { TriggerStore } from './storage/stores/trigger-store.js';
+import { LogStore } from './storage/stores/log-store.js';
+import { EscalationStore } from './storage/stores/escalation-store.js';
+import { MemoryStore } from './storage/stores/memory-store.js';
+import { OrgTree } from './domain/org-tree.js';
+import { createOrgMcpServer } from './org-mcp/server.js';
+import type { OrgMcpServer } from './org-mcp/server.js';
+import { SessionManager } from './sessions/manager.js';
+import { TriggerDedup } from './triggers/dedup.js';
+import { TriggerRateLimiter } from './triggers/rate-limiter.js';
+import { TriggerEngine } from './triggers/engine.js';
+import { CLIAdapter } from './channels/cli-adapter.js';
+import { DiscordAdapter } from './channels/discord-adapter.js';
+import { SecretString } from './secrets/secret-string.js';
+import { ChannelRouter } from './channels/router.js';
+import { registerHealthEndpoint } from './health.js';
+import type { IChannelAdapter, ChannelMessage } from './domain/interfaces.js';
+import type { TriggerConfig } from './domain/types.js';
+import type { ProvidersOutput } from './config/validation.js';
+import type { Readable, Writable } from 'node:stream';
+import type Database from 'better-sqlite3';
+import type { FastifyInstance } from 'fastify';
+import type pino from 'pino';
 
-import { ConfigLoaderImpl } from './config/loader.js';
-import { LoggerImpl } from './logging/logger.js';
-import { StdoutSink } from './logging/sinks.js';
-
-import { createShutdownState } from './init/types.js';
-import { parseLogLevel, parseListenAddress } from './init/helpers.js';
-import { registerShutdownHandlers } from './init/shutdown.js';
-import { initializeRootMode } from './init/root-mode.js';
-import { initializeNonRootMode } from './init/non-root-mode.js';
-
-// ---------------------------------------------------------------------------
-// Global State (for shutdown handling)
-// ---------------------------------------------------------------------------
-
-const shutdownState = createShutdownState();
-
-// ---------------------------------------------------------------------------
-// Main Entry Point
-// ---------------------------------------------------------------------------
-
-/**
- * Application entry point.
- *
- * Reads `OPENHIVE_IS_ROOT` from the environment to determine operating mode,
- * then initializes the appropriate subsystems and begins accepting work.
- *
- * **Root mode** (INV-10): activates the full control plane including channels,
- * database, REST API, WebSocket hub, Docker runtime, and trigger scheduler.
- *
- * **Non-root mode**: activates only the local orchestrator and WebSocket client
- * connection to the root container.
- *
- * Startup proceeds through a strict validation sequence:
- * providers -> master config -> env -> key -> teams -> org chart.
- *
- * Registers SIGINT and SIGTERM handlers for graceful shutdown that tears down
- * subsystems in reverse initialization order.
- */
-export async function main(): Promise<void> {
-  const isRoot = process.env['OPENHIVE_IS_ROOT'] === 'true';
-
-  // INV-09: Invariants in code, policies in skills
-  // INV-10: Root is a control plane — root mode activates the full
-  //         control plane; non-root activates orchestrator + WS client only.
-
-  // -------------------------------------------------------------------------
-  // Phase 1: Load Configuration
-  // -------------------------------------------------------------------------
-
-  const configLoader = new ConfigLoaderImpl();
-  shutdownState.configLoader = configLoader;
-
-  // Load master config
-  const masterConfig = await configLoader.loadMaster();
-  const logLevel = parseLogLevel(masterConfig.server.log_level);
-  const { host: listenHost, port: listenPort } = parseListenAddress(
-    masterConfig.server.listen_address
-  );
-
-  // Load providers (root only, but load in both to validate)
-  let providers: Record<string, unknown> = {};
-  try {
-    providers = await configLoader.loadProviders();
-  } catch {
-    // providers.yaml is optional in non-root.
-    // In root mode, it's also optional if CLAUDE_CODE_OAUTH_TOKEN env var is set
-    // (enables `bun run docker` with just the env var).
-    if (isRoot && !process.env['CLAUDE_CODE_OAUTH_TOKEN']) {
-      throw new Error('providers.yaml is required in root mode (or set CLAUDE_CODE_OAUTH_TOKEN env var)');
-    }
-  }
-
-  // -------------------------------------------------------------------------
-  // Phase 2: Initialize Logger
-  // -------------------------------------------------------------------------
-
-  const sinks = [new StdoutSink(logLevel)];
-  const logger = new LoggerImpl({
-    minLevel: logLevel,
-    sinks,
-    batchSize: 50,
-    flushIntervalMs: 100,
-  });
-  shutdownState.logger = logger;
-
-  logger.info('OpenHive starting', {
-    is_root: isRoot,
-    log_level: masterConfig.server.log_level,
-    listen_address: masterConfig.server.listen_address,
-  });
-
-  // -------------------------------------------------------------------------
-  // Phase 3: Mode-Specific Initialization
-  // -------------------------------------------------------------------------
-
-  if (isRoot) {
-    await initializeRootMode(configLoader, logger, masterConfig, providers, listenHost, listenPort, shutdownState);
-  } else {
-    await initializeNonRootMode(logger, shutdownState);
-  }
-
-  // -------------------------------------------------------------------------
-  // Phase 4: Register Shutdown Handlers
-  // -------------------------------------------------------------------------
-
-  registerShutdownHandlers(logger, shutdownState);
-
-  logger.info('OpenHive initialized', { is_root: isRoot });
+export interface BootstrapDeps {
+  readonly providersPath?: string;
+  readonly dbPath?: string;
+  readonly memoryDir?: string;
+  readonly listenAddress?: string;
+  readonly listenPort?: number;
+  readonly cliInput?: Readable;
+  readonly cliOutput?: Writable;
+  readonly skipCli?: boolean;
+  readonly skipListen?: boolean;
 }
 
-// ---------------------------------------------------------------------------
-// Entry point — invoke main() when run directly (not when imported by tests)
-// ---------------------------------------------------------------------------
-if (import.meta.main) {
-  main().catch((err) => {
-    console.error('Fatal startup error:', err);
+export interface BootstrapResult {
+  readonly logger: pino.Logger;
+  readonly raw: Database.Database;
+  readonly fastify: FastifyInstance;
+  readonly sessionManager: SessionManager;
+  readonly triggerEngine: TriggerEngine;
+  readonly channelRouter: ChannelRouter;
+  readonly orgTree: OrgTree;
+  readonly orgMcpServer: OrgMcpServer;
+  readonly providersConfig: ProvidersOutput | null;
+  shutdown(): Promise<void>;
+}
+
+let currentResult: BootstrapResult | null = null;
+
+function initStorage(deps?: BootstrapDeps) {
+  const dbPath = deps?.dbPath
+    ?? process.env['OPENHIVE_DB_PATH']
+    ?? '/data/openhive.db';
+  const { db, raw } = createDatabase(dbPath);
+  createTables(raw);
+
+  const orgStore = new OrgStore(db);
+  const taskQueueStore = new TaskQueueStore(db);
+  const triggerStore = new TriggerStore(db);
+  const logStore = new LogStore(db);
+  const escalationStore = new EscalationStore(db);
+  const memoryDir = deps?.memoryDir ?? '/data/memory';
+  const memoryStore = new MemoryStore(memoryDir);
+
+  return { db, raw, orgStore, taskQueueStore, triggerStore, logStore, escalationStore, memoryStore };
+}
+
+function loadTriggerConfigs(dataDir: string, logger: pino.Logger): TriggerConfig[] {
+  const triggersPath = join(dataDir, 'triggers.yaml');
+  if (!existsSync(triggersPath)) {
+    logger.info('No triggers.yaml found, skipping trigger loading');
+    return [];
+  }
+  try {
+    const result = loadTriggers(triggersPath);
+    return result.triggers as TriggerConfig[];
+  } catch (err) {
+    logger.warn({ err }, 'Failed to load triggers.yaml');
+    return [];
+  }
+}
+
+function initTriggerEngine(
+  triggerStore: TriggerStore,
+  taskQueueStore: TaskQueueStore,
+  logger: pino.Logger,
+  triggers: TriggerConfig[],
+): TriggerEngine {
+  const dedup = new TriggerDedup(triggerStore);
+  const rateLimiter = new TriggerRateLimiter(10, 60_000);
+  const engine = new TriggerEngine({
+    triggers,
+    dedup,
+    rateLimiter,
+    delegateTask: (team, task, priority) => {
+      taskQueueStore.enqueue(team, task, priority ?? 'normal');
+      return Promise.resolve();
+    },
+    logger: {
+      info: (msg, meta) => logger.info(meta ?? {}, msg),
+      warn: (msg, meta) => logger.warn(meta ?? {}, msg),
+    },
+  });
+  engine.register();
+  return engine;
+}
+
+function initChannels(
+  deps: BootstrapDeps | undefined,
+  logger: pino.Logger,
+): IChannelAdapter[] {
+  const adapters: IChannelAdapter[] = [];
+  if (!deps?.skipCli) {
+    adapters.push(new CLIAdapter({
+      input: deps?.cliInput,
+      output: deps?.cliOutput,
+    }));
+  }
+
+  // Wire Discord adapter when DISCORD_BOT_TOKEN env var is set
+  const discordToken = process.env['DISCORD_BOT_TOKEN'];
+  if (discordToken) {
+    logger.info('Discord bot token found, wiring Discord adapter');
+    adapters.push(new DiscordAdapter({
+      token: new SecretString(discordToken),
+    }));
+  }
+
+  return adapters;
+}
+
+export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> {
+  const stores = initStorage(deps);
+  const { raw, orgStore, taskQueueStore, escalationStore } = stores;
+
+  const logLevel = process.env['OPENHIVE_LOG_LEVEL'] ?? 'info';
+  const logger = createLogger({ level: logLevel, logStore: stores.logStore });
+
+  const providersPath = deps?.providersPath
+    ?? process.env['OPENHIVE_PROVIDERS_PATH']
+    ?? '/data/providers.yaml';
+  let providersConfig: ProvidersOutput | null = null;
+  try {
+    providersConfig = loadProviders(providersPath);
+    logger.info({ profiles: Object.keys(providersConfig.profiles) }, 'Loaded provider profiles');
+  } catch {
+    logger.warn('No providers.yaml found');
+  }
+
+  const orgTree = new OrgTree(orgStore);
+  orgTree.loadFromStore();
+
+  const sessionManager = new SessionManager();
+
+  const orgMcpServer = createOrgMcpServer({
+    orgTree,
+    spawner: {
+      spawn: (teamId: string) => {
+        sessionManager.spawn(teamId);
+        return Promise.resolve(teamId);
+      },
+    },
+    sessionManager: {
+      getSession: (sessionId: string) =>
+        Promise.resolve(sessionManager.isActive(sessionId) ? { id: sessionId } : null),
+      terminateSession: (sessionId: string) => {
+        sessionManager.stop(sessionId);
+        return Promise.resolve();
+      },
+    },
+    taskQueue: taskQueueStore,
+    escalationStore,
+    loadConfig: () => ({
+      name: 'default', parent: null, description: '', scope: { accepts: [], rejects: [] },
+      allowed_tools: [], secret_refs: [], mcp_servers: [], provider_profile: 'default', maxTurns: 50,
+    }),
+    getTeamConfig: () => undefined,
+    log: (msg, meta) => logger.info(meta ?? {}, msg),
+  });
+
+  const dataDir = deps?.dbPath
+    ? join(deps.dbPath, '..')
+    : (process.env['OPENHIVE_DATA_DIR'] ?? '/data');
+  const triggerConfigs = loadTriggerConfigs(dataDir, logger);
+  const triggerEngine = initTriggerEngine(stores.triggerStore, taskQueueStore, logger, triggerConfigs);
+  const adapters = initChannels(deps, logger);
+  const channelRouter = new ChannelRouter(adapters, (msg: ChannelMessage) => {
+    logger.info({ channelId: msg.channelId, userId: msg.userId }, 'Received message');
+    // Forward to trigger engine for keyword/message matching
+    triggerEngine.onMessage(msg.content, msg.channelId);
+    return Promise.resolve(undefined);
+  });
+
+  const fastify = Fastify({ logger: false });
+  registerHealthEndpoint(fastify, { raw, sessionManager, triggerEngine, channelRouter });
+
+  triggerEngine.start();
+  await channelRouter.start();
+
+  if (!deps?.skipListen) {
+    const address = deps?.listenAddress ?? process.env['OPENHIVE_LISTEN_ADDRESS'] ?? '127.0.0.1';
+    const port = deps?.listenPort ?? Number(process.env['OPENHIVE_LISTEN_PORT'] ?? '8080');
+    await fastify.listen({ host: address, port });
+  }
+
+  logger.info('OpenHive v3 started');
+
+  const shutdown = async (): Promise<void> => {
+    logger.info('Shutting down...');
+    triggerEngine.stop();
+    await channelRouter.stop();
+    sessionManager.stopAll();
+    await fastify.close();
+    raw.close();
+    logger.info('Shutdown complete');
+    currentResult = null;
+  };
+
+  const result: BootstrapResult = {
+    logger, raw, fastify, sessionManager, triggerEngine, channelRouter, orgTree,
+    orgMcpServer, providersConfig, shutdown,
+  };
+  currentResult = result;
+  return result;
+}
+
+// Graceful shutdown handlers
+const handleSignal = (): void => {
+  if (currentResult) {
+    void currentResult.shutdown().then(() => process.exit(0));
+  } else {
+    process.exit(0);
+  }
+};
+
+process.on('SIGTERM', handleSignal);
+process.on('SIGINT', handleSignal);
+
+// Auto-start unless running in test (check multiple indicators)
+const isTest = process.env['VITEST'] !== undefined
+  || process.env['NODE_ENV'] === 'test'
+  || process.env['VITEST_WORKER_ID'] !== undefined;
+if (!isTest) {
+  bootstrap().catch((err: unknown) => {
+    // eslint-disable-next-line no-console
+    console.error('Fatal: bootstrap failed', err);
     process.exit(1);
   });
 }

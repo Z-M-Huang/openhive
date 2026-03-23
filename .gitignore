@@ -1,39 +1,8 @@
-# Runtime state
-.run/
-.claude/settings.local.json
-
-# Dependencies
-node_modules/
-
-# Build output
-dist/
-coverage/
-*.tsbuildinfo
-
-# Config files (real configs, not examples)
-data/openhive.yaml
-data/providers.yaml
-
-# Environment
+node_modules
+dist
 .env
-.env.local
-.env.*.local
-!.env.example
-
-# Database
+/data/secrets/
 *.db
-*.db-wal
-*.db-shm
-
-# Security
-*.key
-*.pem
-
-# Archives
-data/archives/
-
-# OS
-.DS_Store
-Thumbs.db
-
+.run/
+coverage/
 .vcp

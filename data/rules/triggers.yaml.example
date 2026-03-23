@@ -1,0 +1,11 @@
+# Trigger definitions for OpenHive v3
+# Copy to triggers.yaml and customize.
+
+triggers:
+  - name: daily-health-check
+    type: schedule
+    config:
+      cron: "0 9 * * *"
+    team: main
+    task: Run daily health check
+    skill: health-report

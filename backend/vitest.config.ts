@@ -1,51 +1,23 @@
-import { defineConfig } from "vitest/config";
+import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
   test: {
-    environment: "node",
-    testTimeout: 15000,
-    hookTimeout: 15000,
-    include: ["src/**/*.test.ts"],
+    root: '.',
+    include: ['src/**/*.test.ts'],
     coverage: {
-      provider: "v8",
-      reporter: ["text", "json", "html"],
+      provider: 'v8',
+      include: ['src/**/*.ts'],
       exclude: [
-        "node_modules/**",
-        "dist/**",
-        "**/*.test.ts",
-        "**/*.spec.ts",
-        "**/test/**",
+        'src/**/*.test.ts',           // Test files
+        'src/phase-gates/**',         // Phase gate test files
+        'src/domain/interfaces.ts',   // Pure type definitions (no runtime code)
+        'src/types/**',               // Type declaration shims
       ],
       thresholds: {
-        perFile: true,
-        lines: 80,
-        functions: 80,
-        branches: 80,
-        statements: 80,
-        "src/domain/**": {
-          lines: 95,
-          functions: 95,
-          branches: 95,
-          statements: 95,
-        },
-        "src/control-plane/**": {
-          lines: 95,
-          functions: 95,
-          branches: 95,
-          statements: 95,
-        },
-        "src/executor/**": {
-          lines: 95,
-          functions: 95,
-          branches: 95,
-          statements: 95,
-        },
-        "src/storage/**": {
-          lines: 95,
-          functions: 95,
-          branches: 95,
-          statements: 95,
-        },
+        branches: 85,
+        functions: 93,
+        lines: 93,
+        statements: 93,
       },
     },
   },

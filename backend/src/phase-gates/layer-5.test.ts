@@ -1,674 +1,614 @@
 /**
- * Layer 5 Phase Gate: Container integration tests.
+ * Layer 5 Phase Gate -- Org MCP Server
  *
- * Tests ContainerProvisioner workspace scaffolding, ContainerRuntime security
- * enforcement (mock dockerode), ContainerRuntime lifecycle, ContainerManager
- * spawn/stop flows, HealthMonitor state machine and stuck agent detection,
- * and full integration wiring across all L5 components.
+ * Tests with mock ISessionSpawner + real OrgTree:
+ * - UT-6: All 6 tools registered with correct names and schemas
+ * - spawn_team: creates org tree entry, calls spawner
+ * - shutdown_team: validates parent, calls stop, removes from tree
+ * - delegate_task: scope admission passes/rejects, validates parent
+ * - escalate: generates correlation_id, persists to store, queues for parent
+ * - send_message: validates parent/child relationship, blocks unrelated teams
+ * - get_status: returns only caller's children, shows queue depth
+ * - UT-10: Scope admission rejects/admits correctly, reject-by-default for ambiguous
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import * as fs from 'node:fs';
-import * as os from 'node:os';
-import * as path from 'node:path';
-import { parse as yamlParse } from 'yaml';
-
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { createOrgMcpServer } from '../org-mcp/server.js';
+import type { OrgMcpDeps, OrgMcpServer } from '../org-mcp/server.js';
+import { OrgTree } from '../domain/org-tree.js';
 import type {
-  ContainerConfig,
-  ContainerInfo,
-  ContainerRuntime,
-  BusEvent,
-} from '../domain/index.js';
-import { ContainerHealth, AgentStatus, ValidationError } from '../domain/index.js';
+  IOrgStore,
+  ISessionSpawner,
+  ISessionManager,
+  ITaskQueueStore,
+  IEscalationStore,
+} from '../domain/interfaces.js';
+import type { OrgTreeNode, TeamConfig, TaskEntry, EscalationCorrelation } from '../domain/types.js';
+import { TeamStatus, TaskPriority, TaskStatus } from '../domain/types.js';
+import { checkScopeAdmission } from '../org-mcp/scope-admission.js';
 
-import { ContainerProvisionerImpl } from '../containers/provisioner.js';
-import { ContainerRuntimeImpl, sanitizeInput, validateMountPath } from '../containers/runtime.js';
-import { ContainerManagerImpl } from '../containers/manager.js';
-import { HealthMonitorImpl } from '../containers/health.js';
-import { TokenManagerImpl } from '../websocket/token-manager.js';
-import { EventBusImpl } from '../control-plane/event-bus.js';
+// ── Helpers ────────────────────────────────────────────────────────────────
 
-// ---------------------------------------------------------------------------
-// Test helpers: temp directory management
-// ---------------------------------------------------------------------------
-
-let tmpRoot: string;
-
-function createTmpRoot(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'openhive-l5-'));
-}
-
-// ---------------------------------------------------------------------------
-// Test helpers: mock dockerode container
-// ---------------------------------------------------------------------------
-
-function createMockDockerodeContainer(
-  id: string,
-  slug: string,
-  tid: string,
-  state = 'running',
-): {
-  id: string;
-  start: ReturnType<typeof vi.fn>;
-  stop: ReturnType<typeof vi.fn>;
-  kill: ReturnType<typeof vi.fn>;
-  remove: ReturnType<typeof vi.fn>;
-  inspect: ReturnType<typeof vi.fn>;
-} {
+function makeNode(overrides: Partial<OrgTreeNode> & { teamId: string; name: string }): OrgTreeNode {
   return {
-    id,
-    start: vi.fn().mockResolvedValue(undefined),
-    stop: vi.fn().mockResolvedValue(undefined),
-    kill: vi.fn().mockResolvedValue(undefined),
-    remove: vi.fn().mockResolvedValue(undefined),
-    inspect: vi.fn().mockResolvedValue({
-      Id: id,
-      Name: `/openhive-${slug}`,
-      State: { Status: state },
-      Config: {
-        Labels: {
-          'openhive.managed': 'true',
-          'openhive.team': slug,
-          'openhive.tid': tid,
-        },
-      },
-      Created: new Date().toISOString(),
-    }),
+    parentId: null,
+    status: TeamStatus.Idle,
+    agents: [],
+    children: [],
+    ...overrides,
   };
 }
 
-/** Creates a minimal mock Dockerode instance. */
-function createMockDockerode(containers: Map<string, ReturnType<typeof createMockDockerodeContainer>>) {
+function createMemoryOrgStore(): IOrgStore {
+  const data = new Map<string, OrgTreeNode>();
   return {
-    createContainer: vi.fn().mockImplementation(async (opts: Record<string, unknown>) => {
-      const name = opts.name as string;
-      // Extract slug from "openhive-<slug>"
-      const slug = name.replace(/^openhive-/, '');
-      const tid = (opts.Labels as Record<string, string>)?.['openhive.tid'] ?? '';
-      const id = `sha256-${slug}-${Date.now()}`;
-      const container = createMockDockerodeContainer(id, slug, tid);
-      containers.set(id, container);
-      return container;
-    }),
-    getContainer: vi.fn().mockImplementation((id: string) => {
-      const container = containers.get(id);
-      if (!container) {
-        throw new Error(`Container not found: ${id}`);
-      }
-      return container;
-    }),
-    listContainers: vi.fn().mockResolvedValue([]),
+    addTeam(node: OrgTreeNode): void { data.set(node.teamId, node); },
+    removeTeam(id: string): void { data.delete(id); },
+    getTeam(id: string): OrgTreeNode | undefined { return data.get(id); },
+    getChildren(parentId: string): OrgTreeNode[] {
+      return [...data.values()].filter((n) => n.parentId === parentId);
+    },
+    getAncestors(): OrgTreeNode[] { return []; },
+    getAll(): OrgTreeNode[] { return [...data.values()]; },
   };
 }
 
-// ---------------------------------------------------------------------------
-// Test helpers: mock ContainerRuntime
-// ---------------------------------------------------------------------------
-
-function createMockRuntime(): ContainerRuntime & {
-  createContainer: ReturnType<typeof vi.fn>;
-  startContainer: ReturnType<typeof vi.fn>;
-  stopContainer: ReturnType<typeof vi.fn>;
-  removeContainer: ReturnType<typeof vi.fn>;
-  inspectContainer: ReturnType<typeof vi.fn>;
-  listContainers: ReturnType<typeof vi.fn>;
-} {
+function createMockTaskQueue(): ITaskQueueStore & { tasks: TaskEntry[] } {
   let idCounter = 0;
+  const tasks: TaskEntry[] = [];
+
   return {
-    createContainer: vi.fn().mockImplementation(async (config: ContainerConfig) => {
-      idCounter++;
-      return `container-${config.teamSlug}-${idCounter}`;
-    }),
-    startContainer: vi.fn().mockResolvedValue(undefined),
-    stopContainer: vi.fn().mockResolvedValue(undefined),
-    removeContainer: vi.fn().mockResolvedValue(undefined),
-    inspectContainer: vi.fn().mockImplementation(async (id: string) => {
-      const slug = id.replace(/^container-/, '').replace(/-\d+$/, '');
-      return {
+    tasks,
+    enqueue(teamId: string, task: string, priority: string, correlationId?: string): string {
+      idCounter += 1;
+      const id = `task-${String(idCounter).padStart(4, '0')}`;
+      tasks.push({
         id,
-        name: `openhive-${slug}`,
-        state: 'running',
-        teamSlug: slug,
-        tid: `tid-${slug}-000000`,
-        health: ContainerHealth.Running,
-        createdAt: Date.now(),
-      } satisfies ContainerInfo;
-    }),
-    listContainers: vi.fn().mockResolvedValue([]),
+        teamId,
+        task,
+        priority: (priority as TaskPriority) || TaskPriority.Normal,
+        status: TaskStatus.Pending,
+        createdAt: new Date().toISOString(),
+        correlationId: correlationId ?? null,
+      });
+      return id;
+    },
+    dequeue(teamId: string): TaskEntry | undefined {
+      const idx = tasks.findIndex((t) => t.teamId === teamId && t.status === TaskStatus.Pending);
+      if (idx === -1) return undefined;
+      const entry = { ...tasks[idx], status: TaskStatus.Running };
+      tasks[idx] = entry;
+      return entry;
+    },
+    peek(teamId: string): TaskEntry | undefined {
+      return tasks.find((t) => t.teamId === teamId && t.status === TaskStatus.Pending);
+    },
+    getByTeam(teamId: string): TaskEntry[] {
+      return tasks.filter((t) => t.teamId === teamId);
+    },
+    updateStatus(taskId: string, status: TaskStatus): void {
+      const idx = tasks.findIndex((t) => t.id === taskId);
+      if (idx !== -1) {
+        tasks[idx] = { ...tasks[idx], status };
+      }
+    },
+    getPending(): TaskEntry[] {
+      return tasks.filter((t) => t.status === TaskStatus.Pending);
+    },
+    getByStatus(status: TaskStatus): TaskEntry[] {
+      return tasks.filter((t) => t.status === status);
+    },
   };
 }
 
-// ---------------------------------------------------------------------------
-// 1. Provisioner scaffold + verify
-// ---------------------------------------------------------------------------
-
-describe('Layer 5: Containers', () => {
-  beforeEach(() => {
-    tmpRoot = createTmpRoot();
-  });
-
-  afterEach(() => {
-    fs.rmSync(tmpRoot, { recursive: true, force: true });
-  });
-
-  describe('Provisioner scaffold + verify', () => {
-    it('should scaffold workspace with all required directories', async () => {
-      const provisioner = new ContainerProvisionerImpl(tmpRoot);
-      const workspacePath = await provisioner.scaffoldWorkspace(tmpRoot, 'weather-team');
-
-      // Verify all expected directories exist
-      const expectedDirs = [
-        '.claude/agents',
-        '.claude/skills',
-        'memory',
-        'work',
-        'integrations',
-        'plugins/sinks',
-        'teams',
-      ];
-
-      for (const dir of expectedDirs) {
-        const fullPath = path.join(workspacePath, dir);
-        const stat = fs.statSync(fullPath);
-        expect(stat.isDirectory()).toBe(true);
+function createMockEscalationStore(): IEscalationStore & { records: EscalationCorrelation[] } {
+  const records: EscalationCorrelation[] = [];
+  return {
+    records,
+    create(c: EscalationCorrelation): void { records.push(c); },
+    updateStatus(correlationId: string, status: string): void {
+      const idx = records.findIndex((r) => r.correlationId === correlationId);
+      if (idx !== -1) {
+        records[idx] = { ...records[idx], status };
       }
-    });
+    },
+    getByCorrelationId(id: string): EscalationCorrelation | undefined {
+      return records.find((r) => r.correlationId === id);
+    },
+  };
+}
 
-    it('should create default team.yaml with correct slug', async () => {
-      const provisioner = new ContainerProvisionerImpl(tmpRoot);
-      const workspacePath = await provisioner.scaffoldWorkspace(tmpRoot, 'weather-team');
+function makeTeamConfig(overrides?: Partial<TeamConfig>): TeamConfig {
+  return {
+    name: 'test-team',
+    parent: null,
+    description: 'A test team',
+    scope: { accepts: ['weather', 'forecast'], rejects: ['admin'] },
+    allowed_tools: [],
+    secret_refs: [],
+    mcp_servers: [],
+    provider_profile: 'default',
+    maxTurns: 50,
+    ...overrides,
+  };
+}
 
-      const teamYaml = fs.readFileSync(path.join(workspacePath, 'team.yaml'), 'utf-8');
-      const parsed = yamlParse(teamYaml) as Record<string, unknown>;
-      expect(parsed.slug).toBe('weather-team');
-      expect(parsed.agents).toEqual([]);
-    });
+// ── Fixtures ──────────────────────────────────────────────────────────────
 
-    it('should write team config and read it back', async () => {
-      const provisioner = new ContainerProvisionerImpl(tmpRoot);
-      const workspacePath = await provisioner.scaffoldWorkspace(tmpRoot, 'code-team');
+let orgTree: OrgTree;
+let spawner: ISessionSpawner;
+let sessionManager: ISessionManager;
+let taskQueue: ReturnType<typeof createMockTaskQueue>;
+let escalationStore: ReturnType<typeof createMockEscalationStore>;
+let teamConfigs: Map<string, TeamConfig>;
+let logMessages: Array<{ msg: string; meta?: Record<string, unknown> }>;
+let server: OrgMcpServer;
 
-      const team = {
-        tid: 'tid-code-team-abc123',
-        slug: 'code-team',
-        coordinator_aid: 'aid-lead-abc123',
-        parent_tid: 'tid-root-000000',
-        depth: 1,
-        container_id: '',
-        health: 'starting',
-        agent_aids: ['aid-member1-abc123'],
-        workspace_path: workspacePath,
-        created_at: Date.now(),
-      };
+function setupServer(): void {
+  const store = createMemoryOrgStore();
+  orgTree = new OrgTree(store);
+  spawner = { spawn: vi.fn<ISessionSpawner['spawn']>().mockResolvedValue('session-1') };
+  sessionManager = { getSession: vi.fn().mockResolvedValue(null), terminateSession: vi.fn().mockResolvedValue(undefined) };
+  taskQueue = createMockTaskQueue();
+  escalationStore = createMockEscalationStore();
+  teamConfigs = new Map<string, TeamConfig>();
+  logMessages = [];
 
-      await provisioner.writeTeamConfig(workspacePath, team);
+  const deps: OrgMcpDeps = {
+    orgTree,
+    spawner,
+    sessionManager,
+    taskQueue,
+    escalationStore,
+    loadConfig: (name: string) => {
+      const cfg = teamConfigs.get(name);
+      if (!cfg) throw new Error(`no config for team "${name}"`);
+      return cfg;
+    },
+    getTeamConfig: (teamId: string) => teamConfigs.get(teamId),
+    log: (msg: string, meta?: Record<string, unknown>) => { logMessages.push({ msg, meta }); },
+  };
 
-      const readBack = fs.readFileSync(path.join(workspacePath, 'team.yaml'), 'utf-8');
-      const parsed = yamlParse(readBack) as Record<string, unknown>;
-      expect(parsed.slug).toBe('code-team');
-      expect(parsed.tid).toBe('tid-code-team-abc123');
-      expect(parsed.coordinator_aid).toBe('aid-lead-abc123');
-    });
+  server = createOrgMcpServer(deps);
+}
 
-    it('should create default CLAUDE.md and settings.json', async () => {
-      const provisioner = new ContainerProvisionerImpl(tmpRoot);
-      const workspacePath = await provisioner.scaffoldWorkspace(tmpRoot, 'doc-team');
+// ── UT-6: Tool Registration ──────────────────────────────────────────────
 
-      const claudeMd = fs.readFileSync(path.join(workspacePath, '.claude/CLAUDE.md'), 'utf-8');
-      expect(claudeMd).toContain('doc-team');
+describe('UT-6: All 6 tools registered', () => {
+  beforeEach(setupServer);
 
-      const settings = JSON.parse(
-        fs.readFileSync(path.join(workspacePath, '.claude/settings.json'), 'utf-8'),
-      ) as Record<string, unknown>;
-      expect(settings).toHaveProperty('permissions');
-      expect(settings).toHaveProperty('enableAllProjectMcpServers');
-    });
+  it('registers exactly 6 tools', () => {
+    expect(server.tools.size).toBe(6);
   });
 
-  // ---------------------------------------------------------------------------
-  // 2. Runtime security (mock dockerode)
-  // ---------------------------------------------------------------------------
-
-  describe('Runtime security', () => {
-    it('should create container with correct security settings (CapDrop, labels)', async () => {
-      const containers = new Map<string, ReturnType<typeof createMockDockerodeContainer>>();
-      const docker = createMockDockerode(containers);
-      const runtime = new ContainerRuntimeImpl(docker as never);
-
-      const config: ContainerConfig = {
-        teamSlug: 'secure-team',
-        tid: 'tid-secure-team-aaa111',
-        image: 'openhive',
-        workspacePath: '/app/workspace/teams/secure-team',
-        env: { OPENHIVE_WS_TOKEN: 'abc123def456', OPENHIVE_TEAM_TID: 'tid-secure-team-aaa111' },
-        networkMode: 'openhive-network',
-      };
-
-      await runtime.createContainer(config);
-
-      expect(docker.createContainer).toHaveBeenCalledTimes(1);
-      const callArgs = docker.createContainer.mock.calls[0][0] as Record<string, unknown>;
-
-      // Verify security settings
-      const hostConfig = callArgs.HostConfig as Record<string, unknown>;
-      expect(hostConfig.CapDrop).toEqual(['ALL']);
-      expect(hostConfig.Privileged).toBe(false);
-      expect(hostConfig.ReadonlyRootfs).toBe(true);
-
-      // Verify labels
-      const labels = callArgs.Labels as Record<string, string>;
-      expect(labels['openhive.managed']).toBe('true');
-      expect(labels['openhive.team']).toBe('secure-team');
-      expect(labels['openhive.tid']).toBe('tid-secure-team-aaa111');
-    });
-
-    it('should reject non-allowlisted image', async () => {
-      const containers = new Map<string, ReturnType<typeof createMockDockerodeContainer>>();
-      const docker = createMockDockerode(containers);
-      const runtime = new ContainerRuntimeImpl(docker as never);
-
-      const config: ContainerConfig = {
-        teamSlug: 'evil-team',
-        tid: 'tid-evil-team-bbb222',
-        image: 'malicious-image',
-        workspacePath: '/app/workspace/teams/evil-team',
-        env: {},
-        networkMode: 'openhive-network',
-      };
-
-      await expect(runtime.createContainer(config)).rejects.toThrow(ValidationError);
-      await expect(runtime.createContainer(config)).rejects.toThrow(/not in the allowlist/);
-    });
-
-    it('should reject path traversal in mount path', () => {
-      expect(() => validateMountPath('/app/workspace/../etc/passwd', '/app/workspace')).toThrow(
-        ValidationError,
-      );
-    });
-
-    it('should reject shell metacharacters in inputs', () => {
-      expect(() => sanitizeInput('test;rm -rf /', 'name')).toThrow(ValidationError);
-      expect(() => sanitizeInput('test|cat /etc/passwd', 'name')).toThrow(ValidationError);
-      expect(() => sanitizeInput('test\x00null', 'name')).toThrow(ValidationError);
-    });
-
-    it('should reject host networking', async () => {
-      const containers = new Map<string, ReturnType<typeof createMockDockerodeContainer>>();
-      const docker = createMockDockerode(containers);
-      const runtime = new ContainerRuntimeImpl(docker as never);
-
-      const config: ContainerConfig = {
-        teamSlug: 'host-team',
-        tid: 'tid-host-team-ccc333',
-        image: 'openhive',
-        workspacePath: '/app/workspace/teams/host-team',
-        env: {},
-        networkMode: 'host',
-      };
-
-      await expect(runtime.createContainer(config)).rejects.toThrow(ValidationError);
-      await expect(runtime.createContainer(config)).rejects.toThrow(/Host networking is not allowed/);
-    });
+  it('registers spawn_team with correct name', () => {
+    const tool = server.tools.get('spawn_team');
+    expect(tool).toBeDefined();
+    expect(tool!.name).toBe('spawn_team');
+    expect(tool!.description).toBeTruthy();
+    expect(tool!.inputSchema).toBeDefined();
   });
 
-  // ---------------------------------------------------------------------------
-  // 3. Runtime lifecycle (mock dockerode)
-  // ---------------------------------------------------------------------------
-
-  describe('Runtime lifecycle', () => {
-    it('should create -> start -> inspect -> stop -> remove in correct order', async () => {
-      const containers = new Map<string, ReturnType<typeof createMockDockerodeContainer>>();
-      const docker = createMockDockerode(containers);
-      const runtime = new ContainerRuntimeImpl(docker as never);
-
-      // Create
-      const config: ContainerConfig = {
-        teamSlug: 'lifecycle-team',
-        tid: 'tid-lifecycle-team-ddd444',
-        image: 'openhive',
-        workspacePath: '/app/workspace/teams/lifecycle-team',
-        env: { OPENHIVE_WS_TOKEN: 'token123', OPENHIVE_TEAM_TID: 'tid-lifecycle-team-ddd444' },
-        networkMode: 'openhive-network',
-      };
-
-      const containerId = await runtime.createContainer(config);
-      expect(docker.createContainer).toHaveBeenCalledTimes(1);
-
-      // Start
-      await runtime.startContainer(containerId);
-      const container = containers.get(containerId)!;
-      expect(container.start).toHaveBeenCalledTimes(1);
-
-      // Inspect
-      const info = await runtime.inspectContainer(containerId);
-      expect(info.id).toBe(containerId);
-      expect(info.teamSlug).toBe('lifecycle-team');
-      expect(info.tid).toBe('tid-lifecycle-team-ddd444');
-      expect(container.inspect).toHaveBeenCalledTimes(1);
-
-      // Stop (10s timeout -> 10 seconds passed to docker stop)
-      await runtime.stopContainer(containerId, 10_000);
-      expect(container.stop).toHaveBeenCalledWith({ t: 10 });
-
-      // Remove
-      await runtime.removeContainer(containerId);
-      expect(container.remove).toHaveBeenCalledWith({ force: true });
-    });
+  it('registers shutdown_team with correct name', () => {
+    const tool = server.tools.get('shutdown_team');
+    expect(tool).toBeDefined();
+    expect(tool!.name).toBe('shutdown_team');
   });
 
-  // ---------------------------------------------------------------------------
-  // 4. Manager spawn flow (mock runtime + token manager + EventBus)
-  // ---------------------------------------------------------------------------
-
-  describe('Manager spawn flow', () => {
-    it('should generate token, create container, and publish spawned event', async () => {
-      const runtime = createMockRuntime();
-      const tokenManager = new TokenManagerImpl();
-      const eventBus = new EventBusImpl();
-
-      const events: BusEvent[] = [];
-      eventBus.subscribe((event) => events.push(event));
-
-      const manager = new ContainerManagerImpl(runtime, tokenManager, eventBus);
-
-      const info = await manager.spawnTeamContainer('analytics-team');
-
-      // Token was generated (tokenManager.generate was called internally)
-      // Container was created with env vars
-      expect(runtime.createContainer).toHaveBeenCalledTimes(1);
-      const createArgs = runtime.createContainer.mock.calls[0][0] as ContainerConfig;
-      expect(createArgs.env).toHaveProperty('OPENHIVE_WS_TOKEN');
-      expect(createArgs.env).toHaveProperty('OPENHIVE_TEAM_TID');
-      expect(createArgs.env.OPENHIVE_TEAM_TID).toMatch(/^tid-analytics-team-/);
-
-      // Container was started
-      expect(runtime.startContainer).toHaveBeenCalledTimes(1);
-
-      // Inspect was called
-      expect(runtime.inspectContainer).toHaveBeenCalledTimes(1);
-
-      // Container info returned
-      expect(info).toBeDefined();
-      expect(info.state).toBe('running');
-
-      // Event published (flush microtasks)
-      await new Promise<void>((resolve) => queueMicrotask(resolve));
-      const spawnedEvent = events.find((e) => e.type === 'container.spawned');
-      expect(spawnedEvent).toBeDefined();
-      expect(spawnedEvent!.data.slug).toBe('analytics-team');
-    });
+  it('registers delegate_task with correct name', () => {
+    const tool = server.tools.get('delegate_task');
+    expect(tool).toBeDefined();
+    expect(tool!.name).toBe('delegate_task');
   });
 
-  // ---------------------------------------------------------------------------
-  // 5. Manager stop flow
-  // ---------------------------------------------------------------------------
-
-  describe('Manager stop flow', () => {
-    it('should stop container, remove it, and publish stopped event', async () => {
-      const runtime = createMockRuntime();
-      const tokenManager = new TokenManagerImpl();
-      const eventBus = new EventBusImpl();
-
-      const events: BusEvent[] = [];
-      eventBus.subscribe((event) => events.push(event));
-
-      const manager = new ContainerManagerImpl(runtime, tokenManager, eventBus);
-
-      // First spawn the container
-      await manager.spawnTeamContainer('ephemeral-team');
-
-      // Now stop it
-      await manager.stopTeamContainer('ephemeral-team', 'test cleanup');
-
-      // Runtime methods called
-      expect(runtime.stopContainer).toHaveBeenCalledTimes(1);
-      expect(runtime.removeContainer).toHaveBeenCalledTimes(1);
-
-      // Container removed from internal tracking
-      const containerInfo = await manager.getContainerByTeam('ephemeral-team');
-      expect(containerInfo).toBeUndefined();
-
-      // Event published
-      await new Promise<void>((resolve) => queueMicrotask(resolve));
-      const stoppedEvent = events.find((e) => e.type === 'container.stopped');
-      expect(stoppedEvent).toBeDefined();
-      expect(stoppedEvent!.data.slug).toBe('ephemeral-team');
-      expect(stoppedEvent!.data.reason).toBe('test cleanup');
-    });
+  it('registers escalate with correct name', () => {
+    const tool = server.tools.get('escalate');
+    expect(tool).toBeDefined();
+    expect(tool!.name).toBe('escalate');
   });
 
-  // ---------------------------------------------------------------------------
-  // 6. HealthMonitor state machine (fake timers)
-  // ---------------------------------------------------------------------------
-
-  describe('HealthMonitor state machine', () => {
-    let healthMonitor: HealthMonitorImpl;
-    let eventBus: EventBusImpl;
-
-    beforeEach(() => {
-      vi.useFakeTimers();
-      eventBus = new EventBusImpl();
-      healthMonitor = new HealthMonitorImpl(eventBus);
-    });
-
-    afterEach(() => {
-      healthMonitor.stop();
-      eventBus.close();
-      vi.useRealTimers();
-    });
-
-    it('should transition through health states based on elapsed time', () => {
-      const tid = 'tid-health-test-eee555';
-
-      // Record initial heartbeat -> running
-      healthMonitor.recordHeartbeat(tid, [
-        { aid: 'aid-agent1-abc123', status: AgentStatus.Idle, detail: '' },
-      ]);
-      expect(healthMonitor.getHealth(tid)).toBe(ContainerHealth.Running);
-
-      // Advance 35s -> degraded (threshold is 30s)
-      vi.advanceTimersByTime(35_000);
-      expect(healthMonitor.getHealth(tid)).toBe(ContainerHealth.Degraded);
-
-      // Advance to 65s total -> unhealthy (threshold is 60s)
-      vi.advanceTimersByTime(30_000);
-      expect(healthMonitor.getHealth(tid)).toBe(ContainerHealth.Unhealthy);
-
-      // Advance to 95s total -> unreachable (threshold is 90s)
-      vi.advanceTimersByTime(30_000);
-      expect(healthMonitor.getHealth(tid)).toBe(ContainerHealth.Unreachable);
-
-      // Record heartbeat -> back to running
-      healthMonitor.recordHeartbeat(tid, [
-        { aid: 'aid-agent1-abc123', status: AgentStatus.Idle, detail: '' },
-      ]);
-      expect(healthMonitor.getHealth(tid)).toBe(ContainerHealth.Running);
-    });
-
-    it('should report starting for unknown containers', () => {
-      expect(healthMonitor.getHealth('tid-unknown-fff666')).toBe(ContainerHealth.Starting);
-    });
-
-    it('should publish recovery event when heartbeat arrives after degraded state', async () => {
-      const tid = 'tid-recover-ggg777';
-      const events: BusEvent[] = [];
-      eventBus.subscribe((event) => events.push(event));
-
-      // Initial heartbeat -> running (store the state)
-      healthMonitor.recordHeartbeat(tid, [
-        { aid: 'aid-agent1-abc123', status: AgentStatus.Idle, detail: '' },
-      ]);
-
-      // Start the periodic check so checkTimeouts updates stored state
-      healthMonitor.start();
-
-      // Advance 35s so getHealth returns degraded
-      vi.advanceTimersByTime(35_000);
-
-      // The periodic check should fire and update stored state to degraded
-      // Flush microtasks to process EventBus publish
-      await new Promise<void>((resolve) => queueMicrotask(resolve));
-
-      // Now record a heartbeat — monitor detects recovery from degraded
-      healthMonitor.recordHeartbeat(tid, [
-        { aid: 'aid-agent1-abc123', status: AgentStatus.Idle, detail: '' },
-      ]);
-
-      // Flush microtasks for event delivery
-      await new Promise<void>((resolve) => queueMicrotask(resolve));
-
-      const recoveryEvent = events.find((e) => e.type === 'health.recovered');
-      expect(recoveryEvent).toBeDefined();
-      expect(recoveryEvent!.data.tid).toBe(tid);
-    });
+  it('registers send_message with correct name', () => {
+    const tool = server.tools.get('send_message');
+    expect(tool).toBeDefined();
+    expect(tool!.name).toBe('send_message');
   });
 
-  // ---------------------------------------------------------------------------
-  // 7. HealthMonitor stuck agent detection
-  // ---------------------------------------------------------------------------
+  it('registers get_status with correct name', () => {
+    const tool = server.tools.get('get_status');
+    expect(tool).toBeDefined();
+    expect(tool!.name).toBe('get_status');
+  });
+});
 
-  describe('HealthMonitor stuck agent detection', () => {
-    let healthMonitor: HealthMonitorImpl;
-    let eventBus: EventBusImpl;
+// ── spawn_team ────────────────────────────────────────────────────────────
 
-    beforeEach(() => {
-      vi.useFakeTimers();
-      eventBus = new EventBusImpl();
-      healthMonitor = new HealthMonitorImpl(eventBus);
-    });
+describe('spawn_team', () => {
+  beforeEach(setupServer);
 
-    afterEach(() => {
-      healthMonitor.stop();
-      eventBus.close();
-      vi.useRealTimers();
-    });
+  it('creates org tree entry and calls spawner', async () => {
+    teamConfigs.set('weather', makeTeamConfig({ name: 'weather' }));
 
-    it('should detect stuck agents after timeout', () => {
-      const tid = 'tid-stuck-test-hhh888';
-      const stuckAid = 'aid-stuckagent-abc123';
+    const result = await server.invoke('spawn_team', { name: 'weather' }, 'root');
 
-      // Report agent as busy
-      healthMonitor.recordHeartbeat(tid, [
-        { aid: stuckAid, status: AgentStatus.Busy, detail: 'processing task' },
-      ]);
-
-      // Verify not stuck yet
-      const thirtyMinMs = 30 * 60 * 1000;
-      expect(healthMonitor.getStuckAgents(thirtyMinMs)).toHaveLength(0);
-
-      // Advance past 30 minutes — heartbeats still report the same busy status
-      vi.advanceTimersByTime(thirtyMinMs + 1000);
-
-      // Must send another heartbeat to keep the container alive, but agent stays busy
-      healthMonitor.recordHeartbeat(tid, [
-        { aid: stuckAid, status: AgentStatus.Busy, detail: 'still processing' },
-      ]);
-
-      // The agent was first reported as busy at original time.
-      // After advancing 30min+1s, the statusSince stayed at the original time
-      // because the status (Busy) didn't change between heartbeats.
-      expect(healthMonitor.getStuckAgents(thirtyMinMs)).toContain(stuckAid);
-    });
-
-    it('should not flag idle agents as stuck', () => {
-      const tid = 'tid-idle-test-iii999';
-
-      healthMonitor.recordHeartbeat(tid, [
-        { aid: 'aid-idleagent-abc123', status: AgentStatus.Idle, detail: '' },
-      ]);
-
-      vi.advanceTimersByTime(60 * 60 * 1000); // 1 hour
-      healthMonitor.recordHeartbeat(tid, [
-        { aid: 'aid-idleagent-abc123', status: AgentStatus.Idle, detail: '' },
-      ]);
-
-      expect(healthMonitor.getStuckAgents(30 * 60 * 1000)).toHaveLength(0);
-    });
-
-    it('should clear stuck status when agent becomes idle', () => {
-      const tid = 'tid-clear-test-jjj000';
-      const aid = 'aid-clearagent-abc123';
-      const thirtyMinMs = 30 * 60 * 1000;
-
-      // Start busy
-      healthMonitor.recordHeartbeat(tid, [
-        { aid, status: AgentStatus.Busy, detail: 'working' },
-      ]);
-
-      vi.advanceTimersByTime(thirtyMinMs + 1000);
-
-      // Still busy in next heartbeat
-      healthMonitor.recordHeartbeat(tid, [
-        { aid, status: AgentStatus.Busy, detail: 'still working' },
-      ]);
-      expect(healthMonitor.getStuckAgents(thirtyMinMs)).toContain(aid);
-
-      // Agent becomes idle — statusSince resets
-      healthMonitor.recordHeartbeat(tid, [
-        { aid, status: AgentStatus.Idle, detail: 'done' },
-      ]);
-      expect(healthMonitor.getStuckAgents(thirtyMinMs)).not.toContain(aid);
-    });
+    expect(result).toEqual({ success: true, team: 'weather' });
+    expect(orgTree.getTeam('weather')).toBeDefined();
+    expect(orgTree.getTeam('weather')?.parentId).toBe('root');
+    expect(spawner.spawn).toHaveBeenCalledWith('weather', 'weather');
   });
 
-  // ---------------------------------------------------------------------------
-  // 8. Integration wiring
-  // ---------------------------------------------------------------------------
+  it('rejects duplicate team name', async () => {
+    teamConfigs.set('dup', makeTeamConfig({ name: 'dup' }));
+    orgTree.addTeam(makeNode({ teamId: 'dup', name: 'dup' }));
 
-  describe('Integration wiring (Manager + Provisioner + Runtime + HealthMonitor + TokenManager + EventBus)', () => {
-    it('should spawn team, receive heartbeat, verify health, stop team, and verify cleanup', async () => {
-      vi.useFakeTimers();
+    const result = await server.invoke('spawn_team', { name: 'dup' }, 'root');
 
-      const runtime = createMockRuntime();
-      const tokenManager = new TokenManagerImpl();
-      const eventBus = new EventBusImpl();
-      const healthMonitor = new HealthMonitorImpl(eventBus);
+    expect(result).toEqual(expect.objectContaining({ success: false }));
+  });
 
-      const events: BusEvent[] = [];
-      eventBus.subscribe((event) => events.push(event));
+  it('rolls back org tree on spawn failure', async () => {
+    teamConfigs.set('fail-team', makeTeamConfig({ name: 'fail-team' }));
+    vi.mocked(spawner.spawn).mockRejectedValueOnce(new Error('docker unavailable'));
 
-      const manager = new ContainerManagerImpl(runtime, tokenManager, eventBus);
+    const result = await server.invoke('spawn_team', { name: 'fail-team' }, 'root');
 
-      // Step 1: Spawn a team container
-      const info = await manager.spawnTeamContainer('integration-team');
-      expect(info).toBeDefined();
-      expect(info.state).toBe('running');
+    expect(result).toEqual(expect.objectContaining({ success: false }));
+    expect(orgTree.getTeam('fail-team')).toBeUndefined();
+  });
+});
 
-      // Flush microtasks for event delivery
-      await new Promise<void>((resolve) => queueMicrotask(resolve));
-      expect(events.some((e) => e.type === 'container.spawned')).toBe(true);
+// ── shutdown_team ──────────────────────────────────────────────────────────
 
-      // Step 2: Simulate heartbeat arriving from the container
-      const tid = (runtime.createContainer.mock.calls[0][0] as ContainerConfig).tid;
-      healthMonitor.recordHeartbeat(tid, [
-        { aid: 'aid-member1-abc123', status: AgentStatus.Idle, detail: 'ready' },
-      ]);
+describe('shutdown_team', () => {
+  beforeEach(() => {
+    setupServer();
+    orgTree.addTeam(makeNode({ teamId: 'root', name: 'root' }));
+    orgTree.addTeam(makeNode({ teamId: 'child', name: 'child', parentId: 'root' }));
+  });
 
-      // Step 3: Health should be running
-      expect(healthMonitor.getHealth(tid)).toBe(ContainerHealth.Running);
+  it('stops session and removes from tree', async () => {
+    const result = await server.invoke('shutdown_team', { name: 'child' }, 'root');
 
-      // Step 4: Stop the team container
-      await manager.stopTeamContainer('integration-team', 'test complete');
+    expect(result).toEqual({ success: true });
+    expect(orgTree.getTeam('child')).toBeUndefined();
+    expect(sessionManager.terminateSession).toHaveBeenCalledWith('child');
+  });
 
-      // Verify runtime was called correctly
-      expect(runtime.stopContainer).toHaveBeenCalledTimes(1);
-      expect(runtime.removeContainer).toHaveBeenCalledTimes(1);
+  it('rejects when caller is not parent', async () => {
+    orgTree.addTeam(makeNode({ teamId: 'stranger', name: 'stranger' }));
 
-      // Verify container removed from manager tracking
-      const afterStop = await manager.getContainerByTeam('integration-team');
-      expect(afterStop).toBeUndefined();
+    const result = await server.invoke('shutdown_team', { name: 'child' }, 'stranger');
 
-      // Flush microtasks for stop event
-      await new Promise<void>((resolve) => queueMicrotask(resolve));
-      expect(events.some((e) => e.type === 'container.stopped')).toBe(true);
+    expect(result).toEqual(expect.objectContaining({ success: false }));
+    // Team should still exist
+    expect(orgTree.getTeam('child')).toBeDefined();
+  });
 
-      // Step 5: Verify agent health is still queryable from the monitor
-      // (the health monitor is independent of the container manager)
-      expect(healthMonitor.getAgentHealth('aid-member1-abc123')).toBe(AgentStatus.Idle);
+  it('rejects when team not found', async () => {
+    const result = await server.invoke('shutdown_team', { name: 'ghost' }, 'root');
 
-      healthMonitor.stop();
-      eventBus.close();
-      vi.useRealTimers();
-    });
+    expect(result).toEqual(expect.objectContaining({ success: false }));
+  });
+});
+
+// ── delegate_task ──────────────────────────────────────────────────────────
+
+describe('delegate_task', () => {
+  beforeEach(() => {
+    setupServer();
+    orgTree.addTeam(makeNode({ teamId: 'root', name: 'root' }));
+    orgTree.addTeam(makeNode({ teamId: 'weather-team', name: 'weather-team', parentId: 'root' }));
+    teamConfigs.set('weather-team', makeTeamConfig({
+      name: 'weather-team',
+      scope: { accepts: ['weather', 'forecast'], rejects: ['admin'] },
+    }));
+  });
+
+  it('admits task matching accept scope and enqueues', async () => {
+    const result = await server.invoke(
+      'delegate_task',
+      { team: 'weather-team', task: 'get weather forecast for NYC' },
+      'root',
+    );
+
+    expect(result).toEqual(expect.objectContaining({ success: true }));
+    const typed = result as { success: boolean; task_id: string };
+    expect(typed.task_id).toBeTruthy();
+    expect(taskQueue.tasks).toHaveLength(1);
+    expect(taskQueue.tasks[0].teamId).toBe('weather-team');
+  });
+
+  it('rejects task matching reject scope (F-9)', async () => {
+    const result = await server.invoke(
+      'delegate_task',
+      { team: 'weather-team', task: 'admin reset all passwords' },
+      'root',
+    );
+
+    const typed = result as { success: boolean; reason: string; team: string };
+    expect(typed.success).toBe(false);
+    expect(typed.reason).toContain('admin');
+    expect(typed.team).toBe('weather-team');
+    expect(taskQueue.tasks).toHaveLength(0);
+  });
+
+  it('rejects task with no matching accept pattern (reject-by-default F-9)', async () => {
+    const result = await server.invoke(
+      'delegate_task',
+      { team: 'weather-team', task: 'calculate pi to 1000 digits' },
+      'root',
+    );
+
+    const typed = result as { success: boolean; reason: string };
+    expect(typed.success).toBe(false);
+    expect(typed.reason).toContain('out-of-scope');
+  });
+
+  it('validates caller is parent', async () => {
+    orgTree.addTeam(makeNode({ teamId: 'stranger', name: 'stranger' }));
+
+    const result = await server.invoke(
+      'delegate_task',
+      { team: 'weather-team', task: 'get weather' },
+      'stranger',
+    );
+
+    const typed = result as { success: boolean; reason: string };
+    expect(typed.success).toBe(false);
+    expect(typed.reason).toContain('not parent');
+  });
+
+  it('uses specified priority', async () => {
+    const result = await server.invoke(
+      'delegate_task',
+      { team: 'weather-team', task: 'urgent weather alert', priority: 'critical' },
+      'root',
+    );
+
+    expect(result).toEqual(expect.objectContaining({ success: true }));
+    expect(taskQueue.tasks[0].priority).toBe('critical');
+  });
+});
+
+// ── escalate ─────────────────────────────────────────────────────────────
+
+describe('escalate', () => {
+  beforeEach(() => {
+    setupServer();
+    orgTree.addTeam(makeNode({ teamId: 'root', name: 'root' }));
+    orgTree.addTeam(makeNode({ teamId: 'child', name: 'child', parentId: 'root' }));
+  });
+
+  it('generates correlation_id and persists to store', async () => {
+    const result = await server.invoke(
+      'escalate',
+      { message: 'Need help with complex task', reason: 'out of scope' },
+      'child',
+    );
+
+    const typed = result as { success: boolean; correlation_id: string };
+    expect(typed.success).toBe(true);
+    expect(typed.correlation_id).toBeTruthy();
+
+    // Verify escalation store
+    expect(escalationStore.records).toHaveLength(1);
+    expect(escalationStore.records[0].sourceTeam).toBe('child');
+    expect(escalationStore.records[0].targetTeam).toBe('root');
+    expect(escalationStore.records[0].correlationId).toBe(typed.correlation_id);
+  });
+
+  it('queues task for parent with high priority', async () => {
+    await server.invoke(
+      'escalate',
+      { message: 'Need help' },
+      'child',
+    );
+
+    expect(taskQueue.tasks).toHaveLength(1);
+    expect(taskQueue.tasks[0].teamId).toBe('root');
+    expect(taskQueue.tasks[0].priority).toBe(TaskPriority.High);
+    expect(taskQueue.tasks[0].task).toContain('Need help');
+  });
+
+  it('fails when caller has no parent', async () => {
+    const result = await server.invoke(
+      'escalate',
+      { message: 'Help' },
+      'root',
+    );
+
+    const typed = result as { success: boolean; error: string };
+    expect(typed.success).toBe(false);
+    expect(typed.error).toContain('no parent');
+  });
+
+  it('fails when caller not found in org tree', async () => {
+    const result = await server.invoke(
+      'escalate',
+      { message: 'Help' },
+      'ghost',
+    );
+
+    const typed = result as { success: boolean; error: string };
+    expect(typed.success).toBe(false);
+    expect(typed.error).toContain('not found');
+  });
+});
+
+// ── send_message ──────────────────────────────────────────────────────────
+
+describe('send_message', () => {
+  beforeEach(() => {
+    setupServer();
+    orgTree.addTeam(makeNode({ teamId: 'root', name: 'root' }));
+    orgTree.addTeam(makeNode({ teamId: 'child-a', name: 'child-a', parentId: 'root' }));
+    orgTree.addTeam(makeNode({ teamId: 'child-b', name: 'child-b', parentId: 'root' }));
+  });
+
+  it('allows child to send to parent', async () => {
+    const result = await server.invoke(
+      'send_message',
+      { target: 'root', message: 'status update' },
+      'child-a',
+    );
+
+    expect(result).toEqual({ success: true });
+    expect(logMessages).toHaveLength(1);
+    expect(logMessages[0].meta!['from']).toBe('child-a');
+    expect(logMessages[0].meta!['to']).toBe('root');
+  });
+
+  it('allows parent to send to child', async () => {
+    const result = await server.invoke(
+      'send_message',
+      { target: 'child-a', message: 'instructions' },
+      'root',
+    );
+
+    expect(result).toEqual({ success: true });
+  });
+
+  it('blocks unrelated teams (sibling to sibling)', async () => {
+    const result = await server.invoke(
+      'send_message',
+      { target: 'child-b', message: 'hello sibling' },
+      'child-a',
+    );
+
+    const typed = result as { success: boolean; error: string };
+    expect(typed.success).toBe(false);
+    expect(typed.error).toContain('neither parent nor child');
+  });
+
+  it('fails when target not found', async () => {
+    const result = await server.invoke(
+      'send_message',
+      { target: 'ghost', message: 'hello' },
+      'child-a',
+    );
+
+    const typed = result as { success: boolean; error: string };
+    expect(typed.success).toBe(false);
+    expect(typed.error).toContain('not found');
+  });
+});
+
+// ── get_status ────────────────────────────────────────────────────────────
+
+describe('get_status', () => {
+  beforeEach(() => {
+    setupServer();
+    orgTree.addTeam(makeNode({ teamId: 'root', name: 'root' }));
+    orgTree.addTeam(makeNode({ teamId: 'team-a', name: 'team-a', parentId: 'root' }));
+    orgTree.addTeam(makeNode({ teamId: 'team-b', name: 'team-b', parentId: 'root' }));
+  });
+
+  it('returns all children when no team specified', async () => {
+    const result = await server.invoke('get_status', {}, 'root');
+
+    const typed = result as { success: boolean; teams: Array<{ teamId: string }> };
+    expect(typed.success).toBe(true);
+    expect(typed.teams).toHaveLength(2);
+    const ids = typed.teams.map((t) => t.teamId).sort();
+    expect(ids).toEqual(['team-a', 'team-b']);
+  });
+
+  it('returns specific child team status', async () => {
+    const result = await server.invoke('get_status', { team: 'team-a' }, 'root');
+
+    const typed = result as { success: boolean; teams: Array<{ teamId: string; queueDepth: number }> };
+    expect(typed.success).toBe(true);
+    expect(typed.teams).toHaveLength(1);
+    expect(typed.teams[0].teamId).toBe('team-a');
+    expect(typed.teams[0].queueDepth).toBe(0);
+  });
+
+  it('shows correct queue depth', async () => {
+    taskQueue.enqueue('team-a', 'task 1', 'normal');
+    taskQueue.enqueue('team-a', 'task 2', 'high');
+    taskQueue.enqueue('team-b', 'task 3', 'normal');
+
+    const result = await server.invoke('get_status', { team: 'team-a' }, 'root');
+
+    const typed = result as { success: boolean; teams: Array<{ queueDepth: number; pendingCount: number }> };
+    expect(typed.teams[0].queueDepth).toBe(2);
+    expect(typed.teams[0].pendingCount).toBe(2);
+  });
+
+  it('rejects when target is not child of caller', async () => {
+    orgTree.addTeam(makeNode({ teamId: 'stranger', name: 'stranger' }));
+
+    const result = await server.invoke('get_status', { team: 'team-a' }, 'stranger');
+
+    const typed = result as { success: boolean; error: string };
+    expect(typed.success).toBe(false);
+    expect(typed.error).toContain('not a child');
+  });
+});
+
+// ── UT-10: Scope Admission ───────────────────────────────────────────────
+
+describe('UT-10: Scope Admission', () => {
+  const scope = { accepts: ['weather', 'forecast', 'temperature'], rejects: ['admin', 'delete'] };
+
+  it('admits task with matching accept keyword', () => {
+    const result = checkScopeAdmission('get weather for NYC', scope);
+    expect(result.admitted).toBe(true);
+    expect(result.reason).toContain('weather');
+  });
+
+  it('rejects task with matching reject keyword', () => {
+    const result = checkScopeAdmission('admin reset passwords', scope);
+    expect(result.admitted).toBe(false);
+    expect(result.reason).toContain('admin');
+  });
+
+  it('rejects take priority over accepts', () => {
+    const result = checkScopeAdmission('admin weather override', scope);
+    expect(result.admitted).toBe(false);
+    expect(result.reason).toContain('admin');
+  });
+
+  it('reject-by-default for ambiguous task (F-9)', () => {
+    const result = checkScopeAdmission('calculate fibonacci sequence', scope);
+    expect(result.admitted).toBe(false);
+    expect(result.reason).toBe('out-of-scope: no matching accept pattern');
+  });
+
+  it('handles empty scope (rejects everything by default)', () => {
+    const result = checkScopeAdmission('any task', { accepts: [], rejects: [] });
+    expect(result.admitted).toBe(false);
+    expect(result.reason).toBe('out-of-scope: no matching accept pattern');
+  });
+
+  it('admits with partial keyword match', () => {
+    const result = checkScopeAdmission('check the temperatures today', scope);
+    expect(result.admitted).toBe(true);
+  });
+});
+
+// ── R-1: Error handling (must not crash) ──────────────────────────────────
+
+describe('R-1: Server error handling', () => {
+  beforeEach(setupServer);
+
+  it('returns error for unknown tool', async () => {
+    const result = await server.invoke('nonexistent_tool', {}, 'root');
+
+    const typed = result as { success: boolean; error: string };
+    expect(typed.success).toBe(false);
+    expect(typed.error).toContain('unknown tool');
+  });
+
+  it('catches handler exceptions and returns error', async () => {
+    // Force an exception by making spawner throw
+    teamConfigs.set('boom', makeTeamConfig({ name: 'boom' }));
+    vi.mocked(spawner.spawn).mockRejectedValueOnce(new Error('kaboom'));
+
+    const result = await server.invoke('spawn_team', { name: 'boom' }, 'root');
+
+    const typed = result as { success: boolean; error: string };
+    expect(typed.success).toBe(false);
+    // The error is handled inside spawnTeam, not at the server catch level
+    expect(typed.error).toContain('spawn failed');
   });
 });

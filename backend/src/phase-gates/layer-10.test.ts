@@ -1,700 +1,283 @@
 /**
- * Layer 10 Phase Gate: API + Portal Integration Tests
+ * Layer 10 Phase Gate -- Recovery + Backup
  *
- * Tests end-to-end API and portal integration:
- * - API health endpoint
- * - Teams CRUD
- * - Tasks query
- * - Logs SSE stream
- * - Portal WS relay
- * - SPA builds
- * - Webhook path validation
- * - Listen address default
- *
- * AC-L10-01 through AC-L10-08
+ * Tests:
+ * - UT-22: Recovery reloads org tree, resets running tasks, detects orphaned teams
+ * - Backup creates valid SQLite copy, rotates old backups
+ * - Memory files persist after recovery
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { createServer } from 'node:http';
-import { WebSocket } from 'ws';
-import Fastify from 'fastify';
-import { APIServer } from '../api/server.js';
-import { PortalWSRelay } from '../api/portal-ws.js';
-import { registerRoutes, type RouteContext } from '../api/routes/index.js';
-import { EventBusImpl } from '../control-plane/event-bus.js';
-import { OrgChartImpl } from '../control-plane/org-chart.js';
-import { ContainerHealth, TaskStatus, AgentStatus } from '../domain/enums.js';
-import type {
-  OrgChartAgent,
-  OrgChartTeam,
-  TaskStore,
-  LogStore,
-  TaskEventStore,
-  ContainerManager,
-  HealthMonitor,
-  BusEvent,
-} from '../domain/interfaces.js';
-import type { Task, LogEntry } from '../domain/domain.js';
+import { describe, it, expect } from 'vitest';
+import { tmpdir } from 'node:os';
+import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
+import Database from 'better-sqlite3';
 
-// ---------------------------------------------------------------------------
-// Test Helpers
-// ---------------------------------------------------------------------------
+import { createDatabase, createTables } from '../storage/database.js';
+import { OrgStore } from '../storage/stores/org-store.js';
+import { TaskQueueStore } from '../storage/stores/task-queue-store.js';
+import { OrgTree } from '../domain/org-tree.js';
+import { TeamStatus, TaskStatus, TaskPriority } from '../domain/types.js';
+import { recoverFromCrash } from '../recovery/startup-recovery.js';
+import { backupDatabase } from '../storage/backup.js';
+import { MemoryStore } from '../storage/stores/memory-store.js';
 
-function makeOrgChartTeam(overrides: Partial<OrgChartTeam> = {}): OrgChartTeam {
-  return {
-    tid: 'tid-main-abc123',
-    slug: 'main',
-    coordinatorAid: 'aid-main-leader',
-    parentTid: '',
-    depth: 0,
-    containerId: 'container-123',
-    health: ContainerHealth.Running,
-    agentAids: ['aid-main-leader'],
-    workspacePath: '/workspace',
-    ...overrides,
-  };
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+function createTempEnv(): {
+  dbPath: string;
+  dir: string;
+  raw: Database.Database;
+  orgStore: OrgStore;
+  taskQueueStore: TaskQueueStore;
+  orgTree: OrgTree;
+  teamsDir: string;
+} {
+  const dir = mkdtempSync(join(tmpdir(), 'openhive-l10-'));
+  const dbPath = join(dir, 'test.db');
+  const { db, raw } = createDatabase(dbPath);
+  createTables(raw);
+
+  const orgStore = new OrgStore(db);
+  const taskQueueStore = new TaskQueueStore(db);
+  const orgTree = new OrgTree(orgStore);
+  const teamsDir = join(dir, 'teams');
+  mkdirSync(teamsDir, { recursive: true });
+
+  return { dbPath, dir, raw, orgStore, taskQueueStore, orgTree, teamsDir };
 }
 
-function makeOrgChartAgent(overrides: Partial<OrgChartAgent> = {}): OrgChartAgent {
-  return {
-    aid: 'aid-main-agent1',
-    name: 'Test Agent',
-    teamSlug: 'main',
-    role: 'member',
-    status: 'idle',
-    ...overrides,
-  };
-}
+const noopLogger = {
+  info: () => {},
+  warn: () => {},
+};
 
-function makeTask(overrides: Partial<Task> = {}): Task {
-  return {
-    id: 'task-123',
-    parent_id: '',
-    team_slug: 'main',
-    agent_aid: 'aid-main-agent1',
-    title: 'Test Task',
-    status: TaskStatus.Pending,
-    prompt: 'Do something',
-    result: '',
-    error: '',
-    blocked_by: null,
-    priority: 0,
-    retry_count: 0,
-    max_retries: 3,
-    created_at: Date.now(),
-    updated_at: Date.now(),
-    completed_at: null,
-    ...overrides,
-  };
-}
+// ── UT-22: Recovery ─────────────────────────────────────────────────────
 
-function makeLogEntry(overrides: Partial<LogEntry> = {}): LogEntry {
-  return {
-    id: 1,
-    level: 20,
-    event_type: 'test',
-    component: 'test',
-    action: 'test_action',
-    message: 'Test log entry',
-    params: '',
-    team_slug: '',
-    task_id: '',
-    agent_aid: '',
-    request_id: '',
-    correlation_id: '',
-    error: '',
-    duration_ms: 0,
-    created_at: Date.now(),
-    ...overrides,
-  };
-}
+describe('UT-22: Recovery reloads org tree, resets running tasks, detects orphaned teams', () => {
+  it('reloads org tree from SQLite', async () => {
+    const { raw, orgStore, taskQueueStore, orgTree, teamsDir } = createTempEnv();
 
-// ---------------------------------------------------------------------------
-// Mock Stores
-// ---------------------------------------------------------------------------
+    orgStore.addTeam({
+      teamId: 'team-1',
+      name: 'alpha',
+      parentId: null,
+      status: TeamStatus.Active,
+      agents: [],
+      children: [],
+    });
 
-function createMockTaskStore(tasks: Task[] = []): TaskStore {
-  const store = new Map<string, Task>();
-  tasks.forEach((t) => store.set(t.id, t));
+    // Create config on disk so it's not orphaned
+    mkdirSync(join(teamsDir, 'alpha'), { recursive: true });
+    writeFileSync(join(teamsDir, 'alpha', 'config.yaml'), 'name: alpha\n');
 
-  return {
-    create: vi.fn(async (task: Task) => { store.set(task.id, task); }),
-    get: vi.fn(async (id: string) => {
-      const task = store.get(id);
-      if (!task) throw new Error(`Task not found: ${id}`);
-      return task;
-    }),
-    update: vi.fn(async (task: Task) => { store.set(task.id, task); }),
-    delete: vi.fn(async (id: string) => { store.delete(id); }),
-    listByTeam: vi.fn(async (teamSlug: string) =>
-      [...store.values()].filter((t) => t.team_slug === teamSlug)
-    ),
-    listByStatus: vi.fn(async (status: TaskStatus) =>
-      [...store.values()].filter((t) => t.status === status)
-    ),
-    getSubtree: vi.fn(async () => []),
-    getBlockedBy: vi.fn(async () => []),
-    unblockTask: vi.fn(async () => false),
-    retryTask: vi.fn(async () => false),
-    validateDependencies: vi.fn(async () => {}),
-    getRecentUserTasks: vi.fn().mockResolvedValue([]),
-    getNextPendingForAgent: vi.fn().mockResolvedValue(null),
-  };
-}
+    const result = recoverFromCrash({
+      orgStore,
+      taskQueueStore,
+      orgTree,
+      teamsDir,
+      logger: noopLogger,
+    });
 
-function createMockLogStore(entries: LogEntry[] = []): LogStore {
-  const store = entries;
+    expect(orgTree.getTeam('team-1')).toBeDefined();
+    expect(orgTree.getTeam('team-1')?.name).toBe('alpha');
+    expect(result.orphaned).toHaveLength(0);
 
-  return {
-    create: vi.fn(async () => {}),
-    createWithIds: vi.fn().mockResolvedValue([1]),
-    query: vi.fn(async () => store),
-    deleteBefore: vi.fn(async () => 0),
-    deleteByLevelBefore: vi.fn(async () => 0),
-    count: vi.fn(async () => store.length),
-    getOldest: vi.fn(async () => store.slice(0, 10)),
-  };
-}
-
-function createMockTaskEventStore(): TaskEventStore {
-  return {
-    create: vi.fn(async () => {}),
-    getByTask: vi.fn(async () => []),
-    getByLogEntry: vi.fn(async () => null),
-  };
-}
-
-function createMockContainerManager(): ContainerManager {
-  return {
-    spawnTeamContainer: vi.fn(async () => ({
-      id: 'container-new',
-      name: 'openhive-new-team',
-      state: 'running',
-      teamSlug: 'new-team',
-      tid: 'tid-new-team',
-      health: ContainerHealth.Starting,
-      createdAt: Date.now(),
-    })),
-    stopTeamContainer: vi.fn(async () => {}),
-    restartTeamContainer: vi.fn(async () => ({ id: 'cid-1', name: 'openhive-test', state: 'running', teamSlug: 'test', tid: 'tid-test-new', health: 'running' as any, createdAt: Date.now() })),
-    getContainerByTeam: vi.fn(async () => undefined),
-    listRunningContainers: vi.fn(async () => []),
-    cleanupStoppedContainers: vi.fn(async () => 0),
-  };
-}
-
-function createMockHealthMonitor(): HealthMonitor {
-  const healthMap = new Map<string, ContainerHealth>();
-  return {
-    recordHeartbeat: vi.fn(),
-    getHealth: vi.fn(() => ContainerHealth.Running),
-    getAgentHealth: vi.fn(() => AgentStatus.Idle),
-    getAllHealth: vi.fn(() => healthMap),
-    getStuckAgents: vi.fn(() => []),
-    checkTimeouts: vi.fn(),
-    start: vi.fn(),
-    stop: vi.fn(),
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-describe('Layer 10: API + Portal', () => {
-  let eventBus: EventBusImpl;
-  let orgChart: OrgChartImpl;
-
-  beforeEach(() => {
-    eventBus = new EventBusImpl();
-    orgChart = new OrgChartImpl();
-
-    // For root team bootstrapping, we need to work around the chicken-and-egg problem:
-    // addTeam requires leader to exist, but addAgent requires team to exist.
-    // Solution: Create a minimal root team first, then add agents via direct manipulation
-    // for testing purposes. In production, the root team is created with the main assistant
-    // as the leader during initial setup.
+    raw.close();
   });
 
-  afterEach(() => {
-    eventBus.close();
+  it('resets running tasks to pending', async () => {
+    const { raw, orgStore, taskQueueStore, orgTree, teamsDir } = createTempEnv();
+
+    // Enqueue and dequeue (sets to running)
+    const taskId1 = taskQueueStore.enqueue('team-1', 'do something', TaskPriority.Normal);
+    const taskId2 = taskQueueStore.enqueue('team-1', 'do another', TaskPriority.High);
+    taskQueueStore.dequeue('team-1'); // sets taskId2 to running (high priority first)
+
+    const result = recoverFromCrash({
+      orgStore,
+      taskQueueStore,
+      orgTree,
+      teamsDir,
+      logger: noopLogger,
+    });
+
+    expect(result.recovered).toBe(1);
+
+    // Both tasks should now be pending
+    const pending = taskQueueStore.getByStatus(TaskStatus.Pending);
+    expect(pending).toHaveLength(2);
+
+    // Verify the dequeued task is back to pending
+    const tasks = taskQueueStore.getByTeam('team-1');
+    const resetTask = tasks.find((t) => t.status === TaskStatus.Running);
+    expect(resetTask).toBeUndefined();
+
+    void taskId1;
+    void taskId2;
+    raw.close();
   });
 
-  // Helper to set up a basic org chart with a root team
-  function setupRootTeam(): void {
-    // Create a root team without a leader check by directly adding to the maps
-    // This simulates the production bootstrapping where root team is created first
-    const rootTeam: OrgChartTeam = makeOrgChartTeam();
-    (orgChart as unknown as { teamsByTid: Map<string, OrgChartTeam> }).teamsByTid.set(rootTeam.tid, rootTeam);
-    (orgChart as unknown as { teamsBySlug: Map<string, OrgChartTeam> }).teamsBySlug.set(rootTeam.slug, rootTeam);
-    (orgChart as unknown as { agentsByTeam: Map<string, Set<string>> }).agentsByTeam.set(rootTeam.slug, new Set());
+  it('identifies teams with pending tasks for re-spawning', async () => {
+    const { raw, orgStore, taskQueueStore, orgTree, teamsDir } = createTempEnv();
 
-    // Now add the leader agent
-    const leaderAgent: OrgChartAgent = makeOrgChartAgent({
-      aid: 'aid-main-leader',
-      name: 'Main Leader',
-      role: 'member',
+    taskQueueStore.enqueue('team-alpha', 'task-1', TaskPriority.Normal);
+    taskQueueStore.enqueue('team-beta', 'task-2', TaskPriority.High);
+
+    const result = recoverFromCrash({
+      orgStore,
+      taskQueueStore,
+      orgTree,
+      teamsDir,
+      logger: noopLogger,
     });
-    orgChart.addAgent(leaderAgent);
-  }
 
-  describe('API health endpoint', () => {
-    it('GET /api/health returns system status', async () => {
-      setupRootTeam();
-      const taskStore = createMockTaskStore();
-      const logStore = createMockLogStore();
-      const taskEventStore = createMockTaskEventStore();
-      const containerManager = createMockContainerManager();
-      const healthMonitor = createMockHealthMonitor();
+    expect(result.teamsToReSpawn).toContain('team-alpha');
+    expect(result.teamsToReSpawn).toContain('team-beta');
+    expect(result.teamsToReSpawn).toHaveLength(2);
 
-      const ctx: RouteContext = {
-        orgChart,
-        taskStore,
-        logStore,
-        taskEventStore,
-        containerManager,
-        healthMonitor,
-      };
-
-      const app = Fastify();
-      registerRoutes(app, ctx);
-      await app.ready();
-
-      const response = await app.inject({
-        method: 'GET',
-        url: '/api/health',
-      });
-
-      expect(response.statusCode).toBe(200);
-      const body = JSON.parse(response.body);
-      expect(body.status).toBe('healthy');
-      expect(body).toHaveProperty('uptime');
-      expect(body).toHaveProperty('containers');
-      expect(body).toHaveProperty('connectedTeams');
-
-      await app.close();
-    });
+    raw.close();
   });
 
-  describe('Teams CRUD', () => {
-    it('GET /api/teams lists all teams', async () => {
-      setupRootTeam();
-      const ctx: RouteContext = { orgChart };
-      const app = Fastify();
-      registerRoutes(app, ctx);
-      await app.ready();
+  it('detects orphaned teams (in DB but no config on disk)', async () => {
+    const { raw, orgStore, taskQueueStore, orgTree, teamsDir } = createTempEnv();
 
-      const response = await app.inject({
-        method: 'GET',
-        url: '/api/teams',
-      });
-
-      expect(response.statusCode).toBe(200);
-      const body = JSON.parse(response.body);
-      expect(body.teams).toBeInstanceOf(Array);
-      expect(body.teams.length).toBeGreaterThan(0);
-      expect(body.teams[0]).toHaveProperty('slug');
-      expect(body.teams[0]).toHaveProperty('health');
-
-      await app.close();
+    orgStore.addTeam({
+      teamId: 'team-orphan',
+      name: 'orphan-team',
+      parentId: null,
+      status: TeamStatus.Idle,
+      agents: [],
+      children: [],
     });
 
-    it('GET /api/teams/:slug returns team details', async () => {
-      setupRootTeam();
-      const ctx: RouteContext = { orgChart };
-      const app = Fastify();
-      registerRoutes(app, ctx);
-      await app.ready();
+    // Deliberately do NOT create config on disk
 
-      const response = await app.inject({
-        method: 'GET',
-        url: '/api/teams/main',
-      });
-
-      expect(response.statusCode).toBe(200);
-      const body = JSON.parse(response.body);
-      expect(body.slug).toBe('main');
-      expect(body).toHaveProperty('agents');
-      expect(body).toHaveProperty('childTeams');
-
-      await app.close();
+    const result = recoverFromCrash({
+      orgStore,
+      taskQueueStore,
+      orgTree,
+      teamsDir,
+      logger: noopLogger,
     });
 
-    it('GET /api/teams/:slug returns 404 for unknown team', async () => {
-      // No setup needed - testing 404 for unknown team
-      const ctx: RouteContext = { orgChart };
-      const app = Fastify();
-      registerRoutes(app, ctx);
-      await app.ready();
+    expect(result.orphaned).toContain('team-orphan');
+    expect(result.orphaned).toHaveLength(1);
 
-      const response = await app.inject({
-        method: 'GET',
-        url: '/api/teams/nonexistent',
-      });
-
-      expect(response.statusCode).toBe(404);
-
-      await app.close();
-    });
+    raw.close();
   });
 
-  describe('Tasks query', () => {
-    it('GET /api/tasks returns tasks list', async () => {
-      setupRootTeam();
-      const task = makeTask();
-      const taskStore = createMockTaskStore([task]);
-      const ctx: RouteContext = { orgChart, taskStore };
-      const app = Fastify();
-      registerRoutes(app, ctx);
-      await app.ready();
+  it('handles empty database gracefully', async () => {
+    const { raw, orgStore, taskQueueStore, orgTree, teamsDir } = createTempEnv();
 
-      const response = await app.inject({
-        method: 'GET',
-        url: '/api/tasks',
-      });
-
-      expect(response.statusCode).toBe(200);
-      const body = JSON.parse(response.body);
-      expect(body.tasks).toBeInstanceOf(Array);
-      expect(body).toHaveProperty('total');
-      expect(body).toHaveProperty('offset');
-      expect(body).toHaveProperty('limit');
-
-      await app.close();
+    const result = recoverFromCrash({
+      orgStore,
+      taskQueueStore,
+      orgTree,
+      teamsDir,
+      logger: noopLogger,
     });
 
-    it('GET /api/tasks/:id returns task details', async () => {
-      setupRootTeam();
-      const task = makeTask();
-      const taskStore = createMockTaskStore([task]);
-      const ctx: RouteContext = { orgChart, taskStore };
-      const app = Fastify();
-      registerRoutes(app, ctx);
-      await app.ready();
+    expect(result.recovered).toBe(0);
+    expect(result.orphaned).toHaveLength(0);
+    expect(result.teamsToReSpawn).toHaveLength(0);
 
-      const response = await app.inject({
-        method: 'GET',
-        url: '/api/tasks/task-123',
-      });
+    raw.close();
+  });
+});
 
-      expect(response.statusCode).toBe(200);
-      const body = JSON.parse(response.body);
-      expect(body.id).toBe('task-123');
+// ── Backup creates valid SQLite copy ────────────────────────────────────
 
-      await app.close();
-    });
+describe('Backup creates valid SQLite copy', () => {
+  it('creates a backup file that is a valid SQLite database', async () => {
+    const { dbPath, raw } = createTempEnv();
+    const backupDir = mkdtempSync(join(tmpdir(), 'openhive-backup-'));
+
+    const backupPath = await backupDatabase(dbPath, backupDir);
+
+    expect(existsSync(backupPath)).toBe(true);
+
+    // Verify the backup is a valid SQLite database
+    const backupDb = new Database(backupPath, { readonly: true });
+    const result = backupDb.prepare('SELECT 1 as val').get() as { val: number };
+    expect(result.val).toBe(1);
+    backupDb.close();
+
+    raw.close();
   });
 
-  describe('Logs SSE stream', () => {
-    it('GET /api/logs returns log entries', async () => {
-      setupRootTeam();
-      const entry = makeLogEntry();
-      const logStore = createMockLogStore([entry]);
-      const ctx: RouteContext = { orgChart, logStore };
-      const app = Fastify();
-      registerRoutes(app, ctx);
-      await app.ready();
+  it('rotates old backups keeping only maxBackups', async () => {
+    const { dbPath, raw } = createTempEnv();
+    const backupDir = mkdtempSync(join(tmpdir(), 'openhive-rotate-'));
 
-      const response = await app.inject({
-        method: 'GET',
-        url: '/api/logs',
-      });
+    // Create 5 backups with maxBackups=3
+    for (let i = 0; i < 5; i++) {
+      await backupDatabase(dbPath, backupDir, 3);
+      // Small delay to ensure unique timestamps
+      await new Promise((r) => setTimeout(r, 10));
+    }
 
-      expect(response.statusCode).toBe(200);
-      const body = JSON.parse(response.body);
-      expect(body.entries).toBeInstanceOf(Array);
+    const files = readdirSync(backupDir).filter((f) => f.startsWith('openhive-backup-'));
+    expect(files.length).toBeLessThanOrEqual(3);
 
-      await app.close();
-    });
+    raw.close();
   });
 
-  describe('Portal WS relay', () => {
-    // Note: these tests open real WebSocket connections on 127.0.0.1 with a random
-    // ephemeral port. In some sandboxed CI environments the bind may be slow, causing
-    // the first test (which has no explicit timeout override) to appear to time out.
-    // The tests themselves are correct — any timeout failure is an infrastructure issue
-    // unrelated to the PortalWSRelay implementation. Confirmed passing locally.
-    it('broadcasts events to connected clients', async () => {
-      const relay = new PortalWSRelay({
-        eventBus,
-        path: '/ws/portal',
-      });
+  it('creates backup directory if it does not exist', async () => {
+    const { dbPath, raw } = createTempEnv();
+    const backupDir = join(mkdtempSync(join(tmpdir(), 'openhive-newdir-')), 'nested', 'backups');
 
-      // Create HTTP server (bind to 127.0.0.1 to avoid EPERM in sandboxed environments)
-      const server = createServer();
-      await new Promise<void>((resolve) => {
-        server.listen(0, '127.0.0.1', () => resolve());
-      });
+    expect(existsSync(backupDir)).toBe(false);
 
-      const address = server.address() as { port: number };
-      const port = address.port;
+    await backupDatabase(dbPath, backupDir);
 
-      // Start relay
-      await relay.start(server);
+    expect(existsSync(backupDir)).toBe(true);
 
-      // Connect a client
-      const client = new WebSocket(`ws://127.0.0.1:${port}/ws/portal`);
-
-      await new Promise<void>((resolve) => {
-        client.on('open', () => resolve());
-      });
-
-      // Collect messages
-      const messages: BusEvent[] = [];
-      client.on('message', (data) => {
-        try {
-          messages.push(JSON.parse(data.toString()));
-        } catch {
-          // Ignore
-        }
-      });
-
-      // Publish a dotted event type that matches the prefix filter ('task.' prefix).
-      // The relay uses prefix-based matching so 'task.dispatched' passes through;
-      // a bare 'task' type would be filtered out.
-      const event: BusEvent = {
-        type: 'task.dispatched',
-        data: { taskId: 'task-123', status: 'pending' },
-        timestamp: Date.now(),
-      };
-      eventBus.publish(event);
-
-      // Wait for event propagation
-      await new Promise<void>((resolve) => setTimeout(resolve, 100));
-
-      // Check that the event was received
-      const taskMessages = messages.filter((m) => m.type === 'task.dispatched');
-      expect(taskMessages.length).toBeGreaterThan(0);
-
-      // Cleanup
-      client.close();
-      await relay.stop();
-      await new Promise<void>((resolve) => {
-        server.close(() => resolve());
-      });
-    });
-
-    it('filters out events with unrecognized prefixes', async () => {
-      const relay = new PortalWSRelay({
-        eventBus,
-        path: '/ws/portal',
-      });
-
-      const server = createServer();
-      await new Promise<void>((resolve) => {
-        server.listen(0, '127.0.0.1', () => resolve());
-      });
-
-      const address = server.address() as { port: number };
-      const port = address.port;
-
-      await relay.start(server);
-
-      const client = new WebSocket(`ws://127.0.0.1:${port}/ws/portal`);
-      await new Promise<void>((resolve) => {
-        client.on('open', () => resolve());
-      });
-
-      // Collect messages (skip the 'connected' welcome message)
-      const messages: BusEvent[] = [];
-      client.on('message', (data) => {
-        try {
-          const parsed = JSON.parse(data.toString()) as BusEvent;
-          if (parsed.type !== 'connected') {
-            messages.push(parsed);
-          }
-        } catch {
-          // Ignore
-        }
-      });
-
-      // Publish events that should be filtered out (unrecognized prefixes)
-      eventBus.publish({ type: 'internal.debug', data: { msg: 'secret' }, timestamp: Date.now() });
-      eventBus.publish({ type: 'org-chart.update', data: {}, timestamp: Date.now() });
-      eventBus.publish({ type: 'debug', data: {}, timestamp: Date.now() });
-      eventBus.publish({ type: 'system.boot', data: {}, timestamp: Date.now() });
-
-      // Wait for propagation
-      await new Promise<void>((resolve) => setTimeout(resolve, 100));
-
-      // None of the unrecognized events should have been received
-      expect(messages.filter((m) => m.type === 'internal.debug').length).toBe(0);
-      expect(messages.filter((m) => m.type === 'org-chart.update').length).toBe(0);
-      expect(messages.filter((m) => m.type === 'debug').length).toBe(0);
-      expect(messages.filter((m) => m.type === 'system.boot').length).toBe(0);
-      expect(messages.length).toBe(0);
-
-      // Cleanup
-      client.close();
-      await relay.stop();
-      await new Promise<void>((resolve) => {
-        server.close(() => resolve());
-      });
-    });
-
-    it('forwards dotted event names matching known prefixes', async () => {
-      const relay = new PortalWSRelay({
-        eventBus,
-        path: '/ws/portal',
-      });
-
-      const server = createServer();
-      await new Promise<void>((resolve) => {
-        server.listen(0, '127.0.0.1', () => resolve());
-      });
-
-      const address = server.address() as { port: number };
-      const port = address.port;
-
-      await relay.start(server);
-
-      const client = new WebSocket(`ws://127.0.0.1:${port}/ws/portal`);
-      await new Promise<void>((resolve) => {
-        client.on('open', () => resolve());
-      });
-
-      // Collect messages (skip the 'connected' welcome message)
-      const messages: BusEvent[] = [];
-      client.on('message', (data) => {
-        try {
-          const parsed = JSON.parse(data.toString()) as BusEvent;
-          if (parsed.type !== 'connected') {
-            messages.push(parsed);
-          }
-        } catch {
-          // Ignore
-        }
-      });
-
-      // Publish events with known prefixes that should all be forwarded
-      const eventsToPublish: BusEvent[] = [
-        { type: 'container.spawned', data: { containerId: 'c-1' }, timestamp: Date.now() },
-        { type: 'health.state_changed', data: { state: 'degraded' }, timestamp: Date.now() },
-        { type: 'escalation.resolved', data: { escalationId: 'esc-1' }, timestamp: Date.now() },
-      ];
-
-      for (const event of eventsToPublish) {
-        eventBus.publish(event);
-      }
-
-      // Wait for propagation
-      await new Promise<void>((resolve) => setTimeout(resolve, 100));
-
-      // All three events should have been received
-      expect(messages.filter((m) => m.type === 'container.spawned').length).toBe(1);
-      expect(messages.filter((m) => m.type === 'health.state_changed').length).toBe(1);
-      expect(messages.filter((m) => m.type === 'escalation.resolved').length).toBe(1);
-      expect(messages.length).toBe(3);
-
-      // Cleanup
-      client.close();
-      await relay.stop();
-      await new Promise<void>((resolve) => {
-        server.close(() => resolve());
-      });
-    });
-
-    it('rejects connections from disallowed origins (AC-L10-06)', async () => {
-      const relay = new PortalWSRelay({
-        eventBus,
-        path: '/ws/portal',
-        allowedOrigins: ['http://localhost:3000'],
-      });
-
-      const server = createServer();
-      await new Promise<void>((resolve) => {
-        server.listen(0, '127.0.0.1', () => resolve());
-      });
-
-      const address = server.address() as { port: number };
-      const port = address.port;
-
-      await relay.start(server);
-
-      // Try to connect with disallowed origin
-      const client = new WebSocket(`ws://127.0.0.1:${port}/ws/portal`, {
-        headers: { Origin: 'http://evil.com' },
-      });
-
-      // The connection should be rejected with an error
-      const errorOrClose = await new Promise<'error' | 'close'>((resolve) => {
-        client.on('error', () => resolve('error'));
-        client.on('close', () => resolve('close'));
-      });
-
-      // Either error or close is acceptable - the connection was rejected
-      expect(['error', 'close']).toContain(errorOrClose);
-
-      // Cleanup
-      await relay.stop();
-      await new Promise<void>((resolve) => {
-        server.close(() => resolve());
-      });
-    });
+    raw.close();
   });
+});
 
-  describe('SPA builds', () => {
-    it('TypeScript compiles without errors', async () => {
-      // This is verified by the test running successfully
-      expect(true).toBe(true);
-    });
-  });
+// ── Memory files persist after recovery ─────────────────────────────────
 
-  describe('Webhook path validation', () => {
-    it('POST /api/v1/hooks/:path returns 404 for unregistered path', async () => {
-      // No setup needed - testing 404
-      const ctx: RouteContext = { orgChart };
-      const app = Fastify();
-      registerRoutes(app, ctx);
-      await app.ready();
+describe('Memory files persist after recovery', () => {
+  it('memory store files survive recovery process', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'openhive-mem-'));
+    const memoryBaseDir = join(dir, 'teams');
+    const memoryStore = new MemoryStore(memoryBaseDir);
 
-      const response = await app.inject({
-        method: 'POST',
-        url: '/api/v1/hooks/unregistered-path',
-        payload: { data: 'test' },
-      });
+    // Write memory files
+    memoryStore.writeFile('test-team', 'context.md', '# Team Context\nSome important notes');
+    memoryStore.writeFile('test-team', 'history.md', '## History\nPrevious decisions');
 
-      expect(response.statusCode).toBe(404);
+    // Simulate recovery (memory store is filesystem-based, so files survive)
+    const dbPath = join(dir, 'test.db');
+    const { db, raw } = createDatabase(dbPath);
+    createTables(raw);
+    const orgStore = new OrgStore(db);
+    const taskQueueStore = new TaskQueueStore(db);
+    const orgTree = new OrgTree(orgStore);
+    const teamsDir = join(dir, 'cfg-teams');
+    mkdirSync(teamsDir, { recursive: true });
 
-      await app.close();
-    });
-
-    it('GET /api/v1/hooks lists registered webhooks', async () => {
-      // No setup needed - testing empty list
-      const ctx: RouteContext = { orgChart };
-      const app = Fastify();
-      registerRoutes(app, ctx);
-      await app.ready();
-
-      const response = await app.inject({
-        method: 'GET',
-        url: '/api/v1/hooks',
-      });
-
-      expect(response.statusCode).toBe(200);
-      const body = JSON.parse(response.body);
-      expect(body).toHaveProperty('webhooks');
-
-      await app.close();
-    });
-  });
-
-  describe('Listen address default (AC-L10-07)', () => {
-    it('APIServer defaults to 127.0.0.1', () => {
-      const server = new APIServer({ port: 3000 });
-      expect(server.getListenAddress()).toBe('127.0.0.1');
+    recoverFromCrash({
+      orgStore,
+      taskQueueStore,
+      orgTree,
+      teamsDir,
+      logger: noopLogger,
     });
 
-    it('APIServer respects listenAddress config', () => {
-      const server = new APIServer({ port: 3000, listenAddress: '0.0.0.0' });
-      expect(server.getListenAddress()).toBe('0.0.0.0');
-    });
+    // Verify memory files still exist
+    const context = memoryStore.readFile('test-team', 'context.md');
+    expect(context).toBe('# Team Context\nSome important notes');
 
-    it('APIServer respects OPENHIVE_SYSTEM_LISTEN_ADDRESS env var', () => {
-      process.env.OPENHIVE_SYSTEM_LISTEN_ADDRESS = '10.0.0.1';
-      const server = new APIServer({ port: 3000 });
-      expect(server.getListenAddress()).toBe('10.0.0.1');
-      delete process.env.OPENHIVE_SYSTEM_LISTEN_ADDRESS;
-    });
+    const history = memoryStore.readFile('test-team', 'history.md');
+    expect(history).toBe('## History\nPrevious decisions');
+
+    const files = memoryStore.listFiles('test-team');
+    expect(files).toContain('context.md');
+    expect(files).toContain('history.md');
+
+    raw.close();
   });
 });
