@@ -6,8 +6,16 @@ services:
       context: ..
       dockerfile: deployments/Dockerfile
     environment:
-      - OPENHIVE_IS_ROOT=true
+      - OPENHIVE_DATA_DIR=/data
+      - OPENHIVE_RUN_DIR=/app/.run
+      - OPENHIVE_SYSTEM_RULES_DIR=/app/system-rules
+      - OPENHIVE_LISTEN_ADDRESS=0.0.0.0
     volumes:
-      - ../data:/app/data
+      - ../data/config:/data/config:ro    # Admin config (read-only)
+      - ../data/rules:/data/rules         # Org rules (writable, seeded)
+      - openhive-run:/app/.run            # Runtime workspace (persistent)
     ports:
       - "8080:8080"
+
+volumes:
+  openhive-run:

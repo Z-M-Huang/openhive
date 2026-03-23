@@ -16,6 +16,7 @@ import { randomBytes } from 'node:crypto';
 
 import { createWorkspaceBoundaryHook } from '../hooks/workspace-boundary.js';
 import { createGovernanceHook } from '../hooks/governance.js';
+import type { GovernancePaths } from '../hooks/governance.js';
 import { createAuditPreHook, createAuditPostHook } from '../hooks/audit-logger.js';
 import { buildHookConfig } from '../hooks/index.js';
 import { SecretString } from '../secrets/secret-string.js';
@@ -189,12 +190,20 @@ describe('UT-4: Workspace Boundary Hook', () => {
 // ── UT-5: Governance Hook ──────────────────────────────────────────────────
 
 describe('UT-5: Governance Hook', () => {
+  let tmpDir: string;
+  let systemRulesDir: string;
   let dataDir: string;
+  let runDir: string;
+  let paths: GovernancePaths;
   let logMessages: Array<{ msg: string; meta?: Record<string, unknown> }>;
   let logger: { info: (msg: string, meta?: Record<string, unknown>) => void };
 
   beforeEach(() => {
-    dataDir = makeTmpDir();
+    tmpDir = makeTmpDir();
+    systemRulesDir = join(tmpDir, 'system-rules');
+    dataDir = join(tmpDir, 'data');
+    runDir = join(tmpDir, 'run');
+    paths = { systemRulesDir, dataDir, runDir };
     logMessages = [];
     logger = {
       info: (msg: string, meta?: Record<string, unknown>) => {
@@ -204,11 +213,11 @@ describe('UT-5: Governance Hook', () => {
   });
 
   afterEach(() => {
-    if (existsSync(dataDir)) rmSync(dataDir, { recursive: true });
+    if (existsSync(tmpDir)) rmSync(tmpDir, { recursive: true });
   });
 
-  it('blocks write to /data/rules/global/', async () => {
-    const hook = createGovernanceHook('my-team', dataDir, logger);
+  it('blocks write to admin org rules (dataDir/rules/)', async () => {
+    const hook = createGovernanceHook('my-team', paths, logger);
     const result = await hook(
       { tool_name: 'Write', tool_input: { file_path: join(dataDir, 'rules', 'global', 'safety.md') } },
       'tu-g1',
@@ -216,25 +225,25 @@ describe('UT-5: Governance Hook', () => {
     );
 
     expect(isDenied(result)).toBe(true);
-    expect(denyReason(result)).toContain('global-rules');
+    expect(denyReason(result)).toContain('admin-org-rules');
   });
 
-  it('blocks write to /data/main/org-rules/', async () => {
-    const hook = createGovernanceHook('my-team', dataDir, logger);
+  it('blocks write to system-rules dir', async () => {
+    const hook = createGovernanceHook('my-team', paths, logger);
     const result = await hook(
-      { tool_name: 'Edit', tool_input: { file_path: join(dataDir, 'main', 'org-rules', 'policy.md') } },
+      { tool_name: 'Edit', tool_input: { file_path: join(systemRulesDir, 'policy.md') } },
       'tu-g2',
       emptyCtx,
     );
 
     expect(isDenied(result)).toBe(true);
-    expect(denyReason(result)).toContain('main-org-rules');
+    expect(denyReason(result)).toContain('system-rules');
   });
 
   it('blocks write to other team directory', async () => {
-    const hook = createGovernanceHook('my-team', dataDir, logger);
+    const hook = createGovernanceHook('my-team', paths, logger);
     const result = await hook(
-      { tool_name: 'Write', tool_input: { file_path: join(dataDir, 'teams', 'rival-team', 'team-rules', 'hack.md') } },
+      { tool_name: 'Write', tool_input: { file_path: join(runDir, 'teams', 'rival-team', 'team-rules', 'hack.md') } },
       'tu-g3',
       emptyCtx,
     );
@@ -244,9 +253,9 @@ describe('UT-5: Governance Hook', () => {
   });
 
   it('allows write to own team-rules/ and logs', async () => {
-    const hook = createGovernanceHook('my-team', dataDir, logger);
+    const hook = createGovernanceHook('my-team', paths, logger);
     const result = await hook(
-      { tool_name: 'Write', tool_input: { file_path: join(dataDir, 'teams', 'my-team', 'team-rules', 'style.md') } },
+      { tool_name: 'Write', tool_input: { file_path: join(runDir, 'teams', 'my-team', 'team-rules', 'style.md') } },
       'tu-g4',
       emptyCtx,
     );
@@ -258,9 +267,9 @@ describe('UT-5: Governance Hook', () => {
   });
 
   it('allows write to own org-rules/ and logs', async () => {
-    const hook = createGovernanceHook('my-team', dataDir, logger);
+    const hook = createGovernanceHook('my-team', paths, logger);
     const result = await hook(
-      { tool_name: 'Edit', tool_input: { file_path: join(dataDir, 'teams', 'my-team', 'org-rules', 'rule.md') } },
+      { tool_name: 'Edit', tool_input: { file_path: join(runDir, 'teams', 'my-team', 'org-rules', 'rule.md') } },
       'tu-g5',
       emptyCtx,
     );
@@ -271,9 +280,9 @@ describe('UT-5: Governance Hook', () => {
   });
 
   it('allows write to own skills/ and logs', async () => {
-    const hook = createGovernanceHook('my-team', dataDir, logger);
+    const hook = createGovernanceHook('my-team', paths, logger);
     const result = await hook(
-      { tool_name: 'Write', tool_input: { file_path: join(dataDir, 'teams', 'my-team', 'skills', 'SKILL.md') } },
+      { tool_name: 'Write', tool_input: { file_path: join(runDir, 'teams', 'my-team', 'skills', 'SKILL.md') } },
       'tu-g6',
       emptyCtx,
     );
@@ -284,9 +293,9 @@ describe('UT-5: Governance Hook', () => {
   });
 
   it('allows write to own subagents/ and logs', async () => {
-    const hook = createGovernanceHook('my-team', dataDir, logger);
+    const hook = createGovernanceHook('my-team', paths, logger);
     const result = await hook(
-      { tool_name: 'Write', tool_input: { file_path: join(dataDir, 'teams', 'my-team', 'subagents', 'agent.md') } },
+      { tool_name: 'Write', tool_input: { file_path: join(runDir, 'teams', 'my-team', 'subagents', 'agent.md') } },
       'tu-g7',
       emptyCtx,
     );
@@ -297,9 +306,9 @@ describe('UT-5: Governance Hook', () => {
   });
 
   it('allows write to own memory/ without special log', async () => {
-    const hook = createGovernanceHook('my-team', dataDir, logger);
+    const hook = createGovernanceHook('my-team', paths, logger);
     const result = await hook(
-      { tool_name: 'Write', tool_input: { file_path: join(dataDir, 'teams', 'my-team', 'memory', 'notes.md') } },
+      { tool_name: 'Write', tool_input: { file_path: join(runDir, 'teams', 'my-team', 'memory', 'notes.md') } },
       'tu-g8',
       emptyCtx,
     );
@@ -309,7 +318,7 @@ describe('UT-5: Governance Hook', () => {
   });
 
   it('allows write to non-data paths (workspace)', async () => {
-    const hook = createGovernanceHook('my-team', dataDir, logger);
+    const hook = createGovernanceHook('my-team', paths, logger);
     const result = await hook(
       { tool_name: 'Write', tool_input: { file_path: '/app/workspace/work/output.txt' } },
       'tu-g9',
@@ -320,7 +329,7 @@ describe('UT-5: Governance Hook', () => {
   });
 
   it('allows when file_path is missing from tool_input', async () => {
-    const hook = createGovernanceHook('my-team', dataDir, logger);
+    const hook = createGovernanceHook('my-team', paths, logger);
     const result = await hook(
       { tool_name: 'Write', tool_input: { content: 'no path here' } },
       'tu-g10',
@@ -445,7 +454,7 @@ describe('Hook Composer: buildHookConfig', () => {
       teamName: 'test-team',
       cwd: '/app/workspace',
       additionalDirs: ['/app/common'],
-      dataDir: '/app/data',
+      paths: { systemRulesDir: '/app/system-rules', dataDir: '/app/data', runDir: '/app/run' },
       logger,
     });
 
@@ -470,7 +479,7 @@ describe('Hook Composer: buildHookConfig', () => {
       teamName: 'test-team',
       cwd: '/app/workspace',
       additionalDirs: [],
-      dataDir: '/app/data',
+      paths: { systemRulesDir: '/app/system-rules', dataDir: '/app/data', runDir: '/app/run' },
       logger,
     });
 

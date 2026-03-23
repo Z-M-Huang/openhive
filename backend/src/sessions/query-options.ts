@@ -6,7 +6,6 @@
 
 import type { TeamConfig } from '../domain/types.js';
 import type { ProvidersOutput } from '../config/validation.js';
-import type { SecretString } from '../secrets/secret-string.js';
 import type { HookConfig, BuildHookConfigOpts } from '../hooks/index.js';
 
 import { resolveProvider } from './provider-resolver.js';
@@ -16,6 +15,8 @@ import { createCanUseTool } from './can-use-tool.js';
 import { buildRuleCascade } from '../rules/cascade.js';
 import { buildHookConfig } from '../hooks/index.js';
 import { createStderrScrubber } from '../logging/credential-scrubber.js';
+import { loadSubagents, loadSkillsContent } from './skill-loader.js';
+import type { SubagentDef } from './skill-loader.js';
 
 interface Logger {
   info(msg: string, meta?: Record<string, unknown>): void;
@@ -36,14 +37,16 @@ export interface QueryOptions {
   readonly env: Record<string, string>;
   readonly cwd: string;
   readonly additionalDirectories: string[];
+  readonly agents: SubagentDef[];
 }
 
 export interface BuildQueryOptionsInput {
   readonly teamName: string;
   readonly teamConfig: TeamConfig;
+  readonly runDir: string;
   readonly dataDir: string;
+  readonly systemRulesDir: string;
   readonly providers: ProvidersOutput;
-  readonly secrets: Map<string, SecretString>;
   readonly orgMcpServer: unknown;
   readonly availableMcpServers: Record<string, unknown>;
   readonly ancestors: string[];
@@ -54,13 +57,12 @@ export interface BuildQueryOptionsInput {
  * Assemble the complete SDK query() options for a team session.
  */
 export function buildQueryOptions(opts: BuildQueryOptionsInput): QueryOptions {
-  const { model, env: providerEnv } = resolveProvider(
+  const { model, env: providerEnv, secrets: providerSecrets } = resolveProvider(
     opts.teamConfig.provider_profile,
     opts.providers,
-    opts.secrets,
   );
 
-  const ctx = buildSessionContext(opts.teamName, opts.dataDir, opts.secrets, opts.teamConfig.secret_refs);
+  const ctx = buildSessionContext(opts.teamName, opts.runDir);
 
   const mcpServers = buildMcpServers(
     opts.teamConfig.mcp_servers,
@@ -76,31 +78,39 @@ export function buildQueryOptions(opts: BuildQueryOptionsInput): QueryOptions {
     ? { warn: (msg: string, meta?: Record<string, unknown>) => opts.logger.warn!(msg, meta) }
     : undefined;
 
-  const ruleCascade = buildRuleCascade(
-    opts.teamName,
-    opts.ancestors,
-    opts.dataDir,
-    cascadeLogger,
-  );
-
-  const secretValues = [...opts.secrets.values()];
+  const ruleCascade = buildRuleCascade({
+    teamName: opts.teamName,
+    ancestors: opts.ancestors,
+    runDir: opts.runDir,
+    dataDir: opts.dataDir,
+    systemRulesDir: opts.systemRulesDir,
+    logger: cascadeLogger,
+  });
 
   const hookOpts: BuildHookConfigOpts = {
     teamName: opts.teamName,
     cwd: ctx.cwd,
     additionalDirs: ctx.additionalDirectories,
-    dataDir: opts.dataDir,
+    paths: {
+      systemRulesDir: opts.systemRulesDir,
+      dataDir: opts.dataDir,
+      runDir: opts.runDir,
+    },
     logger: opts.logger,
-    knownSecrets: secretValues,
+    knownSecrets: providerSecrets,
   };
   const hooks = buildHookConfig(hookOpts);
-  const stderr = createStderrScrubber(secretValues);
+  const stderr = createStderrScrubber(providerSecrets);
 
-  // Merge provider env (API keys) with context env (secrets)
-  const mergedEnv = { ...ctx.env, ...providerEnv };
+  // Load skills content and append to rule cascade
+  const skillsContent = loadSkillsContent(opts.runDir, opts.teamName);
+  const fullAppend = skillsContent ? `${ruleCascade}\n${skillsContent}` : ruleCascade;
+
+  // Load subagent definitions for the SDK agents option
+  const agents = loadSubagents(opts.runDir, opts.teamName);
 
   return {
-    systemPrompt: { type: 'preset', preset: 'claude_code', append: ruleCascade },
+    systemPrompt: { type: 'preset', preset: 'claude_code', append: fullAppend },
     tools: { type: 'preset', preset: 'claude_code' },
     model,
     permissionMode: 'bypassPermissions',
@@ -110,8 +120,9 @@ export function buildQueryOptions(opts: BuildQueryOptionsInput): QueryOptions {
     canUseTool,
     hooks,
     stderr,
-    env: mergedEnv,
+    env: providerEnv,
     cwd: ctx.cwd,
     additionalDirectories: ctx.additionalDirectories,
+    agents,
   };
 }

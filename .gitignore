@@ -1,8 +1,11 @@
 node_modules
 dist
 .env
-/data/secrets/
 *.db
 .run/
 coverage/
 .vcp
+
+# Credential-bearing config files (only examples are committed)
+data/config/providers.yaml
+data/config/channels.yaml

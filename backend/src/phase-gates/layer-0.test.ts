@@ -68,7 +68,6 @@ describe('Layer 0: Domain type shapes', () => {
       description: 'A test team',
       scope: { accepts: ['*'], rejects: [] },
       allowed_tools: [],
-      secret_refs: [],
       mcp_servers: [],
       provider_profile: 'default-sonnet',
       maxTurns: 10,
@@ -97,7 +96,6 @@ describe('Layer 0: Domain type shapes', () => {
     const provider: ProviderProfile = {
       name: 'default-sonnet',
       type: 'api',
-      api_key_ref: 'ANTHROPIC_API_KEY',
       model: 'claude-sonnet-4-20250514',
     };
 

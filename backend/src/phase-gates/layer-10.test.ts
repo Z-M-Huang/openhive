@@ -31,7 +31,7 @@ function createTempEnv(): {
   orgStore: OrgStore;
   taskQueueStore: TaskQueueStore;
   orgTree: OrgTree;
-  teamsDir: string;
+  runDir: string;
 } {
   const dir = mkdtempSync(join(tmpdir(), 'openhive-l10-'));
   const dbPath = join(dir, 'test.db');
@@ -41,10 +41,11 @@ function createTempEnv(): {
   const orgStore = new OrgStore(db);
   const taskQueueStore = new TaskQueueStore(db);
   const orgTree = new OrgTree(orgStore);
-  const teamsDir = join(dir, 'teams');
+  const runDir = dir;
+  const teamsDir = join(runDir, 'teams');
   mkdirSync(teamsDir, { recursive: true });
 
-  return { dbPath, dir, raw, orgStore, taskQueueStore, orgTree, teamsDir };
+  return { dbPath, dir, raw, orgStore, taskQueueStore, orgTree, runDir };
 }
 
 const noopLogger = {
@@ -56,7 +57,7 @@ const noopLogger = {
 
 describe('UT-22: Recovery reloads org tree, resets running tasks, detects orphaned teams', () => {
   it('reloads org tree from SQLite', async () => {
-    const { raw, orgStore, taskQueueStore, orgTree, teamsDir } = createTempEnv();
+    const { raw, orgStore, taskQueueStore, orgTree, runDir } = createTempEnv();
 
     orgStore.addTeam({
       teamId: 'team-1',
@@ -68,14 +69,14 @@ describe('UT-22: Recovery reloads org tree, resets running tasks, detects orphan
     });
 
     // Create config on disk so it's not orphaned
-    mkdirSync(join(teamsDir, 'alpha'), { recursive: true });
-    writeFileSync(join(teamsDir, 'alpha', 'config.yaml'), 'name: alpha\n');
+    mkdirSync(join(runDir, 'teams', 'alpha'), { recursive: true });
+    writeFileSync(join(runDir, 'teams', 'alpha', 'config.yaml'), 'name: alpha\n');
 
     const result = recoverFromCrash({
       orgStore,
       taskQueueStore,
       orgTree,
-      teamsDir,
+      runDir,
       logger: noopLogger,
     });
 
@@ -87,7 +88,7 @@ describe('UT-22: Recovery reloads org tree, resets running tasks, detects orphan
   });
 
   it('resets running tasks to pending', async () => {
-    const { raw, orgStore, taskQueueStore, orgTree, teamsDir } = createTempEnv();
+    const { raw, orgStore, taskQueueStore, orgTree, runDir } = createTempEnv();
 
     // Enqueue and dequeue (sets to running)
     const taskId1 = taskQueueStore.enqueue('team-1', 'do something', TaskPriority.Normal);
@@ -98,7 +99,7 @@ describe('UT-22: Recovery reloads org tree, resets running tasks, detects orphan
       orgStore,
       taskQueueStore,
       orgTree,
-      teamsDir,
+      runDir,
       logger: noopLogger,
     });
 
@@ -119,7 +120,7 @@ describe('UT-22: Recovery reloads org tree, resets running tasks, detects orphan
   });
 
   it('identifies teams with pending tasks for re-spawning', async () => {
-    const { raw, orgStore, taskQueueStore, orgTree, teamsDir } = createTempEnv();
+    const { raw, orgStore, taskQueueStore, orgTree, runDir } = createTempEnv();
 
     taskQueueStore.enqueue('team-alpha', 'task-1', TaskPriority.Normal);
     taskQueueStore.enqueue('team-beta', 'task-2', TaskPriority.High);
@@ -128,7 +129,7 @@ describe('UT-22: Recovery reloads org tree, resets running tasks, detects orphan
       orgStore,
       taskQueueStore,
       orgTree,
-      teamsDir,
+      runDir,
       logger: noopLogger,
     });
 
@@ -140,7 +141,7 @@ describe('UT-22: Recovery reloads org tree, resets running tasks, detects orphan
   });
 
   it('detects orphaned teams (in DB but no config on disk)', async () => {
-    const { raw, orgStore, taskQueueStore, orgTree, teamsDir } = createTempEnv();
+    const { raw, orgStore, taskQueueStore, orgTree, runDir } = createTempEnv();
 
     orgStore.addTeam({
       teamId: 'team-orphan',
@@ -157,7 +158,7 @@ describe('UT-22: Recovery reloads org tree, resets running tasks, detects orphan
       orgStore,
       taskQueueStore,
       orgTree,
-      teamsDir,
+      runDir,
       logger: noopLogger,
     });
 
@@ -168,13 +169,13 @@ describe('UT-22: Recovery reloads org tree, resets running tasks, detects orphan
   });
 
   it('handles empty database gracefully', async () => {
-    const { raw, orgStore, taskQueueStore, orgTree, teamsDir } = createTempEnv();
+    const { raw, orgStore, taskQueueStore, orgTree, runDir } = createTempEnv();
 
     const result = recoverFromCrash({
       orgStore,
       taskQueueStore,
       orgTree,
-      teamsDir,
+      runDir,
       logger: noopLogger,
     });
 
@@ -256,14 +257,14 @@ describe('Memory files persist after recovery', () => {
     const orgStore = new OrgStore(db);
     const taskQueueStore = new TaskQueueStore(db);
     const orgTree = new OrgTree(orgStore);
-    const teamsDir = join(dir, 'cfg-teams');
-    mkdirSync(teamsDir, { recursive: true });
+    const runDir = dir;
+    mkdirSync(join(runDir, 'teams'), { recursive: true });
 
     recoverFromCrash({
       orgStore,
       taskQueueStore,
       orgTree,
-      teamsDir,
+      runDir,
       logger: noopLogger,
     });
 

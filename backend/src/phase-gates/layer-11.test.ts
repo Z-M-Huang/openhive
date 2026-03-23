@@ -54,7 +54,7 @@ function makeConfig(o?: Partial<TeamConfig>): TeamConfig {
   return {
     name: 'test-team', parent: null, description: '', maxTurns: 50,
     scope: { accepts: ['weather'], rejects: ['admin'] },
-    allowed_tools: [], secret_refs: [], mcp_servers: [], provider_profile: 'default', ...o,
+    allowed_tools: [], mcp_servers: [], provider_profile: 'default', ...o,
   };
 }
 
@@ -82,7 +82,7 @@ describe('E2E-1: Bootstrap + Health', () => {
 
   it('bootstrap creates all components and health returns 200', { timeout: 15_000 }, async () => {
     const dir = makeTempDir();
-    result = await bootstrap({ dbPath: join(dir, 'e2e.db'), memoryDir: join(dir, 'mem'), skipListen: true, skipCli: true });
+    result = await bootstrap({ runDir: dir, dataDir: join(dir, 'data'), skipListen: true, skipCli: true });
     expect(result.logger).toBeDefined();
     expect(result.raw).toBeDefined();
     expect(result.orgTree).toBeDefined();
@@ -159,7 +159,9 @@ describe('E2E-4: Workspace boundary + audit hooks compose correctly', () => {
     const logger = { info: (msg: string) => { logs.push({ msg }); } };
     const dir = makeTempDir();
     const config = buildHookConfig({
-      teamName: 'alpha', cwd: dir, additionalDirs: [], dataDir: join(dir, 'data'), logger,
+      teamName: 'alpha', cwd: dir, additionalDirs: [],
+      paths: { systemRulesDir: '/app/system-rules', dataDir: join(dir, 'data'), runDir: dir },
+      logger,
     });
 
     // PreToolUse: allowed read inside cwd
@@ -202,6 +204,7 @@ describe('E2E-5: Org MCP 6 tools with real stores', () => {
       sessionManager: { getSession: async () => null, terminateSession: async () => {} },
       loadConfig: (n) => { const c = configs.get(n); if (!c) throw new Error('no cfg'); return c; },
       getTeamConfig: (id) => configs.get(id),
+      runDir: dir,
       log: () => {},
     };
     const server = createOrgMcpServer(deps);
@@ -342,7 +345,7 @@ describe('E2E-9: Crash recovery resets tasks and detects orphans', () => {
     const tid = taskStore.enqueue('t1', 'unfinished work', TaskPriority.High);
     taskStore.dequeue('t1');
 
-    const result = recoverFromCrash({ orgStore, taskQueueStore: taskStore, orgTree: tree, teamsDir, logger: noop });
+    const result = recoverFromCrash({ orgStore, taskQueueStore: taskStore, orgTree: tree, runDir: dir, logger: noop });
 
     expect(result.recovered).toBe(1);
     expect(result.orphaned).toContain('t2');
@@ -374,6 +377,7 @@ describe('E2E-10: Full integration chain', () => {
       sessionManager: { getSession: async () => null, terminateSession: async () => {} },
       loadConfig: (n) => { const c = configs.get(n); if (!c) throw new Error('no cfg'); return c; },
       getTeamConfig: (id) => configs.get(id),
+      runDir: dir,
       log: () => {},
     };
     const server = createOrgMcpServer(mcpDeps);

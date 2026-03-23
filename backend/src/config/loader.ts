@@ -12,10 +12,12 @@ import {
   TeamConfigSchema,
   ProvidersSchema,
   TriggersSchema,
+  ChannelsSchema,
   LoggingSchema,
   type TeamConfigOutput,
   type ProvidersOutput,
   type TriggersOutput,
+  type ChannelsOutput,
   type LoggingOutput,
 } from './validation.js';
 
@@ -64,6 +66,10 @@ export function loadProviders(path: string): ProvidersOutput {
 
 export function loadTriggers(path: string): TriggersOutput {
   return loadAndValidate(path, TriggersSchema) as TriggersOutput;
+}
+
+export function loadChannels(path: string): ChannelsOutput {
+  return loadAndValidate(path, ChannelsSchema) as ChannelsOutput;
 }
 
 export function loadLogging(path: string): LoggingOutput {

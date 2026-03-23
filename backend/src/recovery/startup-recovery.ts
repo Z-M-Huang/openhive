@@ -3,6 +3,7 @@
  *
  * Reloads org tree, resets running tasks to pending,
  * identifies teams needing re-spawn, and detects orphaned teams.
+ * Team configs live under {runDir}/teams/{name}/config.yaml.
  */
 
 import { existsSync } from 'node:fs';
@@ -20,7 +21,7 @@ export interface RecoveryDeps {
   readonly orgStore: IOrgStore;
   readonly taskQueueStore: ITaskQueueStore;
   readonly orgTree: OrgTree;
-  readonly teamsDir?: string;
+  readonly runDir: string;
   readonly logger: RecoveryLogger;
 }
 
@@ -31,8 +32,7 @@ export interface RecoveryResult {
 }
 
 export function recoverFromCrash(deps: RecoveryDeps): RecoveryResult {
-  const { orgStore, taskQueueStore, orgTree, logger } = deps;
-  const teamsDir = deps.teamsDir ?? '/data/teams';
+  const { orgStore, taskQueueStore, orgTree, runDir, logger } = deps;
 
   // 1. Load org tree from SQLite
   orgTree.loadFromStore();
@@ -63,7 +63,7 @@ export function recoverFromCrash(deps: RecoveryDeps): RecoveryResult {
   // 4. Detect orphaned teams: in org_tree but no config on disk
   const orphaned: string[] = [];
   for (const team of allTeams) {
-    const configPath = join(teamsDir, team.name, 'config.yaml');
+    const configPath = join(runDir, 'teams', team.name, 'config.yaml');
     if (!existsSync(configPath)) {
       orphaned.push(team.teamId);
       logger.warn('Recovery: orphaned team detected', { teamId: team.teamId, name: team.name });

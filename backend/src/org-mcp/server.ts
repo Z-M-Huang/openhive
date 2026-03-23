@@ -34,6 +34,7 @@ export interface OrgMcpDeps {
   readonly sessionManager: ISessionManager;
   readonly taskQueue: ITaskQueueStore;
   readonly escalationStore: IEscalationStore;
+  readonly runDir: string;
   readonly loadConfig: (name: string, configPath?: string) => TeamConfig;
   readonly getTeamConfig: (teamId: string) => TeamConfig | undefined;
   readonly log: (msg: string, meta?: Record<string, unknown>) => void;
@@ -51,7 +52,12 @@ export function createOrgMcpServer(deps: OrgMcpDeps): OrgMcpServer {
     name: 'spawn_team',
     description: 'Create a new team and spawn its session',
     inputSchema: SpawnTeamInputSchema,
-    handler: (input, callerId) => spawnTeam(input as never, callerId, deps),
+    handler: (input, callerId) => spawnTeam(input as never, callerId, {
+      orgTree: deps.orgTree,
+      spawner: deps.spawner,
+      runDir: deps.runDir,
+      loadConfig: deps.loadConfig,
+    }),
   });
 
   tools.set('shutdown_team', {

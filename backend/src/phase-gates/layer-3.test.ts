@@ -138,59 +138,69 @@ describe('UT-3: Rule Loader', () => {
 // ── Rule Cascade ──────────────────────────────────────────────────────────
 
 describe('Rule Cascade', () => {
+  let systemRulesDir: string;
   let dataDir: string;
+  let runDir: string;
 
   beforeEach(() => {
+    systemRulesDir = makeTmpDir();
     dataDir = makeTmpDir();
+    runDir = makeTmpDir();
   });
 
   afterEach(() => {
+    if (existsSync(systemRulesDir)) rmSync(systemRulesDir, { recursive: true });
     if (existsSync(dataDir)) rmSync(dataDir, { recursive: true });
+    if (existsSync(runDir)) rmSync(runDir, { recursive: true });
   });
 
   it('concatenates all levels in correct order', () => {
-    // Global rules
-    const globalDir = join(dataDir, 'rules', 'global');
-    mkdirSync(globalDir, { recursive: true });
-    writeFileSync(join(globalDir, '01-safety.md'), '# Safety\nGlobal safety');
+    // System rules (Tier 1)
+    writeFileSync(join(systemRulesDir, '01-safety.md'), '# Safety\nGlobal safety');
 
-    // Main org-rules
-    const mainDir = join(dataDir, 'main', 'org-rules');
-    mkdirSync(mainDir, { recursive: true });
-    writeFileSync(join(mainDir, '01-org.md'), '# Org\nMain org rule');
+    // Admin org rules (Tier 2): {dataDir}/rules/
+    const adminOrgDir = join(dataDir, 'rules');
+    mkdirSync(adminOrgDir, { recursive: true });
+    writeFileSync(join(adminOrgDir, '01-org.md'), '# Org\nMain org rule');
 
-    // Ancestor org-rules (grandparent -> parent)
-    const gpDir = join(dataDir, 'teams', 'grandparent', 'org-rules');
+    // Ancestor org-rules (grandparent -> parent): {runDir}/teams/{ancestor}/org-rules/
+    const gpDir = join(runDir, 'teams', 'grandparent', 'org-rules');
     mkdirSync(gpDir, { recursive: true });
     writeFileSync(join(gpDir, '01-gp.md'), '# GP\nGrandparent rule');
 
-    const parentDir = join(dataDir, 'teams', 'parent', 'org-rules');
+    const parentDir = join(runDir, 'teams', 'parent', 'org-rules');
     mkdirSync(parentDir, { recursive: true });
     writeFileSync(join(parentDir, '01-parent.md'), '# Parent\nParent rule');
 
-    // Team's own org-rules
-    const teamOrgDir = join(dataDir, 'teams', 'my-team', 'org-rules');
+    // Team's own org-rules: {runDir}/teams/{teamName}/org-rules/
+    const teamOrgDir = join(runDir, 'teams', 'my-team', 'org-rules');
     mkdirSync(teamOrgDir, { recursive: true });
     writeFileSync(join(teamOrgDir, '01-team-org.md'), '# Team Org\nTeam org rule');
 
-    // Team-only rules
-    const teamRulesDir = join(dataDir, 'teams', 'my-team', 'team-rules');
+    // Team-only rules: {runDir}/teams/{teamName}/team-rules/
+    const teamRulesDir = join(runDir, 'teams', 'my-team', 'team-rules');
     mkdirSync(teamRulesDir, { recursive: true });
     writeFileSync(join(teamRulesDir, '01-local.md'), '# Local\nTeam-only rule');
 
-    const result = buildRuleCascade('my-team', ['grandparent', 'parent'], dataDir);
+    const result = buildRuleCascade({
+      teamName: 'my-team',
+      ancestors: ['grandparent', 'parent'],
+      runDir,
+      dataDir,
+      systemRulesDir,
+    });
 
     // Verify section order
-    const globalIdx = result.indexOf('--- Global Rules ---');
-    const mainIdx = result.indexOf('--- Main Org Rules ---');
+    const systemIdx = result.indexOf('--- System Rules ---');
+    const orgIdx = result.indexOf('--- Organization Rules ---');
     const gpIdx = result.indexOf('--- Org Rules: grandparent ---');
     const parentIdx = result.indexOf('--- Org Rules: parent ---');
     const teamOrgIdx = result.indexOf('--- Org Rules: my-team ---');
     const teamRulesIdx = result.indexOf('--- Team Rules: my-team ---');
 
-    expect(globalIdx).toBeGreaterThanOrEqual(0);
-    expect(mainIdx).toBeGreaterThan(globalIdx);
-    expect(gpIdx).toBeGreaterThan(mainIdx);
+    expect(systemIdx).toBeGreaterThanOrEqual(0);
+    expect(orgIdx).toBeGreaterThan(systemIdx);
+    expect(gpIdx).toBeGreaterThan(orgIdx);
     expect(parentIdx).toBeGreaterThan(gpIdx);
     expect(teamOrgIdx).toBeGreaterThan(parentIdx);
     expect(teamRulesIdx).toBeGreaterThan(teamOrgIdx);
@@ -206,20 +216,32 @@ describe('Rule Cascade', () => {
 
   it('skips empty/missing levels gracefully', () => {
     // Only create team-rules, nothing else
-    const teamRulesDir = join(dataDir, 'teams', 'solo-team', 'team-rules');
+    const teamRulesDir = join(runDir, 'teams', 'solo-team', 'team-rules');
     mkdirSync(teamRulesDir, { recursive: true });
     writeFileSync(join(teamRulesDir, '01-only.md'), '# Only\nThe only rule');
 
-    const result = buildRuleCascade('solo-team', [], dataDir);
+    const result = buildRuleCascade({
+      teamName: 'solo-team',
+      ancestors: [],
+      runDir,
+      dataDir,
+      systemRulesDir,
+    });
 
     expect(result).toContain('--- Team Rules: solo-team ---');
     expect(result).toContain('The only rule');
-    expect(result).not.toContain('--- Global Rules ---');
-    expect(result).not.toContain('--- Main Org Rules ---');
+    expect(result).not.toContain('--- System Rules ---');
+    expect(result).not.toContain('--- Organization Rules ---');
   });
 
   it('returns empty string when no rules exist anywhere', () => {
-    const result = buildRuleCascade('ghost-team', [], dataDir);
+    const result = buildRuleCascade({
+      teamName: 'ghost-team',
+      ancestors: [],
+      runDir,
+      dataDir,
+      systemRulesDir,
+    });
     expect(result).toBe('');
   });
 });

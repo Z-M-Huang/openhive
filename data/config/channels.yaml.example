@@ -1,0 +1,12 @@
+# Channel configuration for OpenHive v3
+# Copy to channels.yaml and configure your channels.
+
+cli:
+  enabled: true
+
+# Uncomment to enable Discord:
+# discord:
+#   token: YOUR_DISCORD_BOT_TOKEN
+#   watched_channels:
+#     - general
+#     - alerts

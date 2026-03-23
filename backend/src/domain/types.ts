@@ -37,7 +37,6 @@ export interface TeamConfig {
   readonly description: string;
   readonly scope: TeamScope;
   readonly allowed_tools: readonly string[];
-  readonly secret_refs: readonly string[];
   readonly mcp_servers: readonly string[];
   readonly provider_profile: string;
   readonly maxTurns: number;
@@ -56,7 +55,7 @@ export interface ProviderProfile {
   readonly name: string;
   readonly type: 'api' | 'oauth';
   readonly api_url?: string;
-  readonly api_key_ref?: string;
+  readonly api_key?: string;
   readonly model?: string;
   readonly oauth_token_env?: string;
 }

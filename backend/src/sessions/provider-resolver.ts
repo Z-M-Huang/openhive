@@ -3,26 +3,26 @@
  * model string and environment variables for the SDK.
  */
 
-import type { SecretString } from '../secrets/secret-string.js';
+import { SecretString } from '../secrets/secret-string.js';
 import { ConfigError } from '../domain/errors.js';
 import type { ProvidersOutput } from '../config/validation.js';
 
 export interface ResolvedProvider {
   readonly model: string;
   readonly env: Record<string, string>;
+  readonly secrets: readonly SecretString[];
 }
 
 /**
  * Resolve a named provider profile to a model + env vars.
+ * API keys are read directly from the profile (inline in providers.yaml).
  *
  * @param profileName  Profile key in providers.yaml (e.g. 'default').
  * @param providers    Parsed providers config.
- * @param secrets      Secret map (from resolveSecrets or test fixture).
  */
 export function resolveProvider(
   profileName: string,
   providers: ProvidersOutput,
-  secrets: Map<string, SecretString>,
 ): ResolvedProvider {
   const profile = providers.profiles[profileName];
   if (!profile) {
@@ -32,27 +32,25 @@ export function resolveProvider(
   }
 
   if (profile.type === 'api') {
-    const ref = profile.api_key_ref;
-    if (!ref) {
+    const apiKey = profile.api_key;
+    if (!apiKey) {
       throw new ConfigError(
-        `Provider profile "${profileName}" (api) missing api_key_ref`,
-      );
-    }
-    const secret = secrets.get(ref);
-    if (!secret) {
-      throw new ConfigError(
-        `Secret "${ref}" not found for provider profile "${profileName}"`,
+        `Provider profile "${profileName}" (api) missing api_key`,
       );
     }
 
     const env: Record<string, string> = {
-      ANTHROPIC_API_KEY: secret.expose(),
+      ANTHROPIC_API_KEY: apiKey,
     };
     if (profile.api_url) {
       env['ANTHROPIC_BASE_URL'] = profile.api_url;
     }
 
-    return { model: profile.model ?? 'claude-sonnet-4-20250514', env };
+    return {
+      model: profile.model ?? 'claude-sonnet-4-20250514',
+      env,
+      secrets: [new SecretString(apiKey)],
+    };
   }
 
   if (profile.type === 'oauth') {
@@ -72,6 +70,7 @@ export function resolveProvider(
     return {
       model: profile.model ?? 'claude-sonnet-4-20250514',
       env: { CLAUDE_CODE_OAUTH_TOKEN: token },
+      secrets: [new SecretString(token)],
     };
   }
 

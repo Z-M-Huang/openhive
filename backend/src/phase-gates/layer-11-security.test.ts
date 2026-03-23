@@ -88,11 +88,12 @@ describe('E2E-11: Tool defense bypass -- 3 layers', () => {
     configs.set('team-a', {
       name: 'team-a', parent: 'root', description: '', maxTurns: 50,
       scope: { accepts: ['task'], rejects: [] },
-      allowed_tools: [], secret_refs: [], mcp_servers: [], provider_profile: 'default',
+      allowed_tools: [], mcp_servers: [], provider_profile: 'default',
     });
 
     const deps: OrgMcpDeps = {
       orgTree: tree,
+      runDir: '/tmp/test-run',
       taskQueue: {
         enqueue: () => 'task-1', dequeue: () => undefined, peek: () => undefined,
         getByTeam: () => [], updateStatus: () => {}, getPending: () => [], getByStatus: () => [],

@@ -16,11 +16,10 @@ import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 
 import { SecretString } from '../secrets/secret-string.js';
-import { resolveSecrets } from '../secrets/resolver.js';
 import { loadTeamConfig, loadProviders, loadTriggers, loadLogging } from '../config/loader.js';
 import { scrubSecrets, createStderrScrubber } from '../logging/credential-scrubber.js';
 import { createLogger } from '../logging/logger.js';
-import { ConfigError, ValidationError } from '../domain/errors.js';
+import { ConfigError } from '../domain/errors.js';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -67,60 +66,6 @@ describe('UT-11: SecretString', () => {
   });
 });
 
-// ── UT-12: Secret Resolver ─────────────────────────────────────────────────
-
-describe('UT-12: Secret Resolver', () => {
-  let tmpDir: string;
-
-  beforeEach(() => {
-    tmpDir = makeTmpDir();
-  });
-
-  afterEach(() => {
-    if (existsSync(tmpDir)) rmSync(tmpDir, { recursive: true });
-  });
-
-  it('loads .env file with KEY=VALUE pairs', () => {
-    writeFileSync(join(tmpDir, 'global.env'), 'GLOBAL_KEY=global-value\n');
-    writeFileSync(join(tmpDir, 'myteam.env'), 'TEAM_KEY=team-value\n');
-    const secrets = resolveSecrets('myteam', tmpDir);
-    expect(secrets.get('GLOBAL_KEY')?.expose()).toBe('global-value');
-    expect(secrets.get('TEAM_KEY')?.expose()).toBe('team-value');
-  });
-
-  it('team secrets override global secrets', () => {
-    writeFileSync(join(tmpDir, 'global.env'), 'SHARED=from-global\n');
-    writeFileSync(join(tmpDir, 'myteam.env'), 'SHARED=from-team\n');
-    const secrets = resolveSecrets('myteam', tmpDir);
-    expect(secrets.get('SHARED')?.expose()).toBe('from-team');
-  });
-
-  it('skips empty lines and comments', () => {
-    writeFileSync(
-      join(tmpDir, 'global.env'),
-      '# comment\n\nKEY=val\n  \n# another\n',
-    );
-    const secrets = resolveSecrets('myteam', tmpDir);
-    expect(secrets.size).toBe(1);
-    expect(secrets.get('KEY')?.expose()).toBe('val');
-  });
-
-  it('handles missing files gracefully', () => {
-    const secrets = resolveSecrets('myteam', tmpDir);
-    expect(secrets.size).toBe(0);
-  });
-
-  it('rejects path traversal in team slug', () => {
-    expect(() => resolveSecrets('../etc', tmpDir)).toThrow(ValidationError);
-  });
-
-  it('rejects invalid slug format', () => {
-    expect(() => resolveSecrets('UPPER_CASE', tmpDir)).toThrow(ValidationError);
-    expect(() => resolveSecrets('has spaces', tmpDir)).toThrow(ValidationError);
-    expect(() => resolveSecrets('', tmpDir)).toThrow(ValidationError);
-  });
-});
-
 // ── UT-1: Config Loader ────────────────────────────────────────────────────
 
 describe('UT-1: Config Loader', () => {
@@ -163,7 +108,7 @@ scope:
 profiles:
   sonnet:
     type: api
-    api_key_ref: ANTHROPIC_KEY
+    api_key: sk-test-placeholder
     model: claude-sonnet-4-20250514
 `;
     const file = join(tmpDir, 'providers.yaml');

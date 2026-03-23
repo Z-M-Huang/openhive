@@ -47,6 +47,14 @@ export class ChannelRouter {
     }
   }
 
+  /**
+   * Route a message programmatically (e.g., from the HTTP API).
+   * Returns the handler response, if any.
+   */
+  async routeMessage(msg: ChannelMessage): Promise<string | void> {
+    return this.#onMessage(msg);
+  }
+
   async #handleMessage(adapter: IChannelAdapter, msg: ChannelMessage): Promise<void> {
     // Track which adapter owns this channel
     this.#channelOwners.set(msg.channelId, adapter);

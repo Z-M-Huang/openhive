@@ -2,8 +2,12 @@
  * Governance PreToolUse hook (self-evolution authorization).
  *
  * Controls which rule/skill/config files an agent may write to,
- * based on team ownership. Global rules and other teams' directories
- * are always blocked.
+ * based on team ownership and the three-tier data model:
+ *
+ * - System rules (/app/system-rules/) — BLOCK all writes (immutable)
+ * - Admin org rules (/data/rules/) — BLOCK agent writes (admin-managed)
+ * - Own team files (.run/teams/{name}/) — ALLOW self-evolution
+ * - Other team files (.run/teams/{other}/) — BLOCK cross-team
  */
 
 import { resolve } from 'node:path';
@@ -12,14 +16,15 @@ import type { PreToolUseHook } from './workspace-boundary.js';
 
 /** Classification of a target file for governance purposes. */
 type FileClass =
-  | 'global-rules'
-  | 'main-org-rules'
+  | 'system-rules'
+  | 'admin-org-rules'
   | 'other-team'
   | 'own-org-rules'
   | 'own-team-rules'
   | 'own-skills'
   | 'own-subagents'
   | 'own-memory'
+  | 'own-workspace'
   | 'other';
 
 /** Map of sub-path prefixes to FileClass for own-team directories. */
@@ -29,6 +34,7 @@ const OWN_TEAM_PREFIXES: ReadonlyArray<[string, FileClass]> = [
   ['skills', 'own-skills'],
   ['subagents', 'own-subagents'],
   ['memory', 'own-memory'],
+  ['workspace', 'own-workspace'],
 ];
 
 /** Classify a sub-path within the owning team's directory. */
@@ -41,33 +47,37 @@ function classifyOwnTeamPath(subPath: string): FileClass {
   return 'other';
 }
 
+export interface GovernancePaths {
+  readonly systemRulesDir: string;
+  readonly dataDir: string;
+  readonly runDir: string;
+}
+
 /** Determine the governance class of a resolved absolute path. */
 function classifyPath(
   resolved: string,
   teamName: string,
-  dataDir: string,
+  paths: GovernancePaths,
 ): FileClass {
-  const rel = resolved.startsWith(dataDir + '/')
-    ? resolved.slice(dataDir.length + 1)
-    : undefined;
+  // Check system rules (immutable, baked into image)
+  const sysDir = paths.systemRulesDir;
+  if (resolved.startsWith(sysDir + '/') || resolved === sysDir) {
+    return 'system-rules';
+  }
 
-  if (rel === undefined) {
+  // Check admin org rules (/data/rules/)
+  const adminRulesDir = resolve(paths.dataDir, 'rules');
+  if (resolved.startsWith(adminRulesDir + '/') || resolved === adminRulesDir) {
+    return 'admin-org-rules';
+  }
+
+  // Check team files under .run/teams/
+  const teamsDir = resolve(paths.runDir, 'teams');
+  if (!resolved.startsWith(teamsDir + '/')) {
     return 'other';
   }
 
-  if (rel.startsWith('rules/global/') || rel === 'rules/global') {
-    return 'global-rules';
-  }
-
-  if (rel.startsWith('main/org-rules/') || rel === 'main/org-rules') {
-    return 'main-org-rules';
-  }
-
-  if (!rel.startsWith('teams/')) {
-    return 'other';
-  }
-
-  const afterTeams = rel.slice('teams/'.length);
+  const afterTeams = resolved.slice(teamsDir.length + 1);
   const slashIdx = afterTeams.indexOf('/');
   const targetTeam = slashIdx === -1 ? afterTeams : afterTeams.slice(0, slashIdx);
 
@@ -83,12 +93,12 @@ function classifyPath(
  * Factory: create a governance PreToolUse hook for Write/Edit tools.
  *
  * @param teamName  The team this agent belongs to.
- * @param dataDir   Absolute path to the data directory.
+ * @param paths     Three-tier path configuration.
  * @param logger    Logger with info method.
  */
 export function createGovernanceHook(
   teamName: string,
-  dataDir: string,
+  paths: GovernancePaths,
   logger: { info: (msg: string, meta?: Record<string, unknown>) => void },
 ): PreToolUseHook {
   return (input) => {
@@ -101,11 +111,11 @@ export function createGovernanceHook(
     }
 
     const resolved = resolve(filePath);
-    const cls = classifyPath(resolved, teamName, dataDir);
+    const cls = classifyPath(resolved, teamName, paths);
 
     switch (cls) {
-      case 'global-rules':
-      case 'main-org-rules':
+      case 'system-rules':
+      case 'admin-org-rules':
       case 'other-team':
         return Promise.resolve({
           hookSpecificOutput: {
@@ -129,6 +139,7 @@ export function createGovernanceHook(
         return Promise.resolve({});
 
       case 'own-memory':
+      case 'own-workspace':
       case 'other':
         return Promise.resolve({});
     }

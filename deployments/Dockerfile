@@ -30,6 +30,15 @@ COPY --from=builder /app/package.json ./
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/backend/node_modules ./backend/node_modules
 
+# Tier 1: System rules (baked in, immutable)
+COPY common/system-rules/ /app/system-rules/
+
+# Seed rules (copied to /data/rules/ on first start if empty)
+COPY common/seed-rules/ /app/seed-rules/
+
+# Create runtime workspace directory
+RUN mkdir -p /app/.run
+
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD curl -f http://localhost:8080/health || kill -0 1
 

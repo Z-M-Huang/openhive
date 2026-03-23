@@ -20,7 +20,6 @@ import { buildSessionContext } from '../sessions/context-builder.js';
 import { buildQueryOptions } from '../sessions/query-options.js';
 import { spawnSession } from '../sessions/spawner.js';
 import { SessionManager } from '../sessions/manager.js';
-import { SecretString } from '../secrets/secret-string.js';
 import { ConfigError } from '../domain/errors.js';
 import type { ProvidersOutput } from '../config/validation.js';
 import type { TeamConfig } from '../domain/types.js';
@@ -31,14 +30,13 @@ import type { BuildQueryOptionsInput } from '../sessions/query-options.js';
 
 /** Test-only placeholder. Not a real key. */
 const TEST_KEY_VALUE = 'test-placeholder-key-not-real';
-const TEST_DB_VALUE = 'test-db-placeholder';
 
 function makeProviders(overrides?: Partial<ProvidersOutput>): ProvidersOutput {
   return {
     profiles: {
       default: {
         type: 'api',
-        api_key_ref: 'ANTHROPIC_KEY',
+        api_key: TEST_KEY_VALUE,
         model: 'claude-sonnet-4-20250514',
       },
       oauth: {
@@ -50,13 +48,6 @@ function makeProviders(overrides?: Partial<ProvidersOutput>): ProvidersOutput {
   };
 }
 
-function makeSecrets(): Map<string, SecretString> {
-  const m = new Map<string, SecretString>();
-  m.set('ANTHROPIC_KEY', new SecretString(TEST_KEY_VALUE));
-  m.set('DB_PASSWORD', new SecretString(TEST_DB_VALUE));
-  return m;
-}
-
 function makeTeamConfig(overrides?: Partial<TeamConfig>): TeamConfig {
   return {
     name: 'test-team',
@@ -64,7 +55,6 @@ function makeTeamConfig(overrides?: Partial<TeamConfig>): TeamConfig {
     description: 'A test team',
     scope: { accepts: ['weather'], rejects: ['admin'] },
     allowed_tools: ['Read', 'Write', 'Edit', 'mcp__org__*'],
-    secret_refs: ['ANTHROPIC_KEY'],
     mcp_servers: ['org'],
     provider_profile: 'default',
     maxTurns: 25,
@@ -180,8 +170,7 @@ describe('UT-9: MCP Builder', () => {
 describe('UT-18: Provider Resolver', () => {
   it('maps api profile correctly', () => {
     const providers = makeProviders();
-    const secrets = makeSecrets();
-    const resolved = resolveProvider('default', providers, secrets);
+    const resolved = resolveProvider('default', providers);
 
     expect(resolved.model).toBe('claude-sonnet-4-20250514');
     expect(resolved.env).toEqual({ ANTHROPIC_API_KEY: TEST_KEY_VALUE });
@@ -192,14 +181,13 @@ describe('UT-18: Provider Resolver', () => {
       profiles: {
         custom: {
           type: 'api',
-          api_key_ref: 'ANTHROPIC_KEY',
+          api_key: TEST_KEY_VALUE,
           model: 'claude-haiku-2',
           api_url: 'https://custom.api.example.com',
         },
       },
     });
-    const secrets = makeSecrets();
-    const resolved = resolveProvider('custom', providers, secrets);
+    const resolved = resolveProvider('custom', providers);
 
     expect(resolved.env['ANTHROPIC_BASE_URL']).toBe('https://custom.api.example.com');
     expect(resolved.env['ANTHROPIC_API_KEY']).toBe(TEST_KEY_VALUE);
@@ -211,8 +199,7 @@ describe('UT-18: Provider Resolver', () => {
     try {
       process.env['MY_OAUTH_TOKEN'] = 'oauth-test-placeholder';
       const providers = makeProviders();
-      const secrets = makeSecrets();
-      const resolved = resolveProvider('oauth', providers, secrets);
+      const resolved = resolveProvider('oauth', providers);
 
       expect(resolved.env).toEqual({ CLAUDE_CODE_OAUTH_TOKEN: 'oauth-test-placeholder' });
     } finally {
@@ -226,20 +213,9 @@ describe('UT-18: Provider Resolver', () => {
 
   it('throws ConfigError on missing profile', () => {
     const providers = makeProviders();
-    const secrets = makeSecrets();
 
-    expect(() => resolveProvider('nonexistent', providers, secrets)).toThrow(ConfigError);
-    expect(() => resolveProvider('nonexistent', providers, secrets)).toThrow('not found');
-  });
-
-  it('throws ConfigError when api secret ref missing', () => {
-    const providers = makeProviders();
-    const emptySecrets = new Map<string, SecretString>();
-
-    expect(() => resolveProvider('default', providers, emptySecrets)).toThrow(ConfigError);
-    expect(() => resolveProvider('default', providers, emptySecrets)).toThrow(
-      'Secret "ANTHROPIC_KEY" not found',
-    );
+    expect(() => resolveProvider('nonexistent', providers)).toThrow(ConfigError);
+    expect(() => resolveProvider('nonexistent', providers)).toThrow('not found');
   });
 
   it('throws ConfigError when oauth env var not set', () => {
@@ -247,10 +223,9 @@ describe('UT-18: Provider Resolver', () => {
     try {
       delete process.env['MY_OAUTH_TOKEN'];
       const providers = makeProviders();
-      const secrets = makeSecrets();
 
-      expect(() => resolveProvider('oauth', providers, secrets)).toThrow(ConfigError);
-      expect(() => resolveProvider('oauth', providers, secrets)).toThrow('not set');
+      expect(() => resolveProvider('oauth', providers)).toThrow(ConfigError);
+      expect(() => resolveProvider('oauth', providers)).toThrow('not set');
     } finally {
       if (original !== undefined) {
         process.env['MY_OAUTH_TOKEN'] = original;
@@ -262,35 +237,19 @@ describe('UT-18: Provider Resolver', () => {
 // ── UT-7: Context Builder ─────────────────────────────────────────────────
 
 describe('UT-7: Context Builder', () => {
-  it('produces correct env from secrets (no filter)', () => {
-    const secrets = makeSecrets();
-    const ctx = buildSessionContext('weather-team', '/data', secrets);
-
-    expect(ctx.env['ANTHROPIC_KEY']).toBe(TEST_KEY_VALUE);
-    expect(ctx.env['DB_PASSWORD']).toBe(TEST_DB_VALUE);
-  });
-
-  it('filters env by secretRefs when provided', () => {
-    const secrets = makeSecrets();
-    const ctx = buildSessionContext('weather-team', '/data', secrets, ['ANTHROPIC_KEY']);
-
-    expect(ctx.env['ANTHROPIC_KEY']).toBe(TEST_KEY_VALUE);
-    expect(ctx.env['DB_PASSWORD']).toBeUndefined();
-  });
-
   it('produces correct cwd', () => {
-    const ctx = buildSessionContext('weather-team', '/data', new Map());
-    expect(ctx.cwd).toBe(join('/data', 'teams', 'weather-team', 'workspace'));
+    const ctx = buildSessionContext('weather-team', '/run');
+    expect(ctx.cwd).toBe(join('/run', 'teams', 'weather-team', 'workspace'));
   });
 
   it('produces correct additionalDirectories', () => {
-    const ctx = buildSessionContext('weather-team', '/data', new Map());
+    const ctx = buildSessionContext('weather-team', '/run');
     const expected = [
-      join('/data', 'teams', 'weather-team', 'memory'),
-      join('/data', 'teams', 'weather-team', 'org-rules'),
-      join('/data', 'teams', 'weather-team', 'team-rules'),
-      join('/data', 'teams', 'weather-team', 'skills'),
-      join('/data', 'teams', 'weather-team', 'subagents'),
+      join('/run', 'teams', 'weather-team', 'memory'),
+      join('/run', 'teams', 'weather-team', 'org-rules'),
+      join('/run', 'teams', 'weather-team', 'team-rules'),
+      join('/run', 'teams', 'weather-team', 'skills'),
+      join('/run', 'teams', 'weather-team', 'subagents'),
     ];
     expect(ctx.additionalDirectories).toEqual(expected);
   });
@@ -301,14 +260,14 @@ describe('UT-7: Context Builder', () => {
 describe('UT-7: Query Options Assembler', () => {
   it('produces correct structure with all fields', () => {
     const log = captureLog();
-    const secrets = makeSecrets();
 
     const input: BuildQueryOptionsInput = {
       teamName: 'weather-team',
       teamConfig: makeTeamConfig(),
+      runDir: '/run',
       dataDir: '/data',
+      systemRulesDir: '/app/system-rules',
       providers: makeProviders(),
-      secrets,
       orgMcpServer: { url: 'http://org:3000' },
       availableMcpServers: { analytics: { url: 'http://analytics:3001' } },
       ancestors: ['root-team'],
@@ -353,11 +312,11 @@ describe('UT-7: Query Options Assembler', () => {
     const scrubbed = opts.stderr('leaked ' + TEST_KEY_VALUE + ' here');
     expect(scrubbed).not.toContain(TEST_KEY_VALUE);
 
-    // env (provider env merged with context env)
+    // env (provider env only — no merged secrets)
     expect(opts.env['ANTHROPIC_API_KEY']).toBe(TEST_KEY_VALUE);
 
     // cwd
-    expect(opts.cwd).toBe(join('/data', 'teams', 'weather-team', 'workspace'));
+    expect(opts.cwd).toBe(join('/run', 'teams', 'weather-team', 'workspace'));
 
     // additionalDirectories
     expect(opts.additionalDirectories.length).toBe(5);
@@ -528,15 +487,15 @@ describe('E2E-6/E2E-11: Full session flow simulation', () => {
   it('assembles options, spawns session, tracks in manager', async () => {
     vi.useFakeTimers();
     const log = captureLog();
-    const secrets = makeSecrets();
 
     // 1. Build query options
     const input: BuildQueryOptionsInput = {
       teamName: 'weather-team',
       teamConfig: makeTeamConfig(),
+      runDir: '/run',
       dataDir: '/data',
+      systemRulesDir: '/app/system-rules',
       providers: makeProviders(),
-      secrets,
       orgMcpServer: { url: 'http://org:3000' },
       availableMcpServers: {},
       ancestors: [],
@@ -588,14 +547,14 @@ describe('E2E-6/E2E-11: Full session flow simulation', () => {
 
   it('provider error prevents session from starting', () => {
     const log = captureLog();
-    const secrets = makeSecrets();
 
     const input: BuildQueryOptionsInput = {
       teamName: 'broken-team',
       teamConfig: makeTeamConfig({ provider_profile: 'nonexistent' }),
+      runDir: '/run',
       dataDir: '/data',
+      systemRulesDir: '/app/system-rules',
       providers: makeProviders(),
-      secrets,
       orgMcpServer: {},
       availableMcpServers: {},
       ancestors: [],

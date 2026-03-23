@@ -152,14 +152,12 @@ describe('Bootstrap creates all components', () => {
 
   it('creates logger, db, session manager, trigger engine, channel router, fastify', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'openhive-bootstrap-'));
-    const dbPath = join(dir, 'bootstrap.db');
-    const memoryDir = join(dir, 'memory');
     const input = new PassThrough();
     const output = new PassThrough();
 
     result = await bootstrap({
-      dbPath,
-      memoryDir,
+      runDir: dir,
+      dataDir: join(dir, 'data'),
       skipListen: true,
       skipCli: true,
       cliInput: input,
@@ -187,12 +185,10 @@ describe('Bootstrap creates all components', () => {
 describe('Graceful shutdown stops all components', () => {
   it('shutdown closes database and all subsystems', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'openhive-shutdown-'));
-    const dbPath = join(dir, 'shutdown.db');
-    const memoryDir = join(dir, 'memory');
 
     const result = await bootstrap({
-      dbPath,
-      memoryDir,
+      runDir: dir,
+      dataDir: join(dir, 'data'),
       skipListen: true,
       skipCli: true,
     });

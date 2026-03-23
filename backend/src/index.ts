@@ -1,33 +1,29 @@
 /**
  * OpenHive v3 entry point — bootstrap and graceful shutdown.
+ *
+ * Three-tier data model:
+ *   Tier 1: /app/system-rules/  (baked into image, immutable)
+ *   Tier 2: /data/              (admin config + org rules, read-only volume)
+ *   Tier 3: .run/               (runtime workspace, writable volume)
  */
 
-import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import Fastify from 'fastify';
 import { createLogger } from './logging/logger.js';
-import { loadProviders, loadTriggers } from './config/loader.js';
-import { createDatabase, createTables } from './storage/database.js';
-import { OrgStore } from './storage/stores/org-store.js';
-import { TaskQueueStore } from './storage/stores/task-queue-store.js';
-import { TriggerStore } from './storage/stores/trigger-store.js';
-import { LogStore } from './storage/stores/log-store.js';
-import { EscalationStore } from './storage/stores/escalation-store.js';
-import { MemoryStore } from './storage/stores/memory-store.js';
+import { existsSync } from 'node:fs';
+import { loadProviders, loadTeamConfig } from './config/loader.js';
 import { OrgTree } from './domain/org-tree.js';
 import { createOrgMcpServer } from './org-mcp/server.js';
 import type { OrgMcpServer } from './org-mcp/server.js';
 import { SessionManager } from './sessions/manager.js';
-import { TriggerDedup } from './triggers/dedup.js';
-import { TriggerRateLimiter } from './triggers/rate-limiter.js';
-import { TriggerEngine } from './triggers/engine.js';
-import { CLIAdapter } from './channels/cli-adapter.js';
-import { DiscordAdapter } from './channels/discord-adapter.js';
-import { SecretString } from './secrets/secret-string.js';
 import { ChannelRouter } from './channels/router.js';
 import { registerHealthEndpoint } from './health.js';
-import type { IChannelAdapter, ChannelMessage } from './domain/interfaces.js';
-import type { TriggerConfig } from './domain/types.js';
+import { registerMessageEndpoint } from './api/message-endpoint.js';
+import {
+  ensureRunDir, seedOrgRules, initStorage,
+  loadTriggerConfigs, initTriggerEngine, initChannels,
+} from './bootstrap-helpers.js';
+import type { ChannelMessage } from './domain/interfaces.js';
 import type { ProvidersOutput } from './config/validation.js';
 import type { Readable, Writable } from 'node:stream';
 import type Database from 'better-sqlite3';
@@ -35,9 +31,10 @@ import type { FastifyInstance } from 'fastify';
 import type pino from 'pino';
 
 export interface BootstrapDeps {
-  readonly providersPath?: string;
-  readonly dbPath?: string;
-  readonly memoryDir?: string;
+  readonly dataDir?: string;
+  readonly runDir?: string;
+  readonly systemRulesDir?: string;
+  readonly seedRulesDir?: string;
   readonly listenAddress?: string;
   readonly listenPort?: number;
   readonly cliInput?: Readable;
@@ -51,108 +48,36 @@ export interface BootstrapResult {
   readonly raw: Database.Database;
   readonly fastify: FastifyInstance;
   readonly sessionManager: SessionManager;
-  readonly triggerEngine: TriggerEngine;
+  readonly triggerEngine: ReturnType<typeof initTriggerEngine>;
   readonly channelRouter: ChannelRouter;
   readonly orgTree: OrgTree;
   readonly orgMcpServer: OrgMcpServer;
   readonly providersConfig: ProvidersOutput | null;
+  readonly dataDir: string;
+  readonly runDir: string;
+  readonly systemRulesDir: string;
   shutdown(): Promise<void>;
 }
 
 let currentResult: BootstrapResult | null = null;
 
-function initStorage(deps?: BootstrapDeps) {
-  const dbPath = deps?.dbPath
-    ?? process.env['OPENHIVE_DB_PATH']
-    ?? '/data/openhive.db';
-  const { db, raw } = createDatabase(dbPath);
-  createTables(raw);
-
-  const orgStore = new OrgStore(db);
-  const taskQueueStore = new TaskQueueStore(db);
-  const triggerStore = new TriggerStore(db);
-  const logStore = new LogStore(db);
-  const escalationStore = new EscalationStore(db);
-  const memoryDir = deps?.memoryDir ?? '/data/memory';
-  const memoryStore = new MemoryStore(memoryDir);
-
-  return { db, raw, orgStore, taskQueueStore, triggerStore, logStore, escalationStore, memoryStore };
-}
-
-function loadTriggerConfigs(dataDir: string, logger: pino.Logger): TriggerConfig[] {
-  const triggersPath = join(dataDir, 'triggers.yaml');
-  if (!existsSync(triggersPath)) {
-    logger.info('No triggers.yaml found, skipping trigger loading');
-    return [];
-  }
-  try {
-    const result = loadTriggers(triggersPath);
-    return result.triggers as TriggerConfig[];
-  } catch (err) {
-    logger.warn({ err }, 'Failed to load triggers.yaml');
-    return [];
-  }
-}
-
-function initTriggerEngine(
-  triggerStore: TriggerStore,
-  taskQueueStore: TaskQueueStore,
-  logger: pino.Logger,
-  triggers: TriggerConfig[],
-): TriggerEngine {
-  const dedup = new TriggerDedup(triggerStore);
-  const rateLimiter = new TriggerRateLimiter(10, 60_000);
-  const engine = new TriggerEngine({
-    triggers,
-    dedup,
-    rateLimiter,
-    delegateTask: (team, task, priority) => {
-      taskQueueStore.enqueue(team, task, priority ?? 'normal');
-      return Promise.resolve();
-    },
-    logger: {
-      info: (msg, meta) => logger.info(meta ?? {}, msg),
-      warn: (msg, meta) => logger.warn(meta ?? {}, msg),
-    },
-  });
-  engine.register();
-  return engine;
-}
-
-function initChannels(
-  deps: BootstrapDeps | undefined,
-  logger: pino.Logger,
-): IChannelAdapter[] {
-  const adapters: IChannelAdapter[] = [];
-  if (!deps?.skipCli) {
-    adapters.push(new CLIAdapter({
-      input: deps?.cliInput,
-      output: deps?.cliOutput,
-    }));
-  }
-
-  // Wire Discord adapter when DISCORD_BOT_TOKEN env var is set
-  const discordToken = process.env['DISCORD_BOT_TOKEN'];
-  if (discordToken) {
-    logger.info('Discord bot token found, wiring Discord adapter');
-    adapters.push(new DiscordAdapter({
-      token: new SecretString(discordToken),
-    }));
-  }
-
-  return adapters;
-}
-
 export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> {
-  const stores = initStorage(deps);
+  const dataDir = deps?.dataDir ?? process.env['OPENHIVE_DATA_DIR'] ?? '/data';
+  const runDir = deps?.runDir ?? process.env['OPENHIVE_RUN_DIR'] ?? '/app/.run';
+  const systemRulesDir = deps?.systemRulesDir
+    ?? process.env['OPENHIVE_SYSTEM_RULES_DIR'] ?? '/app/system-rules';
+  const seedRulesDir = deps?.seedRulesDir ?? '/app/seed-rules';
+
+  ensureRunDir(runDir);
+  seedOrgRules(dataDir, seedRulesDir);
+
+  const stores = initStorage(dataDir, runDir);
   const { raw, orgStore, taskQueueStore, escalationStore } = stores;
 
   const logLevel = process.env['OPENHIVE_LOG_LEVEL'] ?? 'info';
   const logger = createLogger({ level: logLevel, logStore: stores.logStore });
 
-  const providersPath = deps?.providersPath
-    ?? process.env['OPENHIVE_PROVIDERS_PATH']
-    ?? '/data/providers.yaml';
+  const providersPath = join(dataDir, 'config', 'providers.yaml');
   let providersConfig: ProvidersOutput | null = null;
   try {
     providersConfig = loadProviders(providersPath);
@@ -168,45 +93,39 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
 
   const orgMcpServer = createOrgMcpServer({
     orgTree,
-    spawner: {
-      spawn: (teamId: string) => {
-        sessionManager.spawn(teamId);
-        return Promise.resolve(teamId);
-      },
-    },
+    spawner: { spawn: (id: string) => { sessionManager.spawn(id); return Promise.resolve(id); } },
     sessionManager: {
-      getSession: (sessionId: string) =>
-        Promise.resolve(sessionManager.isActive(sessionId) ? { id: sessionId } : null),
-      terminateSession: (sessionId: string) => {
-        sessionManager.stop(sessionId);
-        return Promise.resolve();
-      },
+      getSession: (id: string) => Promise.resolve(sessionManager.isActive(id) ? { id } : null),
+      terminateSession: (id: string) => { sessionManager.stop(id); return Promise.resolve(); },
     },
-    taskQueue: taskQueueStore,
-    escalationStore,
-    loadConfig: () => ({
-      name: 'default', parent: null, description: '', scope: { accepts: [], rejects: [] },
-      allowed_tools: [], secret_refs: [], mcp_servers: [], provider_profile: 'default', maxTurns: 50,
-    }),
-    getTeamConfig: () => undefined,
+    taskQueue: taskQueueStore, escalationStore, runDir,
+    loadConfig: (name: string, configPath?: string) => {
+      const path = configPath ?? join(runDir, 'teams', name, 'config.yaml');
+      return loadTeamConfig(path);
+    },
+    getTeamConfig: (teamId: string) => {
+      const path = join(runDir, 'teams', teamId, 'config.yaml');
+      if (!existsSync(path)) return undefined;
+      try { return loadTeamConfig(path); } catch { return undefined; }
+    },
     log: (msg, meta) => logger.info(meta ?? {}, msg),
   });
 
-  const dataDir = deps?.dbPath
-    ? join(deps.dbPath, '..')
-    : (process.env['OPENHIVE_DATA_DIR'] ?? '/data');
-  const triggerConfigs = loadTriggerConfigs(dataDir, logger);
+  const triggerConfigs = loadTriggerConfigs(runDir, logger);
   const triggerEngine = initTriggerEngine(stores.triggerStore, taskQueueStore, logger, triggerConfigs);
-  const adapters = initChannels(deps, logger);
+  const adapters = initChannels(
+    { dataDir, cliInput: deps?.cliInput, cliOutput: deps?.cliOutput, skipCli: deps?.skipCli },
+    logger,
+  );
   const channelRouter = new ChannelRouter(adapters, (msg: ChannelMessage) => {
     logger.info({ channelId: msg.channelId, userId: msg.userId }, 'Received message');
-    // Forward to trigger engine for keyword/message matching
     triggerEngine.onMessage(msg.content, msg.channelId);
     return Promise.resolve(undefined);
   });
 
   const fastify = Fastify({ logger: false });
   registerHealthEndpoint(fastify, { raw, sessionManager, triggerEngine, channelRouter });
+  registerMessageEndpoint(fastify, { channelRouter });
 
   triggerEngine.start();
   await channelRouter.start();
@@ -217,7 +136,7 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
     await fastify.listen({ host: address, port });
   }
 
-  logger.info('OpenHive v3 started');
+  logger.info({ dataDir, runDir, systemRulesDir }, 'OpenHive v3 started');
 
   const shutdown = async (): Promise<void> => {
     logger.info('Shutting down...');
@@ -232,7 +151,7 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
 
   const result: BootstrapResult = {
     logger, raw, fastify, sessionManager, triggerEngine, channelRouter, orgTree,
-    orgMcpServer, providersConfig, shutdown,
+    orgMcpServer, providersConfig, dataDir, runDir, systemRulesDir, shutdown,
   };
   currentResult = result;
   return result;

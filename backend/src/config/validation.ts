@@ -20,7 +20,6 @@ export const TeamConfigSchema = z.object({
   description: z.string().default(''),
   scope: TeamScopeSchema.default({ accepts: [], rejects: [] }),
   allowed_tools: z.array(z.string()).default([]),
-  secret_refs: z.array(z.string()).default([]),
   mcp_servers: z.array(z.string()).default([]),
   provider_profile: z.string().min(1),
   maxTurns: z.number().int().positive().default(50),
@@ -34,7 +33,7 @@ export type TeamConfigOutput = z.output<typeof TeamConfigSchema>;
 const ProviderProfileSchema = z.object({
   type: z.enum(['api', 'oauth']),
   api_url: z.string().optional(),
-  api_key_ref: z.string().optional(),
+  api_key: z.string().optional(),
   model: z.string().optional(),
   oauth_token_env: z.string().optional(),
 });
@@ -63,6 +62,25 @@ export const TriggersSchema = z.object({
 
 export type TriggersInput = z.input<typeof TriggersSchema>;
 export type TriggersOutput = z.output<typeof TriggersSchema>;
+
+// ── Channels ────────────────────────────────────────────────────────────────
+
+const DiscordChannelSchema = z.object({
+  token: z.string().min(1),
+  watched_channels: z.array(z.string()).default([]),
+});
+
+const CliChannelSchema = z.object({
+  enabled: z.boolean().default(true),
+});
+
+export const ChannelsSchema = z.object({
+  discord: DiscordChannelSchema.optional(),
+  cli: CliChannelSchema.default({ enabled: true }),
+});
+
+export type ChannelsInput = z.input<typeof ChannelsSchema>;
+export type ChannelsOutput = z.output<typeof ChannelsSchema>;
 
 // ── Logging ─────────────────────────────────────────────────────────────────
 

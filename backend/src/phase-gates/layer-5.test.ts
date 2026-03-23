@@ -125,7 +125,6 @@ function makeTeamConfig(overrides?: Partial<TeamConfig>): TeamConfig {
     description: 'A test team',
     scope: { accepts: ['weather', 'forecast'], rejects: ['admin'] },
     allowed_tools: [],
-    secret_refs: [],
     mcp_servers: [],
     provider_profile: 'default',
     maxTurns: 50,
@@ -160,6 +159,7 @@ function setupServer(): void {
     sessionManager,
     taskQueue,
     escalationStore,
+    runDir: '/tmp/openhive-test',
     loadConfig: (name: string) => {
       const cfg = teamConfigs.get(name);
       if (!cfg) throw new Error(`no config for team "${name}"`);

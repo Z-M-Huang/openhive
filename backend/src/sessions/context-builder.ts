@@ -1,15 +1,15 @@
 /**
- * Session context builder — assembles env, cwd, and additionalDirectories
+ * Session context builder — assembles cwd and additionalDirectories
  * for an SDK query() call.
  *
- * Pure data assembly, no side effects.
+ * All team directories live under {runDir}/teams/{teamName}/.
+ * No secrets are passed through context — API keys come from
+ * provider-resolver and are injected as env vars directly.
  */
 
 import { join } from 'node:path';
-import type { SecretString } from '../secrets/secret-string.js';
 
 export interface SessionContext {
-  readonly env: Record<string, string>;
   readonly cwd: string;
   readonly additionalDirectories: string[];
 }
@@ -24,32 +24,21 @@ const ADDITIONAL_SUBDIRS = [
 ] as const;
 
 /**
- * Build the session context (env, cwd, additionalDirectories).
+ * Build the session context (cwd, additionalDirectories).
  *
- * @param teamName    Team slug.
- * @param dataDir     Absolute path to the data root directory.
- * @param secrets     Resolved secrets map for the team.
- * @param secretRefs  Keys to include from the secrets map. Only these secrets
- *                    are exposed in the session env.
+ * @param teamName  Team slug.
+ * @param runDir    Absolute path to the runtime workspace root (.run/).
  */
 export function buildSessionContext(
   teamName: string,
-  dataDir: string,
-  secrets: Map<string, SecretString>,
-  secretRefs?: readonly string[],
+  runDir: string,
 ): SessionContext {
-  const env: Record<string, string> = {};
-  for (const [key, secret] of secrets) {
-    if (secretRefs && !secretRefs.includes(key)) continue;
-    env[key] = secret.expose();
-  }
-
-  const teamDir = join(dataDir, 'teams', teamName);
+  const teamDir = join(runDir, 'teams', teamName);
   const cwd = join(teamDir, 'workspace');
 
   const additionalDirectories = ADDITIONAL_SUBDIRS.map(
     (sub) => join(teamDir, sub),
   );
 
-  return { env, cwd, additionalDirectories };
+  return { cwd, additionalDirectories };
 }
