@@ -1,58 +1,99 @@
-# E2E Test Skill
+---
+name: e2e-test
+description: Run OpenHive end-to-end regression tests. Quick mode (vitest) and Docker mode (live interaction via WebSocket).
+user-invocable: true
+---
 
-Run OpenHive v3 tests. Two modes: `quick` (vitest only) and `docker` (full Docker E2E).
+# OpenHive E2E Test Runner
 
-## Quick Mode (default)
+Run the FULL test suite. **Never skip any test.**
 
-Run unit/integration tests without Docker:
+## Execution Steps
 
+### Step 1: Type Check
 ```bash
-cd /app/openhive/backend
-npx tsc --noEmit                    # Type check
-npx eslint src/ --max-warnings 0    # Lint
-npx vitest run                      # All tests
+cd /app/openhive/backend && npx tsc --noEmit 2>&1 | head -20
 ```
 
-Report: tsc errors, eslint warnings, test pass/fail count.
-
-## Docker Mode
-
-Run full E2E tests against a running Docker container:
-
+### Step 2: Lint
 ```bash
-cd /app/openhive/backend
-npx tsx src/e2e/runner.ts --tier1-only
+npx eslint src/ --max-warnings 0 2>&1 | head -20
 ```
 
-This will:
-1. Build the Docker image from `deployments/Dockerfile`
-2. Start a container with E2E fixtures (test config, no real API keys)
-3. Wait for the health endpoint to return 200
-4. Run Tier 1 suites:
-   - Health endpoint returns 200 with storage OK
-   - Container started successfully (.run/ structure created)
-   - Triggers component initialized
-   - POST /api/message endpoint works
-   - Seed rules applied without errors
-5. Tear down container and clean up
-
-### Tier 2 (requires ANTHROPIC_API_KEY)
-
-For AI integration tests, remove `--tier1-only`:
-
+### Step 3: Unit + Integration Tests
 ```bash
-ANTHROPIC_API_KEY=sk-ant-... npx tsx src/e2e/runner.ts
+npx vitest run 2>&1
+```
+Expected: 300+ tests pass.
+
+### Step 4: Quick E2E Tests (no Docker)
+```bash
+npx vitest run src/e2e/ 2>&1
+```
+These test bootstrap wiring with mock queryFn. No API key needed.
+
+### Step 5: Docker E2E (live interaction)
+
+Check Docker availability:
+```bash
+sudo docker info >/dev/null 2>&1 && echo "DOCKER_OK" || echo "DOCKER_UNAVAILABLE"
 ```
 
-## Prerequisites
+If `DOCKER_OK`:
 
-- Docker and docker compose must be available
-- For Docker mode: port 18080 must be free
-- For Tier 2: valid Anthropic API key
+**5a. Build the image:**
+```bash
+cd /app/openhive && sudo docker build -t openhive:latest -f deployments/Dockerfile . 2>&1 | tail -5
+```
 
-## Troubleshooting
+**5b. Start clean:**
+```bash
+sudo docker compose -f deployments/docker-compose.yml down -v 2>&1 || true
+sudo docker compose -f deployments/docker-compose.yml up -d 2>&1
+```
 
-If Docker tests fail:
-1. Check container logs: `docker compose -f <test-dir>/docker-compose.yml logs`
-2. Verify Docker is running: `docker info`
-3. Check port availability: `lsof -i :18080`
+**5c. Wait for health:**
+```bash
+for i in $(seq 1 30); do curl -sf http://localhost:8080/health >/dev/null 2>&1 && echo "Server ready" && break; sleep 3; done
+```
+
+**5d. Run ALL test suites** — read each `.yaml` file in `.claude/skills/e2e-test/test-suites/` in order. For each suite:
+1. Read the YAML file
+2. Execute setup commands
+3. For each test case, execute the steps and verify expected outcomes
+4. Execute teardown commands
+5. If a suite requires a clean start (noted in the file), restart the container first
+
+**For suites that need WebSocket interaction:**
+Use `websocat` or a Node.js one-liner to connect to `ws://localhost:8080/ws`, send JSON `{"content":"..."}`, and read the response.
+
+**For suites that need database verification:**
+Use `sudo docker exec openhive-openhive-1 node -e "..."` to run SQLite queries.
+
+**For suites that need filesystem verification:**
+Use `sudo docker exec openhive-openhive-1 ls /path/...` or `cat`.
+
+**5e. Cleanup:**
+```bash
+sudo docker compose -f deployments/docker-compose.yml down -v 2>&1
+```
+
+### Step 6: Report
+```
+=== OpenHive E2E Test Results ===
+
+Type Check:       PASS/FAIL
+Lint:             PASS/FAIL
+Unit Tests:       PASS/FAIL (N passed, N failed)
+Quick E2E:        PASS/FAIL
+Docker Build:     PASS/FAIL
+Docker Runtime:   PASS/FAIL
+
+Live E2E Suites:
+  01 Health & Structure:    PASS/FAIL
+  02 WebSocket:             PASS/FAIL
+  ...
+
+Total: N/N suites passed
+Failures: [details]
+```

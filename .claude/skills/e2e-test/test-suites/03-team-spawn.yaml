@@ -1,0 +1,38 @@
+name: Team Spawn
+description: Verify main agent can create and shut down teams via MCP tools.
+needs_api_key: true
+needs_clean_start: false
+
+setup: []
+teardown: []
+
+test_cases:
+  - name: Create a team via WebSocket
+    steps:
+      - action: "Ask main to create a weather team"
+        command: "echo '{\"content\":\"Create a team called weather-ops for weather forecasting. It should accept weather and forecast topics.\"}' | timeout 300 websocat ws://localhost:8080/ws 2>&1"
+        expected: "weather-ops"
+      - action: "Verify team config exists on disk"
+        command: "sudo docker exec openhive-openhive-1 cat /app/.run/teams/weather-ops/config.yaml"
+        expected: "name"
+      - action: "Verify team in org tree (SQLite)"
+        command: "sudo docker exec openhive-openhive-1 node -e \"const D=require('better-sqlite3')('/app/.run/openhive.db',{readonly:true}); const r=D.prepare('SELECT name FROM org_tree WHERE name=?').get('weather-ops'); console.log(r?'FOUND':'NOT_FOUND'); D.close()\""
+        expected: "FOUND"
+    expected_outcome: "Team weather-ops created with config on disk and entry in org_tree"
+
+  - name: List managed teams
+    steps:
+      - action: "Ask main what teams exist"
+        command: "echo '{\"content\":\"What teams do you manage?\"}' | timeout 120 websocat ws://localhost:8080/ws 2>&1"
+        expected: "weather-ops"
+    expected_outcome: "Response mentions weather-ops"
+
+  - name: Shut down a team
+    steps:
+      - action: "Ask main to shut down weather-ops"
+        command: "echo '{\"content\":\"Shut down the weather-ops team.\"}' | timeout 120 websocat ws://localhost:8080/ws 2>&1"
+        expected: "content"
+      - action: "Verify team removed from org tree"
+        command: "sudo docker exec openhive-openhive-1 node -e \"const D=require('better-sqlite3')('/app/.run/openhive.db',{readonly:true}); const r=D.prepare('SELECT name FROM org_tree WHERE name=?').get('weather-ops'); console.log(r?'FOUND':'REMOVED'); D.close()\""
+        expected: "REMOVED"
+    expected_outcome: "Team weather-ops removed from org tree"

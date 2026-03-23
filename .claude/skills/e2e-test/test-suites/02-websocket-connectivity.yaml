@@ -1,0 +1,32 @@
+name: WebSocket Connectivity
+description: Verify WebSocket adapter accepts connections and AI responds to messages.
+needs_api_key: true
+needs_clean_start: false
+
+setup:
+  - command: "for i in $(seq 1 30); do curl -sf http://localhost:8080/health >/dev/null 2>&1 && echo 'Ready' && break; sleep 3; done"
+    description: "Wait for health"
+
+teardown: []
+
+test_cases:
+  - name: WebSocket connection accepted
+    steps:
+      - action: "Connect to ws://localhost:8080/ws and send a message"
+        command: "echo '{\"content\":\"Say exactly: PONG\"}' | timeout 120 websocat ws://localhost:8080/ws 2>&1"
+        expected: "content"
+    expected_outcome: "WebSocket connection is accepted and a response with content field is returned"
+
+  - name: AI identifies as OpenHive
+    steps:
+      - action: "Ask who the AI is"
+        command: "echo '{\"content\":\"Who are you? Answer in one sentence.\"}' | timeout 120 websocat ws://localhost:8080/ws 2>&1"
+        expected: "OpenHive"
+    expected_outcome: "Response mentions OpenHive (not Claude Code)"
+
+  - name: AI describes capabilities
+    steps:
+      - action: "Ask about capabilities"
+        command: "echo '{\"content\":\"What can you do? List 3 things.\"}' | timeout 120 websocat ws://localhost:8080/ws 2>&1"
+        expected: "content"
+    expected_outcome: "Response describes agent capabilities"

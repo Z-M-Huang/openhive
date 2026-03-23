@@ -7,7 +7,8 @@
     "build": "tsc",
     "test": "vitest run",
     "lint": "eslint src/",
-    "smoke": "vitest run src/phase-gates/"
+    "smoke": "vitest run src/phase-gates/",
+    "e2e:quick": "vitest run src/e2e/"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.0",

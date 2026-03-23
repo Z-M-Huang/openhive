@@ -1,0 +1,44 @@
+name: Recovery
+description: Verify container restart preserves state and recovery resets running tasks.
+needs_api_key: true
+needs_clean_start: true
+
+setup:
+  - command: "sudo docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+    description: "Clean start"
+  - command: "sudo docker compose -f deployments/docker-compose.yml up -d 2>&1"
+    description: "Start container"
+  - command: "for i in $(seq 1 30); do curl -sf http://localhost:8080/health >/dev/null 2>&1 && echo 'Ready' && break; sleep 3; done"
+    description: "Wait for health"
+
+teardown:
+  - command: "sudo docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+
+test_cases:
+  - name: Create team and delegate task, then restart
+    steps:
+      - action: "Create a recovery test team"
+        command: "echo '{\"content\":\"Create a team called recovery-test that accepts test topics.\"}' | timeout 300 websocat ws://localhost:8080/ws 2>&1"
+        expected: "content"
+      - action: "Delegate a task"
+        command: "echo '{\"content\":\"Delegate a test task to recovery-test: run recovery verification.\"}' | timeout 300 websocat ws://localhost:8080/ws 2>&1"
+        expected: "content"
+      - action: "Wait for task to be running"
+        command: "for i in $(seq 1 6); do sleep 5; sudo docker exec openhive-openhive-1 node -e \"const D=require('better-sqlite3')('/app/.run/openhive.db',{readonly:true}); const r=D.prepare('SELECT status FROM task_queue WHERE team_id=? ORDER BY created_at DESC LIMIT 1').get('recovery-test'); console.log(r?.status||'none'); D.close()\" 2>&1 | grep -q 'running' && echo 'RUNNING' && break; done"
+        expected: "RUNNING"
+      - action: "Restart container"
+        command: "sudo docker compose -f deployments/docker-compose.yml restart openhive 2>&1"
+        expected: ""
+      - action: "Wait for health after restart"
+        command: "for i in $(seq 1 30); do curl -sf http://localhost:8080/health >/dev/null 2>&1 && echo 'Recovered' && break; sleep 3; done"
+        expected: "Recovered"
+      - action: "Verify team still exists"
+        command: "sudo docker exec openhive-openhive-1 node -e \"const D=require('better-sqlite3')('/app/.run/openhive.db',{readonly:true}); const r=D.prepare('SELECT name FROM org_tree WHERE name=?').get('recovery-test'); console.log(r?'FOUND':'MISSING'); D.close()\""
+        expected: "FOUND"
+      - action: "Verify task reset to pending"
+        command: "sudo docker exec openhive-openhive-1 node -e \"const D=require('better-sqlite3')('/app/.run/openhive.db',{readonly:true}); const r=D.prepare('SELECT status FROM task_queue WHERE team_id=? ORDER BY created_at DESC LIMIT 1').get('recovery-test'); console.log(r?.status||'none'); D.close()\""
+        expected: "pending"
+      - action: "Check recovery log"
+        command: "sudo docker logs openhive-openhive-1 2>&1 | grep 'Recovery:'"
+        expected: "Recovery:"
+    expected_outcome: "Team persists across restart, running tasks reset to pending, recovery log present"

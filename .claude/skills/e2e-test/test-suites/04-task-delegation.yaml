@@ -1,0 +1,30 @@
+name: Task Delegation
+description: Verify main agent can delegate tasks to child teams with scope admission.
+needs_api_key: true
+needs_clean_start: false
+
+setup:
+  - command: "echo '{\"content\":\"Create a team called weather-ops for weather tasks. It should accept weather and forecast topics.\"}' | timeout 300 websocat ws://localhost:8080/ws 2>&1"
+    description: "Create weather-ops team"
+
+teardown:
+  - command: "echo '{\"content\":\"Shut down the weather-ops team.\"}' | timeout 120 websocat ws://localhost:8080/ws 2>&1"
+    description: "Clean up team"
+
+test_cases:
+  - name: Delegate a matching task
+    steps:
+      - action: "Ask main to delegate weather work"
+        command: "echo '{\"content\":\"Delegate checking the weather in NYC to weather-ops.\"}' | timeout 300 websocat ws://localhost:8080/ws 2>&1"
+        expected: "content"
+      - action: "Verify task queued"
+        command: "sudo docker exec openhive-openhive-1 node -e \"const D=require('better-sqlite3')('/app/.run/openhive.db',{readonly:true}); const r=D.prepare('SELECT COUNT(*) as c FROM task_queue WHERE team_id=?').get('weather-ops'); console.log('tasks:',r.c); D.close()\""
+        expected: "tasks:"
+    expected_outcome: "Task queued for weather-ops"
+
+  - name: Scope rejection for non-matching task
+    steps:
+      - action: "Ask main to delegate tax work to weather team"
+        command: "echo '{\"content\":\"Delegate doing my taxes to weather-ops.\"}' | timeout 120 websocat ws://localhost:8080/ws 2>&1"
+        expected: "content"
+    expected_outcome: "Main agent reports scope rejection or handles the task itself"

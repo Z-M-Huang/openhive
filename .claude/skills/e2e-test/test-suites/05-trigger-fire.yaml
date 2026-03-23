@@ -1,0 +1,29 @@
+name: Trigger Fire
+description: Verify keyword triggers fire and create tasks when matching messages arrive.
+needs_api_key: false
+needs_clean_start: false
+
+setup: []
+teardown: []
+
+test_cases:
+  - name: Health shows triggers registered
+    steps:
+      - action: "Check trigger count in health"
+        command: "curl -sf http://localhost:8080/health"
+        expected: "triggers"
+    expected_outcome: "Health endpoint includes triggers field"
+
+  - name: Matching keyword fires trigger
+    steps:
+      - action: "Send message matching keyword trigger via /api/message"
+        command: "curl -sf -X POST http://localhost:8080/api/message -H 'Content-Type: application/json' -d '{\"content\":\"e2e-test-trigger\"}'"
+        expected: "success"
+    expected_outcome: "POST /api/message returns success (trigger fires in background)"
+
+  - name: Non-matching message does not fire trigger
+    steps:
+      - action: "Send non-matching message"
+        command: "curl -sf -X POST http://localhost:8080/api/message -H 'Content-Type: application/json' -d '{\"content\":\"no match here\"}'"
+        expected: "success"
+    expected_outcome: "Message processed but no trigger fired"

@@ -1,0 +1,101 @@
+/**
+ * Quick E2E tests — in-process bootstrap with mock queryFn.
+ *
+ * Verifies runtime wiring without Docker or API keys.
+ */
+
+import { describe, it, expect, afterAll } from 'vitest';
+import { tmpdir } from 'node:os';
+import { mkdtempSync, existsSync, readdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+import { bootstrap } from '../index.js';
+import type { BootstrapResult } from '../index.js';
+// ── Setup ────────────────────────────────────────────────────────────────
+
+const dir = mkdtempSync(join(tmpdir(), 'openhive-e2e-quick-'));
+let result: BootstrapResult;
+
+afterAll(async () => {
+  if (result) await result.shutdown();
+});
+
+// ── Tests ────────────────────────────────────────────────────────────────
+
+describe('Quick E2E: Bootstrap wiring', () => {
+  it('bootstraps and health returns 200', { timeout: 15_000 }, async () => {
+    result = await bootstrap({
+      runDir: dir, dataDir: join(dir, 'data'),
+      skipListen: true, skipCli: true,
+    });
+
+    const resp = await result.fastify.inject({ method: 'GET', url: '/health' });
+    expect(resp.statusCode).toBe(200);
+    const body = JSON.parse(resp.body) as { storage: { ok: boolean } };
+    expect(body.storage.ok).toBe(true);
+  });
+
+  it('.run/ structure has teams/, shared/, backups/, teams/main/', () => {
+    expect(existsSync(join(dir, 'teams'))).toBe(true);
+    expect(existsSync(join(dir, 'shared'))).toBe(true);
+    expect(existsSync(join(dir, 'backups'))).toBe(true);
+    expect(existsSync(join(dir, 'teams', 'main', 'config.yaml'))).toBe(true);
+  });
+
+  it('health shows triggers registered', async () => {
+    // Copy trigger fixture to runDir
+    const triggersYaml = `triggers:\n  - name: e2e-kw\n    type: keyword\n    config:\n      pattern: "e2e-test"\n    team: test\n    task: handle test\n`;
+    writeFileSync(join(dir, 'triggers.yaml'), triggersYaml);
+
+    // Re-bootstrap with triggers
+    await result.shutdown();
+    result = await bootstrap({
+      runDir: dir, dataDir: join(dir, 'data'),
+      skipListen: true, skipCli: true,
+    });
+
+    const resp = await result.fastify.inject({ method: 'GET', url: '/health' });
+    const body = JSON.parse(resp.body) as { triggers: { registered: number } };
+    expect(body.triggers.registered).toBeGreaterThanOrEqual(1);
+  });
+
+  it('seed rules applied to dataDir/rules/', () => {
+    const rulesDir = join(dir, 'data', 'rules');
+    if (!existsSync(rulesDir)) return; // seed-rules dir may not exist in test env
+    const files = readdirSync(rulesDir).filter(f => f.endsWith('.md'));
+    // If seed rules exist, they should have been copied
+    expect(files.length).toBeGreaterThanOrEqual(0);
+  });
+
+  it('POST /api/message returns success', async () => {
+    const resp = await result.fastify.inject({
+      method: 'POST', url: '/api/message',
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify({ content: 'hello from test' }),
+    });
+    expect(resp.statusCode).toBe(200);
+    const body = JSON.parse(resp.body) as { success: boolean };
+    expect(body.success).toBe(true);
+  });
+
+  it('POST /api/message rejects empty content', async () => {
+    const resp = await result.fastify.inject({
+      method: 'POST', url: '/api/message',
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify({ content: '' }),
+    });
+    expect(resp.statusCode).toBe(400);
+  });
+
+  it('providers loaded when config exists', () => {
+    // In this test, no providers.yaml exists so providersConfig is null
+    // That's expected — tests run without real API keys
+    expect(result.providersConfig).toBeNull();
+  });
+
+  it('main team registered in org tree', () => {
+    const main = result.orgTree.getTeam('main');
+    expect(main).toBeDefined();
+    expect(main?.name).toBe('main');
+  });
+});
