@@ -1,13 +1,23 @@
 # Provider profiles for OpenHive v3
-# Copy to providers.yaml and fill in your API keys.
+# Copy to providers.yaml and fill in your values.
+#
+# The main team uses 'default' profile by default.
+# Child teams can use different profiles via their config.yaml provider_profile field.
 
 profiles:
-  default-sonnet:
+  default:
     type: api
-    api_key: YOUR_ANTHROPIC_API_KEY_HERE
-    api_url: YOUR_ANTHROPIC_API_URL_HERE
+    api_key: YOUR_API_KEY_HERE
     model: claude-sonnet-4-20250514
+    # api_url: https://api.anthropic.com   # Optional: custom API endpoint
 
-  oauth-profile:
-    type: oauth
-    oauth_token_env: OAUTH_TOKEN
+  # Example: use a different model or provider for specific teams
+  # fast:
+  #   type: api
+  #   api_key: YOUR_API_KEY_HERE
+  #   model: claude-haiku-4-5-20251001
+
+  # Example: OAuth provider (e.g., managed Claude deployment)
+  # oauth-profile:
+  #   type: oauth
+  #   oauth_token_env: OAUTH_TOKEN
