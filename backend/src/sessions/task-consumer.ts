@@ -73,10 +73,13 @@ export class TaskConsumer {
             },
             { ...this.#deps, orgAncestors: this.#getAncestorNames(task.teamId) },
             this.#queryFn,
+            task.teamId,
           );
 
-          this.#taskQueue.updateStatus(dequeued.id, TaskStatus.Completed);
-          this.#deps.logger.info('Task completed', {
+          // Detect error responses (handleMessage returns "Error: ..." on failure)
+          const isError = typeof response === 'string' && response.startsWith('Error processing');
+          this.#taskQueue.updateStatus(dequeued.id, isError ? TaskStatus.Failed : TaskStatus.Completed);
+          this.#deps.logger.info(isError ? 'Task failed (handler error)' : 'Task completed', {
             taskId: dequeued.id, team: task.teamId,
             responseLength: response?.length ?? 0,
           });

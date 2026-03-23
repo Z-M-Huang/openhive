@@ -38,11 +38,17 @@ export interface SpawnTeamResult {
   readonly error?: string;
 }
 
+export interface SpawnTeamConfigHints {
+  readonly description?: string;
+  readonly scopeAccepts?: string[];
+  readonly scopeRejects?: string[];
+}
+
 export interface SpawnTeamDeps {
   readonly orgTree: OrgTree;
   readonly spawner: ISessionSpawner;
   readonly runDir: string;
-  readonly loadConfig: (name: string, configPath?: string) => TeamConfig;
+  readonly loadConfig: (name: string, configPath?: string, hints?: SpawnTeamConfigHints) => TeamConfig;
 }
 
 /** Subdirectories to scaffold for each new team. */
@@ -95,7 +101,12 @@ export async function spawnTeam(
   // (no file on disk yet). The calling agent must provide config_path.
   let config: TeamConfig;
   try {
-    config = deps.loadConfig(name, config_path);
+    const hints: SpawnTeamConfigHints = {
+      description: parsed.data.description,
+      scopeAccepts: parsed.data.scope_accepts,
+      scopeRejects: parsed.data.scope_rejects,
+    };
+    config = deps.loadConfig(name, config_path, hints);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return { success: false, error: `config error: ${msg}` };

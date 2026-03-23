@@ -67,24 +67,13 @@ describe('Quick E2E: Bootstrap wiring', () => {
     expect(files.length).toBeGreaterThanOrEqual(0);
   });
 
-  it('POST /api/message returns success', async () => {
-    const resp = await result.fastify.inject({
-      method: 'POST', url: '/api/message',
-      headers: { 'content-type': 'application/json' },
-      payload: JSON.stringify({ content: 'hello from test' }),
+  it('routeMessage returns response (no providers = error message)', async () => {
+    const response = await result.channelRouter.routeMessage({
+      channelId: 'test', userId: 'test-user',
+      content: 'hello', timestamp: Date.now(),
     });
-    expect(resp.statusCode).toBe(200);
-    const body = JSON.parse(resp.body) as { success: boolean };
-    expect(body.success).toBe(true);
-  });
-
-  it('POST /api/message rejects empty content', async () => {
-    const resp = await result.fastify.inject({
-      method: 'POST', url: '/api/message',
-      headers: { 'content-type': 'application/json' },
-      payload: JSON.stringify({ content: '' }),
-    });
-    expect(resp.statusCode).toBe(400);
+    // Without providers.yaml, returns error message
+    expect(typeof response).toBe('string');
   });
 
   it('providers loaded when config exists', () => {

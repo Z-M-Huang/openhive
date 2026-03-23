@@ -61,8 +61,8 @@ export async function handleMessage(
   msg: ChannelMessage,
   deps: MessageHandlerDeps,
   queryFn?: QueryFn,
+  teamName: string = 'main',
 ): Promise<string | void> {
-  const teamName = 'main';
 
   const teamConfig = loadConfig(deps.runDir, teamName);
   if (!teamConfig) {

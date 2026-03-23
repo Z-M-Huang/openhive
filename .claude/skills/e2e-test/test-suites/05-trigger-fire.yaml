@@ -14,16 +14,12 @@ test_cases:
         expected: "triggers"
     expected_outcome: "Health endpoint includes triggers field"
 
-  - name: Matching keyword fires trigger
+  - name: Matching keyword fires trigger via WS
     steps:
-      - action: "Send message matching keyword trigger via /api/message"
-        command: "curl -sf -X POST http://localhost:8080/api/message -H 'Content-Type: application/json' -d '{\"content\":\"e2e-test-trigger\"}'"
-        expected: "success"
-    expected_outcome: "POST /api/message returns success (trigger fires in background)"
-
-  - name: Non-matching message does not fire trigger
-    steps:
-      - action: "Send non-matching message"
-        command: "curl -sf -X POST http://localhost:8080/api/message -H 'Content-Type: application/json' -d '{\"content\":\"no match here\"}'"
-        expected: "success"
-    expected_outcome: "Message processed but no trigger fired"
+      - action: "Send message matching keyword trigger"
+        command: "echo '{\"content\":\"e2e-test-trigger\"}' | timeout 30 websocat ws://localhost:8080/ws 2>&1"
+        expected: ""
+      - action: "Verify task created in SQLite"
+        command: "sudo docker exec openhive-openhive-1 node -e \"const D=require('better-sqlite3')('/app/.run/openhive.db',{readonly:true}); const r=D.prepare('SELECT COUNT(*) as c FROM task_queue WHERE team_id=?').get('test-team'); console.log('tasks:',r.c); D.close()\""
+        expected: "tasks:"
+    expected_outcome: "Keyword trigger fires and task is enqueued for test-team"

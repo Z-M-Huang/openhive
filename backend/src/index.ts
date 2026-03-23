@@ -18,7 +18,6 @@ import type { OrgMcpServer } from './org-mcp/server.js';
 import { SessionManager } from './sessions/manager.js';
 import { ChannelRouter } from './channels/router.js';
 import { registerHealthEndpoint } from './health.js';
-import { registerMessageEndpoint } from './api/message-endpoint.js';
 import { handleMessage } from './sessions/message-handler.js';
 import { TaskConsumer } from './sessions/task-consumer.js';
 import { recoverFromCrash } from './recovery/startup-recovery.js';
@@ -64,12 +63,16 @@ export interface BootstrapResult {
 
 let currentResult: BootstrapResult | null = null;
 
-function loadOrGenerateConfig(runDir: string, name: string, configPath?: string) {
+function loadOrGenerateConfig(
+  runDir: string, name: string, configPath?: string,
+  hints?: { description?: string; scopeAccepts?: string[]; scopeRejects?: string[] },
+) {
   if (configPath) return loadTeamConfig(configPath);
   const path = join(runDir, 'teams', name, 'config.yaml');
   if (existsSync(path)) return loadTeamConfig(path);
   return {
-    name, parent: null, description: '', scope: { accepts: [] as string[], rejects: [] as string[] },
+    name, parent: null, description: hints?.description ?? '',
+    scope: { accepts: hints?.scopeAccepts ?? [] as string[], rejects: hints?.scopeRejects ?? [] as string[] },
     allowed_tools: ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'mcp__org__*'],
     mcp_servers: ['org'], provider_profile: 'default', maxTurns: 100,
   };
@@ -127,7 +130,8 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
       getSession: (id: string) => Promise.resolve(sessionManager.isActive(id) ? { id } : null),
       terminateSession: (id: string) => { sessionManager.stop(id); return Promise.resolve(); },
     },
-    loadConfig: (name: string, cp?: string) => loadOrGenerateConfig(runDir, name, cp),
+    loadConfig: (name: string, cp?: string, hints?: { description?: string; scopeAccepts?: string[]; scopeRejects?: string[] }) =>
+      loadOrGenerateConfig(runDir, name, cp, hints),
     getTeamConfig: (id: string) => safeLoadConfig(runDir, id),
     log: (msg, meta) => logger.info(meta ?? {}, msg),
   });
@@ -152,7 +156,6 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
 
   const fastify = Fastify({ logger: false });
   registerHealthEndpoint(fastify, { raw, sessionManager, triggerEngine, channelRouter });
-  registerMessageEndpoint(fastify, { channelRouter });
 
   const taskConsumer = handlerDeps ? new TaskConsumer({ taskQueueStore, orgTree, handlerDeps }) : null;
   taskConsumer?.start();

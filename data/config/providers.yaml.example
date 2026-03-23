@@ -5,6 +5,7 @@ profiles:
   default-sonnet:
     type: api
     api_key: YOUR_ANTHROPIC_API_KEY_HERE
+    api_url: YOUR_ANTHROPIC_API_URL_HERE
     model: claude-sonnet-4-20250514
 
   oauth-profile:
