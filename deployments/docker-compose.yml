@@ -6,10 +6,7 @@ services:
       context: ..
       dockerfile: deployments/Dockerfile
     environment:
-      - OPENHIVE_DATA_DIR=/data
-      - OPENHIVE_RUN_DIR=/app/.run
-      - OPENHIVE_SYSTEM_RULES_DIR=/app/system-rules
-      - OPENHIVE_LISTEN_ADDRESS=0.0.0.0
+      - OPENHIVE_LOG_LEVEL=info
     volumes:
       - ../data/config:/data/config:ro    # Admin config (read-only)
       - ../data/rules:/data/rules         # Org rules (writable, seeded)

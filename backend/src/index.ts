@@ -8,9 +8,9 @@
  */
 
 import { join } from 'node:path';
+import { existsSync } from 'node:fs';
 import Fastify from 'fastify';
 import { createLogger } from './logging/logger.js';
-import { existsSync } from 'node:fs';
 import { loadProviders, loadTeamConfig } from './config/loader.js';
 import { OrgTree } from './domain/org-tree.js';
 import { createOrgMcpServer } from './org-mcp/server.js';
@@ -19,9 +19,12 @@ import { SessionManager } from './sessions/manager.js';
 import { ChannelRouter } from './channels/router.js';
 import { registerHealthEndpoint } from './health.js';
 import { registerMessageEndpoint } from './api/message-endpoint.js';
+import { handleMessage } from './sessions/message-handler.js';
+import { TaskConsumer } from './sessions/task-consumer.js';
+import { recoverFromCrash } from './recovery/startup-recovery.js';
 import {
   ensureRunDir, seedOrgRules, initStorage,
-  loadTriggerConfigs, initTriggerEngine, initChannels,
+  loadTriggerConfigs, initTriggerEngine, initChannels, ensureMainTeam,
 } from './bootstrap-helpers.js';
 import type { ChannelMessage } from './domain/interfaces.js';
 import type { ProvidersOutput } from './config/validation.js';
@@ -61,11 +64,28 @@ export interface BootstrapResult {
 
 let currentResult: BootstrapResult | null = null;
 
+function loadOrGenerateConfig(runDir: string, name: string, configPath?: string) {
+  if (configPath) return loadTeamConfig(configPath);
+  const path = join(runDir, 'teams', name, 'config.yaml');
+  if (existsSync(path)) return loadTeamConfig(path);
+  return {
+    name, parent: null, description: '', scope: { accepts: [] as string[], rejects: [] as string[] },
+    allowed_tools: ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'mcp__org__*'],
+    mcp_servers: ['org'], provider_profile: 'default', maxTurns: 100,
+  };
+}
+
+function safeLoadConfig(runDir: string, teamId: string) {
+  const path = join(runDir, 'teams', teamId, 'config.yaml');
+  if (!existsSync(path)) return undefined;
+  try { return loadTeamConfig(path); } catch { return undefined; }
+}
+
 export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> {
-  const dataDir = deps?.dataDir ?? process.env['OPENHIVE_DATA_DIR'] ?? '/data';
-  const runDir = deps?.runDir ?? process.env['OPENHIVE_RUN_DIR'] ?? '/app/.run';
-  const systemRulesDir = deps?.systemRulesDir
-    ?? process.env['OPENHIVE_SYSTEM_RULES_DIR'] ?? '/app/system-rules';
+  // Hardcoded paths (deps overrides for tests only)
+  const dataDir = deps?.dataDir ?? '/data';
+  const runDir = deps?.runDir ?? '/app/.run';
+  const systemRulesDir = deps?.systemRulesDir ?? '/app/system-rules';
   const seedRulesDir = deps?.seedRulesDir ?? '/app/seed-rules';
 
   ensureRunDir(runDir);
@@ -89,64 +109,69 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   const orgTree = new OrgTree(orgStore);
   orgTree.loadFromStore();
 
+  // Recovery — reset running tasks, detect orphans
+  const recovery = recoverFromCrash({ orgStore, taskQueueStore, orgTree, runDir, logger });
+  if (recovery.recovered > 0) {
+    logger.info({ recovered: recovery.recovered }, 'Recovery completed');
+  }
+
+  // Scaffold main team
+  ensureMainTeam(runDir, orgTree);
+
   const sessionManager = new SessionManager();
 
   const orgMcpServer = createOrgMcpServer({
-    orgTree,
+    orgTree, taskQueue: taskQueueStore, escalationStore, runDir,
     spawner: { spawn: (id: string) => { sessionManager.spawn(id); return Promise.resolve(id); } },
     sessionManager: {
       getSession: (id: string) => Promise.resolve(sessionManager.isActive(id) ? { id } : null),
       terminateSession: (id: string) => { sessionManager.stop(id); return Promise.resolve(); },
     },
-    taskQueue: taskQueueStore, escalationStore, runDir,
-    loadConfig: (name: string, configPath?: string) => {
-      const path = configPath ?? join(runDir, 'teams', name, 'config.yaml');
-      return loadTeamConfig(path);
-    },
-    getTeamConfig: (teamId: string) => {
-      const path = join(runDir, 'teams', teamId, 'config.yaml');
-      if (!existsSync(path)) return undefined;
-      try { return loadTeamConfig(path); } catch { return undefined; }
-    },
+    loadConfig: (name: string, cp?: string) => loadOrGenerateConfig(runDir, name, cp),
+    getTeamConfig: (id: string) => safeLoadConfig(runDir, id),
     log: (msg, meta) => logger.info(meta ?? {}, msg),
   });
 
   const triggerConfigs = loadTriggerConfigs(runDir, logger);
   const triggerEngine = initTriggerEngine(stores.triggerStore, taskQueueStore, logger, triggerConfigs);
+
   const adapters = initChannels(
     { dataDir, cliInput: deps?.cliInput, cliOutput: deps?.cliOutput, skipCli: deps?.skipCli },
     logger,
   );
-  const channelRouter = new ChannelRouter(adapters, (msg: ChannelMessage) => {
+
+  const handlerDeps = providersConfig
+    ? { providers: providersConfig, orgMcpServer, availableMcpServers: {}, runDir, dataDir, systemRulesDir, orgAncestors: [] as string[], logger }
+    : null;
+
+  const channelRouter = new ChannelRouter(adapters, async (msg: ChannelMessage) => {
     logger.info({ channelId: msg.channelId, userId: msg.userId }, 'Received message');
     triggerEngine.onMessage(msg.content, msg.channelId);
-    return Promise.resolve(undefined);
+    return handlerDeps ? handleMessage(msg, handlerDeps) : 'No providers configured.';
   });
 
   const fastify = Fastify({ logger: false });
   registerHealthEndpoint(fastify, { raw, sessionManager, triggerEngine, channelRouter });
   registerMessageEndpoint(fastify, { channelRouter });
 
+  const taskConsumer = handlerDeps ? new TaskConsumer({ taskQueueStore, orgTree, handlerDeps }) : null;
+  taskConsumer?.start();
   triggerEngine.start();
   await channelRouter.start();
 
   if (!deps?.skipListen) {
-    const address = deps?.listenAddress ?? process.env['OPENHIVE_LISTEN_ADDRESS'] ?? '127.0.0.1';
     const port = deps?.listenPort ?? Number(process.env['OPENHIVE_LISTEN_PORT'] ?? '8080');
-    await fastify.listen({ host: address, port });
+    await fastify.listen({ host: deps?.listenAddress ?? '0.0.0.0', port });
   }
 
   logger.info({ dataDir, runDir, systemRulesDir }, 'OpenHive v3 started');
 
   const shutdown = async (): Promise<void> => {
     logger.info('Shutting down...');
-    triggerEngine.stop();
-    await channelRouter.stop();
-    sessionManager.stopAll();
-    await fastify.close();
-    raw.close();
-    logger.info('Shutdown complete');
-    currentResult = null;
+    taskConsumer?.stop(); triggerEngine.stop();
+    await channelRouter.stop(); sessionManager.stopAll();
+    await fastify.close(); raw.close();
+    logger.info('Shutdown complete'); currentResult = null;
   };
 
   const result: BootstrapResult = {
@@ -169,7 +194,7 @@ const handleSignal = (): void => {
 process.on('SIGTERM', handleSignal);
 process.on('SIGINT', handleSignal);
 
-// Auto-start unless running in test (check multiple indicators)
+// Auto-start unless running in test
 const isTest = process.env['VITEST'] !== undefined
   || process.env['NODE_ENV'] === 'test'
   || process.env['VITEST_WORKER_ID'] !== undefined;

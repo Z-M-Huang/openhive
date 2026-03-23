@@ -1,46 +1,103 @@
 # ── Builder ──────────────────────────────────────────────────────────────────
 FROM node:22-bookworm-slim AS builder
 
+WORKDIR /build
+
+# Install native build tools for better-sqlite3 and bun runtime
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        python3 \
+        make \
+        g++ \
+        curl \
+        unzip && \
+    rm -rf /var/lib/apt/lists/*
+
 # Install bun
-RUN apt-get update && apt-get install -y curl unzip && \
-    curl -fsSL https://bun.sh/install | bash && \
-    ln -s /root/.bun/bin/bun /usr/local/bin/bun && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL https://bun.sh/install | bash && \
+    ln -s /root/.bun/bin/bun /usr/local/bin/bun
 
-WORKDIR /app
+# Copy package files first (layer cache)
+COPY package.json bun.lock* ./
+COPY backend/package.json backend/
 
-COPY backend/package.json backend/tsconfig.json ./backend/
-COPY package.json ./
-RUN cd /app && bun install
+# Install all dependencies (including devDependencies for compilation)
+RUN bun install
 
-COPY backend/src ./backend/src
-RUN cd /app/backend && npx tsc
+# Install Playwright Chromium to a shared path
+ENV PLAYWRIGHT_BROWSERS_PATH=/app/browsers
+RUN cd backend && npx playwright install --with-deps chromium
+
+# Copy source code
+COPY backend/src backend/src
+COPY backend/tsconfig.json backend/
+COPY common/ /build/common/
+
+# Compile TypeScript
+RUN cd backend && npx tsc
 
 # ── Production ──────────────────────────────────────────────────────────────
 FROM node:22-bookworm-slim
 
-RUN apt-get update && apt-get install -y curl && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
+# Runtime system dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        python3 \
+        python3-pip \
+        python3-venv \
+        curl \
+        libnss3 libatk-bridge2.0-0 libdrm2 libxcomposite1 \
+        libxdamage1 libxrandr2 libgbm1 libasound2 libpango-1.0-0 \
+        libcairo2 libatspi2.0-0 libcups2 libxfixes3 libxkbcommon0 && \
+    rm -rf /var/lib/apt/lists/*
 
+# Install bun runtime
+RUN npm install -g bun@1.3.10
+
+# Install Claude Code CLI (required by Claude Agent SDK)
+RUN npm install -g @anthropic-ai/claude-code@latest
+
+USER root
 WORKDIR /app
 
-COPY --from=builder /app/backend/dist ./backend/dist
-COPY --from=builder /app/backend/package.json ./backend/
-COPY --from=builder /app/package.json ./
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/backend/node_modules ./backend/node_modules
+# Copy compiled backend
+COPY --from=builder /build/backend/dist/ backend/dist/
+COPY --from=builder /build/backend/package.json backend/
+COPY --from=builder /build/package.json .
+COPY --from=builder /build/node_modules/ node_modules/
+COPY --from=builder /build/backend/node_modules/ backend/node_modules/
+
+# Copy Playwright browsers
+ENV PLAYWRIGHT_BROWSERS_PATH=/app/browsers
+COPY --from=builder /app/browsers /app/browsers
 
 # Tier 1: System rules (baked in, immutable)
-COPY common/system-rules/ /app/system-rules/
+COPY --from=builder /build/common/system-rules/ /app/system-rules/
 
 # Seed rules (copied to /data/rules/ on first start if empty)
-COPY common/seed-rules/ /app/seed-rules/
+COPY --from=builder /build/common/seed-rules/ /app/seed-rules/
 
-# Create runtime workspace directory
-RUN mkdir -p /app/.run
+# Create runtime directories
+RUN mkdir -p /app/.run /data/config /data/rules
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD curl -f http://localhost:8080/health || kill -0 1
+# Ensure non-root user owns app directories
+RUN chown -R node:node /app /data
+
+# Docker GID for socket access (override with --build-arg DOCKER_GID=<gid>)
+ARG DOCKER_GID=0
+RUN if [ "${DOCKER_GID}" = "0" ]; then \
+      usermod -aG root node; \
+    else \
+      groupadd -g ${DOCKER_GID} docker 2>/dev/null || true && \
+      usermod -aG docker node 2>/dev/null || \
+      usermod -aG ${DOCKER_GID} node 2>/dev/null || true; \
+    fi
+
+# Switch to non-root user (Claude Code requires non-root)
+USER node
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+  CMD curl -f http://localhost:8080/health || exit 1
 
 EXPOSE 8080
 

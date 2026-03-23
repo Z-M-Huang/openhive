@@ -1,0 +1,8 @@
+.git
+.run
+.claude
+node_modules
+coverage
+.env*
+.vcp
+data/

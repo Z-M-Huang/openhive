@@ -1,8 +1,7 @@
 /**
  * POST /api/message — accepts { content }, routes through ChannelRouter.
  *
- * Gated behind OPENHIVE_ENABLE_API_MESSAGE=true (off by default).
- * Used for E2E testing against a running Docker container.
+ * Always enabled. Used for E2E testing and programmatic interaction.
  */
 
 import type { FastifyInstance } from 'fastify';
@@ -20,9 +19,6 @@ export function registerMessageEndpoint(
   fastify: FastifyInstance,
   deps: MessageEndpointDeps,
 ): void {
-  const enabled = process.env['OPENHIVE_ENABLE_API_MESSAGE'] === 'true';
-  if (!enabled) return;
-
   fastify.post<{ Body: MessageBody }>('/api/message', async (request, reply) => {
     const body = request.body as MessageBody | undefined;
     if (!body?.content || typeof body.content !== 'string') {
@@ -36,7 +32,6 @@ export function registerMessageEndpoint(
       return;
     }
 
-    // Route through channel router as an API message
     const response = await deps.channelRouter.routeMessage({
       channelId: 'api',
       userId: 'api-client',

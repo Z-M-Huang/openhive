@@ -25,6 +25,9 @@ const TEAM_SLUG_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 export const SpawnTeamInputSchema = z.object({
   name: z.string().min(1).regex(TEAM_SLUG_RE, 'team name must be a lowercase slug (a-z0-9 and hyphens)'),
   config_path: z.string().optional(),
+  description: z.string().optional(),
+  scope_accepts: z.array(z.string()).optional(),
+  scope_rejects: z.array(z.string()).optional(),
 });
 
 export type SpawnTeamInput = z.infer<typeof SpawnTeamInputSchema>;

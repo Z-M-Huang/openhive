@@ -2,8 +2,9 @@
  * Bootstrap helper functions — extracted from index.ts for size limit.
  */
 
-import { existsSync, mkdirSync, cpSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, cpSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { stringify as yamlStringify } from 'yaml';
 import { loadTriggers, loadChannels } from './config/loader.js';
 import { createDatabase, createTables } from './storage/database.js';
 import { OrgStore } from './storage/stores/org-store.js';
@@ -23,6 +24,8 @@ import type { TriggerConfig } from './domain/types.js';
 import type { ChannelsOutput } from './config/validation.js';
 import type { Readable, Writable } from 'node:stream';
 import type { DatabaseInstance } from './storage/database.js';
+import type { OrgTree } from './domain/org-tree.js';
+import { TeamStatus } from './domain/types.js';
 import type pino from 'pino';
 
 export interface ChannelDeps {
@@ -161,4 +164,32 @@ export function initChannels(
   }
 
   return adapters;
+}
+
+/** Scaffold the main team on first start. */
+export function ensureMainTeam(runDir: string, orgTree: OrgTree): void {
+  const mainDir = join(runDir, 'teams', 'main');
+  const configPath = join(mainDir, 'config.yaml');
+
+  const subdirs = ['workspace', 'memory', 'org-rules', 'team-rules', 'skills', 'subagents'];
+  for (const sub of subdirs) {
+    mkdirSync(join(mainDir, sub), { recursive: true });
+  }
+
+  if (!existsSync(configPath)) {
+    const config = {
+      name: 'main', description: 'Main orchestrator',
+      scope: { accepts: [], rejects: [] },
+      allowed_tools: ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash', 'mcp__org__*'],
+      mcp_servers: ['org'], provider_profile: 'default', maxTurns: 200,
+    };
+    writeFileSync(configPath, yamlStringify(config), 'utf-8');
+  }
+
+  if (!orgTree.getTeam('main')) {
+    orgTree.addTeam({
+      teamId: 'main', name: 'main', parentId: null,
+      status: TeamStatus.Active, agents: [], children: [],
+    });
+  }
 }

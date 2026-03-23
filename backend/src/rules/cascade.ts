@@ -23,6 +23,7 @@ interface CascadeSection {
 }
 
 export interface CascadeLogger {
+  info(msg: string, meta?: Record<string, unknown>): void;
   warn(msg: string, meta?: Record<string, unknown>): void;
 }
 
@@ -81,6 +82,11 @@ export function buildRuleCascade(opts: BuildRuleCascadeOpts): string {
         source: section.header,
       });
     }
+  }
+
+  // Log which rules were loaded (positive observability)
+  if (logger) {
+    logger.info('Rule cascade loaded', { team: teamName, sectionCount: parts.length, ruleCount: annotated.length });
   }
 
   // Validate for conflicts — warn but never throw

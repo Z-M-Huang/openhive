@@ -74,9 +74,10 @@ export function buildQueryOptions(opts: BuildQueryOptionsInput): QueryOptions {
     opts.logger,
   );
 
-  const cascadeLogger = opts.logger.warn
-    ? { warn: (msg: string, meta?: Record<string, unknown>) => opts.logger.warn!(msg, meta) }
-    : undefined;
+  const cascadeLogger = {
+    info: (msg: string, meta?: Record<string, unknown>) => opts.logger.info(msg, meta),
+    warn: (msg: string, meta?: Record<string, unknown>) => (opts.logger.warn ?? opts.logger.info)(msg, meta),
+  };
 
   const ruleCascade = buildRuleCascade({
     teamName: opts.teamName,
