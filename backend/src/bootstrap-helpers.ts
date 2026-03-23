@@ -180,7 +180,7 @@ export function ensureMainTeam(runDir: string, orgTree: OrgTree): void {
     const config = {
       name: 'main', description: 'Main orchestrator',
       scope: { accepts: [], rejects: [] },
-      allowed_tools: ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash', 'mcp__org__*'],
+      allowed_tools: ['*'],
       mcp_servers: ['org'], provider_profile: 'default', maxTurns: 200,
     };
     writeFileSync(configPath, yamlStringify(config), 'utf-8');

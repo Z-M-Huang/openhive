@@ -36,7 +36,12 @@ export function createCanUseTool(
     }
   }
 
+  // '*' alone means allow everything
+  const allowAll = exactSet.has('*') || prefixes.some(p => p === '');
+
   return (toolName: string): CanUseToolResult => {
+    if (allowAll) return { allowed: true };
+
     if (exactSet.has(toolName)) {
       return { allowed: true };
     }

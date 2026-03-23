@@ -1,7 +1,6 @@
 # OpenHive main team configuration example
 # This file is auto-generated at .run/teams/main/config.yaml on first start.
-# To customize, edit .run/teams/main/config.yaml after first boot,
-# or provide this file before starting to override defaults.
+# To customize, edit .run/teams/main/config.yaml after first boot.
 
 name: main
 description: Main orchestrator — receives user messages, delegates to child teams
@@ -11,19 +10,13 @@ scope:
   accepts: []
   rejects: []
 
-# Tools the main agent can use
+# Tools: '*' means allow all tools (full permission inside container)
 allowed_tools:
-  - Read
-  - Write
-  - Edit
-  - Glob
-  - Grep
-  - Bash
-  - "mcp__org__*"    # All Org MCP tools (spawn_team, delegate_task, etc.)
+  - "*"
 
-# MCP servers available to this team
+# MCP servers: org is always needed for team management tools
 mcp_servers:
-  - org              # Organization MCP Server (always available)
+  - org
 
 # Provider profile from providers.yaml
 provider_profile: default

@@ -73,7 +73,7 @@ function loadOrGenerateConfig(
   return {
     name, parent: null, description: hints?.description ?? '',
     scope: { accepts: hints?.scopeAccepts ?? [] as string[], rejects: hints?.scopeRejects ?? [] as string[] },
-    allowed_tools: ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'mcp__org__*'],
+    allowed_tools: ['*'],
     mcp_servers: ['org'], provider_profile: 'default', maxTurns: 100,
   };
 }
