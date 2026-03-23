@@ -73,26 +73,25 @@ function makeTrigger(overrides: Partial<TriggerConfig> & { type: TriggerConfig['
 // ── UT-17: Schedule Handler ─────────────────────────────────────────────
 
 describe('UT-17: Schedule Handler', () => {
-  it('fires callback when started', () => {
+  it('start and stop lifecycle works', () => {
     const cb = vi.fn();
-    const handler = new ScheduleHandler('* * * * * *', cb);
+    // Use far-future cron so it never fires during the test
+    const handler = new ScheduleHandler('0 0 1 1 *', cb);
 
-    // Fire the callback directly (avoid waiting for real cron tick)
     handler.start();
-    // Invoke callback manually to test wiring
-    cb();
-    expect(cb).toHaveBeenCalledTimes(1);
+    // Verify the handler accepted the cron without error
+    expect(cb).not.toHaveBeenCalled();
     handler.stop();
   });
 
-  it('stop prevents further firing', () => {
+  it('stop prevents further firing and double-stop is safe', () => {
     const cb = vi.fn();
-    const handler = new ScheduleHandler('* * * * * *', cb);
+    const handler = new ScheduleHandler('0 0 1 1 *', cb);
     handler.start();
     handler.stop();
-    // After stop, the internal task should be null
     // Double stop is safe
     handler.stop();
+    expect(cb).not.toHaveBeenCalled();
   });
 
   it('start creates a cron task that invokes callback', async () => {
