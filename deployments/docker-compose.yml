@@ -5,14 +5,9 @@ services:
     build:
       context: ..
       dockerfile: deployments/Dockerfile
-    environment:
-      - OPENHIVE_LOG_LEVEL=info
     volumes:
-      - ../data/config:/data/config:ro    # Admin config (read-only)
-      - ../data/rules:/data/rules         # Org rules (writable, seeded)
-      - openhive-run:/app/.run            # Runtime workspace (persistent)
+      - ${HOST_PATH}\data\config:/data/config:ro    # Admin config (read-only)
+      - ${HOST_PATH}\data\rules:/data/rules         # Org rules (writable, seeded)
+      - ${HOST_PATH}\.run:/app/.run            # Runtime workspace (persistent)
     ports:
       - "8080:8080"
-
-volumes:
-  openhive-run:

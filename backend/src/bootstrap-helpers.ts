@@ -132,15 +132,12 @@ export function initChannels(
   if (!channelDeps) return [];
   const adapters: IChannelAdapter[] = [];
 
-  // Try to load channels config
+  // Load channels config
   let channelsConfig: ChannelsOutput | null = null;
   const channelsPath = join(channelDeps.dataDir, 'config', 'channels.yaml');
   if (existsSync(channelsPath)) {
-    try {
-      channelsConfig = loadChannels(channelsPath);
-    } catch (err) {
-      logger.warn({ err }, 'Failed to load channels.yaml');
-    }
+    try { channelsConfig = loadChannels(channelsPath); }
+    catch (err) { logger.warn({ err }, 'Failed to load channels.yaml'); }
   }
 
   // CLI adapter

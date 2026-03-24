@@ -6,6 +6,7 @@ dist
 coverage/
 .vcp
 
-# Credential-bearing config files (only examples are committed)
+# Config files (only examples are committed)
 data/config/providers.yaml
 data/config/channels.yaml
+data/config/config.yaml

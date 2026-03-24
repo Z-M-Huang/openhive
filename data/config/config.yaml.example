@@ -1,25 +1,5 @@
-# OpenHive main team configuration example
-# This file is auto-generated at .run/teams/main/config.yaml on first start.
-# To customize, edit .run/teams/main/config.yaml after first boot.
+# OpenHive system configuration
+# Copy to config.yaml to customize.
 
-name: main
-description: Main orchestrator — receives user messages, delegates to child teams
-
-# Scope — main accepts everything (empty = no filtering)
-scope:
-  accepts: []
-  rejects: []
-
-# Tools: '*' means allow all tools (full permission inside container)
-allowed_tools:
-  - "*"
-
-# MCP servers: org is always needed for team management tools
-mcp_servers:
-  - org
-
-# Provider profile from providers.yaml
-provider_profile: default
-
-# Maximum turns per SDK session
-maxTurns: 200
+# Log level: trace, debug, info, warn, error
+log_level: info

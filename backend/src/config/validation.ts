@@ -82,6 +82,15 @@ export const ChannelsSchema = z.object({
 export type ChannelsInput = z.input<typeof ChannelsSchema>;
 export type ChannelsOutput = z.output<typeof ChannelsSchema>;
 
+// ── System Config ───────────────────────────────────────────────────────────
+
+export const SystemConfigSchema = z.object({
+  log_level: z.enum(['trace', 'debug', 'info', 'warn', 'error']).default('info'),
+});
+
+export type SystemConfigInput = z.input<typeof SystemConfigSchema>;
+export type SystemConfigOutput = z.output<typeof SystemConfigSchema>;
+
 // ── Logging ─────────────────────────────────────────────────────────────────
 
 export const LoggingSchema = z.object({

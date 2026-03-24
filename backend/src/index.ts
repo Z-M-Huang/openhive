@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 import Fastify from 'fastify';
 import { createLogger } from './logging/logger.js';
-import { loadProviders, loadTeamConfig } from './config/loader.js';
+import { loadProviders, loadTeamConfig, loadSystemConfig } from './config/loader.js';
 import { OrgTree } from './domain/org-tree.js';
 import { createOrgMcpServer } from './org-mcp/server.js';
 import type { OrgMcpServer } from './org-mcp/server.js';
@@ -84,8 +84,13 @@ function safeLoadConfig(runDir: string, teamId: string) {
   try { return loadTeamConfig(path); } catch { return undefined; }
 }
 
+function resolveLogLevel(dataDir: string): string {
+  const path = join(dataDir, 'config', 'config.yaml');
+  if (!existsSync(path)) return 'info';
+  try { return loadSystemConfig(path).log_level; } catch { return 'info'; }
+}
+
 export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> {
-  // Hardcoded paths (deps overrides for tests only)
   const dataDir = deps?.dataDir ?? '/data';
   const runDir = deps?.runDir ?? '/app/.run';
   const systemRulesDir = deps?.systemRulesDir ?? '/app/system-rules';
@@ -97,7 +102,7 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   const stores = initStorage(dataDir, runDir);
   const { raw, orgStore, taskQueueStore, escalationStore } = stores;
 
-  const logLevel = process.env['OPENHIVE_LOG_LEVEL'] ?? 'info';
+  const logLevel = resolveLogLevel(dataDir);
   const logger = createLogger({ level: logLevel, logStore: stores.logStore });
 
   const providersPath = join(dataDir, 'config', 'providers.yaml');
