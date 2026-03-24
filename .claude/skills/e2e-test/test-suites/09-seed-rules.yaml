@@ -4,8 +4,8 @@ needs_api_key: false
 needs_clean_start: true
 
 setup:
-  - command: "sudo docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
-    description: "Clean start"
+  - command: "sudo docker compose -f deployments/docker-compose.yml down -v 2>&1 || true && sudo rm -rf /app/openhive/.run && mkdir -p /app/openhive/.run"
+    description: "Clean start — wipe .run/ to remove stale state"
   - command: "rm -f data/rules/*.md 2>/dev/null || true"
     description: "Clear host bind-mount rules"
   - command: "sudo docker compose -f deployments/docker-compose.yml up -d 2>&1"

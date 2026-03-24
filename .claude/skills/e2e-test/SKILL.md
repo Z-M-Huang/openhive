@@ -41,15 +41,17 @@ sudo docker info >/dev/null 2>&1 && echo "DOCKER_OK" || echo "DOCKER_UNAVAILABLE
 
 If `DOCKER_OK`:
 
-**5a. Prune and build the image:**
+**5a. Clean runtime state, prune, and build the image:**
 ```bash
-cd /app/openhive && sudo docker system prune -af 2>&1 | tail -3
+cd /app/openhive && sudo docker compose -f deployments/docker-compose.yml down -v 2>&1 || true
+sudo rm -rf .run && mkdir -p .run
+sudo docker system prune -af 2>&1 | tail -3
 sudo docker build -t openhive:latest -f deployments/Dockerfile . 2>&1 | tail -5
 ```
+The `.run/` cleanup ensures no stale teams, org tree entries, or memory files carry over from previous runs.
 
 **5b. Start clean:**
 ```bash
-sudo docker compose -f deployments/docker-compose.yml down -v 2>&1 || true
 sudo docker compose -f deployments/docker-compose.yml up -d 2>&1
 ```
 
