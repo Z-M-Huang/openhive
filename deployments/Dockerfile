@@ -14,14 +14,13 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # Install bun
-RUN curl -fsSL https://bun.sh/install | bash && \
-    ln -s /root/.bun/bin/bun /usr/local/bin/bun
+RUN npm install -g bun@1.3.10
 
 # Copy package files first (layer cache)
 COPY package.json bun.lock* ./
 COPY backend/package.json backend/
 
-# Install all dependencies (including devDependencies for compilation)
+# Install all dependencies
 RUN bun install
 
 # Install Playwright Chromium to a shared path
@@ -34,7 +33,7 @@ COPY backend/tsconfig.json backend/
 COPY common/ /build/common/
 
 # Compile TypeScript
-RUN cd backend && npx tsc
+RUN cd backend && ./node_modules/.bin/tsc
 
 # ── Production ──────────────────────────────────────────────────────────────
 FROM node:22-bookworm-slim
