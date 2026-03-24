@@ -2,5 +2,8 @@
   "name": "openhive",
   "version": "3.0.0",
   "private": true,
-  "workspaces": ["backend"]
+  "workspaces": ["backend"],
+  "dependencies": {
+    "@fastify/websocket": "^11.2.0"
+  }
 }

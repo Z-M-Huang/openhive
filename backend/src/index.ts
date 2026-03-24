@@ -18,6 +18,7 @@ import type { OrgMcpServer } from './org-mcp/server.js';
 import { SessionManager } from './sessions/manager.js';
 import { ChannelRouter } from './channels/router.js';
 import { registerHealthEndpoint } from './health.js';
+import { registerWsRoute } from './channels/ws-adapter.js';
 import { handleMessage } from './sessions/message-handler.js';
 import { TaskConsumer } from './sessions/task-consumer.js';
 import { recoverFromCrash } from './recovery/startup-recovery.js';
@@ -160,26 +161,26 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   });
 
   const fastify = Fastify({ logger: false });
+  await fastify.register(import('@fastify/websocket'));
   registerHealthEndpoint(fastify, { raw, sessionManager, triggerEngine, channelRouter });
+  const wsHandler = async (msg: ChannelMessage) => {
+    triggerEngine.onMessage(msg.content, msg.channelId);
+    return handlerDeps ? handleMessage(msg, handlerDeps) : 'No providers configured.';
+  };
+  registerWsRoute(fastify, wsHandler);
 
   const taskConsumer = handlerDeps ? new TaskConsumer({ taskQueueStore, orgTree, handlerDeps }) : null;
-  taskConsumer?.start();
-  triggerEngine.start();
-  await channelRouter.start();
+  taskConsumer?.start(); triggerEngine.start(); await channelRouter.start();
 
   if (!deps?.skipListen) {
-    const port = deps?.listenPort ?? Number(process.env['OPENHIVE_LISTEN_PORT'] ?? '8080');
-    await fastify.listen({ host: deps?.listenAddress ?? '0.0.0.0', port });
+    await fastify.listen({ host: deps?.listenAddress ?? '0.0.0.0', port: deps?.listenPort ?? 8080 });
   }
-
   logger.info({ dataDir, runDir, systemRulesDir }, 'OpenHive v3 started');
 
   const shutdown = async (): Promise<void> => {
-    logger.info('Shutting down...');
     taskConsumer?.stop(); triggerEngine.stop();
     await channelRouter.stop(); sessionManager.stopAll();
-    await fastify.close(); raw.close();
-    logger.info('Shutdown complete'); currentResult = null;
+    await fastify.close(); raw.close(); currentResult = null;
   };
 
   const result: BootstrapResult = {
