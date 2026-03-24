@@ -22,14 +22,14 @@ test_cases:
   - name: Seed rules present after first boot
     steps:
       - action: "Check for seed .md files in /data/rules/"
-        command: "sudo docker exec openhive-openhive-1 ls /data/rules/"
+        command: "sudo docker exec deployments-openhive-1 ls /data/rules/"
         expected: ".md"
     expected_outcome: "Seed .md files (escalation-policy.md, tool-safety.md) present in /data/rules/"
 
   - name: Seed rules are idempotent (not overwritten on restart)
     steps:
       - action: "Add a custom rule file"
-        command: "sudo docker exec openhive-openhive-1 sh -c 'echo custom > /data/rules/custom.md'"
+        command: "sudo docker exec deployments-openhive-1 sh -c 'echo custom > /data/rules/custom.md'"
         expected: ""
       - action: "Restart container"
         command: "sudo docker compose -f deployments/docker-compose.yml restart openhive 2>&1"
@@ -38,9 +38,9 @@ test_cases:
         command: "for i in $(seq 1 30); do curl -sf http://localhost:8080/health >/dev/null 2>&1 && echo 'Ready' && break; sleep 3; done"
         expected: "Ready"
       - action: "Verify custom rule preserved"
-        command: "sudo docker exec openhive-openhive-1 cat /data/rules/custom.md"
+        command: "sudo docker exec deployments-openhive-1 cat /data/rules/custom.md"
         expected: "custom"
       - action: "Verify seed rules not duplicated"
-        command: "sudo docker exec openhive-openhive-1 ls /data/rules/"
+        command: "sudo docker exec deployments-openhive-1 ls /data/rules/"
         expected: ".md"
     expected_outcome: "Custom rule preserved, seed rules not re-copied since .md files already exist"

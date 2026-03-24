@@ -6,7 +6,7 @@ user-invocable: true
 
 # OpenHive E2E Test Runner
 
-Run the FULL test suite. **Never skip any test.**
+Run the FULL test suite. **Never skip any test. Never stop to ask the user if you should proceed — run everything end-to-end autonomously.** If a suite fails, log it and continue to the next suite. Report all results at the end.
 
 ## Execution Steps
 
@@ -41,9 +41,10 @@ sudo docker info >/dev/null 2>&1 && echo "DOCKER_OK" || echo "DOCKER_UNAVAILABLE
 
 If `DOCKER_OK`:
 
-**5a. Build the image:**
+**5a. Prune and build the image:**
 ```bash
-cd /app/openhive && sudo docker build -t openhive:latest -f deployments/Dockerfile . 2>&1 | tail -5
+cd /app/openhive && sudo docker system prune -af 2>&1 | tail -3
+sudo docker build -t openhive:latest -f deployments/Dockerfile . 2>&1 | tail -5
 ```
 
 **5b. Start clean:**
@@ -90,10 +91,21 @@ Docker Build:     PASS/FAIL
 Docker Runtime:   PASS/FAIL
 
 Live E2E Suites:
-  01 Health & Structure:    PASS/FAIL
-  02 WebSocket:             PASS/FAIL
-  ...
+  01 Health & Structure:      PASS/FAIL
+  02 WebSocket:               PASS/FAIL
+  03 Team Spawn:              PASS/FAIL
+  04 Scope Admission:         PASS/FAIL
+  05 Trigger Fire:            PASS/FAIL
+  06 Rule Cascade:            PASS/FAIL
+  07 Escalation:              PASS/FAIL
+  08 Recovery:                PASS/FAIL
+  09 Seed Rules:              PASS/FAIL
+  10 Weather Team UAT:        PASS/FAIL
+  11 Scheduled Tasks:         PASS/FAIL
+  12 Multi-Team Routing:      PASS/FAIL
+  13 Task Lifecycle:          PASS/FAIL
+  14 Concurrent Resilience:   PASS/FAIL
 
-Total: N/N suites passed
+Total: N/14 suites passed
 Failures: [details]
 ```

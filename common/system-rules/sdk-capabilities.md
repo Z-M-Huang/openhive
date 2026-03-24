@@ -13,7 +13,7 @@ Your session has access to these tools (subject to `allowed_tools` config):
 
 ## MCP Servers
 
-- **org-mcp** — Always available. Provides the 6 organization tools.
+- **org-mcp** — Always available. Provides the 7 organization tools (spawn_team, delegate_task, query_team, escalate, send_message, get_status, shutdown_team).
 - Additional MCP servers as configured in team config.
 
 ## Skills and Subagents

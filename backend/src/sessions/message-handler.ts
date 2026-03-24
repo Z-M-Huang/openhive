@@ -111,6 +111,7 @@ export async function handleMessage(
       systemPrompt: opts.systemPrompt,
       tools: opts.tools,
       env: opts.env,
+      mcpServers: opts.mcpServers,
     };
     const qFn = queryFn ?? await createSdkQueryFn();
     const result = await spawnSession(msg.content, sdkOpts, qFn);

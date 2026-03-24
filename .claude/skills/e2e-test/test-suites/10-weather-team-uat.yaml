@@ -1,0 +1,49 @@
+name: Weather Team UAT
+description: Create weather team, query it via query_team, verify response flows back through WS.
+needs_api_key: true
+needs_clean_start: false
+
+setup:
+  - command: "echo '{\"content\":\"Shut down the weather-ops team.\"}' | timeout 120 websocat ws://localhost:8080/ws 2>&1 || true"
+    description: "Clean up any leftover weather-ops from earlier suites"
+
+teardown:
+  - command: "echo '{\"content\":\"Shut down the weather-ops team.\"}' | timeout 120 websocat ws://localhost:8080/ws 2>&1 || true"
+    description: "Shut down weather-ops"
+
+test_cases:
+  - name: Create weather team
+    steps:
+      - action: "Create weather-ops team via WS"
+        command: "echo '{\"content\":\"Create a team called weather-ops for weather and forecasting. It should accept weather, forecast, and temperature topics.\"}' | timeout 300 websocat ws://localhost:8080/ws 2>&1"
+        expected: "weather-ops"
+      - action: "Verify config on disk"
+        command: "sudo docker exec deployments-openhive-1 cat /app/.run/teams/weather-ops/config.yaml 2>&1"
+        expected: "name"
+      - action: "Verify team directories created"
+        command: "sudo docker exec deployments-openhive-1 ls /app/.run/teams/weather-ops/ 2>&1"
+        expected: "workspace"
+      - action: "Verify team in org tree"
+        command: "sudo docker exec deployments-openhive-1 node -e \"const D=require('better-sqlite3');const d=new D('/app/.run/openhive.db');const r=d.prepare('SELECT name FROM org_tree WHERE name=?').get('weather-ops');console.log(r?'FOUND':'NOT_FOUND');d.close()\" 2>&1"
+        expected: "FOUND"
+    expected_outcome: "weather-ops team created with config, directories, and org tree entry"
+
+  - name: Query weather for Boca Raton via query_team
+    steps:
+      - action: "Ask weather-ops about Boca Raton weather using query_team"
+        command: "echo '{\"content\":\"Ask the weather-ops team: What is the current temperature and weather conditions in Boca Raton, Florida? You MUST use your query_team tool to get the answer from weather-ops and relay it to me. Do NOT answer from your own knowledge.\"}' | timeout 300 websocat ws://localhost:8080/ws 2>&1"
+        expected: "Boca Raton|temperature|degrees|weather|warm|sunny|rain|humid|forecast"
+      - action: "Verify query_team was actually invoked in container logs"
+        command: "sudo docker logs deployments-openhive-1 2>&1 | grep -c 'query_team\\|query:main:weather-ops'"
+        expected: "[1-9]"
+    expected_outcome: "Weather response flows back through WS via query_team, with log evidence of tool invocation"
+
+  - name: System health after processing
+    steps:
+      - action: "Health check"
+        command: "curl -sf http://localhost:8080/health 2>&1"
+        expected: "ok"
+      - action: "weather-ops still in org tree"
+        command: "sudo docker exec deployments-openhive-1 node -e \"const D=require('better-sqlite3');const d=new D('/app/.run/openhive.db');const r=d.prepare('SELECT name FROM org_tree WHERE name=?').get('weather-ops');console.log(r?'FOUND':'NOT_FOUND');d.close()\" 2>&1"
+        expected: "FOUND"
+    expected_outcome: "System healthy and weather-ops still registered"

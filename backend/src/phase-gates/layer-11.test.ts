@@ -207,7 +207,7 @@ describe('E2E-5: Org MCP 6 tools with real stores', () => {
       runDir: dir,
       log: () => {},
     };
-    const server = createOrgMcpServer(deps);
+    const server = await createOrgMcpServer(deps);
 
     // Root must exist for parent validation
     tree.addTeam(makeNode({ teamId: 'root', name: 'root' }));
@@ -380,7 +380,7 @@ describe('E2E-10: Full integration chain', () => {
       runDir: dir,
       log: () => {},
     };
-    const server = createOrgMcpServer(mcpDeps);
+    const server = await createOrgMcpServer(mcpDeps);
 
     // Step 1: Message arrives
     const adapter = createMockAdapter();

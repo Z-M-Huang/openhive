@@ -107,7 +107,7 @@ describe('E2E-11: Tool defense bypass -- 3 layers', () => {
       getTeamConfig: (id) => configs.get(id),
       log: () => {},
     };
-    const server = createOrgMcpServer(deps);
+    const server = await createOrgMcpServer(deps);
 
     // Sibling cannot delegate to another sibling's child
     const res = await server.invoke(

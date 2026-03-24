@@ -65,9 +65,11 @@ export function buildQueryOptions(opts: BuildQueryOptionsInput): QueryOptions {
 
   const ctx = buildSessionContext(opts.teamName, opts.runDir);
 
+  // Extract SDK server from OrgMcpServer wrapper (sdkServer is McpSdkServerConfigWithInstance)
+  const orgSdkServer = (opts.orgMcpServer as { sdkServer?: unknown })?.sdkServer;
   const mcpServers = buildMcpServers(
     opts.teamConfig.mcp_servers,
-    { ...opts.availableMcpServers, org: opts.orgMcpServer },
+    { ...opts.availableMcpServers, ...(orgSdkServer ? { org: orgSdkServer } : {}) },
   );
 
   const canUseTool = createCanUseTool(

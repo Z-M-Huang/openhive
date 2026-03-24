@@ -75,7 +75,7 @@ function loadOrGenerateConfig(
     name, parent: null, description: hints?.description ?? '',
     scope: { accepts: hints?.scopeAccepts ?? [] as string[], rejects: hints?.scopeRejects ?? [] as string[] },
     allowed_tools: ['*'],
-    mcp_servers: ['org'], provider_profile: 'default', maxTurns: 100,
+    mcp_servers: [], provider_profile: 'default', maxTurns: 100,
   };
 }
 
@@ -89,6 +89,25 @@ function resolveLogLevel(dataDir: string): string {
   const path = join(dataDir, 'config', 'config.yaml');
   if (!existsSync(path)) return 'info';
   try { return loadSystemConfig(path).log_level; } catch { return 'info'; }
+}
+
+async function createOrgMcp(
+  opts: { orgTree: OrgTree; taskQueueStore: import('./domain/interfaces.js').ITaskQueueStore; escalationStore: import('./domain/interfaces.js').IEscalationStore; runDir: string; sessionManager: SessionManager; logger: pino.Logger },
+  getHandlerDeps: () => Parameters<typeof handleMessage>[1] | null,
+) {
+  return createOrgMcpServer({
+    orgTree: opts.orgTree, taskQueue: opts.taskQueueStore, escalationStore: opts.escalationStore, runDir: opts.runDir,
+    spawner: { spawn: (id: string) => { opts.sessionManager.spawn(id); return Promise.resolve(id); } },
+    sessionManager: {
+      getSession: (id: string) => Promise.resolve(opts.sessionManager.isActive(id) ? { id } : null),
+      terminateSession: (id: string) => { opts.sessionManager.stop(id); return Promise.resolve(); },
+    },
+    loadConfig: (name: string, cp?: string, hints?: { description?: string; scopeAccepts?: string[]; scopeRejects?: string[] }) =>
+      loadOrGenerateConfig(opts.runDir, name, cp, hints),
+    getTeamConfig: (id: string) => safeLoadConfig(opts.runDir, id),
+    log: (msg, meta) => opts.logger.info(meta ?? {}, msg),
+    getHandlerDeps,
+  });
 }
 
 export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> {
@@ -129,18 +148,13 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
 
   const sessionManager = new SessionManager();
 
-  const orgMcpServer = createOrgMcpServer({
-    orgTree, taskQueue: taskQueueStore, escalationStore, runDir,
-    spawner: { spawn: (id: string) => { sessionManager.spawn(id); return Promise.resolve(id); } },
-    sessionManager: {
-      getSession: (id: string) => Promise.resolve(sessionManager.isActive(id) ? { id } : null),
-      terminateSession: (id: string) => { sessionManager.stop(id); return Promise.resolve(); },
-    },
-    loadConfig: (name: string, cp?: string, hints?: { description?: string; scopeAccepts?: string[]; scopeRejects?: string[] }) =>
-      loadOrGenerateConfig(runDir, name, cp, hints),
-    getTeamConfig: (id: string) => safeLoadConfig(runDir, id),
-    log: (msg, meta) => logger.info(meta ?? {}, msg),
-  });
+  // Lazy ref for query_team's handleMessage dep — breaks circular dependency
+  let handlerDepsRef: Parameters<typeof handleMessage>[1] | null = null;
+
+  const orgMcpServer = await createOrgMcp(
+    { orgTree, taskQueueStore, escalationStore, runDir, sessionManager, logger },
+    () => handlerDepsRef,
+  );
 
   const triggerConfigs = loadTriggerConfigs(runDir, logger);
   const triggerEngine = initTriggerEngine(stores.triggerStore, taskQueueStore, logger, triggerConfigs);
@@ -153,6 +167,9 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   const handlerDeps = providersConfig
     ? { providers: providersConfig, orgMcpServer, availableMcpServers: {}, runDir, dataDir, systemRulesDir, orgAncestors: [] as string[], logger }
     : null;
+
+  // Wire lazy ref for query_team (must be after handlerDeps is created)
+  handlerDepsRef = handlerDeps;
 
   const channelRouter = new ChannelRouter(adapters, async (msg: ChannelMessage) => {
     logger.info({ channelId: msg.channelId, userId: msg.userId }, 'Received message');

@@ -18,6 +18,6 @@ test_cases:
         command: "echo '{\"content\":\"Delegate a task to ops-team asking it to escalate a test issue back to you.\"}' | timeout 300 websocat ws://localhost:8080/ws 2>&1"
         expected: "content"
       - action: "Check escalation records in SQLite (wait for processing)"
-        command: "sleep 10 && sudo docker exec openhive-openhive-1 node -e \"const D=require('better-sqlite3')('/app/.run/openhive.db',{readonly:true}); const r=D.prepare('SELECT COUNT(*) as c FROM escalation_correlations').get(); console.log('escalations:',r.c); D.close()\""
+        command: "sleep 10 && sudo docker exec deployments-openhive-1 node -e \"const D=require('better-sqlite3')('/app/.run/openhive.db',{readonly:true}); const r=D.prepare('SELECT COUNT(*) as c FROM escalation_correlations').get(); console.log('escalations:',r.c); D.close()\""
         expected: "escalations:"
     expected_outcome: "Escalation correlation record exists in database"
