@@ -104,9 +104,13 @@ export class DiscordAdapter implements IChannelAdapter {
     if (this.#watchedChannelIds && !this.#watchedChannelIds.has(message.channelId)) return;
     if (!this.#handler) return;
 
-    // Show typing indicator
+    // Show typing indicator and keep it alive every 8s while processing
+    let typingInterval: ReturnType<typeof setInterval> | null = null;
     if (message.channel.sendTyping) {
       await message.channel.sendTyping();
+      typingInterval = setInterval(() => {
+        message.channel.sendTyping?.().catch(() => {});
+      }, 8000);
     }
 
     const msg: ChannelMessage = {
@@ -116,7 +120,11 @@ export class DiscordAdapter implements IChannelAdapter {
       timestamp: message.createdTimestamp,
     };
 
-    await this.#handler(msg);
+    try {
+      await this.#handler(msg);
+    } finally {
+      if (typingInterval) clearInterval(typingInterval);
+    }
   }
 
   #isTextChannel(channel: unknown): channel is DiscordTextChannel {
