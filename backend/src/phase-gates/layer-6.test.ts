@@ -564,3 +564,97 @@ describe('E2E-6/E2E-11: Full session flow simulation', () => {
     expect(() => buildQueryOptions(input)).toThrow(ConfigError);
   });
 });
+
+// ── Skill and Subagent Loader ────────────────────────────────────────────
+
+import { tmpdir } from 'node:os';
+import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { loadSkillsContent, loadSubagents } from '../sessions/skill-loader.js';
+import { buildMemorySection } from '../sessions/memory-loader.js';
+import { MemoryStore } from '../storage/stores/memory-store.js';
+
+describe('Skill and Subagent Loader', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'openhive-l6-skills-'));
+    mkdirSync(join(dir, 'teams', 'test-team', 'skills'), { recursive: true });
+    mkdirSync(join(dir, 'teams', 'test-team', 'subagents'), { recursive: true });
+  });
+
+  it('returns empty string when skills/ is empty', () => {
+    expect(loadSkillsContent(dir, 'test-team')).toBe('');
+  });
+
+  it('returns concatenated content with header when skills/ has .md files', () => {
+    writeFileSync(join(dir, 'teams', 'test-team', 'skills', 'deploy.md'), '# Deploy\nStep 1');
+    writeFileSync(join(dir, 'teams', 'test-team', 'skills', 'review.md'), '# Review\nStep A');
+    const result = loadSkillsContent(dir, 'test-team');
+    expect(result).toContain('--- Skills ---');
+    expect(result).toContain('# Deploy');
+    expect(result).toContain('# Review');
+  });
+
+  it('returns empty array when subagents/ is empty', () => {
+    expect(loadSubagents(dir, 'test-team')).toHaveLength(0);
+  });
+
+  it('parses subagent .md format', () => {
+    const content = '# Agent: Devops\n## Role\nHandles deployments\n## Skills\n- deploy — run deploys\n- rollback — undo deploys\n';
+    writeFileSync(join(dir, 'teams', 'test-team', 'subagents', 'devops.md'), content);
+    const agents = loadSubagents(dir, 'test-team');
+    expect(agents).toHaveLength(1);
+    expect(agents[0].name).toBe('Devops');
+    expect(agents[0].description).toBe('Handles deployments');
+    expect(agents[0].skills).toEqual(['deploy', 'rollback']);
+  });
+});
+
+// ── Memory Loader ────────────────────────────────────────────────────────
+
+describe('Memory Loader', () => {
+  let dir: string;
+  let store: MemoryStore;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'openhive-l6-mem-'));
+    // MemoryStore baseDir = .run/teams/, so files go to {baseDir}/{team}/memory/{file}
+    store = new MemoryStore(dir);
+    // Create the memory directory for the test team
+    mkdirSync(join(dir, 'test-team', 'memory'), { recursive: true });
+  });
+
+  it('returns empty string when no MEMORY.md exists', () => {
+    expect(buildMemorySection(store, 'test-team')).toBe('');
+  });
+
+  it('injects MEMORY.md content with header', () => {
+    store.writeFile('test-team', 'MEMORY.md', '# Memory Index\nTeam context here');
+    const result = buildMemorySection(store, 'test-team');
+    expect(result).toContain('--- Team Memory ---');
+    expect(result).toContain('# Memory Index');
+  });
+
+  it('does NOT inject other memory files (no fallbacks)', () => {
+    store.writeFile('test-team', 'context.md', 'This should NOT appear');
+    store.writeFile('test-team', 'decisions.md', 'This too');
+    const result = buildMemorySection(store, 'test-team');
+    expect(result).toBe(''); // Only MEMORY.md is injected
+  });
+
+  it('handles corrupt/unreadable MEMORY.md gracefully', () => {
+    const badStore = {
+      readFile: () => { throw new Error('permission denied'); },
+      writeFile: store.writeFile.bind(store),
+      listFiles: store.listFiles.bind(store),
+    };
+    const result = buildMemorySection(badStore, 'test-team');
+    expect(result).toBe('');
+  });
+
+  it('skips empty/whitespace MEMORY.md', () => {
+    store.writeFile('test-team', 'MEMORY.md', '   ');
+    const result = buildMemorySection(store, 'test-team');
+    expect(result).toBe('');
+  });
+});

@@ -769,12 +769,6 @@ describe('query_team handler logic', () => {
     const configs = new Map<string, TeamConfig>();
     configs.set('child', makeTeamConfig({ name: 'child', scope: { accepts: ['test'], rejects: [] } }));
 
-    // The error detection is in the response check after handleMessage returns.
-    // We can't easily mock handleMessage without vitest module mocking,
-    // but we verify the detection logic exists by checking the source behavior:
-    // If handleMessage returns "Error processing message: X", query_team should return success: false.
-    // This is validated by the implementation at query-team.ts line 106-108.
-    // For now, verify the function handles missing handleMessage gracefully.
     const result = await queryTeam(
       { team: 'child', query: 'test query' },
       'root',
@@ -795,7 +789,158 @@ describe('query_team handler logic', () => {
       },
     );
 
-    // handleMessage will return an error (no config found) — query_team should propagate it
     expect(result.success).toBe(false);
+  });
+});
+
+// ── spawn_team filesystem + init + credentials ───────────────────────────
+
+import { tmpdir } from 'node:os';
+import { mkdtempSync, existsSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { parse as yamlParse } from 'yaml';
+import { spawnTeam } from '../org-mcp/tools/spawn-team.js';
+
+describe('spawn_team filesystem and init', () => {
+  let dir: string;
+  let tree: OrgTree;
+  let mockSpawner: { spawn: ReturnType<typeof vi.fn>; stop: ReturnType<typeof vi.fn> };
+  let mockTaskQueue: ReturnType<typeof createMockTaskQueue>;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'openhive-l5-fs-'));
+    mkdirSync(join(dir, 'teams'), { recursive: true });
+    const store = createMemoryOrgStore();
+    tree = new OrgTree(store);
+    tree.addTeam(makeNode({ teamId: 'root', name: 'root' }));
+    mockSpawner = { spawn: vi.fn().mockResolvedValue('sid'), stop: vi.fn() };
+    mockTaskQueue = createMockTaskQueue();
+  });
+
+  function makeDeps(overrides?: Partial<Parameters<typeof spawnTeam>[2]>) {
+    return {
+      orgTree: tree,
+      spawner: mockSpawner,
+      runDir: dir,
+      loadConfig: (_name: string, _cp?: string, hints?: { description?: string; scopeAccepts?: string[]; scopeRejects?: string[] }) => ({
+        name: _name, parent: null, description: hints?.description ?? '',
+        scope: { accepts: hints?.scopeAccepts ?? [], rejects: hints?.scopeRejects ?? [] },
+        allowed_tools: ['*'], mcp_servers: [] as string[], provider_profile: 'default', maxTurns: 100,
+      }),
+      taskQueue: mockTaskQueue,
+      ...overrides,
+    };
+  }
+
+  it('scaffolds all 6 subdirectories', async () => {
+    await spawnTeam({ name: 'ops' }, 'root', makeDeps());
+    for (const sub of ['workspace', 'memory', 'org-rules', 'team-rules', 'skills', 'subagents']) {
+      expect(existsSync(join(dir, 'teams', 'ops', sub))).toBe(true);
+    }
+  });
+
+  it('writes config.yaml with correct content', async () => {
+    await spawnTeam({ name: 'ops', description: 'My ops team', scope_accepts: ['logs'] }, 'root', makeDeps());
+    const raw = readFileSync(join(dir, 'teams', 'ops', 'config.yaml'), 'utf-8');
+    const cfg = yamlParse(raw) as Record<string, unknown>;
+    expect(cfg['name']).toBe('ops');
+    expect(cfg['description']).toBe('My ops team');
+  });
+
+  it('enforces org in mcp_servers even when config omits it', async () => {
+    await spawnTeam({ name: 'ops' }, 'root', makeDeps());
+    const raw = readFileSync(join(dir, 'teams', 'ops', 'config.yaml'), 'utf-8');
+    const cfg = yamlParse(raw) as { mcp_servers: string[] };
+    expect(cfg.mcp_servers).toContain('org');
+  });
+
+  it('enforces org when config_path provides config without org', async () => {
+    const cfgPath = join(dir, 'no-org.yaml');
+    writeFileSync(cfgPath, 'name: custom\nmcp_servers: [analytics]\nscope:\n  accepts: []\n  rejects: []\nallowed_tools: ["*"]\nprovider_profile: default\nmaxTurns: 50\n');
+    const { loadTeamConfig } = await import('../config/loader.js');
+    const deps = makeDeps({ loadConfig: (_n, cp) => cp ? loadTeamConfig(cp) : makeDeps().loadConfig(_n) });
+    await spawnTeam({ name: 'custom', config_path: cfgPath }, 'root', deps);
+    const raw = readFileSync(join(dir, 'teams', 'custom', 'config.yaml'), 'utf-8');
+    const cfg = yamlParse(raw) as { mcp_servers: string[] };
+    expect(cfg.mcp_servers).toContain('org');
+    expect(cfg.mcp_servers).toContain('analytics');
+  });
+
+  it('writes credentials to config.yaml', async () => {
+    const testToken = 'test-fake-token-value-1234567890';
+    await spawnTeam({ name: 'ops', credentials: { api_key: testToken, subdomain: 'acme' } }, 'root', makeDeps());
+    const raw = readFileSync(join(dir, 'teams', 'ops', 'config.yaml'), 'utf-8');
+    const cfg = yamlParse(raw) as { credentials: Record<string, string> };
+    expect(cfg.credentials['api_key']).toBe(testToken);
+    expect(cfg.credentials['subdomain']).toBe('acme');
+  });
+
+  it('config has no credentials section when none provided', async () => {
+    await spawnTeam({ name: 'ops' }, 'root', makeDeps());
+    const raw = readFileSync(join(dir, 'teams', 'ops', 'config.yaml'), 'utf-8');
+    const cfg = yamlParse(raw) as { credentials?: Record<string, string> };
+    expect(cfg.credentials).toBeUndefined();
+  });
+
+  it('writes init-context.md when init_context provided', async () => {
+    await spawnTeam({ name: 'ops', init_context: 'Monitor logs every 10 minutes' }, 'root', makeDeps());
+    const content = readFileSync(join(dir, 'teams', 'ops', 'memory', 'init-context.md'), 'utf-8');
+    expect(content).toBe('Monitor logs every 10 minutes');
+  });
+
+  it('does NOT write init-context.md when omitted', async () => {
+    await spawnTeam({ name: 'ops' }, 'root', makeDeps());
+    expect(existsSync(join(dir, 'teams', 'ops', 'memory', 'init-context.md'))).toBe(false);
+  });
+
+  it('auto-queues init task with critical priority', async () => {
+    await spawnTeam({ name: 'ops', init_context: 'Setup instructions' }, 'root', makeDeps());
+    expect(mockTaskQueue.tasks).toHaveLength(1);
+    expect(mockTaskQueue.tasks[0].teamId).toBe('ops');
+    expect(mockTaskQueue.tasks[0].priority).toBe(TaskPriority.Critical);
+    expect(mockTaskQueue.tasks[0].task).toContain('Bootstrap');
+  });
+
+  it('rolls back dirs + org tree + session on enqueue failure', async () => {
+    const failQueue = {
+      ...mockTaskQueue,
+      enqueue: () => { throw new Error('queue full'); },
+    };
+    const result = await spawnTeam({ name: 'ops' }, 'root', makeDeps({ taskQueue: failQueue }));
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('init enqueue failed');
+    expect(tree.getTeam('ops')).toBeUndefined();
+    expect(existsSync(join(dir, 'teams', 'ops'))).toBe(false);
+    expect(mockSpawner.stop).toHaveBeenCalledWith('ops');
+  });
+
+  it('cleans up on spawn failure', async () => {
+    mockSpawner.spawn.mockRejectedValueOnce(new Error('docker down'));
+    const result = await spawnTeam({ name: 'fail' }, 'root', makeDeps());
+    expect(result.success).toBe(false);
+    expect(tree.getTeam('fail')).toBeUndefined();
+    expect(existsSync(join(dir, 'teams', 'fail'))).toBe(false);
+  });
+});
+
+// ── Credential redaction ─────────────────────────────────────────────────
+
+import { scrubSecrets } from '../logging/credential-scrubber.js';
+
+describe('Credential redaction with raw secrets', () => {
+  it('scrubs team credential values from text', () => {
+    const testToken = 'test-fake-token-for-redaction-test';
+    const result = scrubSecrets(
+      `Calling API with token ${testToken}`,
+      [],
+      [testToken],
+    );
+    expect(result).not.toContain(testToken);
+    expect(result).toContain('[REDACTED]');
+  });
+
+  it('does not redact short values (< 8 chars)', () => {
+    const result = scrubSecrets('subdomain is prod', [], ['prod']);
+    expect(result).toContain('prod');
   });
 });

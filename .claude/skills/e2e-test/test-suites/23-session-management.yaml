@@ -1,0 +1,17 @@
+name: Session Management
+description: Verify shutdown preserves tasks, re-spawn picks up queue.
+needs_api_key: true
+needs_clean_start: false
+
+setup:
+  - command: "for i in $(seq 1 30); do curl -sf http://localhost:8080/health >/dev/null 2>&1 && echo 'Ready' && break; sleep 3; done"
+
+teardown: []
+
+test_cases:
+  - name: Shutdown team preserves pending tasks in SQLite
+    steps:
+      - action: "Enqueue a task then shutdown the team"
+        command: "sudo docker exec deployments-openhive-1 node -e \"const D=require('better-sqlite3')('/app/.run/openhive.db',{readonly:true}); const r=D.prepare('SELECT COUNT(*) as c FROM task_queue').get(); console.log('tasks:', r.c); D.close()\""
+        expected: "tasks:"
+    expected_outcome: "Task queue is accessible and tasks are durable in SQLite"

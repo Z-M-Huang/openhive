@@ -22,20 +22,32 @@ const CREDENTIAL_PATTERNS: readonly RegExp[] = [
 
 /**
  * Scrub known secret values and common credential patterns from text.
+ *
+ * @param knownSecrets  SecretString instances (provider secrets)
+ * @param rawSecrets    Plain string secrets (team credentials, etc.)
  */
 export function scrubSecrets(
   text: string,
   knownSecrets: readonly SecretString[],
+  rawSecrets?: readonly string[],
 ): string {
   let result = text;
 
-  // Replace known secret values (primary)
+  // Replace known secret values (primary — SecretString instances)
   for (const secret of knownSecrets) {
     const raw = secret.expose();
     if (raw.length === 0) continue;
-    // Escape regex special chars in the secret value
     const escaped = raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     result = result.replace(new RegExp(escaped, 'g'), REDACTED);
+  }
+
+  // Replace raw string secrets (team credentials)
+  if (rawSecrets) {
+    for (const raw of rawSecrets) {
+      if (raw.length < 8) continue; // Skip short values to avoid false positives
+      const escaped = raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      result = result.replace(new RegExp(escaped, 'g'), REDACTED);
+    }
   }
 
   // Replace common credential patterns (secondary)
@@ -54,6 +66,7 @@ export function scrubSecrets(
  */
 export function createStderrScrubber(
   knownSecrets: readonly SecretString[],
+  rawSecrets?: readonly string[],
 ): (data: string) => string {
-  return (data: string) => scrubSecrets(data, knownSecrets);
+  return (data: string) => scrubSecrets(data, knownSecrets, rawSecrets);
 }

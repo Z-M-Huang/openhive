@@ -1,0 +1,43 @@
+name: Cross-Branch Communication
+description: Verify teams in different branches communicate through common ancestor. A1→A→main→B→B1 traversal.
+needs_api_key: true
+needs_clean_start: true
+
+setup:
+  - command: "sudo docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+    description: "Clean start"
+  - command: "sudo docker compose -f deployments/docker-compose.yml up -d 2>&1"
+    description: "Start container"
+  - command: "for i in $(seq 1 30); do curl -sf http://localhost:8080/health >/dev/null 2>&1 && echo 'Ready' && break; sleep 3; done"
+    description: "Wait for health"
+
+teardown:
+  - command: "sudo docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+
+test_cases:
+  - name: Build two-branch team hierarchy
+    steps:
+      - action: "Create team-a (accepts: operations, monitoring)"
+        command: "sudo docker exec deployments-openhive-1 node -e \"const ws=new(require('ws'))('ws://localhost:8080/ws');ws.on('open',()=>{ws.send(JSON.stringify({content:'Create a team called team-a for operations and monitoring tasks.'}))});ws.on('message',d=>{console.log(d.toString());ws.close()});setTimeout(()=>{ws.close()},240000)\" 2>&1"
+        expected: "team-a"
+      - action: "Create team-b (accepts: development, coding)"
+        command: "sudo docker exec deployments-openhive-1 node -e \"const ws=new(require('ws'))('ws://localhost:8080/ws');ws.on('open',()=>{ws.send(JSON.stringify({content:'Create a team called team-b for development and coding tasks.'}))});ws.on('message',d=>{console.log(d.toString());ws.close()});setTimeout(()=>{ws.close()},240000)\" 2>&1"
+        expected: "team-b"
+      - action: "Verify both teams in org tree with main as parent"
+        command: "sudo docker exec deployments-openhive-1 node -e \"const D=require('better-sqlite3')('/app/.run/openhive.db',{readonly:true}); const r=D.prepare('SELECT name,parentId FROM org_tree').all(); console.log(JSON.stringify(r)); D.close()\""
+        expected: "team-a"
+    expected_outcome: "Two sibling teams (team-a, team-b) under main"
+
+  - name: Sibling-to-sibling direct messaging blocked
+    steps:
+      - action: "Verify team-a cannot send message to team-b directly"
+        command: "sudo docker exec deployments-openhive-1 node -e \"const D=require('better-sqlite3')('/app/.run/openhive.db',{readonly:true}); const a=D.prepare('SELECT parentId FROM org_tree WHERE name=?').get('team-a'); const b=D.prepare('SELECT parentId FROM org_tree WHERE name=?').get('team-b'); console.log('a.parent:', a?.parentId, 'b.parent:', b?.parentId); console.log(a?.parentId===b?.parentId ? 'SIBLINGS' : 'NOT_SIBLINGS'); D.close()\""
+        expected: "SIBLINGS"
+    expected_outcome: "team-a and team-b are siblings (same parent) — direct messaging between them should be blocked by send_message authorization"
+
+  - name: Cross-branch task requires escalation through main
+    steps:
+      - action: "Ask main to route a task that requires both teams"
+        command: "sudo docker exec deployments-openhive-1 node -e \"const ws=new(require('ws'))('ws://localhost:8080/ws');ws.on('open',()=>{ws.send(JSON.stringify({content:'I need team-a to monitor the deployment that team-b is doing. Coordinate between them.'}))});ws.on('message',d=>{console.log(d.toString());ws.close()});setTimeout(()=>{ws.close()},240000)\" 2>&1"
+        expected: "content"
+    expected_outcome: "Main coordinates between team-a and team-b — cross-branch communication goes through main"

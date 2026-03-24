@@ -78,8 +78,7 @@ export function initStorage(_dataDir: string, runDir: string): StorageResult {
   const triggerStore = new TriggerStore(db);
   const logStore = new LogStore(db);
   const escalationStore = new EscalationStore(db);
-  const memoryDir = join(runDir, 'shared', 'memory');
-  mkdirSync(memoryDir, { recursive: true });
+  const memoryDir = join(runDir, 'teams');
   const memoryStore = new MemoryStore(memoryDir);
 
   return { db, raw, orgStore, taskQueueStore, triggerStore, logStore, escalationStore, memoryStore };

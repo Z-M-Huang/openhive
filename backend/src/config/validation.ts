@@ -23,6 +23,7 @@ export const TeamConfigSchema = z.object({
   mcp_servers: z.array(z.string()).default([]),
   provider_profile: z.string().min(1),
   maxTurns: z.number().int().positive().default(50),
+  credentials: z.record(z.string(), z.string()).optional().default({}),
 });
 
 export type TeamConfigInput = z.input<typeof TeamConfigSchema>;

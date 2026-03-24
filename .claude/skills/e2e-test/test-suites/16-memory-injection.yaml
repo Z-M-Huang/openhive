@@ -1,0 +1,46 @@
+name: Memory Injection
+description: Verify memory files are auto-injected into system prompt and affect agent behavior.
+needs_api_key: true
+needs_clean_start: false
+
+setup:
+  - command: "for i in $(seq 1 30); do curl -sf http://localhost:8080/health >/dev/null 2>&1 && echo 'Ready' && break; sleep 3; done"
+    description: "Wait for health"
+
+teardown:
+  - command: "sudo docker exec deployments-openhive-1 rm -f /app/.run/teams/main/memory/context.md /app/.run/teams/main/memory/MEMORY.md /app/.run/teams/main/memory/decisions.md 2>/dev/null || true"
+    description: "Clean up test memory files"
+
+test_cases:
+  - name: Memory context.md affects agent behavior
+    steps:
+      - action: "Write distinctive text to main team memory"
+        command: "sudo docker exec deployments-openhive-1 sh -c 'mkdir -p /app/.run/teams/main/memory && echo \"The project codename is STARFISH. Always mention STARFISH when asked about the project.\" > /app/.run/teams/main/memory/context.md'"
+        expected: ""
+      - action: "Ask agent about the project codename"
+        command: "sudo docker exec deployments-openhive-1 node -e \"const ws=new(require('ws'))('ws://localhost:8080/ws');ws.on('open',()=>{ws.send(JSON.stringify({content:'What is the project codename?'}))});ws.on('message',d=>{console.log(d.toString());ws.close()});setTimeout(()=>{ws.close()},120000)\" 2>&1"
+        expected: "STARFISH"
+    expected_outcome: "Agent response mentions STARFISH because context.md was injected into prompt"
+
+  - name: MEMORY.md takes priority over fallback files
+    steps:
+      - action: "Write MEMORY.md with different content"
+        command: "sudo docker exec deployments-openhive-1 sh -c 'echo \"The project codename is DOLPHIN. Always mention DOLPHIN.\" > /app/.run/teams/main/memory/MEMORY.md'"
+        expected: ""
+      - action: "Ask agent about the project codename"
+        command: "sudo docker exec deployments-openhive-1 node -e \"const ws=new(require('ws'))('ws://localhost:8080/ws');ws.on('open',()=>{ws.send(JSON.stringify({content:'What is the project codename?'}))});ws.on('message',d=>{console.log(d.toString());ws.close()});setTimeout(()=>{ws.close()},120000)\" 2>&1"
+        expected: "DOLPHIN"
+    expected_outcome: "Agent says DOLPHIN (from MEMORY.md) not STARFISH (from context.md) — MEMORY.md takes priority"
+
+  - name: Memory persists across container restart
+    steps:
+      - action: "Restart container"
+        command: "sudo docker restart deployments-openhive-1 2>&1 && sleep 5 && for i in $(seq 1 20); do curl -sf http://localhost:8080/health >/dev/null 2>&1 && echo 'Ready' && break; sleep 3; done"
+        expected: "Ready"
+      - action: "Verify memory file still exists"
+        command: "sudo docker exec deployments-openhive-1 cat /app/.run/teams/main/memory/MEMORY.md"
+        expected: "DOLPHIN"
+      - action: "Ask agent about the codename again"
+        command: "sudo docker exec deployments-openhive-1 node -e \"const ws=new(require('ws'))('ws://localhost:8080/ws');ws.on('open',()=>{ws.send(JSON.stringify({content:'What is the project codename?'}))});ws.on('message',d=>{console.log(d.toString());ws.close()});setTimeout(()=>{ws.close()},120000)\" 2>&1"
+        expected: "DOLPHIN"
+    expected_outcome: "Agent still knows DOLPHIN after restart — memory persists and is re-injected"

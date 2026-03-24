@@ -1,0 +1,31 @@
+name: Personal Assistant UAT
+description: End-to-end user journey — main agent answers questions, creates teams, manages context.
+needs_api_key: true
+needs_clean_start: false
+
+setup:
+  - command: "for i in $(seq 1 30); do curl -sf http://localhost:8080/health >/dev/null 2>&1 && echo 'Ready' && break; sleep 3; done"
+
+teardown: []
+
+test_cases:
+  - name: Main agent identifies as OpenHive
+    steps:
+      - action: "Ask who are you"
+        command: "sudo docker exec deployments-openhive-1 node -e \"const ws=new(require('ws'))('ws://localhost:8080/ws');ws.on('open',()=>{ws.send(JSON.stringify({content:'Who are you? Answer in one sentence.'}))});ws.on('message',d=>{console.log(d.toString());ws.close()});setTimeout(()=>{ws.close()},120000)\" 2>&1"
+        expected: "OpenHive"
+    expected_outcome: "Agent identifies as OpenHive"
+
+  - name: Main agent describes capabilities
+    steps:
+      - action: "Ask about capabilities"
+        command: "sudo docker exec deployments-openhive-1 node -e \"const ws=new(require('ws'))('ws://localhost:8080/ws');ws.on('open',()=>{ws.send(JSON.stringify({content:'What can you do? List 3 things briefly.'}))});ws.on('message',d=>{console.log(d.toString());ws.close()});setTimeout(()=>{ws.close()},120000)\" 2>&1"
+        expected: "team"
+    expected_outcome: "Agent mentions team management capabilities"
+
+  - name: Main agent can create team on request
+    steps:
+      - action: "Ask to create a team"
+        command: "sudo docker exec deployments-openhive-1 node -e \"const ws=new(require('ws'))('ws://localhost:8080/ws');ws.on('open',()=>{ws.send(JSON.stringify({content:'Create a team called uat-helper for general assistance.'}))});ws.on('message',d=>{console.log(d.toString());ws.close()});setTimeout(()=>{ws.close()},240000)\" 2>&1"
+        expected: "uat-helper"
+    expected_outcome: "Agent creates team via spawn_team MCP tool"

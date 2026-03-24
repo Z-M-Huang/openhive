@@ -8,6 +8,7 @@ import type { TeamConfig } from '../domain/types.js';
 import type { ProvidersOutput } from '../config/validation.js';
 import type { HookConfig, BuildHookConfigOpts } from '../hooks/index.js';
 
+import { join } from 'node:path';
 import { resolveProvider } from './provider-resolver.js';
 import { buildSessionContext } from './context-builder.js';
 import { buildMcpServers } from './mcp-builder.js';
@@ -17,6 +18,8 @@ import { buildHookConfig } from '../hooks/index.js';
 import { createStderrScrubber } from '../logging/credential-scrubber.js';
 import { loadSubagents, loadSkillsContent } from './skill-loader.js';
 import type { SubagentDef } from './skill-loader.js';
+import { buildMemorySection } from './memory-loader.js';
+import { MemoryStore } from '../storage/stores/memory-store.js';
 
 interface Logger {
   info(msg: string, meta?: Record<string, unknown>): void;
@@ -65,8 +68,10 @@ export function buildQueryOptions(opts: BuildQueryOptionsInput): QueryOptions {
 
   const ctx = buildSessionContext(opts.teamName, opts.runDir);
 
-  // Extract SDK server from OrgMcpServer wrapper (sdkServer is McpSdkServerConfigWithInstance)
-  const orgSdkServer = (opts.orgMcpServer as { sdkServer?: unknown })?.sdkServer;
+  // Create a team-scoped org MCP server so callerId is correct for this team.
+  // Falls back to global sdkServer if factory is unavailable (test env).
+  const orgMcp = opts.orgMcpServer as { createTeamSdkServer?: (name: string) => unknown; sdkServer?: unknown };
+  const orgSdkServer = orgMcp.createTeamSdkServer?.(opts.teamName) ?? orgMcp.sdkServer;
   const mcpServers = buildMcpServers(
     opts.teamConfig.mcp_servers,
     { ...opts.availableMcpServers, ...(orgSdkServer ? { org: orgSdkServer } : {}) },
@@ -103,12 +108,31 @@ export function buildQueryOptions(opts: BuildQueryOptionsInput): QueryOptions {
     logger: opts.logger,
     knownSecrets: providerSecrets,
   };
-  const hooks = buildHookConfig(hookOpts);
-  const stderr = createStderrScrubber(providerSecrets);
+  // Extract team credentials from config for redaction and prompt injection
+  const teamCreds = opts.teamConfig.credentials ?? {};
+  const teamCredentialValues = Object.values(teamCreds).filter(v => typeof v === 'string');
 
-  // Load skills content and append to rule cascade
+  const hooks = buildHookConfig(hookOpts);
+  const stderr = createStderrScrubber(providerSecrets, teamCredentialValues);
+
+  // Load skills and memory, then assemble the full systemPrompt append
   const skillsContent = loadSkillsContent(opts.runDir, opts.teamName);
-  const fullAppend = skillsContent ? `${ruleCascade}\n${skillsContent}` : ruleCascade;
+  const teamMemoryStore = new MemoryStore(join(opts.runDir, 'teams'));
+  const memorySection = buildMemorySection(teamMemoryStore, opts.teamName);
+
+  if (memorySection.length > 12000) {
+    opts.logger.info('Team memory exceeds 12000 chars — consider summarizing', {
+      teamName: opts.teamName, length: memorySection.length,
+    });
+  }
+
+  // Build credentials section for prompt injection (read-only — agent can't modify config.yaml)
+  const credEntries = Object.entries(teamCreds);
+  const credentialsSection = credEntries.length > 0
+    ? '--- Team Credentials ---\n' + credEntries.map(([k, v]) => `${k}: ${v}`).join('\n')
+    : '';
+
+  const fullAppend = [ruleCascade, skillsContent, memorySection, credentialsSection].filter(Boolean).join('\n');
 
   // Load subagent definitions for the SDK agents option
   const agents = loadSubagents(opts.runDir, opts.teamName);

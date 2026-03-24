@@ -41,7 +41,7 @@ export interface OrgMcpDeps {
   readonly taskQueue: ITaskQueueStore;
   readonly escalationStore: IEscalationStore;
   readonly runDir: string;
-  readonly loadConfig: (name: string, configPath?: string) => TeamConfig;
+  readonly loadConfig: (name: string, configPath?: string, hints?: { description?: string; scopeAccepts?: string[]; scopeRejects?: string[] }) => TeamConfig;
   readonly getTeamConfig: (teamId: string) => TeamConfig | undefined;
   readonly log: (msg: string, meta?: Record<string, unknown>) => void;
   readonly getHandlerDeps?: () => MessageHandlerDeps | null;
@@ -50,6 +50,8 @@ export interface OrgMcpDeps {
 export interface OrgMcpServer {
   readonly sdkServer: unknown; // McpSdkServerConfigWithInstance — typed as unknown to avoid import
   readonly tools: ReadonlyMap<string, ToolDefinition>;
+  /** Create a team-scoped SDK MCP server with correct callerId. */
+  createTeamSdkServer(teamName: string): unknown;
   invoke(toolName: string, input: unknown, callerId: string): Promise<unknown>;
 }
 
@@ -63,7 +65,8 @@ function buildToolDefs(deps: OrgMcpDeps): ToolDefinition[] {
       description: 'Create a new team and spawn its session',
       inputSchema: SpawnTeamInputSchema,
       handler: (input, callerId) => spawnTeam(input as never, callerId, {
-        orgTree: deps.orgTree, spawner: deps.spawner, runDir: deps.runDir, loadConfig: deps.loadConfig,
+        orgTree: deps.orgTree, spawner: deps.spawner, runDir: deps.runDir,
+        loadConfig: deps.loadConfig, taskQueue: deps.taskQueue,
       }),
     },
     {
@@ -131,16 +134,20 @@ export async function createOrgMcpServer(deps: OrgMcpDeps): Promise<OrgMcpServer
   }
 
   // Build SDK MCP server — may fail in test env (no SDK installed)
+  // Use Record to avoid type mismatch between local (no SDK) and Docker (with SDK).
+  let sdkModule: Record<string, unknown> | null = null;
   let sdkServer: unknown = null;
-  try {
-    const sdk = await import('@anthropic-ai/claude-agent-sdk');
+
+  /** Build an SDK MCP server with the given callerId baked in. */
+  function buildSdkServer(sdk: Record<string, unknown>, callerId: string): unknown {
+    const sdkTool = sdk['tool'] as (...args: unknown[]) => unknown;
+    const sdkCreateServer = sdk['createSdkMcpServer'] as (...args: unknown[]) => unknown;
     const sdkTools = toolDefs.map((def) =>
-      sdk.tool(
+      sdkTool(
         def.name,
         def.description,
         extractShape(def.inputSchema),
         async (args: unknown) => {
-          const callerId = 'main'; // v1: only main interacts with tools
           try {
             const result = await def.handler(args, callerId);
             return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
@@ -151,16 +158,34 @@ export async function createOrgMcpServer(deps: OrgMcpDeps): Promise<OrgMcpServer
         },
       ),
     );
-    sdkServer = sdk.createSdkMcpServer({ name: 'org', tools: sdkTools });
+    return sdkCreateServer({ name: 'org', tools: sdkTools });
+  }
+
+  try {
+    sdkModule = await import('@anthropic-ai/claude-agent-sdk');
+    sdkServer = buildSdkServer(sdkModule, 'main');
   } catch (err) {
     // SDK not available (test env) — sdkServer stays null, invoke() still works
     const errMsg = err instanceof Error ? err.message : String(err);
     deps.log('SDK MCP server initialization failed — org tools unavailable via SDK path', { error: errMsg });
   }
 
+  // Cache team-scoped SDK servers — each team gets exactly one instance to avoid
+  // "Already connected to a transport" errors from the SDK protocol layer.
+  const teamSdkServers = new Map<string, unknown>();
+
   return {
     sdkServer,
     tools,
+    createTeamSdkServer(teamName: string): unknown {
+      if (!sdkModule) return null;
+      let server = teamSdkServers.get(teamName);
+      if (!server) {
+        server = buildSdkServer(sdkModule, teamName);
+        teamSdkServers.set(teamName, server);
+      }
+      return server;
+    },
     async invoke(toolName: string, input: unknown, callerId: string): Promise<unknown> {
       const tool = tools.get(toolName);
       if (!tool) {

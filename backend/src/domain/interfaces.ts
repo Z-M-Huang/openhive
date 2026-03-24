@@ -18,6 +18,7 @@ import type {
 
 export interface ISessionSpawner {
   spawn(teamId: string, agentId: string): Promise<string>;
+  stop?(teamId: string): void;
 }
 
 export interface ISessionManager {

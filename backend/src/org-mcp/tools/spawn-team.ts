@@ -1,13 +1,16 @@
 /**
  * spawn_team tool — creates a new team in the org tree and spawns its session.
  *
- * Input: {name, config_path?}
+ * Input: {name, config_path?, description?, scope_accepts?, scope_rejects?,
+ *         init_context?, credentials?}
+ *
  * Config is loaded via deps.loadConfig which either reads an existing
  * config.yaml or generates a default. The tool then scaffolds directories,
- * writes the config to .run/teams/{name}/config.yaml, registers in the
- * org tree, and spawns the session.
+ * writes the config to .run/teams/{name}/config.yaml, optionally writes
+ * credentials and init context to memory/, registers in the org tree,
+ * spawns the session, and auto-queues an initialization task.
  *
- * On spawn failure, both the org tree entry and scaffolded dirs are cleaned up.
+ * On any failure, all artifacts (dirs, org tree, session) are cleaned up.
  */
 
 import { z } from 'zod';
@@ -15,8 +18,8 @@ import { mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { stringify as yamlStringify } from 'yaml';
 import type { OrgTree } from '../../domain/org-tree.js';
-import type { ISessionSpawner } from '../../domain/interfaces.js';
-import { TeamStatus } from '../../domain/types.js';
+import type { ISessionSpawner, ITaskQueueStore } from '../../domain/interfaces.js';
+import { TeamStatus, TaskPriority } from '../../domain/types.js';
 import type { TeamConfig } from '../../domain/types.js';
 
 /** Team names must be lowercase slugs to prevent path traversal. */
@@ -28,6 +31,8 @@ export const SpawnTeamInputSchema = z.object({
   description: z.string().optional(),
   scope_accepts: z.array(z.string()).optional(),
   scope_rejects: z.array(z.string()).optional(),
+  init_context: z.string().optional(),
+  credentials: z.record(z.string(), z.string()).optional(),
 });
 
 export type SpawnTeamInput = z.infer<typeof SpawnTeamInputSchema>;
@@ -49,6 +54,7 @@ export interface SpawnTeamDeps {
   readonly spawner: ISessionSpawner;
   readonly runDir: string;
   readonly loadConfig: (name: string, configPath?: string, hints?: SpawnTeamConfigHints) => TeamConfig;
+  readonly taskQueue?: ITaskQueueStore;
 }
 
 /** Subdirectories to scaffold for each new team. */
@@ -97,8 +103,6 @@ export async function spawnTeam(
   }
 
   // Load config — loadConfig either reads from config_path or generates one.
-  // For fresh spawns without config_path, bootstrap's loadConfig will throw
-  // (no file on disk yet). The calling agent must provide config_path.
   let config: TeamConfig;
   try {
     const hints: SpawnTeamConfigHints = {
@@ -112,19 +116,34 @@ export async function spawnTeam(
     return { success: false, error: `config error: ${msg}` };
   }
 
-  // Scaffold directories and write config
+  // Enforce org MCP access — all teams need it for escalation/communication
+  if (!config.mcp_servers.includes('org')) {
+    config = { ...config, mcp_servers: ['org', ...config.mcp_servers] };
+  }
+
+  // Merge credentials into config (stored in config.yaml, injected by system)
+  if (parsed.data.credentials && Object.keys(parsed.data.credentials).length > 0) {
+    config = { ...config, credentials: parsed.data.credentials };
+  }
+
+  // Scaffold directories and write config + optional memory files
   try {
     scaffoldTeamDirs(deps.runDir, name);
     const cfgPath = join(deps.runDir, 'teams', name, 'config.yaml');
     writeFileSync(cfgPath, yamlStringify(config), 'utf-8');
+
+    // Write initialization context to memory/init-context.md
+    if (parsed.data.init_context) {
+      const initPath = join(deps.runDir, 'teams', name, 'memory', 'init-context.md');
+      writeFileSync(initPath, parsed.data.init_context, 'utf-8');
+    }
   } catch (err) {
     cleanupTeamDirs(deps.runDir, name);
     const msg = err instanceof Error ? err.message : String(err);
     return { success: false, error: `scaffold error: ${msg}` };
   }
 
-  // Register in org tree — use name as both teamId and name for consistency.
-  // Recovery looks up config by team.name, so teamId === name avoids drift.
+  // Register in org tree
   deps.orgTree.addTeam({
     teamId: name,
     name,
@@ -138,12 +157,47 @@ export async function spawnTeam(
   try {
     await deps.spawner.spawn(name, name);
   } catch (err) {
-    // Roll back: org tree entry + scaffolded directories
     deps.orgTree.removeTeam(name);
     cleanupTeamDirs(deps.runDir, name);
     const msg = err instanceof Error ? err.message : String(err);
     return { success: false, error: `spawn failed: ${msg}` };
   }
 
+  // Auto-queue initialization task so the team self-bootstraps
+  const initError = enqueueInitTask(name, parsed.data.init_context, deps);
+  if (initError) return initError;
+
   return { success: true, team: name };
+}
+
+/** Build and enqueue the bootstrap initialization task. Returns error result on failure. */
+function enqueueInitTask(
+  name: string, initContext: string | undefined, deps: SpawnTeamDeps,
+): SpawnTeamResult | null {
+  if (!deps.taskQueue) return null;
+
+  const initPayload = initContext
+    ? 'Bootstrap this team. Your setup context is in memory/init-context.md — read it first. ' +
+      'Your credentials (if any) are in your system prompt under Team Credentials. ' +
+      'Steps: (1) Read your init context, ' +
+      '(2) Create skills in skills/ for your core tasks, ' +
+      '(3) Write memory/MEMORY.md with your identity, current state, and key references, ' +
+      '(4) If memory/.bootstrapped exists, skip — you are already initialized, ' +
+      '(5) Create memory/.bootstrapped when done, ' +
+      '(6) Summarize what you set up.'
+    : 'Bootstrap this team. Your description and scope are in your system prompt. ' +
+      'Create initial skills in skills/ and write memory/MEMORY.md with your identity. ' +
+      'Create memory/.bootstrapped when done.';
+
+  try {
+    deps.taskQueue.enqueue(name, initPayload, TaskPriority.Critical);
+    return null;
+  } catch (err) {
+    // Roll back everything: session + org tree + dirs
+    try { deps.spawner.stop?.(name); } catch { /* best effort */ }
+    deps.orgTree.removeTeam(name);
+    cleanupTeamDirs(deps.runDir, name);
+    const msg = err instanceof Error ? err.message : String(err);
+    return { success: false, error: `init enqueue failed: ${msg}` };
+  }
 }

@@ -1,0 +1,17 @@
+name: Query Team Protocol
+description: Verify synchronous parent→child queries with scope admission.
+needs_api_key: true
+needs_clean_start: false
+
+setup:
+  - command: "for i in $(seq 1 30); do curl -sf http://localhost:8080/health >/dev/null 2>&1 && echo 'Ready' && break; sleep 3; done"
+
+teardown: []
+
+test_cases:
+  - name: Parent queries child via query_team
+    steps:
+      - action: "Ask main to query a child team"
+        command: "sudo docker exec deployments-openhive-1 node -e \"const ws=new(require('ws'))('ws://localhost:8080/ws');ws.on('open',()=>{ws.send(JSON.stringify({content:'Query the weather-ops team: what is your status?'}))});ws.on('message',d=>{console.log(d.toString());ws.close()});setTimeout(()=>{ws.close()},120000)\" 2>&1"
+        expected: "content"
+    expected_outcome: "Main queries child team and receives structured response"

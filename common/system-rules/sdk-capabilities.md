@@ -23,7 +23,17 @@ Your session has access to these tools (subject to `allowed_tools` config):
 
 ## Memory
 
-- Files in `memory/` persist across session restarts
-- Read memory at session start for continuity
-- Save important decisions, lessons, and context to memory
-- Keep entries concise and dated
+`memory/MEMORY.md` is **automatically injected** into your context at every session start.
+
+- Write `memory/MEMORY.md` with your identity, current state, key decisions, and references
+- This is your only auto-injected memory — keep it comprehensive
+- Other files in `memory/` (context.md, decisions.md, etc.) are available via Read tool on demand but NOT auto-injected
+- Keep MEMORY.md concise and dated — it is loaded on every interaction
+- Update MEMORY.md regularly as you work
+
+## Credentials
+
+- Team credentials are stored in `config.yaml` and **automatically injected** into your context under `--- Team Credentials ---`.
+- You cannot modify credentials — they are managed by the system (read-only from your perspective).
+- Use credential values for API calls, authentication, etc.
+- Credential values are automatically redacted from logs and output.

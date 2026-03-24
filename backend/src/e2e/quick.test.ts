@@ -42,6 +42,12 @@ describe('Quick E2E: Bootstrap wiring', () => {
     expect(existsSync(join(dir, 'teams', 'main', 'config.yaml'))).toBe(true);
   });
 
+  it('.run/ main team has all subdirectories', () => {
+    for (const sub of ['workspace', 'memory', 'org-rules', 'team-rules', 'skills', 'subagents']) {
+      expect(existsSync(join(dir, 'teams', 'main', sub))).toBe(true);
+    }
+  });
+
   it('health shows triggers registered', async () => {
     // Copy trigger fixture to runDir
     const triggersYaml = `triggers:\n  - name: e2e-kw\n    type: keyword\n    config:\n      pattern: "e2e-test"\n    team: test\n    task: handle test\n`;

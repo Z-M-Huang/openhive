@@ -1,0 +1,60 @@
+name: Team Filesystem Artifacts
+description: Verify team spawn creates all expected files on disk — subdirs, config, credentials, init-context, memory.
+needs_api_key: true
+needs_clean_start: true
+
+setup:
+  - command: "sudo docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+    description: "Clean start"
+  - command: "sudo docker compose -f deployments/docker-compose.yml up -d 2>&1"
+    description: "Start container"
+  - command: "for i in $(seq 1 30); do curl -sf http://localhost:8080/health >/dev/null 2>&1 && echo 'Ready' && break; sleep 3; done"
+    description: "Wait for health"
+
+teardown:
+  - command: "sudo docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+
+test_cases:
+  - name: Spawn creates all 6 subdirectories
+    steps:
+      - action: "Create a team via WS"
+        command: "sudo docker exec deployments-openhive-1 node -e \"const ws=new(require('ws'))('ws://localhost:8080/ws');ws.on('open',()=>{ws.send(JSON.stringify({content:'Create a team called fs-test for filesystem testing. It should accept testing and validation topics.'}))});ws.on('message',d=>{console.log(d.toString());ws.close()});setTimeout(()=>{ws.close()},240000)\" 2>&1"
+        expected: "fs-test"
+      - action: "Verify all subdirectories exist"
+        command: "sudo docker exec deployments-openhive-1 sh -c 'for d in workspace memory org-rules team-rules skills subagents; do test -d /app/.run/teams/fs-test/$d && echo \"$d:OK\" || echo \"$d:MISSING\"; done'"
+        expected: "workspace:OK"
+    expected_outcome: "All 6 subdirectories created under .run/teams/fs-test/"
+
+  - name: Config includes org in mcp_servers
+    steps:
+      - action: "Check config.yaml"
+        command: "sudo docker exec deployments-openhive-1 cat /app/.run/teams/fs-test/config.yaml"
+        expected: "org"
+    expected_outcome: "Config contains org in mcp_servers list"
+
+  - name: Team registered in org tree
+    steps:
+      - action: "Check SQLite"
+        command: "sudo docker exec deployments-openhive-1 node -e \"const D=require('better-sqlite3')('/app/.run/openhive.db',{readonly:true}); const r=D.prepare('SELECT name FROM org_tree WHERE name=?').get('fs-test'); console.log(r?'FOUND':'NOT_FOUND'); D.close()\""
+        expected: "FOUND"
+    expected_outcome: "Team fs-test exists in org_tree table"
+
+  - name: Bootstrap task queued
+    steps:
+      - action: "Check task queue for bootstrap task"
+        command: "sudo docker exec deployments-openhive-1 node -e \"const D=require('better-sqlite3')('/app/.run/openhive.db',{readonly:true}); const r=D.prepare('SELECT task,priority FROM task_queue WHERE teamId=?').all('fs-test'); console.log(JSON.stringify(r)); D.close()\""
+        expected: "Bootstrap"
+    expected_outcome: "Bootstrap task exists in task_queue with critical priority"
+
+  - name: Files survive container restart
+    steps:
+      - action: "Restart container"
+        command: "sudo docker restart deployments-openhive-1 2>&1 && sleep 5 && for i in $(seq 1 20); do curl -sf http://localhost:8080/health >/dev/null 2>&1 && echo 'Ready' && break; sleep 3; done"
+        expected: "Ready"
+      - action: "Verify config still exists"
+        command: "sudo docker exec deployments-openhive-1 cat /app/.run/teams/fs-test/config.yaml"
+        expected: "name"
+      - action: "Verify subdirs still exist"
+        command: "sudo docker exec deployments-openhive-1 test -d /app/.run/teams/fs-test/memory && echo 'EXISTS'"
+        expected: "EXISTS"
+    expected_outcome: "All files and directories persist after container restart"

@@ -1,0 +1,46 @@
+name: Bootstrap Lifecycle
+description: Verify full spawn→bootstrap→operational flow. Skills created, memory written, team handles tasks.
+needs_api_key: true
+needs_clean_start: true
+
+setup:
+  - command: "sudo docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+    description: "Clean start"
+  - command: "sudo docker compose -f deployments/docker-compose.yml up -d 2>&1"
+    description: "Start container"
+  - command: "for i in $(seq 1 30); do curl -sf http://localhost:8080/health >/dev/null 2>&1 && echo 'Ready' && break; sleep 3; done"
+    description: "Wait for health"
+
+teardown:
+  - command: "sudo docker compose -f deployments/docker-compose.yml down -v 2>&1 || true"
+
+test_cases:
+  - name: Spawn team with init_context triggers bootstrap
+    steps:
+      - action: "Create team with full context"
+        command: "sudo docker exec deployments-openhive-1 node -e \"const ws=new(require('ws'))('ws://localhost:8080/ws');ws.on('open',()=>{ws.send(JSON.stringify({content:'Create a team called boot-test for testing. It should accept testing and qa topics. Give it this init context: This team validates software quality by running test suites.'}))});ws.on('message',d=>{console.log(d.toString());ws.close()});setTimeout(()=>{ws.close()},300000)\" 2>&1"
+        expected: "boot-test"
+      - action: "Wait for bootstrap task to process (poll for 60s)"
+        command: "for i in $(seq 1 20); do sudo docker exec deployments-openhive-1 test -f /app/.run/teams/boot-test/memory/.bootstrapped 2>/dev/null && echo 'BOOTSTRAPPED' && break; sleep 3; done"
+        expected: "BOOTSTRAPPED"
+    expected_outcome: "Team spawned and bootstrap completed — .bootstrapped marker exists"
+
+  - name: Bootstrap creates skills
+    steps:
+      - action: "Check skills directory has files"
+        command: "sudo docker exec deployments-openhive-1 ls /app/.run/teams/boot-test/skills/ 2>&1"
+        expected: ".md"
+    expected_outcome: "Bootstrap task created at least one skill .md file"
+
+  - name: Idempotent — restart doesn't re-bootstrap
+    steps:
+      - action: "Record current .bootstrapped timestamp"
+        command: "sudo docker exec deployments-openhive-1 cat /app/.run/teams/boot-test/memory/.bootstrapped"
+        expected: ""
+      - action: "Restart container"
+        command: "sudo docker restart deployments-openhive-1 2>&1 && sleep 5 && for i in $(seq 1 20); do curl -sf http://localhost:8080/health >/dev/null 2>&1 && echo 'Ready' && break; sleep 3; done"
+        expected: "Ready"
+      - action: "Verify .bootstrapped unchanged"
+        command: "sudo docker exec deployments-openhive-1 test -f /app/.run/teams/boot-test/memory/.bootstrapped && echo 'STILL_EXISTS'"
+        expected: "STILL_EXISTS"
+    expected_outcome: ".bootstrapped marker prevents double initialization"

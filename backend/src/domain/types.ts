@@ -40,6 +40,7 @@ export interface TeamConfig {
   readonly mcp_servers: readonly string[];
   readonly provider_profile: string;
   readonly maxTurns: number;
+  readonly credentials?: Readonly<Record<string, string>>;
 }
 
 export interface TriggerConfig {

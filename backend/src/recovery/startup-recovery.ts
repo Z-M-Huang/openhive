@@ -9,7 +9,7 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type { IOrgStore, ITaskQueueStore } from '../domain/interfaces.js';
-import { TaskStatus } from '../domain/types.js';
+import { TaskStatus, TaskPriority } from '../domain/types.js';
 import type { OrgTree } from '../domain/org-tree.js';
 
 export interface RecoveryLogger {
@@ -44,9 +44,22 @@ export function recoverFromCrash(deps: RecoveryDeps): RecoveryResult {
   for (const task of runningTasks) {
     taskQueueStore.updateStatus(task.id, TaskStatus.Pending);
   }
-  const recovered = runningTasks.length;
+  let recovered = runningTasks.length;
   if (recovered > 0) {
     logger.info('Recovery: reset running tasks to pending', { count: recovered });
+  }
+
+  // 2b. Reset failed bootstrap tasks to pending (so teams can retry initialization)
+  const failedTasks = taskQueueStore.getByStatus(TaskStatus.Failed);
+  const failedInits = failedTasks.filter(
+    t => t.priority === TaskPriority.Critical && t.task.startsWith('Bootstrap'),
+  );
+  for (const task of failedInits) {
+    taskQueueStore.updateStatus(task.id, TaskStatus.Pending);
+    recovered++;
+  }
+  if (failedInits.length > 0) {
+    logger.info('Recovery: reset failed bootstrap tasks to pending', { count: failedInits.length });
   }
 
   // 3. Find teams with pending tasks (candidates for re-spawning)

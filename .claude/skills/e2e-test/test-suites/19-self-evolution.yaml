@@ -1,0 +1,50 @@
+name: Self-Evolution
+description: Verify teams can create/modify their own skills, rules, and memory.
+needs_api_key: true
+needs_clean_start: false
+
+setup:
+  - command: "for i in $(seq 1 30); do curl -sf http://localhost:8080/health >/dev/null 2>&1 && echo 'Ready' && break; sleep 3; done"
+    description: "Wait for health"
+
+teardown:
+  - command: "sudo docker exec deployments-openhive-1 rm -f /app/.run/teams/main/skills/test-skill.md /app/.run/teams/main/team-rules/test-rule.md /app/.run/teams/main/memory/MEMORY.md 2>/dev/null || true"
+    description: "Clean up test files"
+
+test_cases:
+  - name: Team creates skill file
+    steps:
+      - action: "Write skill file externally (simulating agent Write tool)"
+        command: "sudo docker exec deployments-openhive-1 sh -c 'mkdir -p /app/.run/teams/main/skills && echo \"# Skill: Greeting\\n## Steps\\n1. Say hello\\n2. Mention BANANA\" > /app/.run/teams/main/skills/test-skill.md'"
+        expected: ""
+      - action: "Verify skill file on disk"
+        command: "sudo docker exec deployments-openhive-1 cat /app/.run/teams/main/skills/test-skill.md"
+        expected: "BANANA"
+    expected_outcome: "Skill file created in skills/ directory"
+
+  - name: New skill affects agent behavior
+    steps:
+      - action: "Ask agent to follow the greeting skill"
+        command: "sudo docker exec deployments-openhive-1 node -e \"const ws=new(require('ws'))('ws://localhost:8080/ws');ws.on('open',()=>{ws.send(JSON.stringify({content:'Follow your greeting skill to greet me.'}))});ws.on('message',d=>{console.log(d.toString());ws.close()});setTimeout(()=>{ws.close()},120000)\" 2>&1"
+        expected: "BANANA"
+    expected_outcome: "Agent follows the greeting skill and mentions BANANA"
+
+  - name: Team writes team-rule
+    steps:
+      - action: "Write team-rule"
+        command: "sudo docker exec deployments-openhive-1 sh -c 'mkdir -p /app/.run/teams/main/team-rules && echo \"Always end responses with -- OpenHive\" > /app/.run/teams/main/team-rules/test-rule.md'"
+        expected: ""
+      - action: "Ask agent a question"
+        command: "sudo docker exec deployments-openhive-1 node -e \"const ws=new(require('ws'))('ws://localhost:8080/ws');ws.on('open',()=>{ws.send(JSON.stringify({content:'Say hi.'}))});ws.on('message',d=>{console.log(d.toString());ws.close()});setTimeout(()=>{ws.close()},120000)\" 2>&1"
+        expected: "OpenHive"
+    expected_outcome: "Agent follows team-rule and ends with -- OpenHive"
+
+  - name: Memory written and injected
+    steps:
+      - action: "Write MEMORY.md"
+        command: "sudo docker exec deployments-openhive-1 sh -c 'echo \"# Memory\\nMy favorite color is TURQUOISE.\" > /app/.run/teams/main/memory/MEMORY.md'"
+        expected: ""
+      - action: "Ask agent about favorite color"
+        command: "sudo docker exec deployments-openhive-1 node -e \"const ws=new(require('ws'))('ws://localhost:8080/ws');ws.on('open',()=>{ws.send(JSON.stringify({content:'What is your favorite color?'}))});ws.on('message',d=>{console.log(d.toString());ws.close()});setTimeout(()=>{ws.close()},120000)\" 2>&1"
+        expected: "TURQUOISE"
+    expected_outcome: "Agent knows TURQUOISE from injected MEMORY.md"

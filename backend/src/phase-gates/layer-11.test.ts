@@ -422,3 +422,115 @@ describe('E2E-10: Full integration chain', () => {
     raw.close();
   });
 });
+
+// ── E2E-11: Spawned team operational readiness ────────────────────────────
+
+import { existsSync, readFileSync } from 'node:fs';
+import { parse as yamlParse } from 'yaml';
+import { buildSessionContext } from '../sessions/context-builder.js';
+import { loadSkillsContent } from '../sessions/skill-loader.js';
+
+describe('E2E-11: Spawned team operational readiness', () => {
+  it('spawn creates subdirs, config with org, credentials, and init task', async () => {
+    const dir = makeTempDir();
+    const { db, raw } = makeDb(dir);
+    const orgStore = new OrgStore(db);
+    const taskStore = new TaskQueueStore(db);
+    const escStore = new EscalationStore(db);
+    const tree = new OrgTree(orgStore);
+    const configs = new Map<string, TeamConfig>();
+
+    const deps: OrgMcpDeps = {
+      orgTree: tree, taskQueue: taskStore, escalationStore: escStore,
+      spawner: { spawn: async () => 'sid' },
+      sessionManager: { getSession: async () => null, terminateSession: async () => {} },
+      loadConfig: (n: string, _cp?: string, hints?: { description?: string; scopeAccepts?: string[]; scopeRejects?: string[] }) => {
+        const cfg = configs.get(n) ?? makeConfig({
+          name: n, description: hints?.description ?? '',
+          scope: { accepts: hints?.scopeAccepts ?? [], rejects: hints?.scopeRejects ?? [] },
+        });
+        return cfg;
+      },
+      getTeamConfig: (id) => configs.get(id),
+      runDir: dir,
+      log: () => {},
+    };
+    const server = await createOrgMcpServer(deps);
+    tree.addTeam(makeNode({ teamId: 'root', name: 'root' }));
+
+    // Spawn with init_context and credentials
+    const result = await server.invoke('spawn_team', {
+      name: 'ops',
+      description: 'Monitoring team',
+      scope_accepts: ['logs', 'monitoring'],
+      init_context: 'Monitor production logs',
+      credentials: { subdomain: 'acme', token: 'test-fake-value-for-testing' },
+    }, 'root') as { success: boolean };
+    expect(result.success).toBe(true);
+
+    // Verify all subdirs exist
+    for (const sub of ['workspace', 'memory', 'org-rules', 'team-rules', 'skills', 'subagents']) {
+      expect(existsSync(join(dir, 'teams', 'ops', sub))).toBe(true);
+    }
+
+    // Config has org in mcp_servers
+    const cfgRaw = readFileSync(join(dir, 'teams', 'ops', 'config.yaml'), 'utf-8');
+    const cfg = yamlParse(cfgRaw) as { mcp_servers: string[] };
+    expect(cfg.mcp_servers).toContain('org');
+
+    // Credentials written to config.yaml
+    const cfgWithCreds = yamlParse(cfgRaw) as { credentials: Record<string, string> };
+    expect(cfgWithCreds.credentials['subdomain']).toBe('acme');
+
+    // Init context written to memory
+    const initContent = readFileSync(join(dir, 'teams', 'ops', 'memory', 'init-context.md'), 'utf-8');
+    expect(initContent).toBe('Monitor production logs');
+
+    // Init task auto-queued
+    const tasks = taskStore.getByTeam('ops');
+    expect(tasks.length).toBeGreaterThanOrEqual(1);
+    expect(tasks[0].priority).toBe('critical');
+    expect(tasks[0].task).toContain('Bootstrap');
+
+    // Skill loading works (empty initially, then write one)
+    expect(loadSkillsContent(dir, 'ops')).toBe('');
+    writeFileSync(join(dir, 'teams', 'ops', 'skills', 'check-logs.md'), '# Check Logs\nStep 1: Query API');
+    const skills = loadSkillsContent(dir, 'ops');
+    expect(skills).toContain('Check Logs');
+
+    // Context builder returns correct paths
+    const ctx = buildSessionContext('ops', dir);
+    expect(ctx.cwd).toBe(join(dir, 'teams', 'ops', 'workspace'));
+    expect(ctx.additionalDirectories).toContain(join(dir, 'teams', 'ops', 'memory'));
+    expect(ctx.additionalDirectories).toContain(join(dir, 'teams', 'ops', 'skills'));
+
+    raw.close();
+  });
+
+  it('failed init task is retried on recovery', () => {
+    const dir = makeTempDir();
+    const { db, raw } = makeDb(dir);
+    const orgStore = new OrgStore(db);
+    const taskStore = new TaskQueueStore(db);
+    const tree = new OrgTree(orgStore);
+    mkdirSync(join(dir, 'teams', 'ops'), { recursive: true });
+    writeFileSync(join(dir, 'teams', 'ops', 'config.yaml'), 'name: ops\n');
+    orgStore.addTeam(makeNode({ teamId: 'ops', name: 'ops' }));
+
+    // Enqueue and fail a bootstrap task
+    const tid = taskStore.enqueue('ops', 'Bootstrap this team. Create skills.', 'critical');
+    taskStore.dequeue('ops'); // moves to running
+    taskStore.updateStatus(tid, TaskStatus.Failed);
+    expect(taskStore.getByStatus(TaskStatus.Failed)).toHaveLength(1);
+
+    // Run recovery
+    const result = recoverFromCrash({ orgStore, taskQueueStore: taskStore, orgTree: tree, runDir: dir, logger: noop });
+    expect(result.recovered).toBeGreaterThanOrEqual(1);
+
+    // Failed bootstrap task should now be pending again
+    const pending = taskStore.getByStatus(TaskStatus.Pending);
+    expect(pending.some(t => t.task.startsWith('Bootstrap'))).toBe(true);
+
+    raw.close();
+  });
+});
