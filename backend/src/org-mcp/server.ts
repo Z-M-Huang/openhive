@@ -170,21 +170,16 @@ export async function createOrgMcpServer(deps: OrgMcpDeps): Promise<OrgMcpServer
     deps.log('SDK MCP server initialization failed — org tools unavailable via SDK path', { error: errMsg });
   }
 
-  // Cache team-scoped SDK servers — each team gets exactly one instance to avoid
-  // "Already connected to a transport" errors from the SDK protocol layer.
-  const teamSdkServers = new Map<string, unknown>();
+  // Create a fresh SDK server per request — each SDK query() needs its own
+  // server instance because the protocol binds to a transport on connection.
+  // Concurrent messages to the same team each get their own instance.
 
   return {
     sdkServer,
     tools,
     createTeamSdkServer(teamName: string): unknown {
       if (!sdkModule) return null;
-      let server = teamSdkServers.get(teamName);
-      if (!server) {
-        server = buildSdkServer(sdkModule, teamName);
-        teamSdkServers.set(teamName, server);
-      }
-      return server;
+      return buildSdkServer(sdkModule, teamName);
     },
     async invoke(toolName: string, input: unknown, callerId: string): Promise<unknown> {
       const tool = tools.get(toolName);
