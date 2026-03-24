@@ -2,15 +2,16 @@
  * Message handler — routes inbound channel messages to SDK sessions.
  *
  * V1 contract: ALL inbound messages go to the `main` team.
- * No scope routing for inbound messages (main delegates via MCP tools).
+ * Uses the Claude Agent SDK query() to spawn sessions.
+ * Pattern follows v2's executor/sdk-runner.ts.
  */
 
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { loadTeamConfig } from '../config/loader.js';
 import { buildQueryOptions } from './query-options.js';
-import { spawnSession } from './spawner.js';
 import type { QueryFn, SdkMessage } from './spawner.js';
+import { spawnSession } from './spawner.js';
 import type { ChannelMessage } from '../domain/interfaces.js';
 import type { ProvidersOutput } from '../config/validation.js';
 import type { TeamConfig } from '../domain/types.js';
@@ -30,32 +31,52 @@ export interface MessageHandlerDeps {
   };
 }
 
-/** Extract text from SDK messages. */
-function extractText(messages: readonly SdkMessage[]): string {
-  return messages
-    .filter(m => m.type === 'text' && typeof m.content === 'string')
-    .map(m => m.content as string)
-    .join('\n')
-    .trim();
-}
-
 /** Load team config from disk, or return undefined. */
 function loadConfig(runDir: string, teamName: string): TeamConfig | undefined {
   const path = join(runDir, 'teams', teamName, 'config.yaml');
   if (!existsSync(path)) return undefined;
-  try {
-    return loadTeamConfig(path);
-  } catch {
-    return undefined;
-  }
+  try { return loadTeamConfig(path); } catch { return undefined; }
 }
 
 /**
- * Handle an inbound message by spawning an SDK session for the main team.
- *
- * @param msg       The channel message.
- * @param deps      Shared dependencies.
- * @param queryFn   Injectable query function (for testing).
+ * Extract text from SDK messages (v2 pattern).
+ * Handles 'assistant' messages with content blocks and 'result' messages.
+ */
+function extractText(messages: readonly SdkMessage[]): string {
+  let output = '';
+  for (const msg of messages) {
+    if (msg.type === 'assistant' && msg.content) {
+      const message = msg.content as { content?: Array<{ type: string; text?: string }> };
+      if (message.content) {
+        for (const block of message.content) {
+          if (block.type === 'text' && block.text) output += block.text;
+        }
+      }
+    }
+    if (msg.type === 'result') {
+      const result = msg as unknown as { result?: string };
+      if (result.result) output = result.result;
+    }
+    // Simple text content fallback
+    if (msg.type === 'text' && typeof msg.content === 'string') {
+      output += msg.content;
+    }
+  }
+  return output.trim();
+}
+
+/**
+ * Create an SDK-compatible queryFn that wraps the real SDK query().
+ * Matches v2's runAgentQuery pattern: sdk.query({ prompt, options }).
+ */
+async function createSdkQueryFn(): Promise<QueryFn> {
+  const sdk = await import('@anthropic-ai/claude-agent-sdk');
+  return (prompt: string, options: Record<string, unknown>) =>
+    sdk.query({ prompt, options }) as AsyncIterable<SdkMessage>;
+}
+
+/**
+ * Handle an inbound message by spawning an SDK session.
  */
 export async function handleMessage(
   msg: ChannelMessage,
@@ -63,35 +84,41 @@ export async function handleMessage(
   queryFn?: QueryFn,
   teamName: string = 'main',
 ): Promise<string | void> {
-
   const teamConfig = loadConfig(deps.runDir, teamName);
   if (!teamConfig) {
-    deps.logger.info('No main team config found, cannot process message');
     return 'OpenHive is not configured yet. Please set up providers.yaml and restart.';
   }
 
   try {
     const opts = buildQueryOptions({
-      teamName,
-      teamConfig,
-      runDir: deps.runDir,
-      dataDir: deps.dataDir,
-      systemRulesDir: deps.systemRulesDir,
-      providers: deps.providers,
-      orgMcpServer: deps.orgMcpServer,
+      teamName, teamConfig,
+      runDir: deps.runDir, dataDir: deps.dataDir, systemRulesDir: deps.systemRulesDir,
+      providers: deps.providers, orgMcpServer: deps.orgMcpServer,
       availableMcpServers: deps.availableMcpServers,
-      ancestors: deps.orgAncestors,
-      logger: deps.logger,
+      ancestors: deps.orgAncestors, logger: deps.logger,
     });
 
-    // Use injected queryFn for testing, or the real SDK query
-    const qFn = queryFn ?? (await import('@anthropic-ai/claude-agent-sdk')).query;
-    const result = await spawnSession(msg.content, opts, qFn as QueryFn);
+    for (const [k, v] of Object.entries(opts.env)) { process.env[k] = v; }
+    // Pass only SDK-compatible options (strip functions that can't serialize to child process)
+    const sdkOpts: Record<string, unknown> = {
+      model: opts.model,
+      permissionMode: opts.permissionMode,
+      allowDangerouslySkipPermissions: opts.allowDangerouslySkipPermissions,
+      pathToClaudeCodeExecutable: opts.pathToClaudeCodeExecutable,
+      maxTurns: opts.maxTurns,
+      cwd: opts.cwd,
+      additionalDirectories: opts.additionalDirectories,
+      systemPrompt: opts.systemPrompt,
+      tools: opts.tools,
+      env: opts.env,
+    };
+    const qFn = queryFn ?? await createSdkQueryFn();
+    const result = await spawnSession(msg.content, sdkOpts, qFn);
     const text = extractText(result.messages);
     return text || undefined;
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
-    deps.logger.info('Message handler error', { error: errMsg, channelId: msg.channelId });
+    deps.logger.info(`Message handler error: ${errMsg}`);
     return `Error processing message: ${errMsg}`;
   }
 }

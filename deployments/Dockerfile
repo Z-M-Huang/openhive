@@ -38,7 +38,10 @@ RUN cd backend && ./node_modules/.bin/tsc
 # ── Production ──────────────────────────────────────────────────────────────
 FROM node:22-bookworm-slim
 
-# Runtime system dependencies
+# Runtime system dependencies:
+#   - Python 3 with pip + venv (for Claude Agent SDK / tool use)
+#   - curl (health checks, debugging)
+#   - Chromium runtime libs (for Playwright browse_web tool)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         python3 \
@@ -53,20 +56,22 @@ RUN apt-get update && \
 # Install bun runtime
 RUN npm install -g bun@1.3.10
 
-# Install Claude Code CLI (required by Claude Agent SDK)
-RUN npm install -g @anthropic-ai/claude-code@latest
+# Install Claude Code CLI as non-root user.
+# Claude Code refuses --dangerously-skip-permissions when running as root.
+USER node
+RUN curl -fsSL https://claude.ai/install.sh | bash
+ENV PATH="/home/node/.local/bin:$PATH"
 
 USER root
-WORKDIR /app
 
 # Copy compiled backend
-COPY --from=builder /build/backend/dist/ backend/dist/
-COPY --from=builder /build/backend/package.json backend/
-COPY --from=builder /build/package.json .
-COPY --from=builder /build/node_modules/ node_modules/
-COPY --from=builder /build/backend/node_modules/ backend/node_modules/
+COPY --from=builder /build/backend/dist/ /app/backend/dist/
+COPY --from=builder /build/backend/package.json /app/backend/
+COPY --from=builder /build/package.json /app/
+COPY --from=builder /build/node_modules/ /app/node_modules/
+COPY --from=builder /build/backend/node_modules/ /app/backend/node_modules/
 
-# Copy Playwright browsers
+# Copy Playwright browsers from builder
 ENV PLAYWRIGHT_BROWSERS_PATH=/app/browsers
 COPY --from=builder /app/browsers /app/browsers
 
@@ -81,6 +86,7 @@ RUN mkdir -p /app/.run /data/config /data/rules
 
 # Ensure non-root user owns app directories
 RUN chown -R node:node /app /data
+WORKDIR /app/backend
 
 # Docker GID for socket access (override with --build-arg DOCKER_GID=<gid>)
 ARG DOCKER_GID=0
@@ -100,4 +106,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
 
 EXPOSE 8080
 
-CMD ["node", "backend/dist/index.js"]
+CMD ["node", "dist/index.js"]

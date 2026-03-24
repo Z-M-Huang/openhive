@@ -38,6 +38,7 @@ export interface QueryOptions {
   readonly cwd: string;
   readonly additionalDirectories: string[];
   readonly agents: SubagentDef[];
+  readonly pathToClaudeCodeExecutable: string;
 }
 
 export interface BuildQueryOptionsInput {
@@ -116,6 +117,7 @@ export function buildQueryOptions(opts: BuildQueryOptionsInput): QueryOptions {
     model,
     permissionMode: 'bypassPermissions',
     allowDangerouslySkipPermissions: true,
+    pathToClaudeCodeExecutable: '/home/node/.local/bin/claude',
     maxTurns: opts.teamConfig.maxTurns,
     mcpServers,
     canUseTool,

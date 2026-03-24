@@ -202,6 +202,13 @@ const handleSignal = (): void => {
 
 process.on('SIGTERM', handleSignal);
 process.on('SIGINT', handleSignal);
+// Prevent SDK subprocess EPIPE from crashing the server
+process.on('uncaughtException', (err) => {
+  if ('code' in err && err.code === 'EPIPE') return; // ignore broken pipe from SDK child
+  // eslint-disable-next-line no-console
+  console.error('Uncaught exception:', err);
+  process.exit(1);
+});
 
 // Auto-start unless running in test
 const isTest = process.env['VITEST'] !== undefined

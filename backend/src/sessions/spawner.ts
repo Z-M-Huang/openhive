@@ -15,7 +15,10 @@ export interface SpawnResult {
   readonly messages: SdkMessage[];
 }
 
-/** Function signature matching SDK query(). */
+/**
+ * QueryFn signature for testing — takes (prompt, options) separately.
+ * The real SDK query takes { prompt, options: {...} } but we wrap it.
+ */
 export type QueryFn = (
   prompt: string,
   options: Record<string, unknown>,
