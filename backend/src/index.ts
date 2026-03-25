@@ -66,14 +66,13 @@ export interface BootstrapResult {
 
 function loadOrGenerateConfig(
   runDir: string, name: string, configPath?: string,
-  hints?: { description?: string; scopeAccepts?: string[]; scopeRejects?: string[]; parent?: string },
+  hints?: { description?: string; scopeAccepts?: string[]; parent?: string },
 ) {
   if (configPath) return loadTeamConfig(configPath);
   const path = join(runDir, 'teams', name, 'config.yaml');
   if (existsSync(path)) return loadTeamConfig(path);
   return {
     name, parent: hints?.parent ?? null, description: hints?.description ?? '',
-    scope: { accepts: hints?.scopeAccepts ?? [] as string[], rejects: hints?.scopeRejects ?? [] as string[] },
     allowed_tools: ['*'],
     mcp_servers: ['org'], provider_profile: 'default', maxTurns: 100,
   };
@@ -105,7 +104,7 @@ function buildOrgMcpDeps(
     taskQueue: opts.taskQueueStore,
     escalationStore: opts.escalationStore,
     runDir: opts.runDir,
-    loadConfig: (name: string, cp?: string, hints?: { description?: string; scopeAccepts?: string[]; scopeRejects?: string[] }) =>
+    loadConfig: (name: string, cp?: string, hints?: { description?: string; scopeAccepts?: string[] }) =>
       loadOrGenerateConfig(opts.runDir, name, cp, hints),
     getTeamConfig: (id: string) => safeLoadConfig(opts.runDir, id),
     log: (msg, meta) => opts.logger.info(meta ?? {}, msg),

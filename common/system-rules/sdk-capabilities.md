@@ -13,7 +13,7 @@ Your session has access to these tools (subject to `allowed_tools` config):
 
 ## MCP Servers
 
-- **org-mcp** — Always available. Provides the 7 organization tools (spawn_team, delegate_task, query_team, escalate, send_message, get_status, shutdown_team).
+- **org-mcp** — Always available. Provides the 8 organization tools (spawn_team, delegate_task, query_team, escalate, send_message, get_status, list_teams, shutdown_team).
 - Additional MCP servers as configured in team config.
 
 ## Skills and Subagents
@@ -25,13 +25,13 @@ Your session has access to these tools (subject to `allowed_tools` config):
 
 **IMPORTANT:** Do NOT use Claude Code's built-in auto-memory system (`~/.claude/projects/*/memory/`). OpenHive has its own memory system.
 
-Your team memory is at `../memory/MEMORY.md` (relative to CWD). It is **auto-injected** into every session — this is your ONLY continuity between messages.
+Your team memory is at `memory/MEMORY.md` (relative to CWD). It is **auto-injected** into every session — this is your ONLY continuity between messages.
 
 ### Memory Protocol
 
-1. **Before writing**: Read the current `../memory/MEMORY.md` first (if it exists)
+1. **Before writing**: Read the current `memory/MEMORY.md` first (if it exists)
 2. **Merge**: Combine existing content with new information — never blind-overwrite
-3. **Write**: Save the merged result back to `../memory/MEMORY.md`
+3. **Write**: Save the merged result back to `memory/MEMORY.md`
 
 ### When to Update Memory
 
@@ -56,8 +56,8 @@ Keep it concise and dated:
 - ...
 ```
 
-- Other files in `../memory/` are available via Read but NOT auto-injected
-- When asked to remember something, write to `../memory/MEMORY.md` — NOT to Claude's internal memory
+- Other files in `memory/` are available via Read but NOT auto-injected
+- When asked to remember something, write to `memory/MEMORY.md` — NOT to Claude's internal memory
 
 ## Credentials
 

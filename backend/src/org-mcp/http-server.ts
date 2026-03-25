@@ -16,7 +16,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { buildToolDefs, extractShape, type OrgMcpDeps } from './registry.js';
 
 /**
- * Create a fresh McpServer instance with all 7 org tools, callerId baked in.
+ * Create a fresh McpServer instance with all 8 org tools, callerId baked in.
  */
 function createOrgMcpInstance(deps: OrgMcpDeps, callerId: string): McpServer {
   const server = new McpServer({ name: 'org', version: '1.0.0' });

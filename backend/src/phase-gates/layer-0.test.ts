@@ -75,7 +75,7 @@ describe('Layer 0: Domain type shapes', () => {
 
     expect(team.name).toBe('test-team');
     expect(team.parent).toBeNull();
-    expect(team.scope.accepts).toEqual(['*']);
+    expect(team.scope?.accepts).toEqual(['*']);
     expect(team.maxTurns).toBe(10);
   });
 
@@ -214,6 +214,10 @@ describe('Layer 0: Interfaces exist', () => {
       getChildren: () => [],
       getAncestors: () => [],
       getAll: () => [],
+      addScopeKeywords: () => {},
+      removeScopeKeywords: () => {},
+      getOwnScope: () => [],
+      getEffectiveScope: () => [],
     };
 
     expect(orgStore.getTeam).toBeDefined();

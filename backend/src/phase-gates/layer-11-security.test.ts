@@ -31,6 +31,10 @@ function memoryOrgStore(): IOrgStore {
     getChildren(pid: string) { return [...data.values()].filter((n) => n.parentId === pid); },
     getAncestors() { return []; },
     getAll() { return [...data.values()]; },
+    addScopeKeywords() {},
+    removeScopeKeywords() {},
+    getOwnScope() { return []; },
+    getEffectiveScope() { return []; },
   };
 }
 
@@ -95,7 +99,6 @@ describe('E2E-11: Tool defense bypass -- 3 layers', () => {
     const configs = new Map<string, TeamConfig>();
     configs.set('team-a', {
       name: 'team-a', parent: 'root', description: '', maxTurns: 50,
-      scope: { accepts: ['task'], rejects: [] },
       allowed_tools: [], mcp_servers: [], provider_profile: 'default',
     });
 

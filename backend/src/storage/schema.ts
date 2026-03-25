@@ -1,7 +1,7 @@
 /**
  * Drizzle ORM schema definitions for OpenHive v3.
  *
- * 6 tables: org_tree, task_queue, trigger_dedup, team_status, log_entries, escalation_correlations
+ * 7 tables: org_tree, scope_keywords, task_queue, trigger_dedup, team_status, log_entries, escalation_correlations
  */
 
 import {
@@ -21,6 +21,19 @@ export const orgTree = sqliteTable('org_tree', {
   status: text('status').notNull().default('idle'),
   createdAt: text('created_at').notNull(),
 });
+
+// ── scope_keywords ─────────────────────────────────────────────────────────
+
+export const scopeKeywords = sqliteTable(
+  'scope_keywords',
+  {
+    teamId: text('team_id').notNull(),
+    keyword: text('keyword').notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.teamId, table.keyword] }),
+  ],
+);
 
 // ── task_queue ──────────────────────────────────────────────────────────────
 

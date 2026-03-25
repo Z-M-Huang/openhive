@@ -35,7 +35,8 @@ export interface TeamConfig {
   readonly name: string;
   readonly parent: string | null;
   readonly description: string;
-  readonly scope: TeamScope;
+  /** @deprecated Scope is now stored in SQLite scope_keywords table. */
+  readonly scope?: TeamScope;
   readonly allowed_tools: readonly string[];
   readonly mcp_servers: readonly string[];
   readonly provider_profile: string;

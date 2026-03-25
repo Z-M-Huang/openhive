@@ -14,17 +14,11 @@ export interface SessionContext {
   readonly additionalDirectories: string[];
 }
 
-/** Subdirectories under teams/{name}/ that agents may access. */
-const ADDITIONAL_SUBDIRS = [
-  'memory',
-  'org-rules',
-  'team-rules',
-  'skills',
-  'subagents',
-] as const;
-
 /**
  * Build the session context (cwd, additionalDirectories).
+ *
+ * CWD is the team directory itself (teams/{name}/), so agents can
+ * naturally access memory/, skills/, etc. without path hacks.
  *
  * @param teamName  Team slug.
  * @param runDir    Absolute path to the runtime workspace root (.run/).
@@ -33,12 +27,6 @@ export function buildSessionContext(
   teamName: string,
   runDir: string,
 ): SessionContext {
-  const teamDir = join(runDir, 'teams', teamName);
-  const cwd = join(teamDir, 'workspace');
-
-  const additionalDirectories = ADDITIONAL_SUBDIRS.map(
-    (sub) => join(teamDir, sub),
-  );
-
-  return { cwd, additionalDirectories };
+  const cwd = join(runDir, 'teams', teamName);
+  return { cwd, additionalDirectories: [] };
 }

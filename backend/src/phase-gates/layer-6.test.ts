@@ -53,7 +53,6 @@ function makeTeamConfig(overrides?: Partial<TeamConfig>): TeamConfig {
     name: 'test-team',
     parent: null,
     description: 'A test team',
-    scope: { accepts: ['weather'], rejects: ['admin'] },
     allowed_tools: ['Read', 'Write', 'Edit', 'mcp__org__*'],
     mcp_servers: ['org'],
     provider_profile: 'default',
@@ -251,19 +250,12 @@ describe('UT-18: Provider Resolver', () => {
 describe('UT-7: Context Builder', () => {
   it('produces correct cwd', () => {
     const ctx = buildSessionContext('weather-team', '/run');
-    expect(ctx.cwd).toBe(join('/run', 'teams', 'weather-team', 'workspace'));
+    expect(ctx.cwd).toBe(join('/run', 'teams', 'weather-team'));
   });
 
-  it('produces correct additionalDirectories', () => {
+  it('produces empty additionalDirectories', () => {
     const ctx = buildSessionContext('weather-team', '/run');
-    const expected = [
-      join('/run', 'teams', 'weather-team', 'memory'),
-      join('/run', 'teams', 'weather-team', 'org-rules'),
-      join('/run', 'teams', 'weather-team', 'team-rules'),
-      join('/run', 'teams', 'weather-team', 'skills'),
-      join('/run', 'teams', 'weather-team', 'subagents'),
-    ];
-    expect(ctx.additionalDirectories).toEqual(expected);
+    expect(ctx.additionalDirectories).toEqual([]);
   });
 });
 
@@ -327,10 +319,10 @@ describe('UT-7: Query Options Assembler', () => {
     expect(opts.env['ANTHROPIC_API_KEY']).toBe(TEST_KEY_VALUE);
 
     // cwd
-    expect(opts.cwd).toBe(join('/run', 'teams', 'weather-team', 'workspace'));
+    expect(opts.cwd).toBe(join('/run', 'teams', 'weather-team'));
 
     // additionalDirectories
-    expect(opts.additionalDirectories.length).toBe(5);
+    expect(opts.additionalDirectories).toEqual([]);
   });
 });
 

@@ -167,7 +167,7 @@ export function ensureMainTeam(runDir: string, orgTree: OrgTree): void {
   const mainDir = join(runDir, 'teams', 'main');
   const configPath = join(mainDir, 'config.yaml');
 
-  const subdirs = ['workspace', 'memory', 'org-rules', 'team-rules', 'skills', 'subagents'];
+  const subdirs = ['memory', 'org-rules', 'team-rules', 'skills', 'subagents'];
   for (const sub of subdirs) {
     mkdirSync(join(mainDir, sub), { recursive: true });
   }
@@ -175,7 +175,6 @@ export function ensureMainTeam(runDir: string, orgTree: OrgTree): void {
   if (!existsSync(configPath)) {
     const config = {
       name: 'main', description: 'Main orchestrator',
-      scope: { accepts: [], rejects: [] },
       allowed_tools: ['*'],
       mcp_servers: ['org'], provider_profile: 'default', maxTurns: 200,
     };

@@ -1,5 +1,5 @@
 /**
- * Org-MCP tool registry — single source of truth for all 7 org tool definitions.
+ * Org-MCP tool registry — single source of truth for all 8 org tool definitions.
  *
  * Provides:
  * - buildToolDefs(): pure data array of tool definitions
@@ -27,6 +27,7 @@ import { EscalateInputSchema, escalate } from './tools/escalate.js';
 import { SendMessageInputSchema, sendMessage } from './tools/send-message.js';
 import { GetStatusInputSchema, getStatus } from './tools/get-status.js';
 import { QueryTeamInputSchema, queryTeam } from './tools/query-team.js';
+import { ListTeamsInputSchema, listTeams } from './tools/list-teams.js';
 
 export interface ToolDefinition {
   readonly name: string;
@@ -83,7 +84,7 @@ export function buildToolDefs(deps: OrgMcpDeps): ToolDefinition[] {
     },
     {
       name: 'delegate_task',
-      description: 'Delegate a task to a child team with scope admission',
+      description: 'Delegate a task to a child team',
       inputSchema: DelegateTaskInputSchema,
       handler: (input, callerId) => Promise.resolve(delegateTask(input as never, callerId, deps)),
     },
@@ -104,6 +105,12 @@ export function buildToolDefs(deps: OrgMcpDeps): ToolDefinition[] {
       description: 'Get status of child teams including queue depth',
       inputSchema: GetStatusInputSchema,
       handler: (input, callerId) => Promise.resolve(getStatus(input as never, callerId, deps)),
+    },
+    {
+      name: 'list_teams',
+      description: 'List child teams with descriptions, scope keywords, and status for routing decisions',
+      inputSchema: ListTeamsInputSchema,
+      handler: (input, callerId) => Promise.resolve(listTeams(input as never, callerId, deps)),
     },
     {
       name: 'query_team',

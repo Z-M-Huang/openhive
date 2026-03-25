@@ -1,15 +1,13 @@
 /**
- * delegate_task tool — delegates a task to a child team with scope admission.
+ * delegate_task tool — delegates a task to a child team.
  *
  * Input: {team: string, task: string, priority?: 'critical'|'high'|'normal'|'low'}
- * Validates caller is parent. Runs scope admission. Enqueues to priority queue.
+ * Validates caller is parent. Enqueues to priority queue.
  */
 
 import { z } from 'zod';
 import type { OrgTree } from '../../domain/org-tree.js';
 import type { ITaskQueueStore } from '../../domain/interfaces.js';
-import type { TeamConfig } from '../../domain/types.js';
-import { checkScopeAdmission } from '../scope-admission.js';
 
 export const DelegateTaskInputSchema = z.object({
   team: z.string().min(1),
@@ -29,7 +27,6 @@ export interface DelegateTaskResult {
 export interface DelegateTaskDeps {
   readonly orgTree: OrgTree;
   readonly taskQueue: ITaskQueueStore;
-  readonly getTeamConfig: (teamId: string) => TeamConfig | undefined;
   readonly log: (msg: string, meta?: Record<string, unknown>) => void;
 }
 
@@ -54,17 +51,6 @@ export function delegateTask(
   // Validate caller is parent of target team
   if (targetTeam.parentId !== callerId) {
     return { success: false, reason: 'caller is not parent of target team' };
-  }
-
-  // Run scope admission check (fail-closed: reject if config not loadable)
-  const config = deps.getTeamConfig(team);
-  if (!config) {
-    deps.log(`scope check failed: config not loadable for team "${team}"`);
-    return { success: false, reason: `config not loadable for team "${team}" — cannot verify scope`, team };
-  }
-  const admission = checkScopeAdmission(task, config.scope);
-  if (!admission.admitted) {
-    return { success: false, reason: admission.reason, team };
   }
 
   // Enqueue task

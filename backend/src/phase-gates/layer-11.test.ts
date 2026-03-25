@@ -54,7 +54,6 @@ function makeNode(o: Partial<OrgTreeNode> & { teamId: string; name: string }): O
 function makeConfig(o?: Partial<TeamConfig>): TeamConfig {
   return {
     name: 'test-team', parent: null, description: '', maxTurns: 50,
-    scope: { accepts: ['weather'], rejects: ['admin'] },
     allowed_tools: [], mcp_servers: [], provider_profile: 'default', ...o,
   };
 }
@@ -203,7 +202,7 @@ describe('E2E-5: Org MCP 6 tools with real stores', () => {
     const escStore = new EscalationStore(db);
     const tree = new OrgTree(orgStore);
     const configs = new Map<string, TeamConfig>();
-    configs.set('ops', makeConfig({ name: 'ops', scope: { accepts: ['deploy'], rejects: ['admin'] } }));
+    configs.set('ops', makeConfig({ name: 'ops' }));
 
     const deps: OrgMcpDeps = {
       orgTree: tree, taskQueue: taskStore, escalationStore: escStore,
@@ -376,7 +375,7 @@ describe('E2E-10: Full integration chain', () => {
     const trigStore = new TriggerStore(db);
     const tree = new OrgTree(orgStore);
     const configs = new Map<string, TeamConfig>();
-    configs.set('weather', makeConfig({ name: 'weather', scope: { accepts: ['weather', 'forecast'], rejects: [] } }));
+    configs.set('weather', makeConfig({ name: 'weather' }));
 
     const mcpDeps: OrgMcpDeps = {
       orgTree: tree, taskQueue: taskStore, escalationStore: escStore,
@@ -451,10 +450,9 @@ describe('E2E-11: Spawned team operational readiness', () => {
       orgTree: tree, taskQueue: taskStore, escalationStore: escStore,
       spawner: { spawn: async () => 'sid' },
       sessionManager: { getSession: async () => null, terminateSession: async () => {} },
-      loadConfig: (n: string, _cp?: string, hints?: { description?: string; scopeAccepts?: string[]; scopeRejects?: string[] }) => {
+      loadConfig: (n: string, _cp?: string, hints?: { description?: string; scopeAccepts?: string[] }) => {
         const cfg = configs.get(n) ?? makeConfig({
           name: n, description: hints?.description ?? '',
-          scope: { accepts: hints?.scopeAccepts ?? [], rejects: hints?.scopeRejects ?? [] },
         });
         return cfg;
       },
@@ -476,7 +474,7 @@ describe('E2E-11: Spawned team operational readiness', () => {
     expect(result.success).toBe(true);
 
     // Verify all subdirs exist
-    for (const sub of ['workspace', 'memory', 'org-rules', 'team-rules', 'skills', 'subagents']) {
+    for (const sub of ['memory', 'org-rules', 'team-rules', 'skills', 'subagents']) {
       expect(existsSync(join(dir, 'teams', 'ops', sub))).toBe(true);
     }
 
@@ -507,9 +505,8 @@ describe('E2E-11: Spawned team operational readiness', () => {
 
     // Context builder returns correct paths
     const ctx = buildSessionContext('ops', dir);
-    expect(ctx.cwd).toBe(join(dir, 'teams', 'ops', 'workspace'));
-    expect(ctx.additionalDirectories).toContain(join(dir, 'teams', 'ops', 'memory'));
-    expect(ctx.additionalDirectories).toContain(join(dir, 'teams', 'ops', 'skills'));
+    expect(ctx.cwd).toBe(join(dir, 'teams', 'ops'));
+    expect(ctx.additionalDirectories).toEqual([]);
 
     raw.close();
   });

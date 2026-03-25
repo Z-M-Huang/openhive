@@ -73,6 +73,10 @@ function createMemoryOrgStore(): IOrgStore {
     getAll(): OrgTreeNode[] {
       return [...data.values()];
     },
+    addScopeKeywords(): void {},
+    removeScopeKeywords(): void {},
+    getOwnScope(): string[] { return []; },
+    getEffectiveScope(): string[] { return []; },
   };
 }
 

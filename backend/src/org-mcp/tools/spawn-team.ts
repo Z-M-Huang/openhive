@@ -1,7 +1,7 @@
 /**
  * spawn_team tool — creates a new team in the org tree and spawns its session.
  *
- * Input: {name, config_path?, description?, scope_accepts?, scope_rejects?,
+ * Input: {name, config_path?, description?, scope_accepts?,
  *         init_context?, credentials?}
  *
  * Config is loaded via deps.loadConfig which either reads an existing
@@ -30,7 +30,6 @@ export const SpawnTeamInputSchema = z.object({
   config_path: z.string().optional(),
   description: z.string().optional(),
   scope_accepts: z.array(z.string().trim().min(1)).optional(),
-  scope_rejects: z.array(z.string()).optional(),
   init_context: z.string().optional(),
   credentials: z.record(z.string(), z.string()).optional(),
 }).refine(
@@ -50,7 +49,6 @@ export interface SpawnTeamResult {
 export interface SpawnTeamConfigHints {
   readonly description?: string;
   readonly scopeAccepts?: string[];
-  readonly scopeRejects?: string[];
   readonly parent?: string;
 }
 
@@ -64,7 +62,7 @@ export interface SpawnTeamDeps {
 
 /** Subdirectories to scaffold for each new team. */
 const TEAM_SUBDIRS = [
-  'workspace', 'memory', 'org-rules', 'team-rules', 'skills', 'subagents',
+  'memory', 'org-rules', 'team-rules', 'skills', 'subagents',
 ] as const;
 
 /** Scaffold the team directory structure under .run/teams/{name}/. */
@@ -113,7 +111,6 @@ export async function spawnTeam(
     const hints: SpawnTeamConfigHints = {
       description: parsed.data.description,
       scopeAccepts: parsed.data.scope_accepts,
-      scopeRejects: parsed.data.scope_rejects,
       parent: callerId,
     };
     config = deps.loadConfig(name, config_path, hints);
@@ -160,6 +157,15 @@ export async function spawnTeam(
     agents: [],
     children: [],
   });
+
+  // Write scope keywords to SQLite
+  if (parsed.data.scope_accepts && parsed.data.scope_accepts.length > 0) {
+    deps.orgTree.addScopeKeywords(name, parsed.data.scope_accepts);
+  }
+  // Backward compat: if loaded from config_path with legacy scope.accepts, backfill SQLite
+  if (config.scope?.accepts && config.scope.accepts.length > 0 && !parsed.data.scope_accepts) {
+    deps.orgTree.addScopeKeywords(name, [...config.scope.accepts]);
+  }
 
   // Spawn the session
   try {

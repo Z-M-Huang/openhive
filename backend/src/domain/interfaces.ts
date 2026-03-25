@@ -51,6 +51,10 @@ export interface IOrgStore {
   getChildren(parentId: string): OrgTreeNode[];
   getAncestors(id: string): OrgTreeNode[];
   getAll(): OrgTreeNode[];
+  addScopeKeywords(teamId: string, keywords: string[]): void;
+  removeScopeKeywords(teamId: string): void;
+  getOwnScope(teamId: string): string[];
+  getEffectiveScope(teamId: string): string[];
 }
 
 export interface ITaskQueueStore {

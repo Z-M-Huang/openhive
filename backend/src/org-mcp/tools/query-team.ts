@@ -5,14 +5,13 @@
  * SDK session completes and returns the response text to the caller.
  *
  * Input: { team: string, query: string }
- * Validates caller is parent. Runs scope admission. Calls queryRunner blocking.
+ * Validates caller is parent. Calls queryRunner blocking.
  */
 
 import { z } from 'zod';
 import type { OrgTree } from '../../domain/org-tree.js';
 import type { TeamConfig } from '../../domain/types.js';
 import type { TeamQueryRunner } from '../registry.js';
-import { checkScopeAdmission } from '../scope-admission.js';
 import { scrubSecrets } from '../../logging/credential-scrubber.js';
 
 export const QueryTeamInputSchema = z.object({
@@ -58,17 +57,6 @@ export async function queryTeam(
     return { success: false, error: 'caller is not parent of target team' };
   }
 
-  // Run scope admission check (fail-closed: reject if config not loadable)
-  const config = deps.getTeamConfig(team);
-  if (!config) {
-    deps.log(`scope check failed: config not loadable for team "${team}"`);
-    return { success: false, error: `config not loadable for team "${team}" — cannot verify scope` };
-  }
-  const admission = checkScopeAdmission(query, config.scope);
-  if (!admission.admitted) {
-    return { success: false, error: admission.reason };
-  }
-
   // Check queryRunner is available
   if (!deps.queryRunner) {
     return { success: false, error: 'query_team not available: providers not configured' };
@@ -93,7 +81,8 @@ export async function queryTeam(
     }
 
     // Scrub child team credential values from response
-    const childCreds = config.credentials ?? {};
+    const config = deps.getTeamConfig(team);
+    const childCreds = config?.credentials ?? {};
     const childCredValues = Object.values(childCreds).filter(
       (v): v is string => typeof v === 'string' && v.length >= 8,
     );

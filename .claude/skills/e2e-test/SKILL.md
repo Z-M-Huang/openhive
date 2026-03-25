@@ -75,7 +75,7 @@ Infrastructure:
 □ Docker inspect health status = "healthy"
 □ .run/teams/, .run/shared/, .run/backups/ directories exist in container
 □ Main team config.yaml has name=main, mcp_servers includes org
-□ Main team has all 6 subdirs: workspace, memory, org-rules, team-rules, skills, subagents
+□ Main team has all 5 subdirs: memory, org-rules, team-rules, skills, subagents
 □ /data/rules/escalation-policy.md exists and contains "escalation"
 □ /app/system-rules/ has .md files
 □ Container logs contain "OpenHive v3 started"
@@ -179,9 +179,10 @@ Scenario 1 runs on the Phase A state (already clean). All other scenarios get fr
    - OBSERVE: What did the AI claim?
 
 2. INDEPENDENT VERIFICATION (don't trust the AI):
-   - `ls .run/teams/ops-team/` → all 6 subdirs?
-   - `cat .run/teams/ops-team/config.yaml` → name correct? description? scope has monitoring+logs? mcp_servers has org?
+   - `ls .run/teams/ops-team/` → all 5 subdirs (memory, org-rules, team-rules, skills, subagents)?
+   - `cat .run/teams/ops-team/config.yaml` → name correct? description? mcp_servers has org?
    - SQLite: `SELECT name, parent_id FROM org_tree WHERE name='ops-team'` → exists with parent=main?
+   - SQLite: `SELECT keyword FROM scope_keywords WHERE team_id='ops-team'` → has monitoring+logs?
    - SQLite: `SELECT task, priority, status FROM task_queue WHERE team_id='ops-team'` → bootstrap task?
 
 3. WAIT for bootstrap (poll every 3s for 60s):
@@ -261,11 +262,11 @@ Scenario 1 runs on the Phase A state (already clean). All other scenarios get fr
 
 ---
 
-### Scenario 6: Multi-Team Scope & Routing
+### Scenario 6: Multi-Team Routing & Isolation
 
 **Run Clean Restart Helper before starting this scenario.**
 
-**Purpose:** Scope admission works. Siblings isolated.
+**Purpose:** LLM routes tasks to correct teams using list_teams. Siblings isolated.
 
 1. Create team-a (accepts: operations, monitoring) and team-b (accepts: development, coding)
 2. VERIFY: Both in org_tree with parent_id=main, both have org in mcp_servers
@@ -273,17 +274,19 @@ Scenario 1 runs on the Phase A state (already clean). All other scenarios get fr
 3. Send: "Get the status of team-a"
    - VERIFY: get_status response received
 
-4. Send: "Ask team-a about monitoring tasks"
-   - VERIFY: task_queue shows task for team-a
+4. Send: "Ask team-b to help with some coding tasks"
+   - VERIFY: task_queue shows task for team-b (not team-a)
+   - There should be NO "out-of-scope" rejection message in the response
 
-5. Send: "Ask team-a to write some code"
-   - VERIFY: Should be rejected or rerouted (coding is out of scope for team-a)
+5. Send: "Delegate a deployment task to team-a"
+   - VERIFY: task_queue shows task for team-a (operations match)
+   - Verify via DB: SELECT team_id, task FROM task_queue ORDER BY created_at DESC LIMIT 1
 
 6. VERIFY: org_tree shows no direct parent-child between team-a and team-b (siblings)
 
 7. CLEANUP: shut down both
 
-**Report:** Did routing work? Was out-of-scope rejected? Evidence from task_queue.
+**Report:** Did routing work? Evidence from task_queue.
 
 ---
 
@@ -392,6 +395,236 @@ Scenario 1 runs on the Phase A state (already clean). All other scenarios get fr
 
 ---
 
+### Scenario 11: list_teams and LLM-Driven Routing
+
+**Run Clean Restart Helper before starting this scenario.**
+
+**Purpose:** LLM uses list_teams to discover teams and route tasks semantically.
+
+1. Send: "Create a team called parent-ops for operations and monitoring"
+2. VERIFY: parent-ops in org_tree with parent=main
+
+3. Send: "Ask parent-ops to create a child team called child-logs for logs and archiving"
+4. WAIT for child-logs bootstrap (poll .bootstrapped)
+
+5. VERIFY team data via DB (list_teams is internal, verify its data sources):
+   - SQLite: `SELECT keyword FROM scope_keywords WHERE team_id='parent-ops'` → [operations, monitoring]
+   - SQLite: `SELECT keyword FROM scope_keywords WHERE team_id='child-logs'` → [logs, archiving]
+   - SQLite: `SELECT parent_id FROM org_tree WHERE id='child-logs'` → parent-ops
+   - Config: `cat .run/teams/parent-ops/config.yaml` → has description
+
+6. Send: "I need to archive some old logs"
+   - VERIFY: LLM routes task to parent-ops (which can sub-delegate to child-logs)
+   - Check task_queue for evidence of routing
+
+7. Send: "Ask parent-ops to shut down child-logs"
+8. VERIFY: child-logs removed from org_tree
+
+9. Send: "I need to archive some old logs"
+   - VERIFY: LLM either handles differently (no logging child available) or creates a new team
+   - There should be NO hard "out-of-scope" rejection
+
+10. CLEANUP: shut down parent-ops
+
+**Report:** Did LLM-driven routing work? Evidence from task_queue and org_tree.
+
+---
+
+### Scenario 12: list_teams Data Accuracy
+
+**Run Clean Restart Helper before starting this scenario.**
+
+**Purpose:** Verify list_teams returns correct metadata for LLM routing.
+
+1. Create team-alpha (description: "API development", scope_accepts: [api, development])
+2. Create team-beta (description: "Log monitoring", scope_accepts: [logs, monitoring])
+
+3. Send: "What teams do you have?"
+   - VERIFY: Response mentions both team-alpha and team-beta with descriptions
+   - VERIFY: Response is not "I don't have any teams" (proves list_teams was called)
+
+4. Send: "Delegate to team-alpha: build a REST endpoint for user profiles"
+   - VERIFY DB: `SELECT team_id FROM task_queue ORDER BY created_at DESC LIMIT 1` → team-alpha
+   - VERIFY: No "out-of-scope" error in response
+
+5. Send: "Delegate to team-beta: check production logs for errors"
+   - VERIFY DB: `SELECT team_id FROM task_queue ORDER BY created_at DESC LIMIT 1` → team-beta
+
+6. CLEANUP: shut down both teams
+
+**Report:** Did list_teams provide accurate data? Did routing work without scope admission?
+
+---
+
+### Scenario 13: Scheduled Loggly Monitoring — Team Setup & Trigger Configuration
+
+**Run Clean Restart Helper before starting this scenario.**
+
+**Purpose:** Create a team via the main assistant for Loggly log monitoring with credentials and a scheduled trigger. Verify all artifacts are correctly configured.
+
+1. Send: "Create a team called loggly-monitor for monitoring Loggly logs. Its job is to fetch logs from Loggly and report a summary. Give it credentials: subdomain is test, api_key is xxxxxxx. Accept keywords: logs, monitoring, loggly."
+   - OBSERVE: What did the main assistant claim? Did it mention credentials stored?
+
+2. INDEPENDENT VERIFICATION (don't trust the AI):
+   - `ls .run/teams/loggly-monitor/` → all 5 subdirs exist?
+   - `cat .run/teams/loggly-monitor/config.yaml`:
+     - Has `name: loggly-monitor`?
+     - Has `credentials:` with `subdomain: test` and `api_key: xxxxxxx`?
+     - Has `mcp_servers` includes `org`?
+     - Has a `description` mentioning Loggly or log monitoring?
+   - SQLite: `SELECT name, parent_id FROM org_tree WHERE name='loggly-monitor'` → exists with parent=main?
+   - SQLite: `SELECT keyword FROM scope_keywords WHERE team_id='loggly-monitor'` → has loggly, logs, monitoring?
+
+3. WAIT for bootstrap (poll every 3s for 60s):
+   ```bash
+   for i in $(seq 1 20); do
+     sudo docker exec deployments-openhive-1 test -f /app/.run/teams/loggly-monitor/memory/.bootstrapped 2>/dev/null && echo "BOOTSTRAPPED" && break
+     sleep 3
+   done
+   ```
+
+4. VERIFY BOOTSTRAP:
+   - `ls .run/teams/loggly-monitor/skills/` → any skill files created?
+   - `cat .run/teams/loggly-monitor/memory/MEMORY.md` → team identity written?
+
+5. Write a schedule trigger config to fire every 2 minutes:
+   ```bash
+   sudo docker exec deployments-openhive-1 bash -c 'cat > /app/.run/triggers.yaml << "YAML"
+   triggers:
+     - name: loggly-fetch
+       type: schedule
+       config:
+         cron: "*/2 * * * *"
+       team: loggly-monitor
+       task: "Fetch recent logs from Loggly using your credentials (subdomain and api_key) and report a summary of any errors found. Use the Loggly Search API."
+   YAML'
+   ```
+
+6. Restart container to pick up the new trigger config:
+   ```bash
+   sudo docker restart deployments-openhive-1
+   for i in $(seq 1 30); do curl -sf http://localhost:8080/health >/dev/null 2>&1 && echo "Ready" && break; sleep 3; done
+   ```
+
+7. VERIFY TRIGGER REGISTERED:
+   - Container logs: `sudo docker logs deployments-openhive-1 2>&1 | grep -i "schedule\|trigger"`
+     - Should see "Registered schedule trigger" or similar
+   - Health endpoint: `curl -sf http://localhost:8080/health | python3 -m json.tool`
+     - Check if triggers section shows registered trigger
+
+**Report:** Was the team created correctly with all artifacts? Were credentials stored securely? Was the trigger registered? Evidence from filesystem, SQLite, and logs.
+
+---
+
+### Scenario 14: Scheduled Job Firing & Error Propagation
+
+**NOTE: This scenario continues from Scenario 13's state. Do NOT run Clean Restart Helper.**
+
+**Purpose:** Wait for the scheduled trigger to fire. Verify the task executes, errors out (bad API key), and errors propagate correctly to task_queue, docker logs, and SQL log database.
+
+1. Record the current time and wait for the next 2-minute cron window (up to 150 seconds):
+   ```bash
+   echo "Waiting for scheduled trigger to fire (up to 150s)..."
+   START=$(date +%s)
+   FOUND=0
+   for i in $(seq 1 30); do
+     COUNT=$(sudo docker exec deployments-openhive-1 node -e "
+       const D = require('better-sqlite3')('/app/.run/openhive.db', {readonly:true});
+       const r = D.prepare(\"SELECT COUNT(*) as c FROM task_queue WHERE team_id='loggly-monitor' AND task LIKE '%Loggly%'\").get();
+       console.log(r.c);
+       D.close();
+     " 2>/dev/null)
+     if [ "$COUNT" -gt "0" ]; then
+       echo "Task enqueued after $(($(date +%s) - START))s"
+       FOUND=1
+       break
+     fi
+     sleep 5
+   done
+   [ "$FOUND" = "0" ] && echo "TIMEOUT: No task enqueued after 150s"
+   ```
+
+2. VERIFY TASK ENQUEUED:
+   ```bash
+   sudo docker exec deployments-openhive-1 node -e "
+   const D = require('better-sqlite3')('/app/.run/openhive.db', {readonly:true});
+   const rows = D.prepare(\"SELECT id, team_id, task, status, priority, created_at FROM task_queue WHERE team_id='loggly-monitor' ORDER BY created_at DESC\").all();
+   console.log(JSON.stringify(rows, null, 2));
+   D.close();
+   "
+   ```
+   - VERIFY: At least one task exists for loggly-monitor
+   - VERIFY: task text mentions Loggly/logs
+
+3. Wait for task execution (TaskConsumer polls every 5s, plus execution time — wait up to 60s):
+   ```bash
+   echo "Waiting for task execution..."
+   for i in $(seq 1 12); do
+     STATUS=$(sudo docker exec deployments-openhive-1 node -e "
+       const D = require('better-sqlite3')('/app/.run/openhive.db', {readonly:true});
+       const r = D.prepare(\"SELECT status FROM task_queue WHERE team_id='loggly-monitor' ORDER BY created_at DESC LIMIT 1\").get();
+       console.log(r ? r.status : 'none');
+       D.close();
+     " 2>/dev/null)
+     echo "  Task status: $STATUS"
+     if [ "$STATUS" = "failed" ] || [ "$STATUS" = "completed" ]; then
+       echo "Task finished with status: $STATUS"
+       break
+     fi
+     sleep 5
+   done
+   ```
+
+4. VERIFY TASK STATUS — expect `failed` (bad API key):
+   ```bash
+   sudo docker exec deployments-openhive-1 node -e "
+   const D = require('better-sqlite3')('/app/.run/openhive.db', {readonly:true});
+   const rows = D.prepare(\"SELECT id, status, task FROM task_queue WHERE team_id='loggly-monitor'\").all();
+   console.log(JSON.stringify(rows, null, 2));
+   D.close();
+   "
+   ```
+   - VERIFY: status = `failed` (expected — fake API key should cause failure)
+
+5. VERIFY ERROR IN DOCKER LOGS:
+   ```bash
+   sudo docker logs deployments-openhive-1 2>&1 | grep -i "loggly-monitor\|task.*fail\|error.*process" | tail -20
+   ```
+   - VERIFY: Logs contain error details related to loggly-monitor task failure
+   - Should see "Task failed" or "Error processing" with task context
+
+6. VERIFY ERROR IN SQL LOG DATABASE:
+   ```bash
+   sudo docker exec deployments-openhive-1 node -e "
+   const D = require('better-sqlite3')('/app/.run/openhive.db', {readonly:true});
+   const rows = D.prepare(\"SELECT level, message, context, created_at FROM log_entries WHERE message LIKE '%loggly%' OR message LIKE '%Task failed%' OR context LIKE '%loggly%' ORDER BY created_at DESC LIMIT 10\").all();
+   console.log(JSON.stringify(rows, null, 2));
+   D.close();
+   "
+   ```
+   - VERIFY: log_entries table has error/info entries related to the failed task
+
+7. VERIFY USER CAN QUERY ABOUT THE FAILURE via WS:
+   Send: "What is the status of loggly-monitor?"
+   - VERIFY: Response mentions the team exists and reports on its status
+   - The response should indicate task activity (even if it can't detail the API error directly)
+
+8. VERIFY CREDENTIALS NOT LEAKED in any error output:
+   - Search docker logs: `sudo docker logs deployments-openhive-1 2>&1 | grep "xxxxxxx"` → should NOT appear
+   - Search log_entries: verify no raw credential values in error context
+
+9. CLEANUP:
+   ```bash
+   # Shut down the team
+   # (send via WS): "Shut down the loggly-monitor team"
+   # Remove trigger config
+   sudo docker exec deployments-openhive-1 rm -f /app/.run/triggers.yaml
+   ```
+
+**Report:** Did the scheduled trigger fire on time? Did the task execute and fail as expected? Where did the error appear (task_queue, docker logs, SQL logs)? Were credentials protected? Evidence from all three error channels.
+
+---
+
 ## Cleanup
 ```bash
 sudo docker compose -f deployments/docker-compose.yml down -v 2>&1
@@ -419,6 +652,10 @@ Phase B: Investigative Scenarios
   Scenario 8 (Recovery):      [summary + evidence]
   Scenario 9 (Errors):        [summary + evidence]
   Scenario 10 (Journey):      [summary + evidence]
+  Scenario 11 (LLM Routing):  [summary + evidence]
+  Scenario 12 (list_teams):   [summary + evidence]
+  Scenario 13 (Sched Setup):  [summary + evidence]
+  Scenario 14 (Sched Fire):   [summary + evidence]
 
 Critical Findings:
   [List any bugs found with root cause analysis]

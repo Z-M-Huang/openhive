@@ -2,14 +2,14 @@
  * Layer 5 Phase Gate -- Org MCP Server
  *
  * Tests with mock ISessionSpawner + real OrgTree:
- * - UT-6: All 7 tools registered with correct names and schemas
+ * - UT-6: All 8 tools registered with correct names and schemas
  * - spawn_team: creates org tree entry, calls spawner
  * - shutdown_team: validates parent, calls stop, removes from tree
- * - delegate_task: scope admission passes/rejects, validates parent
+ * - delegate_task: validates parent, enqueues task
  * - escalate: generates correlation_id, persists to store, queues for parent
  * - send_message: validates parent/child relationship, blocks unrelated teams
  * - get_status: returns only caller's children, shows queue depth
- * - UT-10: Scope admission rejects/admits correctly, reject-by-default for ambiguous
+ * - UT-10: list_teams returns child team info for LLM routing
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
@@ -25,7 +25,6 @@ import type {
 } from '../domain/interfaces.js';
 import type { OrgTreeNode, TeamConfig, TaskEntry, EscalationCorrelation } from '../domain/types.js';
 import { TeamStatus, TaskPriority, TaskStatus } from '../domain/types.js';
-import { checkScopeAdmission } from '../org-mcp/scope-admission.js';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -41,15 +40,32 @@ function makeNode(overrides: Partial<OrgTreeNode> & { teamId: string; name: stri
 
 function createMemoryOrgStore(): IOrgStore {
   const data = new Map<string, OrgTreeNode>();
+  const scopeMap = new Map<string, Set<string>>();
   return {
     addTeam(node: OrgTreeNode): void { data.set(node.teamId, node); },
-    removeTeam(id: string): void { data.delete(id); },
+    removeTeam(id: string): void { scopeMap.delete(id); data.delete(id); },
     getTeam(id: string): OrgTreeNode | undefined { return data.get(id); },
     getChildren(parentId: string): OrgTreeNode[] {
       return [...data.values()].filter((n) => n.parentId === parentId);
     },
     getAncestors(): OrgTreeNode[] { return []; },
     getAll(): OrgTreeNode[] { return [...data.values()]; },
+    addScopeKeywords(teamId: string, keywords: string[]): void {
+      const set = scopeMap.get(teamId) ?? new Set();
+      for (const kw of keywords) set.add(kw.toLowerCase().trim());
+      scopeMap.set(teamId, set);
+    },
+    removeScopeKeywords(teamId: string): void { scopeMap.delete(teamId); },
+    getOwnScope(teamId: string): string[] { return [...(scopeMap.get(teamId) ?? [])]; },
+    getEffectiveScope(teamId: string): string[] {
+      const collect = (id: string): string[] => {
+        const own = [...(scopeMap.get(id) ?? [])];
+        const children = [...data.values()].filter((n) => n.parentId === id);
+        for (const child of children) own.push(...collect(child.teamId));
+        return own;
+      };
+      return [...new Set(collect(teamId))];
+    },
   };
 }
 
@@ -123,7 +139,6 @@ function makeTeamConfig(overrides?: Partial<TeamConfig>): TeamConfig {
     name: 'test-team',
     parent: null,
     description: 'A test team',
-    scope: { accepts: ['weather', 'forecast'], rejects: ['admin'] },
     allowed_tools: [],
     mcp_servers: [],
     provider_profile: 'default',
@@ -174,11 +189,11 @@ async function setupServer(): Promise<void> {
 
 // ── UT-6: Tool Registration ──────────────────────────────────────────────
 
-describe('UT-6: All 7 tools registered', () => {
+describe('UT-6: All 8 tools registered', () => {
   beforeEach(setupServer);
 
-  it('registers exactly 7 tools', () => {
-    expect(server.tools.size).toBe(7);
+  it('registers exactly 8 tools', () => {
+    expect(server.tools.size).toBe(8);
   });
 
   it('registers spawn_team with correct name', () => {
@@ -305,10 +320,8 @@ describe('delegate_task', () => {
     await setupServer();
     orgTree.addTeam(makeNode({ teamId: 'root', name: 'root' }));
     orgTree.addTeam(makeNode({ teamId: 'weather-team', name: 'weather-team', parentId: 'root' }));
-    teamConfigs.set('weather-team', makeTeamConfig({
-      name: 'weather-team',
-      scope: { accepts: ['weather', 'forecast'], rejects: ['admin'] },
-    }));
+    orgTree.addScopeKeywords('weather-team', ['weather', 'forecast']);
+    teamConfigs.set('weather-team', makeTeamConfig({ name: 'weather-team' }));
   });
 
   it('admits task matching accept scope and enqueues', async () => {
@@ -323,32 +336,6 @@ describe('delegate_task', () => {
     expect(typed.task_id).toBeTruthy();
     expect(taskQueue.tasks).toHaveLength(1);
     expect(taskQueue.tasks[0].teamId).toBe('weather-team');
-  });
-
-  it('rejects task matching reject scope (F-9)', async () => {
-    const result = await server.invoke(
-      'delegate_task',
-      { team: 'weather-team', task: 'admin reset all passwords' },
-      'root',
-    );
-
-    const typed = result as { success: boolean; reason: string; team: string };
-    expect(typed.success).toBe(false);
-    expect(typed.reason).toContain('admin');
-    expect(typed.team).toBe('weather-team');
-    expect(taskQueue.tasks).toHaveLength(0);
-  });
-
-  it('rejects task with no matching accept pattern (reject-by-default F-9)', async () => {
-    const result = await server.invoke(
-      'delegate_task',
-      { team: 'weather-team', task: 'calculate pi to 1000 digits' },
-      'root',
-    );
-
-    const typed = result as { success: boolean; reason: string };
-    expect(typed.success).toBe(false);
-    expect(typed.reason).toContain('out-of-scope');
   });
 
   it('validates caller is parent', async () => {
@@ -553,44 +540,133 @@ describe('get_status', () => {
   });
 });
 
-// ── UT-10: Scope Admission ───────────────────────────────────────────────
+// ── UT-10: list_teams ────────────────────────────────────────────────────
 
-describe('UT-10: Scope Admission', () => {
-  const scope = { accepts: ['weather', 'forecast', 'temperature'], rejects: ['admin', 'delete'] };
+describe('UT-10: list_teams', () => {
+  beforeEach(setupServer);
 
-  it('admits task with matching accept keyword', () => {
-    const result = checkScopeAdmission('get weather for NYC', scope);
-    expect(result.admitted).toBe(true);
-    expect(result.reason).toContain('weather');
+  it('returns child teams with description and scope', async () => {
+    orgTree.addTeam(makeNode({ teamId: 'main', name: 'main' }));
+    teamConfigs.set('team-a', makeTeamConfig({
+      name: 'team-a', description: 'Operations monitoring',
+    }));
+    orgTree.addTeam(makeNode({ teamId: 'team-a', name: 'team-a', parentId: 'main' }));
+    orgTree.addScopeKeywords('team-a', ['operations', 'monitoring']);
+
+    const result = await server.invoke('list_teams', {}, 'main');
+    const typed = result as { success: boolean; teams: Array<{
+      name: string; description: string; keywords: string[];
+    }> };
+
+    expect(typed.success).toBe(true);
+    expect(typed.teams).toHaveLength(1);
+    expect(typed.teams[0].name).toBe('team-a');
+    expect(typed.teams[0].description).toBe('Operations monitoring');
+    expect(typed.teams[0].keywords).toContain('operations');
+    expect(typed.teams[0].keywords).toContain('monitoring');
   });
 
-  it('rejects task with matching reject keyword', () => {
-    const result = checkScopeAdmission('admin reset passwords', scope);
-    expect(result.admitted).toBe(false);
-    expect(result.reason).toContain('admin');
+  it('returns empty array when caller has no children', async () => {
+    orgTree.addTeam(makeNode({ teamId: 'main', name: 'main' }));
+    const result = await server.invoke('list_teams', {}, 'main');
+    const typed = result as { success: boolean; teams: unknown[] };
+    expect(typed.success).toBe(true);
+    expect(typed.teams).toHaveLength(0);
   });
 
-  it('rejects take priority over accepts', () => {
-    const result = checkScopeAdmission('admin weather override', scope);
-    expect(result.admitted).toBe(false);
-    expect(result.reason).toContain('admin');
+  it('recursive mode returns nested children', async () => {
+    orgTree.addTeam(makeNode({ teamId: 'main', name: 'main' }));
+    teamConfigs.set('parent-ops', makeTeamConfig({ name: 'parent-ops' }));
+    teamConfigs.set('child-logs', makeTeamConfig({ name: 'child-logs' }));
+    orgTree.addTeam(makeNode({ teamId: 'parent-ops', name: 'parent-ops', parentId: 'main' }));
+    orgTree.addTeam(makeNode({ teamId: 'child-logs', name: 'child-logs', parentId: 'parent-ops' }));
+
+    const result = await server.invoke('list_teams', { recursive: true }, 'main');
+    const typed = result as { success: boolean; teams: Array<{
+      name: string; children?: Array<{ name: string }>;
+    }> };
+
+    expect(typed.success).toBe(true);
+    expect(typed.teams[0].name).toBe('parent-ops');
+    expect(typed.teams[0].children).toHaveLength(1);
+    expect(typed.teams[0].children![0].name).toBe('child-logs');
   });
 
-  it('reject-by-default for ambiguous task (F-9)', () => {
-    const result = checkScopeAdmission('calculate fibonacci sequence', scope);
-    expect(result.admitted).toBe(false);
-    expect(result.reason).toBe('out-of-scope: no matching accept pattern');
+  it('returns own keywords only, not descendant keywords', async () => {
+    orgTree.addTeam(makeNode({ teamId: 'main', name: 'main' }));
+    teamConfigs.set('parent-ops', makeTeamConfig({ name: 'parent-ops' }));
+    teamConfigs.set('child-logs', makeTeamConfig({ name: 'child-logs' }));
+    orgTree.addTeam(makeNode({ teamId: 'parent-ops', name: 'parent-ops', parentId: 'main' }));
+    orgTree.addTeam(makeNode({ teamId: 'child-logs', name: 'child-logs', parentId: 'parent-ops' }));
+    orgTree.addScopeKeywords('parent-ops', ['operations']);
+    orgTree.addScopeKeywords('child-logs', ['logs', 'archiving']);
+
+    const result = await server.invoke('list_teams', { recursive: true }, 'main');
+    const typed = result as { success: boolean; teams: Array<{
+      name: string; keywords: string[]; children?: Array<{ name: string; keywords: string[] }>;
+    }> };
+
+    // parent-ops has only its own keywords, NOT child-logs' keywords
+    expect(typed.teams[0].keywords).toEqual(['operations']);
+    expect(typed.teams[0].keywords).not.toContain('logs');
+    // child-logs has its own keywords
+    expect(typed.teams[0].children![0].keywords).toContain('logs');
+    expect(typed.teams[0].children![0].keywords).toContain('archiving');
   });
 
-  it('handles empty scope (rejects everything by default)', () => {
-    const result = checkScopeAdmission('any task', { accepts: [], rejects: [] });
-    expect(result.admitted).toBe(false);
-    expect(result.reason).toBe('out-of-scope: no matching accept pattern');
+  it('handles team with no config gracefully (description defaults to empty)', async () => {
+    orgTree.addTeam(makeNode({ teamId: 'main', name: 'main' }));
+    // team-orphan has no config in teamConfigs map
+    orgTree.addTeam(makeNode({ teamId: 'team-orphan', name: 'team-orphan', parentId: 'main' }));
+
+    const result = await server.invoke('list_teams', {}, 'main');
+    const typed = result as { success: boolean; teams: Array<{ name: string; description: string }> };
+
+    expect(typed.success).toBe(true);
+    const orphan = typed.teams.find(t => t.name === 'team-orphan');
+    expect(orphan).toBeDefined();
+    expect(orphan!.description).toBe('');
   });
 
-  it('admits with partial keyword match', () => {
-    const result = checkScopeAdmission('check the temperatures today', scope);
-    expect(result.admitted).toBe(true);
+  it('pendingCount only counts pending tasks, not completed/running', async () => {
+    orgTree.addTeam(makeNode({ teamId: 'main', name: 'main' }));
+    teamConfigs.set('busy-team', makeTeamConfig({ name: 'busy-team' }));
+    orgTree.addTeam(makeNode({ teamId: 'busy-team', name: 'busy-team', parentId: 'main' }));
+    // Enqueue tasks and move some to non-pending states
+    taskQueue.enqueue('busy-team', 'task 1', 'normal');
+    taskQueue.enqueue('busy-team', 'task 2', 'normal');
+    const dequeued = taskQueue.dequeue('busy-team');  // moves task 1 to running
+    if (dequeued) taskQueue.updateStatus(dequeued.id, TaskStatus.Completed);
+
+    const result = await server.invoke('list_teams', {}, 'main');
+    const typed = result as { success: boolean; teams: Array<{ pendingCount: number }> };
+    expect(typed.success).toBe(true);
+    // Only task 2 should be pending (task 1 is completed)
+    expect(typed.teams[0].pendingCount).toBe(1);
+  });
+
+  it('respects MAX_DEPTH and does not infinitely recurse', async () => {
+    orgTree.addTeam(makeNode({ teamId: 'main', name: 'main' }));
+    // Create a chain deeper than MAX_DEPTH (10) — should truncate
+    let parentId = 'main';
+    for (let i = 0; i < 12; i++) {
+      const id = `deep-${i}`;
+      teamConfigs.set(id, makeTeamConfig({ name: id }));
+      orgTree.addTeam(makeNode({ teamId: id, name: id, parentId }));
+      parentId = id;
+    }
+
+    const result = await server.invoke('list_teams', { recursive: true }, 'main');
+    expect((result as { success: boolean }).success).toBe(true);
+    // Should complete without hanging — depth bound prevents runaway
+  });
+
+  it('registers list_teams with correct name', () => {
+    const tool = server.tools.get('list_teams');
+    expect(tool).toBeDefined();
+    expect(tool!.name).toBe('list_teams');
+    expect(tool!.description).toBeTruthy();
+    expect(tool!.inputSchema).toBeDefined();
   });
 });
 
@@ -628,10 +704,8 @@ describe('query_team', () => {
     await setupServer();
     orgTree.addTeam(makeNode({ teamId: 'root', name: 'root' }));
     orgTree.addTeam(makeNode({ teamId: 'weather-team', name: 'weather-team', parentId: 'root' }));
-    teamConfigs.set('weather-team', makeTeamConfig({
-      name: 'weather-team',
-      scope: { accepts: ['weather', 'forecast'], rejects: ['admin'] },
-    }));
+    orgTree.addScopeKeywords('weather-team', ['weather', 'forecast']);
+    teamConfigs.set('weather-team', makeTeamConfig({ name: 'weather-team' }));
   });
 
   it('returns error if target team not found', async () => {
@@ -649,16 +723,9 @@ describe('query_team', () => {
     expect(typed.error).toContain('not parent');
   });
 
-  it('returns error if scope admission fails', async () => {
-    const result = await server.invoke('query_team', { team: 'weather-team', query: 'admin reset' }, 'root');
-    const typed = result as { success: boolean; error: string };
-    expect(typed.success).toBe(false);
-    expect(typed.error).toContain('admin');
-  });
-
   it('returns error if queryRunner not configured', async () => {
-    // queryRunner is undefined (no providers)
-    const result = await server.invoke('query_team', { team: 'weather-team', query: 'get weather' }, 'root');
+    // queryRunner is undefined (no providers) — must pass scope first
+    const result = await server.invoke('query_team', { team: 'weather-team', query: 'get weather forecast' }, 'root');
     const typed = result as { success: boolean; error: string };
     expect(typed.success).toBe(false);
     expect(typed.error).toContain('not available');
@@ -694,7 +761,8 @@ describe('query_team handler logic', () => {
     tree.addTeam(makeNode({ teamId: 'root', name: 'root' }));
     tree.addTeam(makeNode({ teamId: 'child', name: 'child', parentId: 'root' }));
     const configs = new Map<string, TeamConfig>();
-    configs.set('child', makeTeamConfig({ name: 'child', scope: { accepts: ['test'], rejects: [] } }));
+    configs.set('child', makeTeamConfig({ name: 'child' }));
+    tree.addScopeKeywords('child', ['test']);
 
     const result = await queryTeam(
       { team: 'child', query: 'test query' },
@@ -719,7 +787,8 @@ describe('query_team handler logic', () => {
     tree.addTeam(makeNode({ teamId: 'root', name: 'root' }));
     tree.addTeam(makeNode({ teamId: 'child', name: 'child', parentId: 'root' }));
     const configs = new Map<string, TeamConfig>();
-    configs.set('child', makeTeamConfig({ name: 'child', scope: { accepts: ['test'], rejects: [] } }));
+    configs.set('child', makeTeamConfig({ name: 'child' }));
+    tree.addScopeKeywords('child', ['test']);
 
     const result = await queryTeam(
       { team: 'child', query: 'test query' },
@@ -776,9 +845,9 @@ describe('spawn_team filesystem and init', () => {
     };
   }
 
-  it('scaffolds all 6 subdirectories', async () => {
+  it('scaffolds all 5 subdirectories', async () => {
     await spawnTeam({ name: 'ops', scope_accepts: ['ops'] }, 'root', makeDeps());
-    for (const sub of ['workspace', 'memory', 'org-rules', 'team-rules', 'skills', 'subagents']) {
+    for (const sub of ['memory', 'org-rules', 'team-rules', 'skills', 'subagents']) {
       expect(existsSync(join(dir, 'teams', 'ops', sub))).toBe(true);
     }
   });
@@ -940,43 +1009,6 @@ describe('spawn_team credential note', () => {
   });
 });
 
-// ── Fix 2: Fail-closed scope check ───────────────────────────────────────
-
-describe('delegate_task fail-closed scope check', () => {
-  it('rejects when getTeamConfig returns undefined', async () => {
-    const { delegateTask: dt } = await import('../org-mcp/tools/delegate-task.js');
-    const store = createMemoryOrgStore();
-    const tree = new OrgTree(store);
-    tree.addTeam(makeNode({ teamId: 'root', name: 'root' }));
-    tree.addTeam(makeNode({ teamId: 'child', name: 'child', parentId: 'root' }));
-
-    const result = dt(
-      { team: 'child', task: 'do something', priority: 'normal' },
-      'root',
-      { orgTree: tree, taskQueue: createMockTaskQueue(), getTeamConfig: () => undefined, log: () => {} },
-    );
-    expect(result.success).toBe(false);
-    expect(result.reason).toContain('config not loadable');
-  });
-});
-
-describe('query_team fail-closed scope check', () => {
-  it('rejects when getTeamConfig returns undefined', async () => {
-    const { queryTeam: qt } = await import('../org-mcp/tools/query-team.js');
-    const store = createMemoryOrgStore();
-    const tree = new OrgTree(store);
-    tree.addTeam(makeNode({ teamId: 'root', name: 'root' }));
-    tree.addTeam(makeNode({ teamId: 'child', name: 'child', parentId: 'root' }));
-
-    const result = await qt(
-      { team: 'child', query: 'hello' },
-      'root',
-      { orgTree: tree, getTeamConfig: () => undefined, log: () => {} },
-    );
-    expect(result.success).toBe(false);
-    expect(result.error).toContain('config not loadable');
-  });
-});
 
 // ── Fix 1B: query_team credential scrubbing ──────────────────────────────
 
@@ -992,9 +1024,9 @@ describe('query_team credential scrubbing', () => {
     const configs = new Map<string, TeamConfig>();
     configs.set('child', makeTeamConfig({
       name: 'child',
-      scope: { accepts: ['test'], rejects: [] },
       credentials: { subdomain: testFakeValue },
     }));
+    tree.addScopeKeywords('child', ['test']);
 
     const result = await qt(
       { team: 'child', query: 'test query' },

@@ -49,6 +49,12 @@ export async function shutdownTeam(
     return { success: false, error: 'caller is not parent of target team' };
   }
 
+  // Reject shutdown when children exist to prevent orphaned nodes
+  const children = deps.orgTree.getChildren(name);
+  if (children.length > 0) {
+    return { success: false, error: `team "${name}" has ${children.length} active children — shut them down first` };
+  }
+
   // Pending tasks are already persisted in SQLite via TaskQueueStore.
   // No additional persistence step needed; they remain in the task_queue table.
 

@@ -10,7 +10,8 @@
  * - Other team files (.run/teams/{other}/) — BLOCK cross-team
  */
 
-import { resolve } from 'node:path';
+import { resolve, dirname } from 'node:path';
+import { realpathSync } from 'node:fs';
 
 import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
 
@@ -24,7 +25,7 @@ type FileClass =
   | 'own-skills'
   | 'own-subagents'
   | 'own-memory'
-  | 'own-workspace'
+  | 'own-config'
   | 'other';
 
 /** Map of sub-path prefixes to FileClass for own-team directories. */
@@ -34,11 +35,11 @@ const OWN_TEAM_PREFIXES: ReadonlyArray<[string, FileClass]> = [
   ['skills', 'own-skills'],
   ['subagents', 'own-subagents'],
   ['memory', 'own-memory'],
-  ['workspace', 'own-workspace'],
 ];
 
 /** Classify a sub-path within the owning team's directory. */
 function classifyOwnTeamPath(subPath: string): FileClass {
+  if (subPath === 'config.yaml') return 'own-config';
   for (const [prefix, cls] of OWN_TEAM_PREFIXES) {
     if (subPath.startsWith(prefix + '/') || subPath === prefix) {
       return cls;
@@ -111,19 +112,29 @@ export function createGovernanceHook(
       return Promise.resolve({});
     }
 
+    // Resolve symlinks to prevent bypass (e.g. memory/link -> config.yaml)
     const resolved = resolve(filePath);
-    const cls = classifyPath(resolved, teamName, paths);
+    let real: string;
+    try {
+      // Resolve parent dir + basename so it works even if file doesn't exist yet
+      const dir = dirname(resolved);
+      real = resolve(realpathSync(dir), resolved.slice(dir.length + 1));
+    } catch {
+      real = resolved;
+    }
+    const cls = classifyPath(real, teamName, paths);
 
     switch (cls) {
       case 'system-rules':
       case 'admin-org-rules':
       case 'other-team':
+      case 'own-config':
         return Promise.resolve({
           hookSpecificOutput: {
             hookEventName: 'PreToolUse',
             permissionDecision: 'deny',
             permissionDecisionReason:
-              `Governance: ${tool_name} blocked for ${cls} path: ${resolved}`,
+              `Governance: ${tool_name} blocked for ${cls} path: ${real}`,
           },
         });
 
@@ -135,12 +146,11 @@ export function createGovernanceHook(
           team: teamName,
           tool: tool_name,
           fileClass: cls,
-          path: resolved,
+          path: real,
         });
         return Promise.resolve({});
 
       case 'own-memory':
-      case 'own-workspace':
       case 'other':
         return Promise.resolve({});
     }

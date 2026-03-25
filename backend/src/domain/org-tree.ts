@@ -61,6 +61,22 @@ export class OrgTree {
     return ancestors.reverse();
   }
 
+  addScopeKeywords(teamId: string, keywords: string[]): void {
+    this.store.addScopeKeywords(teamId, keywords);
+  }
+
+  removeScopeKeywords(teamId: string): void {
+    this.store.removeScopeKeywords(teamId);
+  }
+
+  getOwnScope(teamId: string): string[] {
+    return this.store.getOwnScope(teamId);
+  }
+
+  getEffectiveScope(teamId: string): string[] {
+    return this.store.getEffectiveScope(teamId);
+  }
+
   isDescendant(teamId: string, ancestorId: string): boolean {
     let current = this.nodes.get(teamId);
 

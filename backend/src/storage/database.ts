@@ -38,6 +38,12 @@ export function createTables(raw: Database.Database): void {
       created_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS scope_keywords (
+      team_id TEXT NOT NULL,
+      keyword TEXT NOT NULL,
+      PRIMARY KEY (team_id, keyword)
+    );
+
     CREATE TABLE IF NOT EXISTS task_queue (
       id TEXT PRIMARY KEY,
       team_id TEXT NOT NULL,

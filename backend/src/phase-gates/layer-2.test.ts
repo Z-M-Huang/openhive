@@ -2,7 +2,7 @@
  * Layer 2 Phase Gate — Storage
  *
  * Tests with REAL SQLite (in-memory via ':memory:'):
- * - UT-2: Schema creates all 6 tables, WAL mode enabled
+ * - UT-2: Schema creates all 7 tables, WAL mode enabled
  * - Org store: addTeam, getTeam, getChildren, getAncestors, removeTeam
  * - Task queue: enqueue with priorities, dequeue returns highest priority first,
  *   peek doesn't remove, updateStatus
@@ -70,7 +70,7 @@ describe('UT-2: Schema and WAL mode', () => {
     expect(result[0]?.journal_mode).toBe('wal');
   });
 
-  it('creates all 6 tables', () => {
+  it('creates all 7 tables', () => {
     const tables = instance.raw
       .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
       .all() as Array<{ name: string }>;
@@ -80,6 +80,7 @@ describe('UT-2: Schema and WAL mode', () => {
       'escalation_correlations',
       'log_entries',
       'org_tree',
+      'scope_keywords',
       'task_queue',
       'team_status',
       'trigger_dedup',

@@ -6,6 +6,7 @@
 
 import { eq } from 'drizzle-orm';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
+import type Database from 'better-sqlite3';
 import type { IOrgStore } from '../../domain/interfaces.js';
 import type { OrgTreeNode } from '../../domain/types.js';
 import { TeamStatus } from '../../domain/types.js';
@@ -25,6 +26,7 @@ export class OrgStore implements IOrgStore {
   }
 
   removeTeam(id: string): void {
+    this.db.delete(schema.scopeKeywords).where(eq(schema.scopeKeywords.teamId, id)).run();
     this.db.delete(schema.orgTree).where(eq(schema.orgTree.id, id)).run();
   }
 
@@ -66,6 +68,45 @@ export class OrgStore implements IOrgStore {
   getAll(): OrgTreeNode[] {
     const rows = this.db.select().from(schema.orgTree).all();
     return rows.map((r) => this.rowToNode(r));
+  }
+
+  addScopeKeywords(teamId: string, keywords: string[]): void {
+    for (const kw of keywords) {
+      this.db.insert(schema.scopeKeywords)
+        .values({ teamId, keyword: kw.toLowerCase().trim() })
+        .onConflictDoNothing()
+        .run();
+    }
+  }
+
+  removeScopeKeywords(teamId: string): void {
+    this.db.delete(schema.scopeKeywords)
+      .where(eq(schema.scopeKeywords.teamId, teamId))
+      .run();
+  }
+
+  getOwnScope(teamId: string): string[] {
+    return this.db.select({ keyword: schema.scopeKeywords.keyword })
+      .from(schema.scopeKeywords)
+      .where(eq(schema.scopeKeywords.teamId, teamId))
+      .all()
+      .map(r => r.keyword);
+  }
+
+  getEffectiveScope(teamId: string): string[] {
+    // Recursive CTE: team + all descendants → union of keywords
+    // Uses raw SQLite because Drizzle doesn't support recursive CTEs
+    const raw = (this.db as unknown as { $client: Database.Database }).$client;
+    const rows = raw.prepare(`
+      WITH RECURSIVE descendants AS (
+        SELECT id FROM org_tree WHERE id = ?
+        UNION ALL
+        SELECT o.id FROM org_tree o JOIN descendants d ON o.parent_id = d.id
+      )
+      SELECT DISTINCT keyword FROM scope_keywords
+      WHERE team_id IN (SELECT id FROM descendants)
+    `).all(teamId) as { keyword: string }[];
+    return rows.map(r => r.keyword);
   }
 
   private rowToNode(row: {
