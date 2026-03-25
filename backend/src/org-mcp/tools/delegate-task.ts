@@ -30,6 +30,7 @@ export interface DelegateTaskDeps {
   readonly orgTree: OrgTree;
   readonly taskQueue: ITaskQueueStore;
   readonly getTeamConfig: (teamId: string) => TeamConfig | undefined;
+  readonly log: (msg: string, meta?: Record<string, unknown>) => void;
 }
 
 export function delegateTask(
@@ -55,13 +56,15 @@ export function delegateTask(
     return { success: false, reason: 'caller is not parent of target team' };
   }
 
-  // Run scope admission check
+  // Run scope admission check (fail-closed: reject if config not loadable)
   const config = deps.getTeamConfig(team);
-  if (config) {
-    const admission = checkScopeAdmission(task, config.scope);
-    if (!admission.admitted) {
-      return { success: false, reason: admission.reason, team };
-    }
+  if (!config) {
+    deps.log(`scope check failed: config not loadable for team "${team}"`);
+    return { success: false, reason: `config not loadable for team "${team}" — cannot verify scope`, team };
+  }
+  const admission = checkScopeAdmission(task, config.scope);
+  if (!admission.admitted) {
+    return { success: false, reason: admission.reason, team };
   }
 
   // Enqueue task

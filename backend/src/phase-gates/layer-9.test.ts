@@ -16,7 +16,7 @@ import { PassThrough } from 'node:stream';
 import Fastify from 'fastify';
 
 import { registerHealthEndpoint } from '../health.js';
-import { SessionManager } from '../sessions/manager.js';
+import { TeamRegistry } from '../sessions/team-registry.js';
 import { TriggerEngine } from '../triggers/engine.js';
 import { TriggerDedup } from '../triggers/dedup.js';
 import { TriggerRateLimiter } from '../triggers/rate-limiter.js';
@@ -70,7 +70,7 @@ function parseHealth(body: string): HealthResponse {
 describe('UT-25: Health endpoint returns 200 with component status', () => {
   it('returns 200 with all component statuses when storage is healthy', { timeout: 15_000 }, async () => {
     const { raw } = createTempDb();
-    const sessionManager = new SessionManager();
+    const sessionManager = new TeamRegistry();
     const triggerEngine = createMinimalTriggerEngine();
     triggerEngine.register();
     const channelRouter = new ChannelRouter([], async () => undefined);
@@ -93,7 +93,7 @@ describe('UT-25: Health endpoint returns 200 with component status', () => {
 
   it('reflects active sessions in health response', async () => {
     const { raw } = createTempDb();
-    const sessionManager = new SessionManager();
+    const sessionManager = new TeamRegistry();
     sessionManager.spawn('team-alpha');
     sessionManager.spawn('team-beta');
 
@@ -118,7 +118,7 @@ describe('UT-25: Health endpoint returns 200 with component status', () => {
 describe('Health endpoint returns 503 when storage fails', () => {
   it('returns 503 when database is closed', async () => {
     const { raw } = createTempDb();
-    const sessionManager = new SessionManager();
+    const sessionManager = new TeamRegistry();
     const triggerEngine = createMinimalTriggerEngine();
     const channelRouter = new ChannelRouter([], async () => undefined);
 

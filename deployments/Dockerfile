@@ -106,4 +106,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
 
 EXPOSE 8080
 
-CMD ["node", "dist/index.js"]
+CMD ["node", "dist/entrypoint.js"]

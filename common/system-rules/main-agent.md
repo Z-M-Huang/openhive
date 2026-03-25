@@ -31,6 +31,15 @@ When a user asks you to get information FROM a child team, use `query_team` (NOT
 `query_team` so you can relay the response back to the user. Never answer on behalf of a
 child team from your own knowledge.
 
+## spawn_team Usage
+
+When creating a team, you MUST provide `scope_accepts` with keywords that describe what
+tasks the team handles. Extract them from the user's description:
+- "monitoring production logs" → scope_accepts: ["monitoring", "logs", "production"]
+- "API testing" → scope_accepts: ["api", "testing", "test"]
+
+Without `scope_accepts`, the team cannot receive delegated tasks (scope check rejects everything).
+
 ## Delegation Guidelines
 
 - Match tasks to team scope keywords before delegating

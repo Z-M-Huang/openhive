@@ -81,12 +81,6 @@ function isInsideBoundary(target: string, allowed: string[]): boolean {
   );
 }
 
-export type PreToolUseHook = (
-  input: { tool_name: string; tool_input: Record<string, unknown> },
-  toolUseId: string | undefined,
-  context: { session_id?: string; [key: string]: unknown },
-) => Promise<Record<string, unknown>>;
-
 /**
  * Factory: create a workspace-boundary PreToolUse hook.
  *
@@ -96,13 +90,13 @@ export type PreToolUseHook = (
 export function createWorkspaceBoundaryHook(
   cwd: string,
   additionalDirs: string[],
-): PreToolUseHook {
+): import('@anthropic-ai/claude-agent-sdk').HookCallback {
   const allowed = [cwd, ...additionalDirs];
 
   return (input) => {
-    const raw = extractPath(input.tool_name, input.tool_input);
+    const { tool_name, tool_input } = input as { tool_name: string; tool_input: Record<string, unknown> };
+    const raw = extractPath(tool_name, tool_input);
     if (raw === undefined) {
-      // No path to check -- allow (defensive: tool may have optional path).
       return Promise.resolve({});
     }
 

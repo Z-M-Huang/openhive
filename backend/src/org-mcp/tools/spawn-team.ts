@@ -29,11 +29,14 @@ export const SpawnTeamInputSchema = z.object({
   name: z.string().min(1).regex(TEAM_SLUG_RE, 'team name must be a lowercase slug (a-z0-9 and hyphens)'),
   config_path: z.string().optional(),
   description: z.string().optional(),
-  scope_accepts: z.array(z.string()).optional(),
+  scope_accepts: z.array(z.string().trim().min(1)).optional(),
   scope_rejects: z.array(z.string()).optional(),
   init_context: z.string().optional(),
   credentials: z.record(z.string(), z.string()).optional(),
-});
+}).refine(
+  (data) => data.config_path || (data.scope_accepts && data.scope_accepts.length > 0),
+  { message: 'scope_accepts with at least one keyword is required when config_path is not provided', path: ['scope_accepts'] },
+);
 
 export type SpawnTeamInput = z.infer<typeof SpawnTeamInputSchema>;
 
@@ -41,12 +44,14 @@ export interface SpawnTeamResult {
   readonly success: boolean;
   readonly team?: string;
   readonly error?: string;
+  readonly note?: string;
 }
 
 export interface SpawnTeamConfigHints {
   readonly description?: string;
   readonly scopeAccepts?: string[];
   readonly scopeRejects?: string[];
+  readonly parent?: string;
 }
 
 export interface SpawnTeamDeps {
@@ -109,8 +114,11 @@ export async function spawnTeam(
       description: parsed.data.description,
       scopeAccepts: parsed.data.scope_accepts,
       scopeRejects: parsed.data.scope_rejects,
+      parent: callerId,
     };
     config = deps.loadConfig(name, config_path, hints);
+    // Ensure parent matches the actual caller, regardless of config source
+    config = { ...config, parent: callerId };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return { success: false, error: `config error: ${msg}` };
@@ -167,7 +175,10 @@ export async function spawnTeam(
   const initError = enqueueInitTask(name, parsed.data.init_context, deps);
   if (initError) return initError;
 
-  return { success: true, team: name };
+  return {
+    success: true, team: name,
+    ...(parsed.data.credentials ? { note: 'Credentials stored securely. Do NOT echo credential values.' } : {}),
+  };
 }
 
 /** Build and enqueue the bootstrap initialization task. Returns error result on failure. */

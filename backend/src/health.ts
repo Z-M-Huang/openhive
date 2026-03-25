@@ -7,13 +7,13 @@
 
 import type { FastifyInstance } from 'fastify';
 import type Database from 'better-sqlite3';
-import type { SessionManager } from './sessions/manager.js';
+import type { TeamRegistry } from './sessions/team-registry.js';
 import type { TriggerEngine } from './triggers/engine.js';
 import type { ChannelRouter } from './channels/router.js';
 
 export interface HealthDeps {
   readonly raw: Database.Database;
-  readonly sessionManager: SessionManager;
+  readonly sessionManager: TeamRegistry;
   readonly triggerEngine: TriggerEngine;
   readonly channelRouter: ChannelRouter;
 }

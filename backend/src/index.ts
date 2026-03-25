@@ -13,10 +13,9 @@ import Fastify from 'fastify';
 import { createLogger } from './logging/logger.js';
 import { loadProviders, loadTeamConfig, loadSystemConfig } from './config/loader.js';
 import { OrgTree } from './domain/org-tree.js';
-import { createOrgMcpServer } from './org-mcp/server.js';
-import type { OrgMcpServer } from './org-mcp/server.js';
 import { startOrgMcpHttpServer } from './org-mcp/http-server.js';
-import { SessionManager } from './sessions/manager.js';
+import { createToolInvoker, type OrgMcpDeps, type OrgToolInvoker } from './org-mcp/registry.js';
+import { TeamRegistry } from './sessions/team-registry.js';
 import { ChannelRouter } from './channels/router.js';
 import { registerHealthEndpoint } from './health.js';
 import { registerWsRoute } from './channels/ws-adapter.js';
@@ -52,11 +51,11 @@ export interface BootstrapResult {
   readonly logger: pino.Logger;
   readonly raw: Database.Database;
   readonly fastify: FastifyInstance;
-  readonly sessionManager: SessionManager;
+  readonly sessionManager: TeamRegistry;
   readonly triggerEngine: ReturnType<typeof initTriggerEngine>;
   readonly channelRouter: ChannelRouter;
   readonly orgTree: OrgTree;
-  readonly orgMcpServer: OrgMcpServer;
+  readonly orgToolInvoker: OrgToolInvoker;
   readonly providersConfig: ProvidersOutput | null;
   readonly dataDir: string;
   readonly runDir: string;
@@ -64,17 +63,16 @@ export interface BootstrapResult {
   shutdown(): Promise<void>;
 }
 
-let currentResult: BootstrapResult | null = null;
 
 function loadOrGenerateConfig(
   runDir: string, name: string, configPath?: string,
-  hints?: { description?: string; scopeAccepts?: string[]; scopeRejects?: string[] },
+  hints?: { description?: string; scopeAccepts?: string[]; scopeRejects?: string[]; parent?: string },
 ) {
   if (configPath) return loadTeamConfig(configPath);
   const path = join(runDir, 'teams', name, 'config.yaml');
   if (existsSync(path)) return loadTeamConfig(path);
   return {
-    name, parent: null, description: hints?.description ?? '',
+    name, parent: hints?.parent ?? null, description: hints?.description ?? '',
     scope: { accepts: hints?.scopeAccepts ?? [] as string[], rejects: hints?.scopeRejects ?? [] as string[] },
     allowed_tools: ['*'],
     mcp_servers: ['org'], provider_profile: 'default', maxTurns: 100,
@@ -93,29 +91,10 @@ function resolveLogLevel(dataDir: string): string {
   try { return loadSystemConfig(path).log_level; } catch { return 'info'; }
 }
 
-async function createOrgMcp(
-  opts: { orgTree: OrgTree; taskQueueStore: import('./domain/interfaces.js').ITaskQueueStore; escalationStore: import('./domain/interfaces.js').IEscalationStore; runDir: string; sessionManager: SessionManager; logger: pino.Logger },
-  getHandlerDeps: () => Parameters<typeof handleMessage>[1] | null,
-) {
-  return createOrgMcpServer({
-    orgTree: opts.orgTree, taskQueue: opts.taskQueueStore, escalationStore: opts.escalationStore, runDir: opts.runDir,
-    spawner: { spawn: (id: string) => { opts.sessionManager.spawn(id); return Promise.resolve(id); } },
-    sessionManager: {
-      getSession: (id: string) => Promise.resolve(opts.sessionManager.isActive(id) ? { id } : null),
-      terminateSession: (id: string) => { opts.sessionManager.stop(id); return Promise.resolve(); },
-    },
-    loadConfig: (name: string, cp?: string, hints?: { description?: string; scopeAccepts?: string[]; scopeRejects?: string[] }) =>
-      loadOrGenerateConfig(opts.runDir, name, cp, hints),
-    getTeamConfig: (id: string) => safeLoadConfig(opts.runDir, id),
-    log: (msg, meta) => opts.logger.info(meta ?? {}, msg),
-    getHandlerDeps,
-  });
-}
-
-function buildOrgMcpHttpDeps(
-  opts: { orgTree: OrgTree; sessionManager: SessionManager; taskQueueStore: import('./domain/interfaces.js').ITaskQueueStore; escalationStore: import('./domain/interfaces.js').IEscalationStore; runDir: string; logger: pino.Logger },
-  getHandlerDeps: () => Parameters<typeof handleMessage>[1] | null,
-): import('./org-mcp/http-server.js').OrgMcpHttpDeps {
+function buildOrgMcpDeps(
+  opts: { orgTree: OrgTree; sessionManager: TeamRegistry; taskQueueStore: import('./domain/interfaces.js').ITaskQueueStore; escalationStore: import('./domain/interfaces.js').IEscalationStore; runDir: string; logger: pino.Logger },
+  getQueryRunner: () => import('./org-mcp/registry.js').TeamQueryRunner | undefined,
+): OrgMcpDeps {
   return {
     orgTree: opts.orgTree,
     spawner: { spawn: (id: string) => { opts.sessionManager.spawn(id); return Promise.resolve(id); } },
@@ -130,7 +109,7 @@ function buildOrgMcpHttpDeps(
       loadOrGenerateConfig(opts.runDir, name, cp, hints),
     getTeamConfig: (id: string) => safeLoadConfig(opts.runDir, id),
     log: (msg, meta) => opts.logger.info(meta ?? {}, msg),
-    getHandlerDeps,
+    get queryRunner() { return getQueryRunner(); },
   };
 }
 
@@ -165,23 +144,20 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   if (recovery.recovered > 0) logger.info({ recovered: recovery.recovered }, 'Recovery completed');
 
   ensureMainTeam(runDir, orgTree);
-  const sessionManager = new SessionManager();
+  const sessionManager = new TeamRegistry();
 
-  // Lazy ref for query_team's handleMessage dep — breaks circular dependency
-  let handlerDepsRef: Parameters<typeof handleMessage>[1] | null = null;
+  // Lazy ref for query_team's queryRunner — breaks circular dependency
+  let queryRunnerRef: import('./org-mcp/registry.js').TeamQueryRunner | undefined;
 
-  const orgMcpHttpDeps = buildOrgMcpHttpDeps(
+  const orgMcpDeps = buildOrgMcpDeps(
     { orgTree, sessionManager, taskQueueStore, escalationStore, runDir, logger },
-    () => handlerDepsRef,
+    () => queryRunnerRef,
   );
-  const orgMcpHttpServer = await startOrgMcpHttpServer(orgMcpHttpDeps, deps?.orgMcpPort ?? 3001);
+  const orgMcpHttpServer = await startOrgMcpHttpServer(orgMcpDeps, deps?.orgMcpPort ?? 3001);
   const orgMcpPort = orgMcpHttpServer.port;
 
-  // Keep invoke-based org MCP for tests and direct tool calls
-  const orgMcpServer = await createOrgMcp(
-    { orgTree, taskQueueStore, escalationStore, runDir, sessionManager, logger },
-    () => handlerDepsRef,
-  );
+  // Synchronous invoker for tests and direct tool calls
+  const orgToolInvoker = createToolInvoker(orgMcpDeps);
 
   const triggerConfigs = loadTriggerConfigs(runDir, logger);
   const triggerEngine = initTriggerEngine(stores.triggerStore, taskQueueStore, logger, triggerConfigs);
@@ -195,7 +171,15 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
     ? { providers: providersConfig, orgMcpPort, availableMcpServers: {}, runDir, dataDir, systemRulesDir, orgAncestors: [] as string[], logger }
     : null;
 
-  handlerDepsRef = handlerDeps; // wire lazy ref for query_team
+  // Wire queryRunner: query_team → handleMessage for synchronous child queries
+  if (handlerDeps) {
+    queryRunnerRef = (query, team, callerId, ancestors) =>
+      handleMessage(
+        { channelId: `query:${callerId}:${team}:${Date.now()}`, userId: callerId, content: query, timestamp: Date.now() },
+        { ...handlerDeps, orgAncestors: ancestors },
+        undefined, team,
+      );
+  }
 
   const channelRouter = new ChannelRouter(adapters, async (msg: ChannelMessage) => {
     logger.info({ channelId: msg.channelId, userId: msg.userId }, 'Received message');
@@ -224,44 +208,12 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
     taskConsumer?.stop(); triggerEngine.stop();
     await channelRouter.stop(); sessionManager.stopAll();
     orgMcpHttpServer.close();
-    await fastify.close(); raw.close(); currentResult = null;
+    await fastify.close(); raw.close();
   };
 
   const result: BootstrapResult = {
     logger, raw, fastify, sessionManager, triggerEngine, channelRouter, orgTree,
-    orgMcpServer, providersConfig, dataDir, runDir, systemRulesDir, shutdown,
+    orgToolInvoker, providersConfig, dataDir, runDir, systemRulesDir, shutdown,
   };
-  currentResult = result;
   return result;
-}
-
-// Graceful shutdown handlers
-const handleSignal = (): void => {
-  if (currentResult) {
-    void currentResult.shutdown().then(() => process.exit(0));
-  } else {
-    process.exit(0);
-  }
-};
-
-process.on('SIGTERM', handleSignal);
-process.on('SIGINT', handleSignal);
-// Prevent SDK subprocess EPIPE from crashing the server
-process.on('uncaughtException', (err) => {
-  if ('code' in err && err.code === 'EPIPE') return; // ignore broken pipe from SDK child
-  // eslint-disable-next-line no-console
-  console.error('Uncaught exception:', err);
-  process.exit(1);
-});
-
-// Auto-start unless running in test
-const isTest = process.env['VITEST'] !== undefined
-  || process.env['NODE_ENV'] === 'test'
-  || process.env['VITEST_WORKER_ID'] !== undefined;
-if (!isTest) {
-  bootstrap().catch((err: unknown) => {
-    // eslint-disable-next-line no-console
-    console.error('Fatal: bootstrap failed', err);
-    process.exit(1);
-  });
 }

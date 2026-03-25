@@ -1,12 +1,13 @@
 /**
- * Org MCP server factory — registers 7 tools with the Claude Agent SDK.
+ * Org-MCP tool registry — single source of truth for all 7 org tool definitions.
  *
- * Uses sdk.createSdkMcpServer() + sdk.tool() to produce an injectable
- * MCP server instance for sdk.query(). Each tool handler is wrapped in
- * try-catch (R-1: must not crash the server).
+ * Provides:
+ * - buildToolDefs(): pure data array of tool definitions
+ * - extractShape(): Zod schema → shape record for McpServer.tool()
+ * - createToolInvoker(): direct tool invocation (tests + internal use)
  *
- * The sdkServer field is the full McpSdkServerConfigWithInstance returned
- * by createSdkMcpServer(), suitable for passing to sdk.query({ mcpServers }).
+ * Both the HTTP MCP server (http-server.ts) and tests consume this registry.
+ * No SDK dependency — pure data + invoke.
  */
 
 import { z } from 'zod';
@@ -18,7 +19,7 @@ import type {
   IEscalationStore,
 } from '../domain/interfaces.js';
 import type { TeamConfig } from '../domain/types.js';
-import type { MessageHandlerDeps } from '../sessions/message-handler.js';
+import type { SpawnTeamConfigHints } from './tools/spawn-team.js';
 import { SpawnTeamInputSchema, spawnTeam } from './tools/spawn-team.js';
 import { ShutdownTeamInputSchema, shutdownTeam } from './tools/shutdown-team.js';
 import { DelegateTaskInputSchema, delegateTask } from './tools/delegate-task.js';
@@ -34,6 +35,14 @@ export interface ToolDefinition {
   readonly handler: (input: unknown, callerId: string) => Promise<unknown>;
 }
 
+/**
+ * Runs a query against a child team's SDK session, returning its response.
+ * Wired in index.ts to call handleMessage() — breaks the circular dependency.
+ */
+export type TeamQueryRunner = (
+  query: string, team: string, callerId: string, ancestors: string[],
+) => Promise<string | void>;
+
 export interface OrgMcpDeps {
   readonly orgTree: OrgTree;
   readonly spawner: ISessionSpawner;
@@ -41,24 +50,21 @@ export interface OrgMcpDeps {
   readonly taskQueue: ITaskQueueStore;
   readonly escalationStore: IEscalationStore;
   readonly runDir: string;
-  readonly loadConfig: (name: string, configPath?: string, hints?: { description?: string; scopeAccepts?: string[]; scopeRejects?: string[] }) => TeamConfig;
+  readonly loadConfig: (name: string, configPath?: string, hints?: SpawnTeamConfigHints) => TeamConfig;
   readonly getTeamConfig: (teamId: string) => TeamConfig | undefined;
   readonly log: (msg: string, meta?: Record<string, unknown>) => void;
-  readonly getHandlerDeps?: () => MessageHandlerDeps | null;
+  readonly queryRunner?: TeamQueryRunner;
 }
 
-export interface OrgMcpServer {
-  readonly sdkServer: unknown; // McpSdkServerConfigWithInstance — typed as unknown to avoid import
+export interface OrgToolInvoker {
   readonly tools: ReadonlyMap<string, ToolDefinition>;
-  /** Create a team-scoped SDK MCP server with correct callerId. */
-  createTeamSdkServer(teamName: string): unknown;
   invoke(toolName: string, input: unknown, callerId: string): Promise<unknown>;
 }
 
 /**
  * Build the tool definitions array. Pure data — no SDK dependency.
  */
-function buildToolDefs(deps: OrgMcpDeps): ToolDefinition[] {
+export function buildToolDefs(deps: OrgMcpDeps): ToolDefinition[] {
   return [
     {
       name: 'spawn_team',
@@ -109,78 +115,28 @@ function buildToolDefs(deps: OrgMcpDeps): ToolDefinition[] {
 }
 
 /**
- * Extract Zod shape for sdk.tool() — same pattern as v2.
+ * Extract Zod shape for McpServer.tool() — converts ZodObject to record of shapes.
  */
-function extractShape(schema: z.ZodType): Record<string, z.ZodType> {
+export function extractShape(schema: z.ZodType): Record<string, z.ZodType> {
   if (schema instanceof z.ZodObject) {
     return schema.shape as Record<string, z.ZodType>;
+  }
+  // Unwrap ZodEffects (.refine(), .transform(), .superRefine())
+  if (schema instanceof z.ZodEffects) {
+    return extractShape(schema._def.schema as z.ZodType);
   }
   return {};
 }
 
 /**
- * Create the org MCP server. Async because of dynamic SDK import.
- *
- * Returns { sdkServer, tools, invoke }:
- * - sdkServer: full McpSdkServerConfigWithInstance for sdk.query({ mcpServers })
- * - tools: backward-compat Map for tests
- * - invoke(): direct invocation path for tests and internal use
+ * Create a direct tool invoker. Synchronous — no SDK dependency.
+ * Used by tests and any code that needs to call org tools without MCP transport.
  */
-export async function createOrgMcpServer(deps: OrgMcpDeps): Promise<OrgMcpServer> {
+export function createToolInvoker(deps: OrgMcpDeps): OrgToolInvoker {
   const toolDefs = buildToolDefs(deps);
-  const tools = new Map<string, ToolDefinition>();
-  for (const def of toolDefs) {
-    tools.set(def.name, def);
-  }
-
-  // Build SDK MCP server — may fail in test env (no SDK installed)
-  // Use Record to avoid type mismatch between local (no SDK) and Docker (with SDK).
-  let sdkModule: Record<string, unknown> | null = null;
-  let sdkServer: unknown = null;
-
-  /** Build an SDK MCP server with the given callerId baked in. */
-  function buildSdkServer(sdk: Record<string, unknown>, callerId: string): unknown {
-    const sdkTool = sdk['tool'] as (...args: unknown[]) => unknown;
-    const sdkCreateServer = sdk['createSdkMcpServer'] as (...args: unknown[]) => unknown;
-    const sdkTools = toolDefs.map((def) =>
-      sdkTool(
-        def.name,
-        def.description,
-        extractShape(def.inputSchema),
-        async (args: unknown) => {
-          try {
-            const result = await def.handler(args, callerId);
-            return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: `tool error: ${msg}` }) }] };
-          }
-        },
-      ),
-    );
-    return sdkCreateServer({ name: 'org', tools: sdkTools });
-  }
-
-  try {
-    sdkModule = await import('@anthropic-ai/claude-agent-sdk');
-    sdkServer = buildSdkServer(sdkModule, 'main');
-  } catch (err) {
-    // SDK not available (test env) — sdkServer stays null, invoke() still works
-    const errMsg = err instanceof Error ? err.message : String(err);
-    deps.log('SDK MCP server initialization failed — org tools unavailable via SDK path', { error: errMsg });
-  }
-
-  // Create a fresh SDK server per request — each SDK query() needs its own
-  // server instance because the protocol binds to a transport on connection.
-  // Concurrent messages to the same team each get their own instance.
-
+  const tools = new Map(toolDefs.map(d => [d.name, d] as const));
   return {
-    sdkServer,
     tools,
-    createTeamSdkServer(teamName: string): unknown {
-      if (!sdkModule) return null;
-      return buildSdkServer(sdkModule, teamName);
-    },
     async invoke(toolName: string, input: unknown, callerId: string): Promise<unknown> {
       const tool = tools.get(toolName);
       if (!tool) {
@@ -189,7 +145,6 @@ export async function createOrgMcpServer(deps: OrgMcpDeps): Promise<OrgMcpServer
       try {
         return await tool.handler(input, callerId);
       } catch (err) {
-        // R-1: must not crash the server
         const msg = err instanceof Error ? err.message : String(err);
         return { success: false, error: `tool error: ${msg}` };
       }

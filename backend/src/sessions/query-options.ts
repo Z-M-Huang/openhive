@@ -4,6 +4,7 @@
  * can-use-tool, hooks, and credential-scrubber.
  */
 
+import type { CanUseTool, AgentDefinition } from '@anthropic-ai/claude-agent-sdk';
 import type { TeamConfig } from '../domain/types.js';
 import type { ProvidersOutput } from '../config/validation.js';
 import type { HookConfig, BuildHookConfigOpts } from '../hooks/index.js';
@@ -17,7 +18,6 @@ import { buildRuleCascade } from '../rules/cascade.js';
 import { buildHookConfig } from '../hooks/index.js';
 import { createStderrScrubber } from '../logging/credential-scrubber.js';
 import { loadSubagents, loadSkillsContent } from './skill-loader.js';
-import type { SubagentDef } from './skill-loader.js';
 import { buildMemorySection } from './memory-loader.js';
 import { MemoryStore } from '../storage/stores/memory-store.js';
 
@@ -34,13 +34,13 @@ export interface QueryOptions {
   readonly allowDangerouslySkipPermissions: boolean;
   readonly maxTurns: number;
   readonly mcpServers: Record<string, unknown>;
-  readonly canUseTool: ReturnType<typeof createCanUseTool>;
+  readonly canUseTool: CanUseTool;
   readonly hooks: HookConfig;
-  readonly stderr: (data: string) => string;
+  readonly stderr: (data: string) => void;
   readonly env: Record<string, string>;
   readonly cwd: string;
   readonly additionalDirectories: string[];
-  readonly agents: SubagentDef[];
+  readonly agents: Record<string, AgentDefinition>;
   readonly pathToClaudeCodeExecutable: string;
 }
 
@@ -153,7 +153,7 @@ export function buildQueryOptions(opts: BuildQueryOptionsInput): QueryOptions {
     canUseTool,
     hooks,
     stderr,
-    env: { ...providerEnv, CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' },
+    env: { ...providerEnv, CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', CLAUDE_CODE_STREAM_CLOSE_TIMEOUT: '1800000' },
     cwd: ctx.cwd,
     additionalDirectories: ctx.additionalDirectories,
     agents,

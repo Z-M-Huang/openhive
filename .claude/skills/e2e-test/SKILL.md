@@ -78,7 +78,6 @@ Infrastructure:
 □ Main team has all 6 subdirs: workspace, memory, org-rules, team-rules, skills, subagents
 □ /data/rules/escalation-policy.md exists and contains "escalation"
 □ /app/system-rules/ has .md files
-□ Container logs contain "Rule cascade loaded"
 □ Container logs contain "OpenHive v3 started"
 
 Database:
@@ -92,9 +91,9 @@ WebSocket:
 □ Send {"content":""} → get error response
 □ Health still 200 after error messages
 
-Report: N/17 smoke checks passed.
+Report: N/16 smoke checks passed.
 
-**STOP GATE:** If any smoke check fails, investigate container logs (`sudo docker logs deployments-openhive-1 2>&1`) and report root causes BEFORE proceeding to Phase B. Fix the skill expectations if the check is wrong (e.g., health format differs from expected). Only proceed to Phase B when all 17 pass or failures are understood and documented.
+**STOP GATE:** If any smoke check fails, investigate container logs (`sudo docker logs deployments-openhive-1 2>&1`) and report root causes BEFORE proceeding to Phase B. Fix the skill expectations if the check is wrong (e.g., health format differs from expected). Only proceed to Phase B when all 16 pass or failures are understood and documented.
 ```
 
 ---
@@ -104,6 +103,23 @@ Report: N/17 smoke checks passed.
 For each scenario: ACT → OBSERVE → VERIFY → INVESTIGATE → REPORT.
 
 After every AI response, independently check filesystem + database. Don't trust the AI's claims — verify them.
+
+### Clean Restart Helper
+
+Before **every mutating scenario** (Scenarios 2-10), run a full clean restart to ensure state isolation:
+
+```bash
+cd /app/openhive
+sudo docker compose -f deployments/docker-compose.yml down -v 2>&1 || true
+sudo rm -rf .run && mkdir -p .run
+# Reset data/rules to seed state
+rm -f data/rules/*.md
+cp common/seed-rules/* data/rules/ 2>/dev/null || true
+sudo docker compose -f deployments/docker-compose.yml up -d 2>&1
+for i in $(seq 1 30); do curl -sf http://localhost:8080/health >/dev/null 2>&1 && echo "Ready" && break; sleep 3; done
+```
+
+Scenario 1 runs on the Phase A state (already clean). All other scenarios get fresh state.
 
 ---
 
@@ -122,6 +138,8 @@ After every AI response, independently check filesystem + database. Don't trust 
 ---
 
 ### Scenario 2: Memory Persistence (THE Critical Test)
+
+**Run Clean Restart Helper before starting this scenario.**
 
 **Purpose:** Does information persist across messages via MEMORY.md?
 
@@ -152,6 +170,8 @@ After every AI response, independently check filesystem + database. Don't trust 
 ---
 
 ### Scenario 3: Team Creation — Deep Verification
+
+**Run Clean Restart Helper before starting this scenario.**
 
 **Purpose:** When AI says "team created," independently verify EVERYTHING.
 
@@ -191,6 +211,8 @@ After every AI response, independently check filesystem + database. Don't trust 
 
 ### Scenario 4: Credential Security
 
+**Run Clean Restart Helper before starting this scenario.**
+
 **Purpose:** Credentials in config, injected into prompt, NOT leaked in output.
 
 1. Send: "Create a team called cred-test for API testing. Give it credentials: api_key is test-fake-key-value-12345, region is us-east-1"
@@ -212,6 +234,8 @@ After every AI response, independently check filesystem + database. Don't trust 
 ---
 
 ### Scenario 5: Skill, Rule & Memory Injection
+
+**Run Clean Restart Helper before starting this scenario.**
 
 **Purpose:** Files written to skills/, team-rules/, memory/ affect agent behavior.
 
@@ -239,6 +263,8 @@ After every AI response, independently check filesystem + database. Don't trust 
 
 ### Scenario 6: Multi-Team Scope & Routing
 
+**Run Clean Restart Helper before starting this scenario.**
+
 **Purpose:** Scope admission works. Siblings isolated.
 
 1. Create team-a (accepts: operations, monitoring) and team-b (accepts: development, coding)
@@ -263,6 +289,8 @@ After every AI response, independently check filesystem + database. Don't trust 
 
 ### Scenario 7: Deep Hierarchy & Rule Cascade
 
+**Run Clean Restart Helper before starting this scenario.**
+
 **Purpose:** 3+ levels, rules cascade down.
 
 1. Send: "Create an engineering team for development tasks"
@@ -280,6 +308,8 @@ After every AI response, independently check filesystem + database. Don't trust 
 ---
 
 ### Scenario 8: Recovery & Durability
+
+**Run Clean Restart Helper before starting this scenario.**
 
 **Purpose:** Everything survives restart. System handles stress.
 
@@ -306,6 +336,8 @@ After every AI response, independently check filesystem + database. Don't trust 
 
 ### Scenario 9: Error Handling
 
+**Run Clean Restart Helper before starting this scenario.**
+
 **Purpose:** Bad inputs don't crash the system.
 
 1. Send invalid JSON via WS → should get error response, not disconnect
@@ -321,6 +353,8 @@ After every AI response, independently check filesystem + database. Don't trust 
 ---
 
 ### Scenario 10: Full User Journey
+
+**Run Clean Restart Helper before starting this scenario.**
 
 **Purpose:** End-to-end as a real user.
 

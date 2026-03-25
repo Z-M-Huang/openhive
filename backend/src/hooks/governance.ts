@@ -12,7 +12,7 @@
 
 import { resolve } from 'node:path';
 
-import type { PreToolUseHook } from './workspace-boundary.js';
+import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
 
 /** Classification of a target file for governance purposes. */
 type FileClass =
@@ -100,10 +100,11 @@ export function createGovernanceHook(
   teamName: string,
   paths: GovernancePaths,
   logger: { info: (msg: string, meta?: Record<string, unknown>) => void },
-): PreToolUseHook {
+): HookCallback {
   return (input) => {
-    const filePath = typeof input.tool_input['file_path'] === 'string'
-      ? input.tool_input['file_path']
+    const { tool_name, tool_input } = input as { tool_name: string; tool_input: Record<string, unknown> };
+    const filePath = typeof tool_input['file_path'] === 'string'
+      ? tool_input['file_path']
       : undefined;
 
     if (filePath === undefined) {
@@ -122,7 +123,7 @@ export function createGovernanceHook(
             hookEventName: 'PreToolUse',
             permissionDecision: 'deny',
             permissionDecisionReason:
-              `Governance: ${input.tool_name} blocked for ${cls} path: ${resolved}`,
+              `Governance: ${tool_name} blocked for ${cls} path: ${resolved}`,
           },
         });
 
@@ -132,7 +133,7 @@ export function createGovernanceHook(
       case 'own-subagents':
         logger.info('Governance: self-evolution write', {
           team: teamName,
-          tool: input.tool_name,
+          tool: tool_name,
           fileClass: cls,
           path: resolved,
         });

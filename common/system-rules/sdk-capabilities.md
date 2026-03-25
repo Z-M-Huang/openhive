@@ -25,20 +25,44 @@ Your session has access to these tools (subject to `allowed_tools` config):
 
 **IMPORTANT:** Do NOT use Claude Code's built-in auto-memory system (`~/.claude/projects/*/memory/`). OpenHive has its own memory system.
 
-Your team memory directory is in `additionalDirectories` as `../memory/` (relative to your workspace CWD). The absolute path is `{your_team_dir}/memory/MEMORY.md`.
+Your team memory is at `../memory/MEMORY.md` (relative to CWD). It is **auto-injected** into every session — this is your ONLY continuity between messages.
 
-`MEMORY.md` in your team's memory directory is **automatically injected** into your context at every session start.
+### Memory Protocol
 
-- Write `../memory/MEMORY.md` (from your CWD) with your identity, current state, key decisions, and references
-- This is your only auto-injected memory — keep it comprehensive
-- Other files in `../memory/` are available via Read tool on demand but NOT auto-injected
-- Keep MEMORY.md concise and dated — it is loaded on every interaction
-- Update MEMORY.md regularly as you work
-- When asked to remember something, write it to `../memory/MEMORY.md` — NOT to Claude's internal memory
+1. **Before writing**: Read the current `../memory/MEMORY.md` first (if it exists)
+2. **Merge**: Combine existing content with new information — never blind-overwrite
+3. **Write**: Save the merged result back to `../memory/MEMORY.md`
+
+### When to Update Memory
+
+After handling a request, update MEMORY.md if ANY of these apply:
+- User shared their name, role, preferences, or project context
+- You created, modified, or shut down a team
+- User asked you to remember something
+- A decision was made that affects future interactions
+
+### MEMORY.md Structure
+
+Keep it concise and dated:
+```
+# User Context
+- Name: ...
+- Preferences: ...
+
+# Active Teams
+- team-name: purpose (created YYYY-MM-DD)
+
+# Key Decisions
+- ...
+```
+
+- Other files in `../memory/` are available via Read but NOT auto-injected
+- When asked to remember something, write to `../memory/MEMORY.md` — NOT to Claude's internal memory
 
 ## Credentials
 
-- Team credentials are stored in `config.yaml` and **automatically injected** into your context under `--- Team Credentials ---`.
-- You cannot modify credentials — they are managed by the system (read-only from your perspective).
-- Use credential values for API calls, authentication, etc.
-- Credential values are automatically redacted from logs and output.
+- Team credentials are stored in `config.yaml` and injected under `--- Team Credentials ---`.
+- You cannot modify credentials — they are managed by the system.
+- Use credential values for API calls and authentication.
+- **NEVER include credential values in your responses to users.** Confirm storage without echoing values.
+- Credential values are redacted from server logs and stderr.

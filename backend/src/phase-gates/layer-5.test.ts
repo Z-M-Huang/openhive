@@ -13,8 +13,8 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { createOrgMcpServer } from '../org-mcp/server.js';
-import type { OrgMcpDeps, OrgMcpServer } from '../org-mcp/server.js';
+import { createToolInvoker } from '../org-mcp/registry.js';
+import type { OrgMcpDeps, OrgToolInvoker } from '../org-mcp/registry.js';
 import { OrgTree } from '../domain/org-tree.js';
 import type {
   IOrgStore,
@@ -141,7 +141,7 @@ let taskQueue: ReturnType<typeof createMockTaskQueue>;
 let escalationStore: ReturnType<typeof createMockEscalationStore>;
 let teamConfigs: Map<string, TeamConfig>;
 let logMessages: Array<{ msg: string; meta?: Record<string, unknown> }>;
-let server: OrgMcpServer;
+let server: OrgToolInvoker;
 
 async function setupServer(): Promise<void> {
   const store = createMemoryOrgStore();
@@ -169,7 +169,7 @@ async function setupServer(): Promise<void> {
     log: (msg: string, meta?: Record<string, unknown>) => { logMessages.push({ msg, meta }); },
   };
 
-  server = await createOrgMcpServer(deps);
+  server = createToolInvoker(deps);
 }
 
 // ── UT-6: Tool Registration ──────────────────────────────────────────────
@@ -236,7 +236,7 @@ describe('spawn_team', () => {
   it('creates org tree entry and calls spawner', async () => {
     teamConfigs.set('weather', makeTeamConfig({ name: 'weather' }));
 
-    const result = await server.invoke('spawn_team', { name: 'weather' }, 'root');
+    const result = await server.invoke('spawn_team', { name: 'weather', scope_accepts: ['weather'] }, 'root');
 
     expect(result).toEqual({ success: true, team: 'weather' });
     expect(orgTree.getTeam('weather')).toBeDefined();
@@ -248,7 +248,7 @@ describe('spawn_team', () => {
     teamConfigs.set('dup', makeTeamConfig({ name: 'dup' }));
     orgTree.addTeam(makeNode({ teamId: 'dup', name: 'dup' }));
 
-    const result = await server.invoke('spawn_team', { name: 'dup' }, 'root');
+    const result = await server.invoke('spawn_team', { name: 'dup', scope_accepts: ['test'] }, 'root');
 
     expect(result).toEqual(expect.objectContaining({ success: false }));
   });
@@ -257,7 +257,7 @@ describe('spawn_team', () => {
     teamConfigs.set('fail-team', makeTeamConfig({ name: 'fail-team' }));
     vi.mocked(spawner.spawn).mockRejectedValueOnce(new Error('docker unavailable'));
 
-    const result = await server.invoke('spawn_team', { name: 'fail-team' }, 'root');
+    const result = await server.invoke('spawn_team', { name: 'fail-team', scope_accepts: ['test'] }, 'root');
 
     expect(result).toEqual(expect.objectContaining({ success: false }));
     expect(orgTree.getTeam('fail-team')).toBeUndefined();
@@ -612,7 +612,7 @@ describe('R-1: Server error handling', () => {
     teamConfigs.set('boom', makeTeamConfig({ name: 'boom' }));
     vi.mocked(spawner.spawn).mockRejectedValueOnce(new Error('kaboom'));
 
-    const result = await server.invoke('spawn_team', { name: 'boom' }, 'root');
+    const result = await server.invoke('spawn_team', { name: 'boom', scope_accepts: ['test'] }, 'root');
 
     const typed = result as { success: boolean; error: string };
     expect(typed.success).toBe(false);
@@ -656,70 +656,37 @@ describe('query_team', () => {
     expect(typed.error).toContain('admin');
   });
 
-  it('returns error if handlerDeps not configured', async () => {
-    // getHandlerDeps returns null (no providers)
+  it('returns error if queryRunner not configured', async () => {
+    // queryRunner is undefined (no providers)
     const result = await server.invoke('query_team', { team: 'weather-team', query: 'get weather' }, 'root');
     const typed = result as { success: boolean; error: string };
     expect(typed.success).toBe(false);
-    expect(typed.error).toContain('not configured');
+    expect(typed.error).toContain('not available');
   });
 
-  it('sets CLAUDE_CODE_STREAM_CLOSE_TIMEOUT before calling handleMessage', async () => {
-    // We can verify the env var is set by providing a getHandlerDeps that returns deps,
-    // then having handleMessage fail (no real SDK). The env var should be set before the call.
-    const originalTimeout = process.env['CLAUDE_CODE_STREAM_CLOSE_TIMEOUT'];
-
-    // Create server with getHandlerDeps that returns mock deps
-    const store = createMemoryOrgStore();
-    const tree = new OrgTree(store);
-    tree.addTeam(makeNode({ teamId: 'root', name: 'root' }));
-    tree.addTeam(makeNode({ teamId: 'child', name: 'child', parentId: 'root' }));
-    const configs = new Map<string, TeamConfig>();
-    configs.set('child', makeTeamConfig({ name: 'child', scope: { accepts: ['test'], rejects: [] } }));
-
-    const mockHandlerDeps = {
-      providers: {} as never,
-      orgMcpServer: {} as never,
-      availableMcpServers: {},
+  it('CLAUDE_CODE_STREAM_CLOSE_TIMEOUT is set in buildQueryOptions env', async () => {
+    // Verify timeout is included in SDK env options (no longer global process.env mutation)
+    const { buildQueryOptions } = await import('../sessions/query-options.js');
+    const opts = buildQueryOptions({
+      teamName: 'child',
+      teamConfig: makeTeamConfig({ name: 'child' }),
       runDir: '/tmp/test',
       dataDir: '/tmp/data',
       systemRulesDir: '/tmp/rules',
-      orgAncestors: [],
+      providers: { profiles: { default: { type: 'api', model: 'claude-sonnet-4-5-20250514', api_key: process.env['ANTHROPIC_API_KEY'] ?? 'test-placeholder' } } } as never,
+      availableMcpServers: {},
+      ancestors: [],
       logger: { info: () => {} },
-    };
-
-    const srv = await createOrgMcpServer({
-      orgTree: tree,
-      spawner: { spawn: vi.fn().mockResolvedValue('s') },
-      sessionManager: { getSession: vi.fn().mockResolvedValue(null), terminateSession: vi.fn().mockResolvedValue(undefined) },
-      taskQueue: createMockTaskQueue(),
-      escalationStore: createMockEscalationStore(),
-      runDir: '/tmp/test',
-      loadConfig: () => makeTeamConfig(),
-      getTeamConfig: (id) => configs.get(id),
-      log: () => {},
-      getHandlerDeps: () => mockHandlerDeps,
     });
 
-    // This will fail (handleMessage will error since deps are mocks) but env var should be set
-    await srv.invoke('query_team', { team: 'child', query: 'test query' }, 'root');
-
-    expect(process.env['CLAUDE_CODE_STREAM_CLOSE_TIMEOUT']).toBe('1800000');
-
-    // Restore
-    if (originalTimeout !== undefined) {
-      process.env['CLAUDE_CODE_STREAM_CLOSE_TIMEOUT'] = originalTimeout;
-    } else {
-      delete process.env['CLAUDE_CODE_STREAM_CLOSE_TIMEOUT'];
-    }
+    expect(opts.env['CLAUDE_CODE_STREAM_CLOSE_TIMEOUT']).toBe('1800000');
   });
 });
 
 // ── query_team: happy path + error detection ──────────────────────────────
 
 describe('query_team handler logic', () => {
-  it('returns success with mocked handleMessage response', async () => {
-    // Directly test the queryTeam function with a mock handleMessage
+  it('returns success with mocked queryRunner response', async () => {
     const { queryTeam } = await import('../org-mcp/tools/query-team.js');
 
     const store = createMemoryOrgStore();
@@ -729,37 +696,22 @@ describe('query_team handler logic', () => {
     const configs = new Map<string, TeamConfig>();
     configs.set('child', makeTeamConfig({ name: 'child', scope: { accepts: ['test'], rejects: [] } }));
 
-    // Mock handleMessage via the dynamic import by providing getHandlerDeps
-    // that returns deps, and mocking the module
-    const mockDeps = {
-      providers: {} as never,
-      orgMcpServer: {} as never,
-      availableMcpServers: {},
-      runDir: '/tmp/test',
-      dataDir: '/tmp/data',
-      systemRulesDir: '/tmp/rules',
-      orgAncestors: [],
-      logger: { info: () => {} },
-    };
-
     const result = await queryTeam(
       { team: 'child', query: 'test query' },
       'root',
       {
         orgTree: tree,
         getTeamConfig: (id) => configs.get(id),
-        getHandlerDeps: () => mockDeps,
+        queryRunner: async () => 'The weather is sunny',
         log: () => {},
       },
     );
 
-    // Will fail because handleMessage can't actually run (no real SDK),
-    // but the important thing is it doesn't crash and returns a structured result
-    expect(result.success).toBe(false);
-    expect(result.error).toBeDefined();
+    expect(result.success).toBe(true);
+    expect(result.response).toBe('The weather is sunny');
   });
 
-  it('detects error strings from handleMessage as failures', async () => {
+  it('detects error strings from queryRunner as failures', async () => {
     const { queryTeam } = await import('../org-mcp/tools/query-team.js');
 
     const store = createMemoryOrgStore();
@@ -775,21 +727,13 @@ describe('query_team handler logic', () => {
       {
         orgTree: tree,
         getTeamConfig: (id) => configs.get(id),
-        getHandlerDeps: () => ({
-          providers: {} as never,
-          orgMcpServer: {} as never,
-          availableMcpServers: {},
-          runDir: '/tmp/nonexistent',
-          dataDir: '/tmp/data',
-          systemRulesDir: '/tmp/rules',
-          orgAncestors: [],
-          logger: { info: () => {} },
-        }),
+        queryRunner: async () => 'Error processing message: SDK not available',
         log: () => {},
       },
     );
 
     expect(result.success).toBe(false);
+    expect(result.error).toContain('Error processing message');
   });
 });
 
@@ -833,7 +777,7 @@ describe('spawn_team filesystem and init', () => {
   }
 
   it('scaffolds all 6 subdirectories', async () => {
-    await spawnTeam({ name: 'ops' }, 'root', makeDeps());
+    await spawnTeam({ name: 'ops', scope_accepts: ['ops'] }, 'root', makeDeps());
     for (const sub of ['workspace', 'memory', 'org-rules', 'team-rules', 'skills', 'subagents']) {
       expect(existsSync(join(dir, 'teams', 'ops', sub))).toBe(true);
     }
@@ -848,7 +792,7 @@ describe('spawn_team filesystem and init', () => {
   });
 
   it('enforces org in mcp_servers even when config omits it', async () => {
-    await spawnTeam({ name: 'ops' }, 'root', makeDeps());
+    await spawnTeam({ name: 'ops', scope_accepts: ['ops'] }, 'root', makeDeps());
     const raw = readFileSync(join(dir, 'teams', 'ops', 'config.yaml'), 'utf-8');
     const cfg = yamlParse(raw) as { mcp_servers: string[] };
     expect(cfg.mcp_servers).toContain('org');
@@ -868,7 +812,7 @@ describe('spawn_team filesystem and init', () => {
 
   it('writes credentials to config.yaml', async () => {
     const testToken = 'test-fake-token-value-1234567890';
-    await spawnTeam({ name: 'ops', credentials: { api_key: testToken, subdomain: 'acme' } }, 'root', makeDeps());
+    await spawnTeam({ name: 'ops', scope_accepts: ['ops'], credentials: { api_key: testToken, subdomain: 'acme' } }, 'root', makeDeps());
     const raw = readFileSync(join(dir, 'teams', 'ops', 'config.yaml'), 'utf-8');
     const cfg = yamlParse(raw) as { credentials: Record<string, string> };
     expect(cfg.credentials['api_key']).toBe(testToken);
@@ -876,25 +820,25 @@ describe('spawn_team filesystem and init', () => {
   });
 
   it('config has no credentials section when none provided', async () => {
-    await spawnTeam({ name: 'ops' }, 'root', makeDeps());
+    await spawnTeam({ name: 'ops', scope_accepts: ['ops'] }, 'root', makeDeps());
     const raw = readFileSync(join(dir, 'teams', 'ops', 'config.yaml'), 'utf-8');
     const cfg = yamlParse(raw) as { credentials?: Record<string, string> };
     expect(cfg.credentials).toBeUndefined();
   });
 
   it('writes init-context.md when init_context provided', async () => {
-    await spawnTeam({ name: 'ops', init_context: 'Monitor logs every 10 minutes' }, 'root', makeDeps());
+    await spawnTeam({ name: 'ops', scope_accepts: ['logs'], init_context: 'Monitor logs every 10 minutes' }, 'root', makeDeps());
     const content = readFileSync(join(dir, 'teams', 'ops', 'memory', 'init-context.md'), 'utf-8');
     expect(content).toBe('Monitor logs every 10 minutes');
   });
 
   it('does NOT write init-context.md when omitted', async () => {
-    await spawnTeam({ name: 'ops' }, 'root', makeDeps());
+    await spawnTeam({ name: 'ops', scope_accepts: ['ops'] }, 'root', makeDeps());
     expect(existsSync(join(dir, 'teams', 'ops', 'memory', 'init-context.md'))).toBe(false);
   });
 
   it('auto-queues init task with critical priority', async () => {
-    await spawnTeam({ name: 'ops', init_context: 'Setup instructions' }, 'root', makeDeps());
+    await spawnTeam({ name: 'ops', scope_accepts: ['ops'], init_context: 'Setup instructions' }, 'root', makeDeps());
     expect(mockTaskQueue.tasks).toHaveLength(1);
     expect(mockTaskQueue.tasks[0].teamId).toBe('ops');
     expect(mockTaskQueue.tasks[0].priority).toBe(TaskPriority.Critical);
@@ -906,7 +850,7 @@ describe('spawn_team filesystem and init', () => {
       ...mockTaskQueue,
       enqueue: () => { throw new Error('queue full'); },
     };
-    const result = await spawnTeam({ name: 'ops' }, 'root', makeDeps({ taskQueue: failQueue }));
+    const result = await spawnTeam({ name: 'ops', scope_accepts: ['ops'] }, 'root', makeDeps({ taskQueue: failQueue }));
     expect(result.success).toBe(false);
     expect(result.error).toContain('init enqueue failed');
     expect(tree.getTeam('ops')).toBeUndefined();
@@ -916,7 +860,7 @@ describe('spawn_team filesystem and init', () => {
 
   it('cleans up on spawn failure', async () => {
     mockSpawner.spawn.mockRejectedValueOnce(new Error('docker down'));
-    const result = await spawnTeam({ name: 'fail' }, 'root', makeDeps());
+    const result = await spawnTeam({ name: 'fail', scope_accepts: ['test'] }, 'root', makeDeps());
     expect(result.success).toBe(false);
     expect(tree.getTeam('fail')).toBeUndefined();
     expect(existsSync(join(dir, 'teams', 'fail'))).toBe(false);
@@ -942,5 +886,222 @@ describe('Credential redaction with raw secrets', () => {
   it('does not redact short values (< 8 chars)', () => {
     const result = scrubSecrets('subdomain is prod', [], ['prod']);
     expect(result).toContain('prod');
+  });
+});
+
+// ── Fix 1C: spawn_team note when credentials provided ─────────────────────
+
+describe('spawn_team credential note', () => {
+  let dir: string;
+  let tree: OrgTree;
+  let mockSpawner: { spawn: ReturnType<typeof vi.fn>; stop: ReturnType<typeof vi.fn> };
+  let mockTaskQueue: ReturnType<typeof createMockTaskQueue>;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'openhive-l5-note-'));
+    mkdirSync(join(dir, 'teams'), { recursive: true });
+    const store = createMemoryOrgStore();
+    tree = new OrgTree(store);
+    tree.addTeam(makeNode({ teamId: 'root', name: 'root' }));
+    mockSpawner = { spawn: vi.fn().mockResolvedValue('sid'), stop: vi.fn() };
+    mockTaskQueue = createMockTaskQueue();
+  });
+
+  function makeDeps() {
+    return {
+      orgTree: tree,
+      spawner: mockSpawner,
+      runDir: dir,
+      loadConfig: (_name: string, _cp?: string, hints?: { description?: string; scopeAccepts?: string[]; scopeRejects?: string[] }) => ({
+        name: _name, parent: null, description: hints?.description ?? '',
+        scope: { accepts: hints?.scopeAccepts ?? [], rejects: hints?.scopeRejects ?? [] },
+        allowed_tools: ['*'], mcp_servers: [] as string[], provider_profile: 'default', maxTurns: 100,
+      }),
+      taskQueue: mockTaskQueue,
+    };
+  }
+
+  it('returns note when credentials are provided', async () => {
+    const result = await spawnTeam(
+      { name: 'cred-team', scope_accepts: ['test'], credentials: { subdomain: 'test-fake-credential-1234' } },
+      'root', makeDeps(),
+    );
+    expect(result.success).toBe(true);
+    expect(result.note).toContain('Do NOT echo credential values');
+  });
+
+  it('does not return note when no credentials', async () => {
+    const result = await spawnTeam(
+      { name: 'no-cred', scope_accepts: ['test'] },
+      'root', makeDeps(),
+    );
+    expect(result.success).toBe(true);
+    expect(result.note).toBeUndefined();
+  });
+});
+
+// ── Fix 2: Fail-closed scope check ───────────────────────────────────────
+
+describe('delegate_task fail-closed scope check', () => {
+  it('rejects when getTeamConfig returns undefined', async () => {
+    const { delegateTask: dt } = await import('../org-mcp/tools/delegate-task.js');
+    const store = createMemoryOrgStore();
+    const tree = new OrgTree(store);
+    tree.addTeam(makeNode({ teamId: 'root', name: 'root' }));
+    tree.addTeam(makeNode({ teamId: 'child', name: 'child', parentId: 'root' }));
+
+    const result = dt(
+      { team: 'child', task: 'do something', priority: 'normal' },
+      'root',
+      { orgTree: tree, taskQueue: createMockTaskQueue(), getTeamConfig: () => undefined, log: () => {} },
+    );
+    expect(result.success).toBe(false);
+    expect(result.reason).toContain('config not loadable');
+  });
+});
+
+describe('query_team fail-closed scope check', () => {
+  it('rejects when getTeamConfig returns undefined', async () => {
+    const { queryTeam: qt } = await import('../org-mcp/tools/query-team.js');
+    const store = createMemoryOrgStore();
+    const tree = new OrgTree(store);
+    tree.addTeam(makeNode({ teamId: 'root', name: 'root' }));
+    tree.addTeam(makeNode({ teamId: 'child', name: 'child', parentId: 'root' }));
+
+    const result = await qt(
+      { team: 'child', query: 'hello' },
+      'root',
+      { orgTree: tree, getTeamConfig: () => undefined, log: () => {} },
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('config not loadable');
+  });
+});
+
+// ── Fix 1B: query_team credential scrubbing ──────────────────────────────
+
+describe('query_team credential scrubbing', () => {
+  it('scrubs child team credentials from response', async () => {
+    const { queryTeam: qt } = await import('../org-mcp/tools/query-team.js');
+    const store = createMemoryOrgStore();
+    const tree = new OrgTree(store);
+    tree.addTeam(makeNode({ teamId: 'root', name: 'root' }));
+    tree.addTeam(makeNode({ teamId: 'child', name: 'child', parentId: 'root' }));
+
+    const testFakeValue = 'test-fake-value-for-scrubbing';
+    const configs = new Map<string, TeamConfig>();
+    configs.set('child', makeTeamConfig({
+      name: 'child',
+      scope: { accepts: ['test'], rejects: [] },
+      credentials: { subdomain: testFakeValue },
+    }));
+
+    const result = await qt(
+      { team: 'child', query: 'test query' },
+      'root',
+      {
+        orgTree: tree,
+        getTeamConfig: (id) => configs.get(id),
+        queryRunner: async () => `The value is ${testFakeValue} and it works`,
+        log: () => {},
+      },
+    );
+    expect(result.success).toBe(true);
+    expect(result.response).not.toContain(testFakeValue);
+    expect(result.response).toContain('[REDACTED]');
+  });
+});
+
+// ── Fix 3: Parent set to callerId ────────────────────────────────────────
+
+describe('spawn_team parent normalization', () => {
+  it('config.yaml parent field matches callerId', async () => {
+    const dir2 = mkdtempSync(join(tmpdir(), 'openhive-l5-parent-'));
+    mkdirSync(join(dir2, 'teams'), { recursive: true });
+    const store = createMemoryOrgStore();
+    const tree = new OrgTree(store);
+    tree.addTeam(makeNode({ teamId: 'root', name: 'root' }));
+
+    const result = await spawnTeam(
+      { name: 'child-team', scope_accepts: ['test'], description: 'Test' },
+      'root',
+      {
+        orgTree: tree,
+        spawner: { spawn: vi.fn().mockResolvedValue('sid'), stop: vi.fn() },
+        runDir: dir2,
+        loadConfig: (_n: string, _cp?: string, hints?: { description?: string; scopeAccepts?: string[]; scopeRejects?: string[] }) => ({
+          name: _n, parent: null, description: hints?.description ?? '',
+          scope: { accepts: hints?.scopeAccepts ?? [], rejects: hints?.scopeRejects ?? [] },
+          allowed_tools: ['*'], mcp_servers: [] as string[], provider_profile: 'default', maxTurns: 100,
+        }),
+        taskQueue: createMockTaskQueue(),
+      },
+    );
+    expect(result.success).toBe(true);
+
+    const raw = readFileSync(join(dir2, 'teams', 'child-team', 'config.yaml'), 'utf-8');
+    const cfg = yamlParse(raw) as { parent: string };
+    expect(cfg.parent).toBe('root');
+  });
+});
+
+// ── Fix 4: scope_accepts required without config_path ────────────────────
+
+describe('spawn_team scope_accepts validation', () => {
+  it('rejects when no scope_accepts and no config_path', async () => {
+    const result = await spawnTeam(
+      { name: 'no-scope' },
+      'root',
+      {
+        orgTree: new OrgTree(createMemoryOrgStore()),
+        spawner: { spawn: vi.fn().mockResolvedValue('sid') },
+        runDir: '/tmp/test',
+        loadConfig: () => makeTeamConfig(),
+        taskQueue: createMockTaskQueue(),
+      },
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('scope_accepts');
+  });
+
+  it('rejects scope_accepts with empty strings', async () => {
+    const result = await spawnTeam(
+      { name: 'empty-scope', scope_accepts: [''] },
+      'root',
+      {
+        orgTree: new OrgTree(createMemoryOrgStore()),
+        spawner: { spawn: vi.fn().mockResolvedValue('sid') },
+        runDir: '/tmp/test',
+        loadConfig: () => makeTeamConfig(),
+        taskQueue: createMockTaskQueue(),
+      },
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('invalid input');
+  });
+
+  it('allows spawn with config_path but no scope_accepts', async () => {
+    const dir2 = mkdtempSync(join(tmpdir(), 'openhive-l5-cfg-'));
+    mkdirSync(join(dir2, 'teams'), { recursive: true });
+    const cfgPath = join(dir2, 'custom.yaml');
+    writeFileSync(cfgPath, 'name: custom\nscope:\n  accepts: [ops]\n  rejects: []\nallowed_tools: ["*"]\nmcp_servers: []\nprovider_profile: default\nmaxTurns: 50\n');
+
+    const store = createMemoryOrgStore();
+    const tree = new OrgTree(store);
+    tree.addTeam(makeNode({ teamId: 'root', name: 'root' }));
+    const { loadTeamConfig: ltc } = await import('../config/loader.js');
+
+    const result = await spawnTeam(
+      { name: 'custom', config_path: cfgPath },
+      'root',
+      {
+        orgTree: tree,
+        spawner: { spawn: vi.fn().mockResolvedValue('sid') },
+        runDir: dir2,
+        loadConfig: (_n, cp) => cp ? ltc(cp) : makeTeamConfig(),
+        taskQueue: createMockTaskQueue(),
+      },
+    );
+    expect(result.success).toBe(true);
   });
 });

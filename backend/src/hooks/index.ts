@@ -2,23 +2,22 @@
  * Hook composer -- builds the full SDK hooks configuration.
  */
 
+import type { HookCallbackMatcher } from '@anthropic-ai/claude-agent-sdk';
+
 import { createWorkspaceBoundaryHook } from './workspace-boundary.js';
 import { createGovernanceHook } from './governance.js';
 import { createAuditPreHook, createAuditPostHook } from './audit-logger.js';
 
 import type { SecretString } from '../secrets/secret-string.js';
-import type { PreToolUseHook } from './workspace-boundary.js';
-import type { PostToolUseHook } from './audit-logger.js';
 import type { GovernancePaths } from './governance.js';
 
-export interface HookMatcherEntry<T> {
-  readonly matcher: string;
-  readonly hooks: T[];
-}
-
+/**
+ * Hook configuration — required fields (subtype of SDK's Partial<Record<HookEvent, ...>>).
+ * buildHookConfig() always provides both, keeping downstream test assertions simple.
+ */
 export interface HookConfig {
-  readonly PreToolUse: HookMatcherEntry<PreToolUseHook>[];
-  readonly PostToolUse: HookMatcherEntry<PostToolUseHook>[];
+  readonly PreToolUse: HookCallbackMatcher[];
+  readonly PostToolUse: HookCallbackMatcher[];
 }
 
 export interface BuildHookConfigOpts {

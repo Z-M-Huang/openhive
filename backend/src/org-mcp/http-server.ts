@@ -12,101 +12,26 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { z } from 'zod';
 
-import type { OrgTree } from '../domain/org-tree.js';
-import type { ISessionSpawner, ISessionManager, ITaskQueueStore, IEscalationStore } from '../domain/interfaces.js';
-import type { TeamConfig } from '../domain/types.js';
-import type { MessageHandlerDeps } from '../sessions/message-handler.js';
-import { SpawnTeamInputSchema, spawnTeam } from './tools/spawn-team.js';
-import { ShutdownTeamInputSchema, shutdownTeam } from './tools/shutdown-team.js';
-import { DelegateTaskInputSchema, delegateTask } from './tools/delegate-task.js';
-import { EscalateInputSchema, escalate } from './tools/escalate.js';
-import { SendMessageInputSchema, sendMessage } from './tools/send-message.js';
-import { GetStatusInputSchema, getStatus } from './tools/get-status.js';
-import { QueryTeamInputSchema, queryTeam } from './tools/query-team.js';
-import type { SpawnTeamConfigHints } from './tools/spawn-team.js';
-
-export interface OrgMcpHttpDeps {
-  readonly orgTree: OrgTree;
-  readonly spawner: ISessionSpawner;
-  readonly sessionManager: ISessionManager;
-  readonly taskQueue: ITaskQueueStore;
-  readonly escalationStore: IEscalationStore;
-  readonly runDir: string;
-  readonly loadConfig: (name: string, configPath?: string, hints?: SpawnTeamConfigHints) => TeamConfig;
-  readonly getTeamConfig: (teamId: string) => TeamConfig | undefined;
-  readonly log: (msg: string, meta?: Record<string, unknown>) => void;
-  readonly getHandlerDeps?: () => MessageHandlerDeps | null;
-}
-
-/**
- * Extract Zod shape for McpServer.tool() — converts ZodObject to record of shapes.
- */
-function extractShape(schema: z.ZodType): Record<string, z.ZodType> {
-  if (schema instanceof z.ZodObject) {
-    return schema.shape as Record<string, z.ZodType>;
-  }
-  return {};
-}
+import { buildToolDefs, extractShape, type OrgMcpDeps } from './registry.js';
 
 /**
  * Create a fresh McpServer instance with all 7 org tools, callerId baked in.
  */
-function createOrgMcpInstance(deps: OrgMcpHttpDeps, callerId: string): McpServer {
+function createOrgMcpInstance(deps: OrgMcpDeps, callerId: string): McpServer {
   const server = new McpServer({ name: 'org', version: '1.0.0' });
 
-  const toolDeps = {
-    orgTree: deps.orgTree,
-    spawner: deps.spawner,
-    sessionManager: deps.sessionManager,
-    taskQueue: deps.taskQueue,
-    escalationStore: deps.escalationStore,
-    runDir: deps.runDir,
-    loadConfig: deps.loadConfig,
-    getTeamConfig: deps.getTeamConfig,
-    log: deps.log,
-    getHandlerDeps: deps.getHandlerDeps,
-  };
-
-  server.tool('spawn_team', extractShape(SpawnTeamInputSchema), async (args) => {
-    const result = await spawnTeam(args as never, callerId, {
-      orgTree: toolDeps.orgTree, spawner: toolDeps.spawner,
-      runDir: toolDeps.runDir, loadConfig: toolDeps.loadConfig,
-      taskQueue: toolDeps.taskQueue,
+  for (const def of buildToolDefs(deps)) {
+    server.tool(def.name, extractShape(def.inputSchema), async (args) => {
+      try {
+        const result = await def.handler(args, callerId);
+        return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: `tool error: ${msg}` }) }] };
+      }
     });
-    return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
-  });
-
-  server.tool('shutdown_team', extractShape(ShutdownTeamInputSchema), async (args) => {
-    const result = await shutdownTeam(args as never, callerId, toolDeps);
-    return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
-  });
-
-  server.tool('delegate_task', extractShape(DelegateTaskInputSchema), (args) => {
-    const result = delegateTask(args as never, callerId, toolDeps);
-    return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
-  });
-
-  server.tool('escalate', extractShape(EscalateInputSchema), (args) => {
-    const result = escalate(args as never, callerId, toolDeps);
-    return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
-  });
-
-  server.tool('send_message', extractShape(SendMessageInputSchema), (args) => {
-    const result = sendMessage(args as never, callerId, toolDeps);
-    return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
-  });
-
-  server.tool('get_status', extractShape(GetStatusInputSchema), (args) => {
-    const result = getStatus(args as never, callerId, toolDeps);
-    return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
-  });
-
-  server.tool('query_team', extractShape(QueryTeamInputSchema), async (args) => {
-    const result = await queryTeam(args as never, callerId, toolDeps);
-    return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
-  });
+  }
 
   return server;
 }
@@ -134,7 +59,7 @@ function sendJsonRpcError(res: ServerResponse, status: number, code: number, mes
  * Returns the actual port and a close function.
  */
 export function startOrgMcpHttpServer(
-  deps: OrgMcpHttpDeps,
+  deps: OrgMcpDeps,
   port = 3001,
 ): Promise<{ port: number; close: () => void }> {
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
@@ -168,7 +93,7 @@ export function startOrgMcpHttpServer(
 }
 
 async function handleMcpPost(
-  deps: OrgMcpHttpDeps,
+  deps: OrgMcpDeps,
   req: IncomingMessage,
   res: ServerResponse,
 ): Promise<void> {

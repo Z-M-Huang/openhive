@@ -9,6 +9,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { tmpdir } from 'node:os';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import type { HookInput } from '@anthropic-ai/claude-agent-sdk';
 
 import { bootstrap } from '../index.js';
 import type { BootstrapResult } from '../index.js';
@@ -21,8 +22,8 @@ import { EscalationStore } from '../storage/stores/escalation-store.js';
 import { MemoryStore } from '../storage/stores/memory-store.js';
 import { OrgTree } from '../domain/org-tree.js';
 import { TeamStatus, TaskStatus, TaskPriority } from '../domain/types.js';
-import { createOrgMcpServer } from '../org-mcp/server.js';
-import type { OrgMcpDeps } from '../org-mcp/server.js';
+import { createToolInvoker } from '../org-mcp/registry.js';
+import type { OrgMcpDeps } from '../org-mcp/registry.js';
 import type { OrgTreeNode, TeamConfig } from '../domain/types.js';
 import { buildHookConfig } from '../hooks/index.js';
 import { TriggerDedup } from '../triggers/dedup.js';
@@ -31,7 +32,7 @@ import { TriggerEngine } from '../triggers/engine.js';
 import { ChannelRouter } from '../channels/router.js';
 import type { ChannelMessage, IChannelAdapter } from '../domain/interfaces.js';
 import { recoverFromCrash } from '../recovery/startup-recovery.js';
-import { SessionManager } from '../sessions/manager.js';
+import { TeamRegistry } from '../sessions/team-registry.js';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -59,6 +60,12 @@ function makeConfig(o?: Partial<TeamConfig>): TeamConfig {
 }
 
 const noop = { info: () => {}, warn: () => {} };
+
+/** Cast partial hook input for tests — our hooks only read tool_name + tool_input. */
+function hookInput(obj: Record<string, unknown>): HookInput {
+  return obj as unknown as HookInput;
+}
+const hookOpts = { signal: new AbortController().signal };
 
 function createMockAdapter(): IChannelAdapter & {
   _handler: ((msg: ChannelMessage) => Promise<void>) | null;
@@ -166,20 +173,20 @@ describe('E2E-4: Workspace boundary + audit hooks compose correctly', () => {
 
     // PreToolUse: allowed read inside cwd
     const okResult = await config.PreToolUse[0].hooks[0](
-      { tool_name: 'Read', tool_input: { file_path: join(dir, 'file.ts') } }, 'tu1', {},
+      hookInput({ tool_name: 'Read', tool_input: { file_path: join(dir, 'file.ts') } }), 'tu1', hookOpts,
     );
     expect(okResult).toEqual({});
 
     // PreToolUse: blocked read outside cwd
     const denyResult = await config.PreToolUse[0].hooks[0](
-      { tool_name: 'Read', tool_input: { file_path: '/etc/passwd' } }, 'tu2', {},
+      hookInput({ tool_name: 'Read', tool_input: { file_path: '/etc/passwd' } }), 'tu2', hookOpts,
     );
-    const hookOut = denyResult['hookSpecificOutput'] as Record<string, unknown>;
+    const hookOut = (denyResult as Record<string, unknown>)['hookSpecificOutput'] as Record<string, unknown>;
     expect(hookOut?.['permissionDecision']).toBe('deny');
 
     // Audit hook fires on any tool
     await config.PreToolUse[2].hooks[0](
-      { tool_name: 'Read', tool_input: { file_path: join(dir, 'f.ts') } }, 'tu3', {},
+      hookInput({ tool_name: 'Read', tool_input: { file_path: join(dir, 'f.ts') } }), 'tu3', hookOpts,
     );
     expect(logs.some((l) => l.msg === 'PreToolUse')).toBe(true);
   });
@@ -207,13 +214,13 @@ describe('E2E-5: Org MCP 6 tools with real stores', () => {
       runDir: dir,
       log: () => {},
     };
-    const server = await createOrgMcpServer(deps);
+    const server = createToolInvoker(deps);
 
     // Root must exist for parent validation
     tree.addTeam(makeNode({ teamId: 'root', name: 'root' }));
 
     // 1. spawn
-    const spawnRes = await server.invoke('spawn_team', { name: 'ops' }, 'root') as { success: boolean };
+    const spawnRes = await server.invoke('spawn_team', { name: 'ops', scope_accepts: ['deploy'] }, 'root') as { success: boolean };
     expect(spawnRes.success).toBe(true);
     expect(tree.getTeam('ops')).toBeDefined();
 
@@ -248,7 +255,7 @@ describe('E2E-5: Org MCP 6 tools with real stores', () => {
 
 describe('E2E-6: Session spawn with isolated scope', () => {
   it('session manager tracks isolated team sessions', () => {
-    const mgr = new SessionManager({ idleTimeoutMs: 60_000 });
+    const mgr = new TeamRegistry({ idleTimeoutMs: 60_000 });
     const ac1 = mgr.spawn('team-a');
     const ac2 = mgr.spawn('team-b');
 
@@ -380,7 +387,7 @@ describe('E2E-10: Full integration chain', () => {
       runDir: dir,
       log: () => {},
     };
-    const server = await createOrgMcpServer(mcpDeps);
+    const server = createToolInvoker(mcpDeps);
 
     // Step 1: Message arrives
     const adapter = createMockAdapter();
@@ -405,7 +412,7 @@ describe('E2E-10: Full integration chain', () => {
 
     // Step 3: Spawn team via MCP
     tree.addTeam(makeNode({ teamId: 'root', name: 'root' }));
-    const spawnRes = await server.invoke('spawn_team', { name: 'weather' }, 'root') as { success: boolean };
+    const spawnRes = await server.invoke('spawn_team', { name: 'weather', scope_accepts: ['weather', 'forecast'] }, 'root') as { success: boolean };
     expect(spawnRes.success).toBe(true);
 
     // Step 4: Delegate task
@@ -455,7 +462,7 @@ describe('E2E-11: Spawned team operational readiness', () => {
       runDir: dir,
       log: () => {},
     };
-    const server = await createOrgMcpServer(deps);
+    const server = createToolInvoker(deps);
     tree.addTeam(makeNode({ teamId: 'root', name: 'root' }));
 
     // Spawn with init_context and credentials

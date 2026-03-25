@@ -15,7 +15,8 @@ import { spawnSession } from './spawner.js';
 import type { ChannelMessage } from '../domain/interfaces.js';
 import type { ProvidersOutput } from '../config/validation.js';
 import type { TeamConfig } from '../domain/types.js';
-// OrgMcpServer no longer needed — org-MCP is a separate HTTP server on :3001
+import { scrubSecrets } from '../logging/credential-scrubber.js';
+
 
 export interface MessageHandlerDeps {
   readonly providers: ProvidersOutput;
@@ -98,8 +99,6 @@ export async function handleMessage(
       ancestors: deps.orgAncestors, logger: deps.logger,
     });
 
-    for (const [k, v] of Object.entries(opts.env)) { process.env[k] = v; }
-    // Pass only SDK-compatible options (strip functions that can't serialize to child process)
     const sdkOpts: Record<string, unknown> = {
       model: opts.model,
       permissionMode: opts.permissionMode,
@@ -112,11 +111,22 @@ export async function handleMessage(
       tools: opts.tools,
       env: opts.env,
       mcpServers: opts.mcpServers,
+      hooks: opts.hooks,
+      agents: opts.agents,
+      canUseTool: opts.canUseTool,
+      stderr: opts.stderr,
     };
     const qFn = queryFn ?? await createSdkQueryFn();
     const result = await spawnSession(msg.content, sdkOpts, qFn);
     const text = extractText(result.messages);
-    return text || undefined;
+    if (!text) return undefined;
+
+    // Scrub team credential values from response (defense in depth)
+    const teamCreds = teamConfig.credentials ?? {};
+    const credValues = Object.values(teamCreds).filter(
+      (v): v is string => typeof v === 'string' && v.length >= 8,
+    );
+    return credValues.length > 0 ? scrubSecrets(text, [], credValues) : text;
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     deps.logger.info(`Message handler error: ${errMsg}`);

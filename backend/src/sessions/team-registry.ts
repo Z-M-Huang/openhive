@@ -1,5 +1,5 @@
 /**
- * Session manager — tracks active sessions with idle timeout.
+ * Team registry — tracks active team sessions with idle timeout.
  */
 
 const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
@@ -15,15 +15,15 @@ export interface SessionStatus {
   readonly uptimeMs: number;
 }
 
-export interface SessionManagerOpts {
+export interface TeamRegistryOpts {
   readonly idleTimeoutMs?: number;
 }
 
-export class SessionManager {
+export class TeamRegistry {
   private readonly sessions = new Map<string, SessionInfo>();
   private readonly idleTimeoutMs: number;
 
-  constructor(opts?: SessionManagerOpts) {
+  constructor(opts?: TeamRegistryOpts) {
     this.idleTimeoutMs = opts?.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
   }
 

@@ -6,16 +6,9 @@
  * known-secret matching).
  */
 
+import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
 import { scrubSecrets } from '../logging/credential-scrubber.js';
 import type { SecretString } from '../secrets/secret-string.js';
-import type { PreToolUseHook } from './workspace-boundary.js';
-
-export type PostToolUseHook = (
-  input: { tool_name: string; tool_input: Record<string, unknown> },
-  toolUseId: string | undefined,
-  context: { session_id?: string; [key: string]: unknown },
-  result?: Record<string, unknown>,
-) => Promise<Record<string, unknown>>;
 
 /**
  * Factory: create an audit PreToolUse hook.
@@ -27,15 +20,16 @@ export type PostToolUseHook = (
 export function createAuditPreHook(
   logger: { info: (msg: string, meta?: Record<string, unknown>) => void },
   knownSecrets: readonly SecretString[] = [],
-): { hook: PreToolUseHook; startTimes: Map<string, number> } {
+): { hook: HookCallback; startTimes: Map<string, number> } {
   const startTimes = new Map<string, number>();
 
-  const hook: PreToolUseHook = (input, toolUseId) => {
+  const hook: HookCallback = (input, toolUseId) => {
+    const { tool_name, tool_input } = input as { tool_name: string; tool_input: unknown };
     const now = Date.now();
     if (toolUseId) {
       startTimes.set(toolUseId, now);
     }
-    const rawParams = JSON.stringify(input.tool_input);
+    const rawParams = JSON.stringify(tool_input);
     const scrubbedJson = scrubSecrets(rawParams, knownSecrets);
     let params: unknown;
     try {
@@ -44,7 +38,7 @@ export function createAuditPreHook(
       params = scrubbedJson;
     }
     logger.info('PreToolUse', {
-      tool: input.tool_name,
+      tool: tool_name,
       params,
       toolUseId,
     });
@@ -66,8 +60,9 @@ export function createAuditPostHook(
   logger: { info: (msg: string, meta?: Record<string, unknown>) => void },
   startTimes: Map<string, number>,
   knownSecrets: readonly SecretString[] = [],
-): PostToolUseHook {
-  return (input, toolUseId, _context, result) => {
+): HookCallback {
+  return (input, toolUseId) => {
+    const { tool_name, tool_response } = input as { tool_name: string; tool_response?: unknown };
     const start = toolUseId ? startTimes.get(toolUseId) : undefined;
     const durationMs = start !== undefined ? Date.now() - start : undefined;
 
@@ -76,12 +71,12 @@ export function createAuditPostHook(
     }
 
     // Scrub BEFORE truncating to prevent partial secret leakage at cutoff
-    const summary = result
-      ? scrubSecrets(JSON.stringify(result), knownSecrets).slice(0, 200)
+    const summary = tool_response
+      ? scrubSecrets(JSON.stringify(tool_response), knownSecrets).slice(0, 200)
       : undefined;
 
     logger.info('PostToolUse', {
-      tool: input.tool_name,
+      tool: tool_name,
       toolUseId,
       durationMs,
       summary,

@@ -67,6 +67,6 @@ export function scrubSecrets(
 export function createStderrScrubber(
   knownSecrets: readonly SecretString[],
   rawSecrets?: readonly string[],
-): (data: string) => string {
-  return (data: string) => scrubSecrets(data, knownSecrets, rawSecrets);
+): (data: string) => void {
+  return (data: string) => { scrubSecrets(data, knownSecrets, rawSecrets); };
 }

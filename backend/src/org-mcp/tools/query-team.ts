@@ -5,14 +5,15 @@
  * SDK session completes and returns the response text to the caller.
  *
  * Input: { team: string, query: string }
- * Validates caller is parent. Runs scope admission. Calls handleMessage() blocking.
+ * Validates caller is parent. Runs scope admission. Calls queryRunner blocking.
  */
 
 import { z } from 'zod';
 import type { OrgTree } from '../../domain/org-tree.js';
 import type { TeamConfig } from '../../domain/types.js';
-import type { MessageHandlerDeps } from '../../sessions/message-handler.js';
+import type { TeamQueryRunner } from '../registry.js';
 import { checkScopeAdmission } from '../scope-admission.js';
+import { scrubSecrets } from '../../logging/credential-scrubber.js';
 
 export const QueryTeamInputSchema = z.object({
   team: z.string().min(1),
@@ -30,7 +31,7 @@ export interface QueryTeamResult {
 export interface QueryTeamDeps {
   readonly orgTree: OrgTree;
   readonly getTeamConfig: (teamId: string) => TeamConfig | undefined;
-  readonly getHandlerDeps?: () => MessageHandlerDeps | null;
+  readonly queryRunner?: TeamQueryRunner;
   readonly log: (msg: string, meta?: Record<string, unknown>) => void;
 }
 
@@ -57,48 +58,29 @@ export async function queryTeam(
     return { success: false, error: 'caller is not parent of target team' };
   }
 
-  // Run scope admission check
+  // Run scope admission check (fail-closed: reject if config not loadable)
   const config = deps.getTeamConfig(team);
-  if (config) {
-    const admission = checkScopeAdmission(query, config.scope);
-    if (!admission.admitted) {
-      return { success: false, error: admission.reason };
-    }
+  if (!config) {
+    deps.log(`scope check failed: config not loadable for team "${team}"`);
+    return { success: false, error: `config not loadable for team "${team}" — cannot verify scope` };
+  }
+  const admission = checkScopeAdmission(query, config.scope);
+  if (!admission.admitted) {
+    return { success: false, error: admission.reason };
   }
 
-  // Get handler deps via lazy getter (breaks circular dep)
-  const getHandlerDeps = deps.getHandlerDeps;
-  if (!getHandlerDeps) {
-    return { success: false, error: 'query_team not configured: no handler deps getter' };
-  }
-  const handlerDeps = getHandlerDeps();
-  if (!handlerDeps) {
+  // Check queryRunner is available
+  if (!deps.queryRunner) {
     return { success: false, error: 'query_team not available: providers not configured' };
   }
-
-  // Set stream-close timeout for long-running child sessions (SDK default is 60s)
-  process.env['CLAUDE_CODE_STREAM_CLOSE_TIMEOUT'] = '1800000';
 
   // Compute ancestor chain for the child team
   const ancestors = deps.orgTree.getAncestors(team).map((a) => a.name);
 
-  deps.log('query_team: invoking handleMessage', { callerId, team, query: query.slice(0, 100) });
+  deps.log('query_team: invoking queryRunner', { callerId, team, query: query.slice(0, 100) });
 
   try {
-    // Dynamic import to avoid circular dependency at module load time
-    const { handleMessage } = await import('../../sessions/message-handler.js');
-
-    const response = await handleMessage(
-      {
-        channelId: `query:${callerId}:${team}:${Date.now()}`,
-        userId: callerId,
-        content: query,
-        timestamp: Date.now(),
-      },
-      { ...handlerDeps, orgAncestors: ancestors },
-      undefined, // queryFn — use default SDK
-      team,
-    );
+    const response = await deps.queryRunner(query, team, callerId, ancestors);
 
     if (!response) {
       return { success: false, error: 'Team returned empty response' };
@@ -110,7 +92,15 @@ export async function queryTeam(
       return { success: false, error: response };
     }
 
-    return { success: true, response };
+    // Scrub child team credential values from response
+    const childCreds = config.credentials ?? {};
+    const childCredValues = Object.values(childCreds).filter(
+      (v): v is string => typeof v === 'string' && v.length >= 8,
+    );
+    const scrubbedResponse = childCredValues.length > 0
+      ? scrubSecrets(response, [], childCredValues) : response;
+
+    return { success: true, response: scrubbedResponse };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     deps.log('query_team error', { team, error: msg });

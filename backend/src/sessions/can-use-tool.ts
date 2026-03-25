@@ -6,12 +6,10 @@
  * Bash is denied unless explicitly listed.
  */
 
+import type { CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
+
 interface Logger {
   info(msg: string, meta?: Record<string, unknown>): void;
-}
-
-export interface CanUseToolResult {
-  readonly allowed: boolean;
 }
 
 /**
@@ -23,7 +21,7 @@ export interface CanUseToolResult {
 export function createCanUseTool(
   allowedTools: readonly string[],
   logger?: Logger,
-): (toolName: string) => CanUseToolResult {
+): CanUseTool {
   // Pre-split into exact matches and prefix entries for O(1)/O(n) lookup.
   const exactSet = new Set<string>();
   const prefixes: string[] = [];
@@ -39,20 +37,20 @@ export function createCanUseTool(
   // '*' alone means allow everything
   const allowAll = exactSet.has('*') || prefixes.some(p => p === '');
 
-  return (toolName: string): CanUseToolResult => {
-    if (allowAll) return { allowed: true };
+  return async (toolName: string, _input, _options): Promise<PermissionResult> => {
+    if (allowAll) return { behavior: 'allow' };
 
     if (exactSet.has(toolName)) {
-      return { allowed: true };
+      return { behavior: 'allow' };
     }
 
     for (const prefix of prefixes) {
       if (toolName.startsWith(prefix)) {
-        return { allowed: true };
+        return { behavior: 'allow' };
       }
     }
 
     logger?.info('canUseTool denied', { tool: toolName });
-    return { allowed: false };
+    return { behavior: 'deny', message: `Tool '${toolName}' not in allowed_tools` };
   };
 }

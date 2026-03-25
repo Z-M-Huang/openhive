@@ -6,11 +6,12 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import type { HookInput } from '@anthropic-ai/claude-agent-sdk';
 
 import { createCanUseTool } from '../sessions/can-use-tool.js';
 import { createWorkspaceBoundaryHook } from '../hooks/workspace-boundary.js';
-import { createOrgMcpServer } from '../org-mcp/server.js';
-import type { OrgMcpDeps } from '../org-mcp/server.js';
+import { createToolInvoker } from '../org-mcp/registry.js';
+import type { OrgMcpDeps } from '../org-mcp/registry.js';
 import { OrgTree } from '../domain/org-tree.js';
 import type { IOrgStore } from '../domain/interfaces.js';
 import type { OrgTreeNode, TeamConfig } from '../domain/types.js';
@@ -37,42 +38,49 @@ function makeNode(o: Partial<OrgTreeNode> & { teamId: string; name: string }): O
   return { parentId: null, status: TeamStatus.Active, agents: [], children: [], ...o };
 }
 
+/** Cast partial hook input for tests — our hooks only read tool_name + tool_input. */
+function hookInput(obj: Record<string, unknown>): HookInput {
+  return obj as unknown as HookInput;
+}
+const hookOpts = { signal: new AbortController().signal };
+const canUseToolOpts = { signal: new AbortController().signal, toolUseID: 'test-tu' };
+
 // ── E2E-11: Tool Defense Bypass ──────────────────────────────────────────
 
 describe('E2E-11: Tool defense bypass -- 3 layers', () => {
-  it('Layer 1: canUseTool denies Bash by default', () => {
+  it('Layer 1: canUseTool denies Bash by default', async () => {
     const check = createCanUseTool(['Read', 'Write', 'Edit', 'mcp__org__*']);
 
-    expect(check('Bash').allowed).toBe(false);
-    expect(check('Read').allowed).toBe(true);
-    expect(check('mcp__org__spawn_team').allowed).toBe(true);
+    expect((await check('Bash', {}, canUseToolOpts)).behavior).toBe('deny');
+    expect((await check('Read', {}, canUseToolOpts)).behavior).toBe('allow');
+    expect((await check('mcp__org__spawn_team', {}, canUseToolOpts)).behavior).toBe('allow');
     // Unlisted tool also denied
-    expect(check('Grep').allowed).toBe(false);
+    expect((await check('Grep', {}, canUseToolOpts)).behavior).toBe('deny');
   });
 
-  it('Layer 1: canUseTool allows Bash only if explicitly listed', () => {
+  it('Layer 1: canUseTool allows Bash only if explicitly listed', async () => {
     const check = createCanUseTool(['Bash', 'Read']);
-    expect(check('Bash').allowed).toBe(true);
+    expect((await check('Bash', {}, canUseToolOpts)).behavior).toBe('allow');
   });
 
   it('Layer 2: workspace boundary blocks file access outside cwd', async () => {
     const hook = createWorkspaceBoundaryHook('/app/workspace', ['/app/common']);
     const blocked = await hook(
-      { tool_name: 'Read', tool_input: { file_path: '/etc/shadow' } },
-      'tu-1', {},
+      hookInput({ tool_name: 'Read', tool_input: { file_path: '/etc/shadow' } }),
+      'tu-1', hookOpts,
     );
-    const out = blocked['hookSpecificOutput'] as Record<string, unknown>;
+    const out = (blocked as Record<string, unknown>)['hookSpecificOutput'] as Record<string, unknown>;
     expect(out?.['permissionDecision']).toBe('deny');
 
     const allowed = await hook(
-      { tool_name: 'Read', tool_input: { file_path: '/app/workspace/file.ts' } },
-      'tu-2', {},
+      hookInput({ tool_name: 'Read', tool_input: { file_path: '/app/workspace/file.ts' } }),
+      'tu-2', hookOpts,
     );
     expect(allowed).toEqual({});
 
     const commonAllowed = await hook(
-      { tool_name: 'Glob', tool_input: { path: '/app/common' } },
-      'tu-3', {},
+      hookInput({ tool_name: 'Glob', tool_input: { path: '/app/common' } }),
+      'tu-3', hookOpts,
     );
     expect(commonAllowed).toEqual({});
   });
@@ -107,7 +115,7 @@ describe('E2E-11: Tool defense bypass -- 3 layers', () => {
       getTeamConfig: (id) => configs.get(id),
       log: () => {},
     };
-    const server = await createOrgMcpServer(deps);
+    const server = createToolInvoker(deps);
 
     // Sibling cannot delegate to another sibling's child
     const res = await server.invoke(
@@ -132,20 +140,20 @@ describe('E2E-11: Tool defense bypass -- 3 layers', () => {
   it('all 3 defense layers compose (end-to-end)', async () => {
     // 1. canUseTool denies Bash
     const check = createCanUseTool(['Read', 'Write', 'mcp__org__*']);
-    expect(check('Bash').allowed).toBe(false);
+    expect((await check('Bash', {}, canUseToolOpts)).behavior).toBe('deny');
 
     // 2. Even if a tool is allowed, boundary blocks outside-workspace access
-    expect(check('Read').allowed).toBe(true);
+    expect((await check('Read', {}, canUseToolOpts)).behavior).toBe('allow');
     const hook = createWorkspaceBoundaryHook('/app/workspace', []);
     const boundaryResult = await hook(
-      { tool_name: 'Read', tool_input: { file_path: '/root/.ssh/id_rsa' } },
-      'tu-x', {},
+      hookInput({ tool_name: 'Read', tool_input: { file_path: '/root/.ssh/id_rsa' } }),
+      'tu-x', hookOpts,
     );
-    const bOut = boundaryResult['hookSpecificOutput'] as Record<string, unknown>;
+    const bOut = (boundaryResult as Record<string, unknown>)['hookSpecificOutput'] as Record<string, unknown>;
     expect(bOut?.['permissionDecision']).toBe('deny');
 
     // 3. Even if file access passes, Org MCP validates team relationships
-    expect(check('mcp__org__delegate_task').allowed).toBe(true);
+    expect((await check('mcp__org__delegate_task', {}, canUseToolOpts)).behavior).toBe('allow');
     // (authorization tested in Layer 3 test above)
   });
 });
@@ -185,8 +193,8 @@ describe('E2E-12: Credential leakage audit', () => {
     const { hook } = createAuditPreHook(logger, [secret]);
 
     await hook(
-      { tool_name: 'Write', tool_input: { file_path: '/app/f.ts', content: 'api-key-secret-value' } },
-      'tu-sec', {},
+      hookInput({ tool_name: 'Write', tool_input: { file_path: '/app/f.ts', content: 'api-key-secret-value' } }),
+      'tu-sec', hookOpts,
     );
 
     expect(logs).toHaveLength(1);

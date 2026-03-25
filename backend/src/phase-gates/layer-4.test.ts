@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 
+import type { HookInput, HookJSONOutput } from '@anthropic-ai/claude-agent-sdk';
 import { createWorkspaceBoundaryHook } from '../hooks/workspace-boundary.js';
 import { createGovernanceHook } from '../hooks/governance.js';
 import type { GovernancePaths } from '../hooks/governance.js';
@@ -29,17 +30,24 @@ function makeTmpDir(): string {
   return dir;
 }
 
-function isDenied(result: Record<string, unknown>): boolean {
-  const out = result['hookSpecificOutput'] as Record<string, unknown> | undefined;
+/** Cast partial hook input for tests — our hooks only read tool_name + tool_input. */
+function hookInput(input: { tool_name: string; tool_input: Record<string, unknown>; tool_response?: unknown }): HookInput {
+  return input as unknown as HookInput;
+}
+
+const hookOpts = { signal: new AbortController().signal };
+
+function isDenied(result: HookJSONOutput): boolean {
+  const r = result as Record<string, unknown>;
+  const out = r['hookSpecificOutput'] as Record<string, unknown> | undefined;
   return out?.['permissionDecision'] === 'deny';
 }
 
-function denyReason(result: Record<string, unknown>): string {
-  const out = result['hookSpecificOutput'] as Record<string, unknown>;
+function denyReason(result: HookJSONOutput): string {
+  const r = result as Record<string, unknown>;
+  const out = r['hookSpecificOutput'] as Record<string, unknown>;
   return out['permissionDecisionReason'] as string;
 }
-
-const emptyCtx = {};
 
 // ── UT-4: Workspace Boundary ──────────────────────────────────────────────
 
@@ -60,9 +68,9 @@ describe('UT-4: Workspace Boundary Hook', () => {
   it('blocks ../traversal attempt', async () => {
     const hook = createWorkspaceBoundaryHook(cwd, []);
     const result = await hook(
-      { tool_name: 'Read', tool_input: { file_path: join(cwd, '..', 'etc', 'passwd') } },
+      hookInput({ tool_name: 'Read', tool_input: { file_path: join(cwd, '..', 'etc', 'passwd') } }),
       'tu-1',
-      emptyCtx,
+      hookOpts,
     );
 
     expect(isDenied(result)).toBe(true);
@@ -80,9 +88,9 @@ describe('UT-4: Workspace Boundary Hook', () => {
 
     const hook = createWorkspaceBoundaryHook(cwd, []);
     const result = await hook(
-      { tool_name: 'Read', tool_input: { file_path: join(linkPath, 'secret.txt') } },
+      hookInput({ tool_name: 'Read', tool_input: { file_path: join(linkPath, 'secret.txt') } }),
       'tu-2',
-      emptyCtx,
+      hookOpts,
     );
 
     expect(isDenied(result)).toBe(true);
@@ -92,9 +100,9 @@ describe('UT-4: Workspace Boundary Hook', () => {
   it('allows files within cwd', async () => {
     const hook = createWorkspaceBoundaryHook(cwd, []);
     const result = await hook(
-      { tool_name: 'Write', tool_input: { file_path: join(cwd, 'file.txt') } },
+      hookInput({ tool_name: 'Write', tool_input: { file_path: join(cwd, 'file.txt') } }),
       'tu-3',
-      emptyCtx,
+      hookOpts,
     );
 
     expect(result).toEqual({});
@@ -105,9 +113,9 @@ describe('UT-4: Workspace Boundary Hook', () => {
     try {
       const hook = createWorkspaceBoundaryHook(cwd, [extraDir]);
       const result = await hook(
-        { tool_name: 'Edit', tool_input: { file_path: join(extraDir, 'allowed.ts') } },
+        hookInput({ tool_name: 'Edit', tool_input: { file_path: join(extraDir, 'allowed.ts') } }),
         'tu-4',
-        emptyCtx,
+        hookOpts,
       );
 
       expect(result).toEqual({});
@@ -119,9 +127,9 @@ describe('UT-4: Workspace Boundary Hook', () => {
   it('extracts path from Read tool_input (file_path)', async () => {
     const hook = createWorkspaceBoundaryHook(cwd, []);
     const result = await hook(
-      { tool_name: 'Read', tool_input: { file_path: join(cwd, 'readme.md') } },
+      hookInput({ tool_name: 'Read', tool_input: { file_path: join(cwd, 'readme.md') } }),
       'tu-5',
-      emptyCtx,
+      hookOpts,
     );
     expect(result).toEqual({});
   });
@@ -129,9 +137,9 @@ describe('UT-4: Workspace Boundary Hook', () => {
   it('extracts path from Write tool_input (file_path)', async () => {
     const hook = createWorkspaceBoundaryHook(cwd, []);
     const result = await hook(
-      { tool_name: 'Write', tool_input: { file_path: '/tmp/outside/file' } },
+      hookInput({ tool_name: 'Write', tool_input: { file_path: '/tmp/outside/file' } }),
       'tu-6',
-      emptyCtx,
+      hookOpts,
     );
     expect(isDenied(result)).toBe(true);
   });
@@ -139,9 +147,9 @@ describe('UT-4: Workspace Boundary Hook', () => {
   it('extracts path from Edit tool_input (file_path)', async () => {
     const hook = createWorkspaceBoundaryHook(cwd, []);
     const result = await hook(
-      { tool_name: 'Edit', tool_input: { file_path: join(cwd, 'src', 'code.ts') } },
+      hookInput({ tool_name: 'Edit', tool_input: { file_path: join(cwd, 'src', 'code.ts') } }),
       'tu-7',
-      emptyCtx,
+      hookOpts,
     );
     expect(result).toEqual({});
   });
@@ -149,9 +157,9 @@ describe('UT-4: Workspace Boundary Hook', () => {
   it('extracts path from Glob tool_input (path)', async () => {
     const hook = createWorkspaceBoundaryHook(cwd, []);
     const result = await hook(
-      { tool_name: 'Glob', tool_input: { path: cwd, pattern: '**/*.ts' } },
+      hookInput({ tool_name: 'Glob', tool_input: { path: cwd, pattern: '**/*.ts' } }),
       'tu-8',
-      emptyCtx,
+      hookOpts,
     );
     expect(result).toEqual({});
   });
@@ -159,9 +167,9 @@ describe('UT-4: Workspace Boundary Hook', () => {
   it('extracts path from Glob tool_input (pattern as fallback)', async () => {
     const hook = createWorkspaceBoundaryHook(cwd, []);
     const result = await hook(
-      { tool_name: 'Glob', tool_input: { pattern: join(cwd, 'src') } },
+      hookInput({ tool_name: 'Glob', tool_input: { pattern: join(cwd, 'src') } }),
       'tu-9',
-      emptyCtx,
+      hookOpts,
     );
     expect(result).toEqual({});
   });
@@ -169,9 +177,9 @@ describe('UT-4: Workspace Boundary Hook', () => {
   it('extracts path from Grep tool_input (path)', async () => {
     const hook = createWorkspaceBoundaryHook(cwd, []);
     const result = await hook(
-      { tool_name: 'Grep', tool_input: { path: join(cwd, 'search-here'), pattern: 'foo' } },
+      hookInput({ tool_name: 'Grep', tool_input: { path: join(cwd, 'search-here'), pattern: 'foo' } }),
       'tu-10',
-      emptyCtx,
+      hookOpts,
     );
     expect(result).toEqual({});
   });
@@ -179,9 +187,9 @@ describe('UT-4: Workspace Boundary Hook', () => {
   it('allows when tool_input has no extractable path', async () => {
     const hook = createWorkspaceBoundaryHook(cwd, []);
     const result = await hook(
-      { tool_name: 'Grep', tool_input: { pattern: 'hello' } },
+      hookInput({ tool_name: 'Grep', tool_input: { pattern: 'hello' } }),
       'tu-11',
-      emptyCtx,
+      hookOpts,
     );
     expect(result).toEqual({});
   });
@@ -219,9 +227,9 @@ describe('UT-5: Governance Hook', () => {
   it('blocks write to admin org rules (dataDir/rules/)', async () => {
     const hook = createGovernanceHook('my-team', paths, logger);
     const result = await hook(
-      { tool_name: 'Write', tool_input: { file_path: join(dataDir, 'rules', 'global', 'safety.md') } },
+      hookInput({ tool_name: 'Write', tool_input: { file_path: join(dataDir, 'rules', 'global', 'safety.md') } }),
       'tu-g1',
-      emptyCtx,
+      hookOpts,
     );
 
     expect(isDenied(result)).toBe(true);
@@ -231,9 +239,9 @@ describe('UT-5: Governance Hook', () => {
   it('blocks write to system-rules dir', async () => {
     const hook = createGovernanceHook('my-team', paths, logger);
     const result = await hook(
-      { tool_name: 'Edit', tool_input: { file_path: join(systemRulesDir, 'policy.md') } },
+      hookInput({ tool_name: 'Edit', tool_input: { file_path: join(systemRulesDir, 'policy.md') } }),
       'tu-g2',
-      emptyCtx,
+      hookOpts,
     );
 
     expect(isDenied(result)).toBe(true);
@@ -243,9 +251,9 @@ describe('UT-5: Governance Hook', () => {
   it('blocks write to other team directory', async () => {
     const hook = createGovernanceHook('my-team', paths, logger);
     const result = await hook(
-      { tool_name: 'Write', tool_input: { file_path: join(runDir, 'teams', 'rival-team', 'team-rules', 'hack.md') } },
+      hookInput({ tool_name: 'Write', tool_input: { file_path: join(runDir, 'teams', 'rival-team', 'team-rules', 'hack.md') } }),
       'tu-g3',
-      emptyCtx,
+      hookOpts,
     );
 
     expect(isDenied(result)).toBe(true);
@@ -255,9 +263,9 @@ describe('UT-5: Governance Hook', () => {
   it('allows write to own team-rules/ and logs', async () => {
     const hook = createGovernanceHook('my-team', paths, logger);
     const result = await hook(
-      { tool_name: 'Write', tool_input: { file_path: join(runDir, 'teams', 'my-team', 'team-rules', 'style.md') } },
+      hookInput({ tool_name: 'Write', tool_input: { file_path: join(runDir, 'teams', 'my-team', 'team-rules', 'style.md') } }),
       'tu-g4',
-      emptyCtx,
+      hookOpts,
     );
 
     expect(result).toEqual({});
@@ -269,9 +277,9 @@ describe('UT-5: Governance Hook', () => {
   it('allows write to own org-rules/ and logs', async () => {
     const hook = createGovernanceHook('my-team', paths, logger);
     const result = await hook(
-      { tool_name: 'Edit', tool_input: { file_path: join(runDir, 'teams', 'my-team', 'org-rules', 'rule.md') } },
+      hookInput({ tool_name: 'Edit', tool_input: { file_path: join(runDir, 'teams', 'my-team', 'org-rules', 'rule.md') } }),
       'tu-g5',
-      emptyCtx,
+      hookOpts,
     );
 
     expect(result).toEqual({});
@@ -282,9 +290,9 @@ describe('UT-5: Governance Hook', () => {
   it('allows write to own skills/ and logs', async () => {
     const hook = createGovernanceHook('my-team', paths, logger);
     const result = await hook(
-      { tool_name: 'Write', tool_input: { file_path: join(runDir, 'teams', 'my-team', 'skills', 'SKILL.md') } },
+      hookInput({ tool_name: 'Write', tool_input: { file_path: join(runDir, 'teams', 'my-team', 'skills', 'SKILL.md') } }),
       'tu-g6',
-      emptyCtx,
+      hookOpts,
     );
 
     expect(result).toEqual({});
@@ -295,9 +303,9 @@ describe('UT-5: Governance Hook', () => {
   it('allows write to own subagents/ and logs', async () => {
     const hook = createGovernanceHook('my-team', paths, logger);
     const result = await hook(
-      { tool_name: 'Write', tool_input: { file_path: join(runDir, 'teams', 'my-team', 'subagents', 'agent.md') } },
+      hookInput({ tool_name: 'Write', tool_input: { file_path: join(runDir, 'teams', 'my-team', 'subagents', 'agent.md') } }),
       'tu-g7',
-      emptyCtx,
+      hookOpts,
     );
 
     expect(result).toEqual({});
@@ -308,9 +316,9 @@ describe('UT-5: Governance Hook', () => {
   it('allows write to own memory/ without special log', async () => {
     const hook = createGovernanceHook('my-team', paths, logger);
     const result = await hook(
-      { tool_name: 'Write', tool_input: { file_path: join(runDir, 'teams', 'my-team', 'memory', 'notes.md') } },
+      hookInput({ tool_name: 'Write', tool_input: { file_path: join(runDir, 'teams', 'my-team', 'memory', 'notes.md') } }),
       'tu-g8',
-      emptyCtx,
+      hookOpts,
     );
 
     expect(result).toEqual({});
@@ -320,9 +328,9 @@ describe('UT-5: Governance Hook', () => {
   it('allows write to non-data paths (workspace)', async () => {
     const hook = createGovernanceHook('my-team', paths, logger);
     const result = await hook(
-      { tool_name: 'Write', tool_input: { file_path: '/app/workspace/work/output.txt' } },
+      hookInput({ tool_name: 'Write', tool_input: { file_path: '/app/workspace/work/output.txt' } }),
       'tu-g9',
-      emptyCtx,
+      hookOpts,
     );
 
     expect(result).toEqual({});
@@ -331,9 +339,9 @@ describe('UT-5: Governance Hook', () => {
   it('allows when file_path is missing from tool_input', async () => {
     const hook = createGovernanceHook('my-team', paths, logger);
     const result = await hook(
-      { tool_name: 'Write', tool_input: { content: 'no path here' } },
+      hookInput({ tool_name: 'Write', tool_input: { content: 'no path here' } }),
       'tu-g10',
-      emptyCtx,
+      hookOpts,
     );
 
     expect(result).toEqual({});
@@ -359,9 +367,9 @@ describe('UT-5: Audit Logger', () => {
     const { hook } = createAuditPreHook(logger);
 
     await hook(
-      { tool_name: 'Read', tool_input: { file_path: '/app/workspace/file.ts' } },
+      hookInput({ tool_name: 'Read', tool_input: { file_path: '/app/workspace/file.ts' } }),
       'tu-a1',
-      emptyCtx,
+      hookOpts,
     );
 
     expect(logMessages).toHaveLength(1);
@@ -375,9 +383,9 @@ describe('UT-5: Audit Logger', () => {
     const { hook } = createAuditPreHook(logger, [secret]);
 
     await hook(
-      { tool_name: 'Write', tool_input: { file_path: '/app/file', content: 'my-api-key-12345' } },
+      hookInput({ tool_name: 'Write', tool_input: { file_path: '/app/file', content: 'my-api-key-12345' } }),
       'tu-a2',
-      emptyCtx,
+      hookOpts,
     );
 
     expect(logMessages).toHaveLength(1);
@@ -392,17 +400,16 @@ describe('UT-5: Audit Logger', () => {
 
     // Pre call records start time
     await preHook(
-      { tool_name: 'Read', tool_input: { file_path: '/app/file' } },
+      hookInput({ tool_name: 'Read', tool_input: { file_path: '/app/file' } }),
       'tu-a3',
-      emptyCtx,
+      hookOpts,
     );
 
     // Post call records duration
     await postHook(
-      { tool_name: 'Read', tool_input: { file_path: '/app/file' } },
+      hookInput({ tool_name: 'Read', tool_input: { file_path: '/app/file' }, tool_response: { content: 'file contents here' } }),
       'tu-a3',
-      emptyCtx,
-      { content: 'file contents here' },
+      hookOpts,
     );
 
     expect(logMessages).toHaveLength(2);
@@ -419,10 +426,9 @@ describe('UT-5: Audit Logger', () => {
 
     const longResult = { data: 'x'.repeat(500) };
     await postHook(
-      { tool_name: 'Grep', tool_input: { pattern: 'foo' } },
+      hookInput({ tool_name: 'Grep', tool_input: { pattern: 'foo' }, tool_response: longResult }),
       'tu-a4',
-      emptyCtx,
-      longResult,
+      hookOpts,
     );
 
     expect(logMessages).toHaveLength(1);
@@ -435,9 +441,9 @@ describe('UT-5: Audit Logger', () => {
     const postHook = createAuditPostHook(logger, startTimes);
 
     await postHook(
-      { tool_name: 'Read', tool_input: {} },
+      hookInput({ tool_name: 'Read', tool_input: {} }),
       undefined,
-      emptyCtx,
+      hookOpts,
     );
 
     expect(logMessages).toHaveLength(1);
