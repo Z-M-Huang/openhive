@@ -15,6 +15,7 @@ import { loadProviders, loadTeamConfig, loadSystemConfig } from './config/loader
 import { OrgTree } from './domain/org-tree.js';
 import { createOrgMcpServer } from './org-mcp/server.js';
 import type { OrgMcpServer } from './org-mcp/server.js';
+import { startOrgMcpHttpServer } from './org-mcp/http-server.js';
 import { SessionManager } from './sessions/manager.js';
 import { ChannelRouter } from './channels/router.js';
 import { registerHealthEndpoint } from './health.js';
@@ -44,6 +45,7 @@ export interface BootstrapDeps {
   readonly cliOutput?: Writable;
   readonly skipCli?: boolean;
   readonly skipListen?: boolean;
+  readonly orgMcpPort?: number;
 }
 
 export interface BootstrapResult {
@@ -110,6 +112,28 @@ async function createOrgMcp(
   });
 }
 
+function buildOrgMcpHttpDeps(
+  opts: { orgTree: OrgTree; sessionManager: SessionManager; taskQueueStore: import('./domain/interfaces.js').ITaskQueueStore; escalationStore: import('./domain/interfaces.js').IEscalationStore; runDir: string; logger: pino.Logger },
+  getHandlerDeps: () => Parameters<typeof handleMessage>[1] | null,
+): import('./org-mcp/http-server.js').OrgMcpHttpDeps {
+  return {
+    orgTree: opts.orgTree,
+    spawner: { spawn: (id: string) => { opts.sessionManager.spawn(id); return Promise.resolve(id); } },
+    sessionManager: {
+      getSession: (id: string) => Promise.resolve(opts.sessionManager.isActive(id) ? { id } : null),
+      terminateSession: (id: string) => { opts.sessionManager.stop(id); return Promise.resolve(); },
+    },
+    taskQueue: opts.taskQueueStore,
+    escalationStore: opts.escalationStore,
+    runDir: opts.runDir,
+    loadConfig: (name: string, cp?: string, hints?: { description?: string; scopeAccepts?: string[]; scopeRejects?: string[] }) =>
+      loadOrGenerateConfig(opts.runDir, name, cp, hints),
+    getTeamConfig: (id: string) => safeLoadConfig(opts.runDir, id),
+    log: (msg, meta) => opts.logger.info(meta ?? {}, msg),
+    getHandlerDeps,
+  };
+}
+
 export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> {
   const dataDir = deps?.dataDir ?? '/data';
   const runDir = deps?.runDir ?? '/app/.run';
@@ -137,20 +161,23 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   const orgTree = new OrgTree(orgStore);
   orgTree.loadFromStore();
 
-  // Recovery — reset running tasks, detect orphans
   const recovery = recoverFromCrash({ orgStore, taskQueueStore, orgTree, runDir, logger });
-  if (recovery.recovered > 0) {
-    logger.info({ recovered: recovery.recovered }, 'Recovery completed');
-  }
+  if (recovery.recovered > 0) logger.info({ recovered: recovery.recovered }, 'Recovery completed');
 
-  // Scaffold main team
   ensureMainTeam(runDir, orgTree);
-
   const sessionManager = new SessionManager();
 
   // Lazy ref for query_team's handleMessage dep — breaks circular dependency
   let handlerDepsRef: Parameters<typeof handleMessage>[1] | null = null;
 
+  const orgMcpHttpDeps = buildOrgMcpHttpDeps(
+    { orgTree, sessionManager, taskQueueStore, escalationStore, runDir, logger },
+    () => handlerDepsRef,
+  );
+  const orgMcpHttpServer = await startOrgMcpHttpServer(orgMcpHttpDeps, deps?.orgMcpPort ?? 3001);
+  const orgMcpPort = orgMcpHttpServer.port;
+
+  // Keep invoke-based org MCP for tests and direct tool calls
   const orgMcpServer = await createOrgMcp(
     { orgTree, taskQueueStore, escalationStore, runDir, sessionManager, logger },
     () => handlerDepsRef,
@@ -165,11 +192,10 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   );
 
   const handlerDeps = providersConfig
-    ? { providers: providersConfig, orgMcpServer, availableMcpServers: {}, runDir, dataDir, systemRulesDir, orgAncestors: [] as string[], logger }
+    ? { providers: providersConfig, orgMcpPort, availableMcpServers: {}, runDir, dataDir, systemRulesDir, orgAncestors: [] as string[], logger }
     : null;
 
-  // Wire lazy ref for query_team (must be after handlerDeps is created)
-  handlerDepsRef = handlerDeps;
+  handlerDepsRef = handlerDeps; // wire lazy ref for query_team
 
   const channelRouter = new ChannelRouter(adapters, async (msg: ChannelMessage) => {
     logger.info({ channelId: msg.channelId, userId: msg.userId }, 'Received message');
@@ -197,6 +223,7 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   const shutdown = async (): Promise<void> => {
     taskConsumer?.stop(); triggerEngine.stop();
     await channelRouter.stop(); sessionManager.stopAll();
+    orgMcpHttpServer.close();
     await fastify.close(); raw.close(); currentResult = null;
   };
 

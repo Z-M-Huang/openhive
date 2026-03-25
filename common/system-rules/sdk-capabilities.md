@@ -23,13 +23,18 @@ Your session has access to these tools (subject to `allowed_tools` config):
 
 ## Memory
 
-`memory/MEMORY.md` is **automatically injected** into your context at every session start.
+**IMPORTANT:** Do NOT use Claude Code's built-in auto-memory system (`~/.claude/projects/*/memory/`). OpenHive has its own memory system.
 
-- Write `memory/MEMORY.md` with your identity, current state, key decisions, and references
+Your team memory directory is in `additionalDirectories` as `../memory/` (relative to your workspace CWD). The absolute path is `{your_team_dir}/memory/MEMORY.md`.
+
+`MEMORY.md` in your team's memory directory is **automatically injected** into your context at every session start.
+
+- Write `../memory/MEMORY.md` (from your CWD) with your identity, current state, key decisions, and references
 - This is your only auto-injected memory — keep it comprehensive
-- Other files in `memory/` (context.md, decisions.md, etc.) are available via Read tool on demand but NOT auto-injected
+- Other files in `../memory/` are available via Read tool on demand but NOT auto-injected
 - Keep MEMORY.md concise and dated — it is loaded on every interaction
 - Update MEMORY.md regularly as you work
+- When asked to remember something, write it to `../memory/MEMORY.md` — NOT to Claude's internal memory
 
 ## Credentials
 

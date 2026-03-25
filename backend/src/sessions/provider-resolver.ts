@@ -39,15 +39,19 @@ export function resolveProvider(
       );
     }
 
+    const resolvedModel = profile.model ?? 'claude-sonnet-4-20250514';
     const env: Record<string, string> = {
       ANTHROPIC_API_KEY: apiKey,
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: resolvedModel,
+      ANTHROPIC_DEFAULT_SONNET_MODEL: resolvedModel,
+      ANTHROPIC_DEFAULT_OPUS_MODEL: resolvedModel,
     };
     if (profile.api_url) {
       env['ANTHROPIC_BASE_URL'] = profile.api_url;
     }
 
     return {
-      model: profile.model ?? 'claude-sonnet-4-20250514',
+      model: resolvedModel,
       env,
       secrets: [new SecretString(apiKey)],
     };
@@ -67,9 +71,15 @@ export function resolveProvider(
       );
     }
 
+    const resolvedModel = profile.model ?? 'claude-sonnet-4-20250514';
     return {
-      model: profile.model ?? 'claude-sonnet-4-20250514',
-      env: { CLAUDE_CODE_OAUTH_TOKEN: token },
+      model: resolvedModel,
+      env: {
+        CLAUDE_CODE_OAUTH_TOKEN: token,
+        ANTHROPIC_DEFAULT_HAIKU_MODEL: resolvedModel,
+        ANTHROPIC_DEFAULT_SONNET_MODEL: resolvedModel,
+        ANTHROPIC_DEFAULT_OPUS_MODEL: resolvedModel,
+      },
       secrets: [new SecretString(token)],
     };
   }

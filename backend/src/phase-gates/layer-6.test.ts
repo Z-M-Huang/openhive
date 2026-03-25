@@ -173,7 +173,12 @@ describe('UT-18: Provider Resolver', () => {
     const resolved = resolveProvider('default', providers);
 
     expect(resolved.model).toBe('claude-sonnet-4-20250514');
-    expect(resolved.env).toEqual({ ANTHROPIC_API_KEY: TEST_KEY_VALUE });
+    expect(resolved.env).toEqual({
+      ANTHROPIC_API_KEY: TEST_KEY_VALUE,
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: 'claude-sonnet-4-20250514',
+      ANTHROPIC_DEFAULT_SONNET_MODEL: 'claude-sonnet-4-20250514',
+      ANTHROPIC_DEFAULT_OPUS_MODEL: 'claude-sonnet-4-20250514',
+    });
   });
 
   it('includes ANTHROPIC_BASE_URL when api_url is set', () => {
@@ -201,7 +206,12 @@ describe('UT-18: Provider Resolver', () => {
       const providers = makeProviders();
       const resolved = resolveProvider('oauth', providers);
 
-      expect(resolved.env).toEqual({ CLAUDE_CODE_OAUTH_TOKEN: 'oauth-test-placeholder' });
+      expect(resolved.env).toEqual({
+        CLAUDE_CODE_OAUTH_TOKEN: 'oauth-test-placeholder',
+        ANTHROPIC_DEFAULT_HAIKU_MODEL: 'claude-sonnet-4-20250514',
+        ANTHROPIC_DEFAULT_SONNET_MODEL: 'claude-sonnet-4-20250514',
+        ANTHROPIC_DEFAULT_OPUS_MODEL: 'claude-sonnet-4-20250514',
+      });
     } finally {
       if (original === undefined) {
         delete process.env['MY_OAUTH_TOKEN'];
@@ -268,7 +278,7 @@ describe('UT-7: Query Options Assembler', () => {
       dataDir: '/data',
       systemRulesDir: '/app/system-rules',
       providers: makeProviders(),
-      orgMcpServer: { sdkServer: { url: 'http://org:3000' } },
+      orgMcpPort: 3001,
       availableMcpServers: { analytics: { url: 'http://analytics:3001' } },
       ancestors: ['root-team'],
       logger: log.logger,
@@ -294,8 +304,8 @@ describe('UT-7: Query Options Assembler', () => {
     // maxTurns
     expect(opts.maxTurns).toBe(25);
 
-    // MCP servers (org from orgMcpServer, not analytics since not in mcp_servers)
-    expect(opts.mcpServers['org']).toEqual({ url: 'http://org:3000' });
+    // MCP servers (org via HTTP config on localhost:3001)
+    expect(opts.mcpServers['org']).toEqual({ type: 'http', url: 'http://127.0.0.1:3001/mcp', headers: { 'X-Caller-Id': 'weather-team' } });
     expect(opts.mcpServers['analytics']).toBeUndefined();
 
     // canUseTool
@@ -496,7 +506,7 @@ describe('E2E-6/E2E-11: Full session flow simulation', () => {
       dataDir: '/data',
       systemRulesDir: '/app/system-rules',
       providers: makeProviders(),
-      orgMcpServer: { sdkServer: { url: 'http://org:3000' } },
+      orgMcpPort: 3001,
       availableMcpServers: {},
       ancestors: [],
       logger: log.logger,
@@ -555,7 +565,7 @@ describe('E2E-6/E2E-11: Full session flow simulation', () => {
       dataDir: '/data',
       systemRulesDir: '/app/system-rules',
       providers: makeProviders(),
-      orgMcpServer: {},
+      orgMcpPort: 3001,
       availableMcpServers: {},
       ancestors: [],
       logger: log.logger,

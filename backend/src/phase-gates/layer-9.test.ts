@@ -160,6 +160,7 @@ describe('Bootstrap creates all components', () => {
       dataDir: join(dir, 'data'),
       skipListen: true,
       skipCli: true,
+      orgMcpPort: 0,
       cliInput: input,
       cliOutput: output,
     });
@@ -191,6 +192,7 @@ describe('Graceful shutdown stops all components', () => {
       dataDir: join(dir, 'data'),
       skipListen: true,
       skipCli: true,
+      orgMcpPort: 0,
     });
 
     // Spawn a session so we can verify stopAll is called

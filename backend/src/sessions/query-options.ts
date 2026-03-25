@@ -51,7 +51,7 @@ export interface BuildQueryOptionsInput {
   readonly dataDir: string;
   readonly systemRulesDir: string;
   readonly providers: ProvidersOutput;
-  readonly orgMcpServer: unknown;
+  readonly orgMcpPort?: number;
   readonly availableMcpServers: Record<string, unknown>;
   readonly ancestors: string[];
   readonly logger: Logger;
@@ -68,13 +68,17 @@ export function buildQueryOptions(opts: BuildQueryOptionsInput): QueryOptions {
 
   const ctx = buildSessionContext(opts.teamName, opts.runDir);
 
-  // Create a team-scoped org MCP server so callerId is correct for this team.
-  // Falls back to global sdkServer if factory is unavailable (test env).
-  const orgMcp = opts.orgMcpServer as { createTeamSdkServer?: (name: string) => unknown; sdkServer?: unknown };
-  const orgSdkServer = orgMcp.createTeamSdkServer?.(opts.teamName) ?? orgMcp.sdkServer;
+  // Org-MCP is a stateless HTTP server on localhost:3001.
+  // Each sdk.query() creates its own connection — no shared transport.
+  // callerId passed via X-Caller-Id header for authorization.
+  const orgHttpConfig = {
+    type: 'http' as const,
+    url: `http://127.0.0.1:${opts.orgMcpPort ?? 3001}/mcp`,
+    headers: { 'X-Caller-Id': opts.teamName },
+  };
   const mcpServers = buildMcpServers(
     opts.teamConfig.mcp_servers,
-    { ...opts.availableMcpServers, ...(orgSdkServer ? { org: orgSdkServer } : {}) },
+    { ...opts.availableMcpServers, org: orgHttpConfig },
   );
 
   const canUseTool = createCanUseTool(
@@ -149,7 +153,7 @@ export function buildQueryOptions(opts: BuildQueryOptionsInput): QueryOptions {
     canUseTool,
     hooks,
     stderr,
-    env: providerEnv,
+    env: { ...providerEnv, CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' },
     cwd: ctx.cwd,
     additionalDirectories: ctx.additionalDirectories,
     agents,

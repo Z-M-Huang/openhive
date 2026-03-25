@@ -15,11 +15,11 @@ import { spawnSession } from './spawner.js';
 import type { ChannelMessage } from '../domain/interfaces.js';
 import type { ProvidersOutput } from '../config/validation.js';
 import type { TeamConfig } from '../domain/types.js';
-import type { OrgMcpServer } from '../org-mcp/server.js';
+// OrgMcpServer no longer needed — org-MCP is a separate HTTP server on :3001
 
 export interface MessageHandlerDeps {
   readonly providers: ProvidersOutput;
-  readonly orgMcpServer: OrgMcpServer;
+  readonly orgMcpPort?: number;
   readonly availableMcpServers: Record<string, unknown>;
   readonly runDir: string;
   readonly dataDir: string;
@@ -93,7 +93,7 @@ export async function handleMessage(
     const opts = buildQueryOptions({
       teamName, teamConfig,
       runDir: deps.runDir, dataDir: deps.dataDir, systemRulesDir: deps.systemRulesDir,
-      providers: deps.providers, orgMcpServer: deps.orgMcpServer,
+      providers: deps.providers, orgMcpPort: deps.orgMcpPort,
       availableMcpServers: deps.availableMcpServers,
       ancestors: deps.orgAncestors, logger: deps.logger,
     });

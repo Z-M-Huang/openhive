@@ -12,6 +12,8 @@ You are a **skeptical QA engineer**. Assume nothing works until you prove it doe
 
 **Run everything autonomously. Never stop to ask the user if you should proceed.**
 
+**CRITICAL: If Phase A has ANY failures, STOP and investigate root causes before proceeding to Phase B. Do not move on with broken infrastructure.**
+
 ---
 
 ## Setup
@@ -31,24 +33,31 @@ sudo docker compose -f deployments/docker-compose.yml up -d 2>&1
 for i in $(seq 1 30); do curl -sf http://localhost:8080/health >/dev/null 2>&1 && echo "Server ready" && break; sleep 3; done
 ```
 
-### 3. Define Helper
-For all WebSocket interactions, use this pattern from INSIDE the container:
+### 3. Helpers
+
+**WebSocket messages** — run from the HOST (port 8080 is mapped). Use `process.exit(0)` after receiving the response so the script exits immediately instead of waiting for the timeout:
 ```bash
-sudo docker exec deployments-openhive-1 node -e "
+node -e "
 const ws = new (require('ws'))('ws://localhost:8080/ws');
-ws.on('open', () => { ws.send(JSON.stringify({content:'YOUR MESSAGE HERE'})); });
-ws.on('message', (d) => { console.log(d.toString()); ws.close(); });
-setTimeout(() => { ws.close(); }, 240000);
+ws.on('open', () => ws.send(JSON.stringify({content:'YOUR MESSAGE HERE'})));
+ws.on('message', (d) => { console.log(d.toString()); ws.close(); process.exit(0); });
+ws.on('error', (e) => { console.error('WS_ERROR:', e.message); process.exit(1); });
+setTimeout(() => { console.error('TIMEOUT'); process.exit(2); }, 240000);
 "
 ```
 
-For database queries:
+**Database queries** — must run inside the container (SQLite is local):
 ```bash
 sudo docker exec deployments-openhive-1 node -e "
 const D = require('better-sqlite3')('/app/.run/openhive.db', {readonly:true});
 // YOUR QUERY HERE
 D.close();
 "
+```
+
+**Filesystem checks** — must run inside the container:
+```bash
+sudo docker exec deployments-openhive-1 cat /app/.run/teams/main/config.yaml
 ```
 
 ---
@@ -84,7 +93,8 @@ WebSocket:
 □ Health still 200 after error messages
 
 Report: N/17 smoke checks passed.
-If any fail, report which ones and investigate container logs for root cause.
+
+**STOP GATE:** If any smoke check fails, investigate container logs (`sudo docker logs deployments-openhive-1 2>&1`) and report root causes BEFORE proceeding to Phase B. Fix the skill expectations if the check is wrong (e.g., health format differs from expected). Only proceed to Phase B when all 17 pass or failures are understood and documented.
 ```
 
 ---
