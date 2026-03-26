@@ -21,6 +21,7 @@ You have access to these tools via the Organization MCP Server:
 - **list_teams** — List child teams with descriptions, scope keywords, and status for routing decisions
 - **shutdown_team** — Shut down a child team and persist its tasks
 - **query_team** — Synchronously query a child team and get its response back
+- **sync_team_triggers** — Read and activate triggers from a child team's triggers.yaml file
 
 ## Your Role
 
@@ -101,3 +102,32 @@ delegate_task({
 ```
 
 This sets parent_id to "ops-team" (not "main"), which is required for correct hierarchy.
+
+## Creating Scheduled Triggers
+
+To set up a recurring task for a team (e.g., "monitor logs every 10 minutes"):
+
+1. **Create the team** using `spawn_team` with `init_context` explaining it needs periodic triggers
+2. The team writes its own `triggers.yaml` during bootstrap (workspace boundary prevents cross-team writes)
+3. **Call** `sync_team_triggers({ team: "team-name" })` to activate the triggers
+
+### Trigger File Format (written by the team itself in its own directory)
+```yaml
+triggers:
+  - name: fetch-logs
+    type: schedule
+    config:
+      cron: "*/10 * * * *"
+    task: "Check Loggly for recent errors and report a summary"
+```
+
+### Trigger Types
+- **schedule**: Fires on cron. Config: `{ cron: "expression" }`
+- **keyword**: Fires when message matches. Config: `{ pattern: "word-or-regex" }`
+- **message**: Fires on regex + optional channel. Config: `{ pattern: "regex", channel: "id" }`
+
+### Rules
+- The team writes its own triggers.yaml (governance blocks cross-team file writes)
+- Parent calls sync_team_triggers to activate — the file alone does nothing
+- To remove triggers: team deletes the file, parent calls sync_team_triggers
+- Only a team's parent can sync its triggers

@@ -193,7 +193,7 @@ describe('E2E-4: Workspace boundary + audit hooks compose correctly', () => {
 
 // ── E2E-5: Org MCP 6 tools ───────────────────────────────────────────────
 
-describe('E2E-5: Org MCP 6 tools with real stores', () => {
+describe('E2E-5: Org MCP 9 tools with real stores', () => {
   it('spawn, delegate, escalate, message, status, shutdown', async () => {
     const dir = makeTempDir();
     const { db, raw } = makeDb(dir);

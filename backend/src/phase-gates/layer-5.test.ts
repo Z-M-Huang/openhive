@@ -196,11 +196,11 @@ async function setupServer(): Promise<void> {
 
 // ── UT-6: Tool Registration ──────────────────────────────────────────────
 
-describe('UT-6: All 8 tools registered', () => {
+describe('UT-6: All 9 tools registered', () => {
   beforeEach(setupServer);
 
-  it('registers exactly 8 tools', () => {
-    expect(server.tools.size).toBe(8);
+  it('registers exactly 9 tools', () => {
+    expect(server.tools.size).toBe(9);
   });
 
   it('registers spawn_team with correct name', () => {
@@ -245,6 +245,14 @@ describe('UT-6: All 8 tools registered', () => {
     const tool = server.tools.get('query_team');
     expect(tool).toBeDefined();
     expect(tool!.name).toBe('query_team');
+    expect(tool!.description).toBeTruthy();
+    expect(tool!.inputSchema).toBeDefined();
+  });
+
+  it('registers sync_team_triggers with correct name', () => {
+    const tool = server.tools.get('sync_team_triggers');
+    expect(tool).toBeDefined();
+    expect(tool!.name).toBe('sync_team_triggers');
     expect(tool!.description).toBeTruthy();
     expect(tool!.inputSchema).toBeDefined();
   });

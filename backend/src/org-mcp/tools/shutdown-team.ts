@@ -24,6 +24,7 @@ export interface ShutdownTeamDeps {
   readonly orgTree: OrgTree;
   readonly sessionManager: ISessionManager;
   readonly taskQueue: ITaskQueueStore;
+  readonly triggerEngine?: { removeTeamTriggers(team: string): void };
 }
 
 export async function shutdownTeam(
@@ -57,6 +58,9 @@ export async function shutdownTeam(
 
   // Pending tasks are already persisted in SQLite via TaskQueueStore.
   // No additional persistence step needed; they remain in the task_queue table.
+
+  // Remove triggers for this team
+  deps.triggerEngine?.removeTeamTriggers(name);
 
   // Stop session
   await deps.sessionManager.terminateSession(name);

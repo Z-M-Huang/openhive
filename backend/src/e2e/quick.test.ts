@@ -49,9 +49,9 @@ describe('Quick E2E: Bootstrap wiring', () => {
   });
 
   it('health shows triggers registered', async () => {
-    // Copy trigger fixture to runDir
-    const triggersYaml = `triggers:\n  - name: e2e-kw\n    type: keyword\n    config:\n      pattern: "e2e-test"\n    team: test\n    task: handle test\n`;
-    writeFileSync(join(dir, 'triggers.yaml'), triggersYaml);
+    // Write per-team triggers.yaml under main (always exists after bootstrap)
+    const triggersYaml = `triggers:\n  - name: e2e-kw\n    type: keyword\n    config:\n      pattern: "e2e-test"\n    task: handle test\n`;
+    writeFileSync(join(dir, 'teams', 'main', 'triggers.yaml'), triggersYaml);
 
     // Re-bootstrap with triggers
     await result.shutdown();

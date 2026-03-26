@@ -5,7 +5,7 @@
 import { existsSync, mkdirSync, cpSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { stringify as yamlStringify } from 'yaml';
-import { loadTriggers, loadChannels } from './config/loader.js';
+import { loadTriggers, loadTeamTriggers, loadChannels } from './config/loader.js';
 import { createDatabase, createTables } from './storage/database.js';
 import { OrgStore } from './storage/stores/org-store.js';
 import { TaskQueueStore } from './storage/stores/task-queue-store.js';
@@ -97,6 +97,47 @@ export function loadTriggerConfigs(runDir: string, logger: pino.Logger): Trigger
     logger.warn({ err }, 'Failed to load triggers.yaml');
     return [];
   }
+}
+
+export function loadAllTeamTriggerConfigs(runDir: string, orgTree: OrgTree, logger: pino.Logger): TriggerConfig[] {
+  const teamsDir = join(runDir, 'teams');
+  if (!existsSync(teamsDir)) return [];
+
+  const allConfigs: TriggerConfig[] = [];
+  for (const entry of readdirSync(teamsDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const teamName = entry.name;
+    if (!orgTree.getTeam(teamName)) continue;
+
+    const path = join(teamsDir, teamName, 'triggers.yaml');
+    if (!existsSync(path)) continue;
+
+    try {
+      const result = loadTeamTriggers(path);
+      for (const t of result.triggers) allConfigs.push({ ...t, team: teamName });
+      logger.info({ team: teamName, count: result.triggers.length }, 'Loaded team triggers');
+    } catch (err) {
+      logger.warn({ err, team: teamName }, 'Failed to load team triggers.yaml, skipping');
+    }
+  }
+
+  // Legacy fallback: .run/triggers.yaml (deprecated)
+  const teamsWithTriggers = new Set(allConfigs.map(c => c.team));
+  const legacyPath = join(runDir, 'triggers.yaml');
+  if (existsSync(legacyPath)) {
+    logger.warn('DEPRECATED: .run/triggers.yaml found — migrate to per-team triggers.yaml');
+    try {
+      const legacy = loadTriggers(legacyPath);
+      for (const t of legacy.triggers as TriggerConfig[]) {
+        if (!teamsWithTriggers.has(t.team)) allConfigs.push(t);
+        else logger.info({ team: t.team, trigger: t.name }, 'Skipping legacy trigger (per-team file takes precedence)');
+      }
+    } catch (err) {
+      logger.warn({ err }, 'Failed to load legacy triggers.yaml');
+    }
+  }
+
+  return allConfigs;
 }
 
 export function initTriggerEngine(

@@ -3,6 +3,7 @@
  *
  * Supports three trigger types: schedule, keyword, and message.
  * Integrates deduplication and rate limiting before dispatching.
+ * Uses a per-team keyed registry for dynamic add/replace/remove.
  */
 
 import type { TriggerConfig } from '../domain/types.js';
@@ -18,7 +19,7 @@ export interface TriggerEngineLogger {
 }
 
 export interface TriggerEngineOpts {
-  readonly triggers: readonly TriggerConfig[];
+  readonly triggers?: readonly TriggerConfig[];
   readonly dedup: TriggerDedup;
   readonly rateLimiter: TriggerRateLimiter;
   readonly delegateTask: (team: string, task: string, priority?: string) => Promise<void>;
@@ -40,10 +41,15 @@ function cronSlotKey(): string {
   return String(Math.floor(Date.now() / 60_000));
 }
 
+interface TeamHandlerSet {
+  schedule: ScheduleHandler[];
+  keyword: KeywordHandler[];
+  message: MessageHandler[];
+}
+
 export class TriggerEngine {
-  private readonly scheduleHandlers: ScheduleHandler[] = [];
-  private readonly keywordHandlers: KeywordHandler[] = [];
-  private readonly messageHandlers: MessageHandler[] = [];
+  private readonly teamHandlers = new Map<string, TeamHandlerSet>();
+  private running = false;
 
   private readonly opts: TriggerEngineOpts;
 
@@ -51,88 +57,132 @@ export class TriggerEngine {
     this.opts = opts;
   }
 
+  /** Register triggers from opts.triggers (grouped by team). Backward-compatible entry point. */
   register(): void {
-    for (const trigger of this.opts.triggers) {
-      switch (trigger.type) {
-        case 'schedule':
-          this.registerSchedule(trigger);
-          break;
-        case 'keyword':
-          this.registerKeyword(trigger);
-          break;
-        case 'message':
-          this.registerMessage(trigger);
-          break;
-      }
+    const triggers = this.opts.triggers ?? [];
+    // Group by team
+    const byTeam = new Map<string, TriggerConfig[]>();
+    for (const t of triggers) {
+      const arr = byTeam.get(t.team) ?? [];
+      arr.push(t);
+      byTeam.set(t.team, arr);
+    }
+    for (const [team, teamTriggers] of byTeam) {
+      this.replaceTeamTriggers(team, teamTriggers);
     }
   }
 
   onMessage(text: string, channel?: string): void {
-    for (const handler of this.keywordHandlers) {
-      if (handler.match(text)) {
-        this.dispatch(() => {
-          void this.fireTrigger(handler.trigger, `keyword:${handler.trigger.name}:${simpleHash(text)}`);
-        });
+    for (const set of this.teamHandlers.values()) {
+      for (const handler of set.keyword) {
+        if (handler.match(text)) {
+          this.dispatch(() => {
+            void this.fireTrigger(handler.trigger, `keyword:${handler.trigger.name}:${simpleHash(text)}`);
+          });
+        }
       }
-    }
-    for (const handler of this.messageHandlers) {
-      if (handler.match(text, channel)) {
-        this.dispatch(() => {
-          void this.fireTrigger(handler.trigger, `message:${handler.trigger.name}:${simpleHash(text + (channel ?? ''))}`);
-        });
+      for (const handler of set.message) {
+        if (handler.match(text, channel)) {
+          this.dispatch(() => {
+            void this.fireTrigger(handler.trigger, `message:${handler.trigger.name}:${simpleHash(text + (channel ?? ''))}`);
+          });
+        }
       }
     }
   }
 
   start(): void {
-    for (const handler of this.scheduleHandlers) {
-      handler.start();
+    this.running = true;
+    let scheduleCount = 0;
+    for (const set of this.teamHandlers.values()) {
+      for (const h of set.schedule) { h.start(); scheduleCount++; }
     }
-    this.opts.logger.info('Trigger engine started', { schedules: this.scheduleHandlers.length });
+    this.opts.logger.info('Trigger engine started', { schedules: scheduleCount });
   }
 
   stop(): void {
-    for (const handler of this.scheduleHandlers) {
-      handler.stop();
+    this.running = false;
+    for (const set of this.teamHandlers.values()) {
+      for (const h of set.schedule) h.stop();
     }
     this.opts.logger.info('Trigger engine stopped');
   }
 
   getRegisteredCount(): number {
-    return this.scheduleHandlers.length + this.keywordHandlers.length + this.messageHandlers.length;
+    let count = 0;
+    for (const set of this.teamHandlers.values()) {
+      count += set.schedule.length + set.keyword.length + set.message.length;
+    }
+    return count;
   }
 
-  private registerSchedule(trigger: TriggerConfig): void {
+  /** Atomically replace all triggers for a team. */
+  replaceTeamTriggers(team: string, triggers: TriggerConfig[]): void {
+    this.removeTeamTriggers(team);
+    const set: TeamHandlerSet = { schedule: [], keyword: [], message: [] };
+    for (const trigger of triggers) {
+      switch (trigger.type) {
+        case 'schedule':
+          this.registerScheduleInto(set, trigger);
+          break;
+        case 'keyword':
+          this.registerKeywordInto(set, trigger);
+          break;
+        case 'message':
+          this.registerMessageInto(set, trigger);
+          break;
+      }
+    }
+    this.teamHandlers.set(team, set);
+    if (this.running) {
+      for (const h of set.schedule) h.start();
+    }
+  }
+
+  /** Remove all triggers for a team. Stops schedule handlers. */
+  removeTeamTriggers(team: string): void {
+    const existing = this.teamHandlers.get(team);
+    if (!existing) return;
+    for (const h of existing.schedule) h.stop();
+    this.teamHandlers.delete(team);
+  }
+
+  /** Count triggers for a specific team. */
+  getTeamTriggerCount(team: string): number {
+    const set = this.teamHandlers.get(team);
+    if (!set) return 0;
+    return set.schedule.length + set.keyword.length + set.message.length;
+  }
+
+  private registerScheduleInto(set: TeamHandlerSet, trigger: TriggerConfig): void {
     const expression = trigger.config['cron'] as string;
     const handler = new ScheduleHandler(expression, () => {
       this.dispatch(() => {
         void this.fireTrigger(trigger, `schedule:${trigger.name}:${cronSlotKey()}`);
       });
     });
-    this.scheduleHandlers.push(handler);
+    set.schedule.push(handler);
     this.opts.logger.info('Registered schedule trigger', { name: trigger.name, cron: expression });
   }
 
-  private registerKeyword(trigger: TriggerConfig): void {
+  private registerKeywordInto(set: TeamHandlerSet, trigger: TriggerConfig): void {
     const pattern = trigger.config['pattern'] as string;
     const handler = new KeywordHandler(pattern, () => {
-      // Fallback for direct callback invocation (e.g., tests calling handler.callback())
       void this.fireTrigger(trigger, `keyword:${trigger.name}:direct`);
     });
     handler.trigger = trigger;
-    this.keywordHandlers.push(handler);
+    set.keyword.push(handler);
     this.opts.logger.info('Registered keyword trigger', { name: trigger.name, pattern });
   }
 
-  private registerMessage(trigger: TriggerConfig): void {
+  private registerMessageInto(set: TeamHandlerSet, trigger: TriggerConfig): void {
     const pattern = trigger.config['pattern'] as string;
     const channelFilter = trigger.config['channel'] as string | undefined;
     const handler = new MessageHandler(pattern, channelFilter, () => {
-      // Fallback for direct callback invocation
       void this.fireTrigger(trigger, `message:${trigger.name}:direct`);
     });
     handler.trigger = trigger;
-    this.messageHandlers.push(handler);
+    set.message.push(handler);
     this.opts.logger.info('Registered message trigger', { name: trigger.name, pattern });
   }
 

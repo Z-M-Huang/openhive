@@ -24,8 +24,9 @@ import { TaskConsumer } from './sessions/task-consumer.js';
 import { recoverFromCrash } from './recovery/startup-recovery.js';
 import {
   ensureRunDir, seedOrgRules, initStorage,
-  loadTriggerConfigs, initTriggerEngine, initChannels, ensureMainTeam,
+  loadAllTeamTriggerConfigs, initTriggerEngine, initChannels, ensureMainTeam,
 } from './bootstrap-helpers.js';
+import type { TriggerEngine } from './triggers/engine.js';
 import type { ChannelMessage } from './domain/interfaces.js';
 import type { ProvidersOutput } from './config/validation.js';
 import type { Readable, Writable } from 'node:stream';
@@ -93,6 +94,7 @@ function resolveLogLevel(dataDir: string): string {
 function buildOrgMcpDeps(
   opts: { orgTree: OrgTree; sessionManager: TeamRegistry; taskQueueStore: import('./domain/interfaces.js').ITaskQueueStore; escalationStore: import('./domain/interfaces.js').IEscalationStore; runDir: string; logger: pino.Logger },
   getQueryRunner: () => import('./org-mcp/registry.js').TeamQueryRunner | undefined,
+  getTriggerEngine: () => TriggerEngine | undefined,
 ): OrgMcpDeps {
   return {
     orgTree: opts.orgTree,
@@ -109,6 +111,7 @@ function buildOrgMcpDeps(
     getTeamConfig: (id: string) => safeLoadConfig(opts.runDir, id),
     log: (msg, meta) => opts.logger.info(meta ?? {}, msg),
     get queryRunner() { return getQueryRunner(); },
+    get triggerEngine() { return getTriggerEngine(); },
   };
 }
 
@@ -145,12 +148,14 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   ensureMainTeam(runDir, orgTree);
   const sessionManager = new TeamRegistry();
 
-  // Lazy ref for query_team's queryRunner — breaks circular dependency
+  // Lazy refs — break circular dependency between org-MCP and trigger engine / query runner
   let queryRunnerRef: import('./org-mcp/registry.js').TeamQueryRunner | undefined;
+  let triggerEngineRef: TriggerEngine | undefined;
 
   const orgMcpDeps = buildOrgMcpDeps(
     { orgTree, sessionManager, taskQueueStore, escalationStore, runDir, logger },
     () => queryRunnerRef,
+    () => triggerEngineRef,
   );
   const orgMcpHttpServer = await startOrgMcpHttpServer(orgMcpDeps, deps?.orgMcpPort ?? 3001);
   const orgMcpPort = orgMcpHttpServer.port;
@@ -158,8 +163,9 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   // Synchronous invoker for tests and direct tool calls
   const orgToolInvoker = createToolInvoker(orgMcpDeps);
 
-  const triggerConfigs = loadTriggerConfigs(runDir, logger);
+  const triggerConfigs = loadAllTeamTriggerConfigs(runDir, orgTree, logger);
   const triggerEngine = initTriggerEngine(stores.triggerStore, taskQueueStore, logger, triggerConfigs);
+  triggerEngineRef = triggerEngine;
 
   const adapters = initChannels(
     { dataDir, cliInput: deps?.cliInput, cliOutput: deps?.cliOutput, skipCli: deps?.skipCli },

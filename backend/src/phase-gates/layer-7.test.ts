@@ -450,6 +450,119 @@ describe('Dedup Integration', () => {
   });
 });
 
+// ── Trigger Engine: Per-Team Registry ──────────────────────────────────
+
+describe('Trigger Engine: Per-Team Registry', () => {
+  let store: ITriggerStore;
+  let dedup: TriggerDedup;
+  let rateLimiter: TriggerRateLimiter;
+  let logger: ReturnType<typeof makeLogger>;
+  let delegateTask: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    store = createMemoryTriggerStore();
+    dedup = new TriggerDedup(store);
+    rateLimiter = new TriggerRateLimiter(100, 60_000);
+    logger = makeLogger();
+    delegateTask = vi.fn().mockResolvedValue(undefined);
+  });
+
+  it('replaceTeamTriggers registers handlers for a team', () => {
+    const engine = new TriggerEngine({ dedup, rateLimiter, delegateTask, logger });
+    engine.replaceTeamTriggers('ops', [
+      makeTrigger({ name: 'kw', type: 'keyword', config: { pattern: 'deploy' }, team: 'ops' }),
+    ]);
+    expect(engine.getTeamTriggerCount('ops')).toBe(1);
+    expect(engine.getRegisteredCount()).toBe(1);
+  });
+
+  it('replaceTeamTriggers replaces existing handlers', () => {
+    const engine = new TriggerEngine({ dedup, rateLimiter, delegateTask, logger });
+    engine.replaceTeamTriggers('ops', [
+      makeTrigger({ name: 'kw1', type: 'keyword', config: { pattern: 'deploy' }, team: 'ops' }),
+      makeTrigger({ name: 'kw2', type: 'keyword', config: { pattern: 'rollback' }, team: 'ops' }),
+    ]);
+    expect(engine.getTeamTriggerCount('ops')).toBe(2);
+
+    engine.replaceTeamTriggers('ops', [
+      makeTrigger({ name: 'kw3', type: 'keyword', config: { pattern: 'test' }, team: 'ops' }),
+    ]);
+    expect(engine.getTeamTriggerCount('ops')).toBe(1);
+    expect(engine.getRegisteredCount()).toBe(1);
+  });
+
+  it('removeTeamTriggers removes all handlers for a team', () => {
+    const engine = new TriggerEngine({ dedup, rateLimiter, delegateTask, logger });
+    engine.replaceTeamTriggers('ops', [
+      makeTrigger({ name: 'kw', type: 'keyword', config: { pattern: 'deploy' }, team: 'ops' }),
+    ]);
+    engine.removeTeamTriggers('ops');
+    expect(engine.getTeamTriggerCount('ops')).toBe(0);
+    expect(engine.getRegisteredCount()).toBe(0);
+  });
+
+  it('removeTeamTriggers for non-existent team is no-op', () => {
+    const engine = new TriggerEngine({ dedup, rateLimiter, delegateTask, logger });
+    engine.removeTeamTriggers('nonexistent');
+    expect(engine.getRegisteredCount()).toBe(0);
+  });
+
+  it('replaceTeamTriggers stops old schedule handlers before replacing', () => {
+    const engine = new TriggerEngine({ dedup, rateLimiter, delegateTask, logger });
+    engine.replaceTeamTriggers('ops', [
+      makeTrigger({ name: 'sched1', type: 'schedule', config: { cron: '0 * * * *' }, team: 'ops' }),
+    ]);
+    engine.start();
+    // Replace with new set — old schedules should be stopped
+    engine.replaceTeamTriggers('ops', [
+      makeTrigger({ name: 'sched2', type: 'schedule', config: { cron: '0 0 * * *' }, team: 'ops' }),
+    ]);
+    expect(engine.getTeamTriggerCount('ops')).toBe(1);
+    engine.stop();
+  });
+
+  it('replaceTeamTriggers starts schedule handlers if engine is running', () => {
+    const engine = new TriggerEngine({ dedup, rateLimiter, delegateTask, logger });
+    engine.start();
+    engine.replaceTeamTriggers('ops', [
+      makeTrigger({ name: 'sched', type: 'schedule', config: { cron: '0 * * * *' }, team: 'ops' }),
+    ]);
+    expect(engine.getTeamTriggerCount('ops')).toBe(1);
+    engine.stop();
+  });
+
+  it('per-team isolation: removing one team does not affect another', () => {
+    const engine = new TriggerEngine({ dedup, rateLimiter, delegateTask, logger });
+    engine.replaceTeamTriggers('alpha', [
+      makeTrigger({ name: 'kw-a', type: 'keyword', config: { pattern: 'alpha' }, team: 'alpha' }),
+    ]);
+    engine.replaceTeamTriggers('beta', [
+      makeTrigger({ name: 'kw-b', type: 'keyword', config: { pattern: 'beta' }, team: 'beta' }),
+    ]);
+    expect(engine.getRegisteredCount()).toBe(2);
+
+    engine.removeTeamTriggers('alpha');
+    expect(engine.getTeamTriggerCount('alpha')).toBe(0);
+    expect(engine.getTeamTriggerCount('beta')).toBe(1);
+    expect(engine.getRegisteredCount()).toBe(1);
+  });
+
+  it('onMessage dispatches across multiple teams handlers', () => {
+    const engine = new TriggerEngine({ dedup, rateLimiter, delegateTask, logger });
+    engine.replaceTeamTriggers('alpha', [
+      makeTrigger({ name: 'kw-a', type: 'keyword', config: { pattern: 'shared' }, team: 'alpha', task: 'alpha task' }),
+    ]);
+    engine.replaceTeamTriggers('beta', [
+      makeTrigger({ name: 'kw-b', type: 'keyword', config: { pattern: 'shared' }, team: 'beta', task: 'beta task' }),
+    ]);
+
+    engine.onMessage('shared event');
+    expect(delegateTask).toHaveBeenCalledTimes(2);
+    expect(delegateTask).toHaveBeenCalledWith('alpha', 'alpha task');
+    expect(delegateTask).toHaveBeenCalledWith('beta', 'beta task');
+  });
+});
+
 // ── Rate Limiting Integration ──────────────────────────────────────────
 
 describe('Rate Limiting Integration', () => {

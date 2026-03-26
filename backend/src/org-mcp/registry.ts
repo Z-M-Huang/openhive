@@ -1,5 +1,5 @@
 /**
- * Org-MCP tool registry — single source of truth for all 8 org tool definitions.
+ * Org-MCP tool registry — single source of truth for all 9 org tool definitions.
  *
  * Provides:
  * - buildToolDefs(): pure data array of tool definitions
@@ -28,6 +28,8 @@ import { SendMessageInputSchema, sendMessage } from './tools/send-message.js';
 import { GetStatusInputSchema, getStatus } from './tools/get-status.js';
 import { QueryTeamInputSchema, queryTeam } from './tools/query-team.js';
 import { ListTeamsInputSchema, listTeams } from './tools/list-teams.js';
+import type { TriggerEngine } from '../triggers/engine.js';
+import { SyncTeamTriggersInputSchema, syncTeamTriggers } from './tools/sync-team-triggers.js';
 
 export interface ToolDefinition {
   readonly name: string;
@@ -55,6 +57,7 @@ export interface OrgMcpDeps {
   readonly getTeamConfig: (teamId: string) => TeamConfig | undefined;
   readonly log: (msg: string, meta?: Record<string, unknown>) => void;
   readonly queryRunner?: TeamQueryRunner;
+  readonly triggerEngine?: TriggerEngine;
 }
 
 export interface OrgToolInvoker {
@@ -117,6 +120,20 @@ export function buildToolDefs(deps: OrgMcpDeps): ToolDefinition[] {
       description: 'Synchronously query a child team and return its response',
       inputSchema: QueryTeamInputSchema,
       handler: (input, callerId) => queryTeam(input as never, callerId, deps),
+    },
+    {
+      name: 'sync_team_triggers',
+      description: 'Read and activate triggers from a child team\'s triggers.yaml file',
+      inputSchema: SyncTeamTriggersInputSchema,
+      handler: (input, callerId) => {
+        if (!deps.triggerEngine) return Promise.resolve({ success: false, error: 'trigger engine not available' });
+        return Promise.resolve(
+          syncTeamTriggers(input as never, callerId, {
+            orgTree: deps.orgTree, triggerEngine: deps.triggerEngine,
+            runDir: deps.runDir, log: deps.log,
+          })
+        );
+      },
     },
   ];
 }

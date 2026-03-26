@@ -82,10 +82,10 @@ setTimeout(() => { console.error('TIMEOUT'); process.exit(2); }, 240000);
 "
 ```
 
-#### Database Queries — must run inside the container (SQLite is local):
+#### Database Queries — run from HOST (SQLite is in bind-mounted .run/):
 ```bash
-sudo docker exec deployments-openhive-1 node -e "
-const D = require('better-sqlite3')('/app/.run/openhive.db', {readonly:true});
+node -e "
+const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
 // YOUR QUERY HERE
 D.close();
 "
@@ -259,8 +259,8 @@ Continue using single WS messages (each is a fresh session):
 
    ```bash
    # SQLite (must be inside container)
-   sudo docker exec deployments-openhive-1 node -e "
-   const D = require('better-sqlite3')('/app/.run/openhive.db', {readonly:true});
+   node -e "
+   const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
    console.log('org_tree:', JSON.stringify(D.prepare(\"SELECT name, parent_id FROM org_tree WHERE name='ops-team'\").get()));
    console.log('scope:', JSON.stringify(D.prepare(\"SELECT keyword FROM scope_keywords WHERE team_id='ops-team'\").all()));
    console.log('tasks:', JSON.stringify(D.prepare(\"SELECT task, priority, status FROM task_queue WHERE team_id='ops-team'\").all()));
@@ -299,8 +299,8 @@ Continue using single WS messages (each is a fresh session):
    - VERIFY: Check `result` column after task completes (wait up to 60s):
    ```bash
    for i in $(seq 1 12); do
-     RESULT=$(sudo docker exec deployments-openhive-1 node -e "
-       const D = require('better-sqlite3')('/app/.run/openhive.db', {readonly:true});
+     RESULT=$(node -e "
+       const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
        const r = D.prepare(\"SELECT status, result FROM task_queue WHERE team_id='ops-team' ORDER BY created_at DESC LIMIT 1\").get();
        console.log(JSON.stringify(r));
        D.close();
@@ -357,9 +357,9 @@ Run it. Then VERIFY independently:
 cat /app/openhive/.run/teams/team-alpha/config.yaml
 cat /app/openhive/.run/teams/team-beta/config.yaml
 
-# SQLite
-sudo docker exec deployments-openhive-1 node -e "
-const D = require('better-sqlite3')('/app/.run/openhive.db', {readonly:true});
+# SQLite (host-side, bind-mounted .run/)
+node -e "
+const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
 console.log('alpha:', JSON.stringify(D.prepare(\"SELECT name, parent_id FROM org_tree WHERE name='team-alpha'\").get()));
 console.log('beta:', JSON.stringify(D.prepare(\"SELECT name, parent_id FROM org_tree WHERE name='team-beta'\").get()));
 console.log('alpha_scope:', JSON.stringify(D.prepare(\"SELECT keyword FROM scope_keywords WHERE team_id='team-alpha'\").all()));
@@ -399,8 +399,8 @@ D.close();
 
 9. VERIFY hierarchy:
    ```bash
-   sudo docker exec deployments-openhive-1 node -e "
-   const D = require('better-sqlite3')('/app/.run/openhive.db', {readonly:true});
+   node -e "
+   const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
    console.log(JSON.stringify(D.prepare(\"SELECT name, parent_id FROM org_tree WHERE name='alpha-child'\").get()));
    D.close();
    "
@@ -457,8 +457,8 @@ D.close();
    - Has mcp_servers including org?
 
    ```bash
-   sudo docker exec deployments-openhive-1 node -e "
-   const D = require('better-sqlite3')('/app/.run/openhive.db', {readonly:true});
+   node -e "
+   const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
    console.log('team:', JSON.stringify(D.prepare(\"SELECT name, parent_id FROM org_tree WHERE name='loggly-monitor'\").get()));
    console.log('scope:', JSON.stringify(D.prepare(\"SELECT keyword FROM scope_keywords WHERE team_id='loggly-monitor'\").all()));
    D.close();
@@ -473,30 +473,28 @@ D.close();
    done
    ```
 
-4. Write schedule trigger (inside container — triggers.yaml is read from /app/.run/):
+4. Write per-team triggers.yaml to the team's directory (host filesystem via bind mount):
    ```bash
-   sudo docker exec deployments-openhive-1 bash -c 'cat > /app/.run/triggers.yaml << "YAML"
+   cat > /app/openhive/.run/teams/loggly-monitor/triggers.yaml << 'YAML'
    triggers:
      - name: loggly-fetch
        type: schedule
        config:
          cron: "*/2 * * * *"
-       team: loggly-monitor
        task: "Fetch recent logs from Loggly using your credentials (subdomain and api_key) and report a summary of any errors found. Use the Loggly Search API."
-   YAML'
+   YAML
    ```
 
-5. Restart to pick up trigger:
-   ```bash
-   sudo docker restart deployments-openhive-1
-   for i in $(seq 1 30); do curl -sf http://localhost:8080/health >/dev/null 2>&1 && echo "Ready" && break; sleep 3; done
-   ```
+5. Send WS: "Sync the triggers for loggly-monitor team. Call sync_team_triggers with team loggly-monitor."
+   - VERIFY: Response acknowledges trigger sync
 
-6. VERIFY TRIGGER REGISTERED:
+6. VERIFY TRIGGER REGISTERED (no restart needed):
    ```bash
-   sudo docker logs deployments-openhive-1 2>&1 | grep -i "schedule\|trigger"
+   sudo docker logs deployments-openhive-1 2>&1 | grep -i "Synced team triggers\|schedule\|trigger" | tail -10
    curl -sf http://localhost:8080/health | python3 -m json.tool
    ```
+   - Health should show `"registered": 1` or higher
+   - Container logs should contain "Synced team triggers"
 
 #### Part B: Trigger Firing & Error Propagation (continues from Part A — NO restart)
 
@@ -506,8 +504,8 @@ D.close();
    START=$(date +%s)
    FOUND=0
    for i in $(seq 1 30); do
-     COUNT=$(sudo docker exec deployments-openhive-1 node -e "
-       const D = require('better-sqlite3')('/app/.run/openhive.db', {readonly:true});
+     COUNT=$(node -e "
+       const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
        const r = D.prepare(\"SELECT COUNT(*) as c FROM task_queue WHERE team_id='loggly-monitor' AND task LIKE '%Loggly%'\").get();
        console.log(r.c);
        D.close();
@@ -525,8 +523,8 @@ D.close();
 8. Wait for execution (up to 60s):
    ```bash
    for i in $(seq 1 12); do
-     STATUS=$(sudo docker exec deployments-openhive-1 node -e "
-       const D = require('better-sqlite3')('/app/.run/openhive.db', {readonly:true});
+     STATUS=$(node -e "
+       const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
        const r = D.prepare(\"SELECT status, result FROM task_queue WHERE team_id='loggly-monitor' ORDER BY created_at DESC LIMIT 1\").get();
        console.log(JSON.stringify(r));
        D.close();
@@ -539,8 +537,8 @@ D.close();
 
 9. VERIFY TASK OUTCOME:
    ```bash
-   sudo docker exec deployments-openhive-1 node -e "
-   const D = require('better-sqlite3')('/app/.run/openhive.db', {readonly:true});
+   node -e "
+   const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
    const rows = D.prepare(\"SELECT id, status, result, task FROM task_queue WHERE team_id='loggly-monitor'\").all();
    console.log(JSON.stringify(rows, null, 2));
    D.close();
@@ -553,8 +551,8 @@ D.close();
     - Docker logs: `sudo docker logs deployments-openhive-1 2>&1 | grep -i "loggly-monitor\|task.*fail\|task.*completed" | tail -20`
     - SQL log DB:
     ```bash
-    sudo docker exec deployments-openhive-1 node -e "
-    const D = require('better-sqlite3')('/app/.run/openhive.db', {readonly:true});
+    node -e "
+    const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
     const rows = D.prepare(\"SELECT level, message, context FROM log_entries WHERE message LIKE '%loggly%' OR context LIKE '%loggly%' ORDER BY created_at DESC LIMIT 10\").all();
     console.log(JSON.stringify(rows, null, 2));
     D.close();
@@ -565,15 +563,81 @@ D.close();
     - `sudo docker logs deployments-openhive-1 2>&1 | grep "xxxxxxx"` — should NOT appear
     - Check result column text for credential values
 
-12. Send: "What is the status of loggly-monitor?"
-    - VERIFY: Response includes status info (latestResult should be surfaced)
+#### Part C: Trigger Persistence Across Restart (continues — NO clean restart)
 
-13. CLEANUP:
+12. Record current task count for loggly-monitor:
     ```bash
-    sudo docker exec deployments-openhive-1 rm -f /app/.run/triggers.yaml
+    BEFORE=$(node -e "
+      const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+      const r = D.prepare(\"SELECT COUNT(*) as c FROM task_queue WHERE team_id='loggly-monitor' AND task LIKE '%Loggly%'\").get();
+      console.log(r.c);
+      D.close();
+    ")
+    echo "Tasks before restart: $BEFORE"
     ```
 
-**Report:** Trigger registered? Fired on time? Task enqueued and executed? Result column populated (Bug 2 fix verified)? Credentials protected? Error channels (task_queue, logs, SQL logs) all have evidence?
+13. Restart the container:
+    ```bash
+    sudo docker restart deployments-openhive-1
+    for i in $(seq 1 30); do curl -sf http://localhost:8080/health >/dev/null 2>&1 && echo "Ready" && break; sleep 3; done
+    ```
+
+14. VERIFY TRIGGER STILL REGISTERED after restart (loaded from per-team file):
+    ```bash
+    sudo docker logs deployments-openhive-1 2>&1 | grep -i "Loaded team triggers\|schedule\|trigger" | tail -5
+    curl -sf http://localhost:8080/health | python3 -m json.tool
+    ```
+    - Should see "Loaded team triggers" with team=loggly-monitor in post-restart logs
+    - Should see "Registered schedule trigger" in post-restart logs
+    - Health should show `"registered": 1`
+
+15. Wait for another cron fire after restart (up to 150s):
+    ```bash
+    echo "Waiting for post-restart trigger fire..."
+    START=$(date +%s)
+    FOUND=0
+    for i in $(seq 1 30); do
+      AFTER=$(node -e "
+        const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+        const r = D.prepare(\"SELECT COUNT(*) as c FROM task_queue WHERE team_id='loggly-monitor' AND task LIKE '%Loggly%'\").get();
+        console.log(r.c);
+        D.close();
+      " 2>/dev/null)
+      if [ "$AFTER" -gt "$BEFORE" ]; then
+        echo "New task enqueued after restart ($(($(date +%s) - START))s)"
+        FOUND=1
+        break
+      fi
+      sleep 5
+    done
+    [ "$FOUND" = "0" ] && echo "TIMEOUT: No new task after restart"
+    ```
+
+16. VERIFY the new task executes:
+    ```bash
+    for i in $(seq 1 12); do
+      STATUS=$(node -e "
+        const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+        const r = D.prepare(\"SELECT status, result FROM task_queue WHERE team_id='loggly-monitor' ORDER BY created_at DESC LIMIT 1\").get();
+        console.log(JSON.stringify(r));
+        D.close();
+      " 2>/dev/null)
+      echo "  Post-restart task: $STATUS"
+      echo "$STATUS" | grep -qE '"(completed|failed)"' && break
+      sleep 5
+    done
+    ```
+    - Task should complete/fail with result populated (trigger survived restart)
+
+17. Send: "What is the status of loggly-monitor?"
+    - VERIFY: Response includes status info (latestResult should be surfaced)
+
+18. CLEANUP:
+    ```bash
+    rm -f /app/openhive/.run/teams/loggly-monitor/triggers.yaml
+    ```
+
+**Report:** Trigger registered via sync_team_triggers? Fired on time? Result column populated (Bug 2 fix verified)? Credentials protected? **Trigger survived restart (per-team file) and fired again?**
 
 ---
 
@@ -633,8 +697,8 @@ D.close();
 8. VERIFY post-restart:
    ```bash
    # org_tree still has teams
-   sudo docker exec deployments-openhive-1 node -e "
-   const D = require('better-sqlite3')('/app/.run/openhive.db', {readonly:true});
+   node -e "
+   const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
    console.log(JSON.stringify(D.prepare('SELECT name FROM org_tree').all()));
    D.close();
    "
@@ -707,6 +771,8 @@ Phase B: Investigative Scenarios
     - Task result captured (Bug 2 fix): [pass/fail]
     - Error propagation: [pass/fail]
     - Credential protection: [pass/fail]
+    - Trigger survives restart: [pass/fail]
+    - Post-restart trigger fires: [pass/fail]
   Scenario 5 (Stress & Recovery):        [summary + evidence]
     - Concurrent messages: [pass/fail]
     - Post-restart state: [pass/fail]

@@ -64,6 +64,22 @@ export const TriggersSchema = z.object({
 export type TriggersInput = z.input<typeof TriggersSchema>;
 export type TriggersOutput = z.output<typeof TriggersSchema>;
 
+// ── Per-Team Triggers ──────────────────────────────────────────────────────
+
+export const TeamTriggerEntrySchema = z.object({
+  name: z.string().min(1).regex(/^[a-z0-9]+(-[a-z0-9]+)*$/, 'trigger name must be a slug'),
+  type: z.enum(['schedule', 'keyword', 'message']),
+  config: z.record(z.string(), z.unknown()).default({}),
+  task: z.string().min(1),
+  skill: z.string().optional(),
+}).strict();
+
+export const TeamTriggersSchema = z.object({
+  triggers: z.array(TeamTriggerEntrySchema).default([]),
+});
+
+export type TeamTriggersOutput = z.output<typeof TeamTriggersSchema>;
+
 // ── Channels ────────────────────────────────────────────────────────────────
 
 const DiscordChannelSchema = z.object({
