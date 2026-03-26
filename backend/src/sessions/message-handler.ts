@@ -10,8 +10,8 @@ import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { loadTeamConfig } from '../config/loader.js';
 import { buildQueryOptions } from './query-options.js';
-import type { QueryFn, SdkMessage } from './spawner.js';
-import { spawnSession } from './spawner.js';
+import type { QueryFn, SdkMessage, ProgressCallback } from './spawner.js';
+import { spawnSession, getAssistantContentBlocks } from './spawner.js';
 import type { ChannelMessage } from '../domain/interfaces.js';
 import type { ProvidersOutput } from '../config/validation.js';
 import type { TeamConfig } from '../domain/types.js';
@@ -53,10 +53,10 @@ function loadConfig(runDir: string, teamName: string): TeamConfig | undefined {
 function extractText(messages: readonly SdkMessage[]): string {
   let output = '';
   for (const msg of messages) {
-    if (msg.type === 'assistant' && msg.content) {
-      const message = msg.content as { content?: Array<{ type: string; text?: string }> };
-      if (message.content) {
-        for (const block of message.content) {
+    if (msg.type === 'assistant') {
+      const blocks = getAssistantContentBlocks(msg);
+      if (blocks) {
+        for (const block of blocks) {
           if (block.type === 'text' && block.text) output += block.text;
         }
       }
@@ -91,6 +91,7 @@ export async function handleMessage(
   deps: MessageHandlerDeps,
   queryFn?: QueryFn,
   teamName: string = 'main',
+  onProgress?: ProgressCallback,
 ): Promise<string | void> {
   const teamConfig = loadConfig(deps.runDir, teamName);
   if (!teamConfig) {
@@ -124,7 +125,7 @@ export async function handleMessage(
       stderr: opts.stderr,
     };
     const qFn = queryFn ?? await createSdkQueryFn();
-    const result = await spawnSession(msg.content, sdkOpts, qFn);
+    const result = await spawnSession(msg.content, sdkOpts, qFn, onProgress);
     const text = extractText(result.messages);
     if (!text) return undefined;
 

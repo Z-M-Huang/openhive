@@ -1,25 +1,21 @@
 /**
- * Layer 10 Phase Gate -- Recovery + Backup
+ * Recovery + memory persist tests (migrated from layer-10.test.ts)
  *
- * Tests:
- * - UT-22: Recovery reloads org tree, resets running tasks, detects orphaned teams
- * - Backup creates valid SQLite copy, rotates old backups
- * - Memory files persist after recovery
+ * UT-22: Recovery reloads org tree, resets running tasks, detects orphaned teams
+ * Memory files persist after recovery
  */
 
 import { describe, it, expect } from 'vitest';
 import { tmpdir } from 'node:os';
-import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import Database from 'better-sqlite3';
 
 import { createDatabase, createTables } from '../storage/database.js';
 import { OrgStore } from '../storage/stores/org-store.js';
 import { TaskQueueStore } from '../storage/stores/task-queue-store.js';
 import { OrgTree } from '../domain/org-tree.js';
 import { TeamStatus, TaskStatus, TaskPriority } from '../domain/types.js';
-import { recoverFromCrash } from '../recovery/startup-recovery.js';
-import { backupDatabase } from '../storage/backup.js';
+import { recoverFromCrash } from './startup-recovery.js';
 import { MemoryStore } from '../storage/stores/memory-store.js';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -27,7 +23,7 @@ import { MemoryStore } from '../storage/stores/memory-store.js';
 function createTempEnv(): {
   dbPath: string;
   dir: string;
-  raw: Database.Database;
+  raw: import('better-sqlite3').Database;
   orgStore: OrgStore;
   taskQueueStore: TaskQueueStore;
   orgTree: OrgTree;
@@ -182,57 +178,6 @@ describe('UT-22: Recovery reloads org tree, resets running tasks, detects orphan
     expect(result.recovered).toBe(0);
     expect(result.orphaned).toHaveLength(0);
     expect(result.teamsToReSpawn).toHaveLength(0);
-
-    raw.close();
-  });
-});
-
-// ── Backup creates valid SQLite copy ────────────────────────────────────
-
-describe('Backup creates valid SQLite copy', () => {
-  it('creates a backup file that is a valid SQLite database', async () => {
-    const { dbPath, raw } = createTempEnv();
-    const backupDir = mkdtempSync(join(tmpdir(), 'openhive-backup-'));
-
-    const backupPath = await backupDatabase(dbPath, backupDir);
-
-    expect(existsSync(backupPath)).toBe(true);
-
-    // Verify the backup is a valid SQLite database
-    const backupDb = new Database(backupPath, { readonly: true });
-    const result = backupDb.prepare('SELECT 1 as val').get() as { val: number };
-    expect(result.val).toBe(1);
-    backupDb.close();
-
-    raw.close();
-  });
-
-  it('rotates old backups keeping only maxBackups', async () => {
-    const { dbPath, raw } = createTempEnv();
-    const backupDir = mkdtempSync(join(tmpdir(), 'openhive-rotate-'));
-
-    // Create 5 backups with maxBackups=3
-    for (let i = 0; i < 5; i++) {
-      await backupDatabase(dbPath, backupDir, 3);
-      // Small delay to ensure unique timestamps
-      await new Promise((r) => setTimeout(r, 10));
-    }
-
-    const files = readdirSync(backupDir).filter((f) => f.startsWith('openhive-backup-'));
-    expect(files.length).toBeLessThanOrEqual(3);
-
-    raw.close();
-  });
-
-  it('creates backup directory if it does not exist', async () => {
-    const { dbPath, raw } = createTempEnv();
-    const backupDir = join(mkdtempSync(join(tmpdir(), 'openhive-newdir-')), 'nested', 'backups');
-
-    expect(existsSync(backupDir)).toBe(false);
-
-    await backupDatabase(dbPath, backupDir);
-
-    expect(existsSync(backupDir)).toBe(true);
 
     raw.close();
   });

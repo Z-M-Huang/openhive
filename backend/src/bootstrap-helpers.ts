@@ -213,6 +213,12 @@ export function ensureMainTeam(runDir: string, orgTree: OrgTree): void {
     mkdirSync(join(mainDir, sub), { recursive: true });
   }
 
+  // Seed memory/MEMORY.md if it doesn't exist
+  const memoryPath = join(mainDir, 'memory', 'MEMORY.md');
+  if (!existsSync(memoryPath)) {
+    writeFileSync(memoryPath, '# Main Team Memory\n\n(No entries yet)\n', 'utf-8');
+  }
+
   if (!existsSync(configPath)) {
     const config = {
       name: 'main', description: 'Main orchestrator',

@@ -1,5 +1,5 @@
 /**
- * Layer 4 Phase Gate -- Hooks + Governance
+ * Hooks + Governance tests (migrated from layer-4.test.ts)
  *
  * Tests:
  * - UT-4: Workspace boundary blocks ../traversal, symlink escape, handles tool_input extraction
@@ -15,11 +15,11 @@ import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 
 import type { HookInput, HookJSONOutput } from '@anthropic-ai/claude-agent-sdk';
-import { createWorkspaceBoundaryHook } from '../hooks/workspace-boundary.js';
-import { createGovernanceHook } from '../hooks/governance.js';
-import type { GovernancePaths } from '../hooks/governance.js';
-import { createAuditPreHook, createAuditPostHook } from '../hooks/audit-logger.js';
-import { buildHookConfig } from '../hooks/index.js';
+import { createWorkspaceBoundaryHook } from './workspace-boundary.js';
+import { createGovernanceHook } from './governance.js';
+import type { GovernancePaths } from './governance.js';
+import { createAuditPreHook, createAuditPostHook } from './audit-logger.js';
+import { buildHookConfig } from './index.js';
 import { SecretString } from '../secrets/secret-string.js';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -464,14 +464,16 @@ describe('Hook Composer: buildHookConfig', () => {
       logger,
     });
 
-    // PreToolUse has 3 matcher entries
-    expect(config.PreToolUse).toHaveLength(3);
+    // PreToolUse has 4 matcher entries (workspace boundary, governance+cred guard, bash guard, audit)
+    expect(config.PreToolUse).toHaveLength(4);
     expect(config.PreToolUse[0]?.matcher).toBe('Read|Write|Edit|Glob|Grep');
     expect(config.PreToolUse[0]?.hooks).toHaveLength(1);
     expect(config.PreToolUse[1]?.matcher).toBe('Write|Edit');
-    expect(config.PreToolUse[1]?.hooks).toHaveLength(1);
-    expect(config.PreToolUse[2]?.matcher).toBe('.*');
-    expect(config.PreToolUse[2]?.hooks).toHaveLength(1);
+    expect(config.PreToolUse[1]?.hooks).toHaveLength(2); // governance + credential write guard
+    expect(config.PreToolUse[2]?.matcher).toBe('Bash');
+    expect(config.PreToolUse[2]?.hooks).toHaveLength(1); // bash credential guard
+    expect(config.PreToolUse[3]?.matcher).toBe('.*');
+    expect(config.PreToolUse[3]?.hooks).toHaveLength(1);
 
     // PostToolUse has 1 matcher entry
     expect(config.PostToolUse).toHaveLength(1);

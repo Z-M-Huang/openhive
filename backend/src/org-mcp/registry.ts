@@ -1,5 +1,5 @@
 /**
- * Org-MCP tool registry — single source of truth for all 9 org tool definitions.
+ * Org-MCP tool registry — single source of truth for all 10 org tool definitions.
  *
  * Provides:
  * - buildToolDefs(): pure data array of tool definitions
@@ -30,6 +30,7 @@ import { QueryTeamInputSchema, queryTeam } from './tools/query-team.js';
 import { ListTeamsInputSchema, listTeams } from './tools/list-teams.js';
 import type { TriggerEngine } from '../triggers/engine.js';
 import { SyncTeamTriggersInputSchema, syncTeamTriggers } from './tools/sync-team-triggers.js';
+import { GetCredentialInputSchema, getCredential } from './tools/get-credential.js';
 
 export interface ToolDefinition {
   readonly name: string;
@@ -134,6 +135,16 @@ export function buildToolDefs(deps: OrgMcpDeps): ToolDefinition[] {
           })
         );
       },
+    },
+    {
+      name: 'get_credential',
+      description: 'Retrieve a credential value by key. Use for API calls — do NOT store returned values in files.',
+      inputSchema: GetCredentialInputSchema,
+      handler: (input, callerId) => Promise.resolve(
+        getCredential(input as never, callerId, {
+          getTeamConfig: deps.getTeamConfig, log: deps.log,
+        })
+      ),
     },
   ];
 }

@@ -10,19 +10,19 @@ import { describe, it, expect } from 'vitest';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, extname } from 'node:path';
 
-import { SecretString } from '../secrets/secret-string.js';
-import { scrubSecrets } from '../logging/credential-scrubber.js';
+import { SecretString } from './secrets/secret-string.js';
+import { scrubSecrets } from './logging/credential-scrubber.js';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-const SRC_ROOT = join(__dirname, '..');
+const SRC_ROOT = join(__dirname);
 
 /** Recursively collect all .ts files under a directory, excluding tests and node_modules. */
 function collectTsFiles(dir: string, files: string[] = []): string[] {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const fullPath = join(dir, entry.name);
     if (entry.isDirectory()) {
-      if (entry.name === 'node_modules' || entry.name === 'phase-gates') continue;
+      if (entry.name === 'node_modules') continue;
       collectTsFiles(fullPath, files);
     } else if (entry.isFile() && extname(entry.name) === '.ts' && !entry.name.endsWith('.test.ts')) {
       files.push(fullPath);
@@ -63,7 +63,7 @@ describe('SK-2: No explicit any in production source', () => {
   });
 });
 
-// ── SK-3: All source files under 300 lines ────────────────────────────────
+// ── SK-3: All production source files under 300 lines ────────────────────
 
 describe('SK-3: All production source files under 300 lines', () => {
   it('no production .ts file exceeds 300 lines', () => {

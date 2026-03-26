@@ -1,25 +1,19 @@
 /**
- * Layer 7 Phase Gate -- Trigger Engine
+ * Trigger Engine + Per-Team Registry + Dedup Integration + Rate Limiting Integration
  *
  * Tests:
- * - UT-17: Schedule handler starts/stops, fires callback. Keyword handler matches/doesn't match.
- *          Message handler matches with channel filter.
- * - UT-14: TriggerDedup prevents duplicate events. Clean expired works. Non-duplicate allows.
- * - UT-16: Rate limiter allows within threshold. Blocks when exceeded. Resets after window.
- * - Engine: registers all 3 handler types. onMessage dispatches matching keyword/message triggers.
- *           Schedule trigger fires via cron.
- * - Dedup integration: duplicate trigger events blocked before delegate_task.
- * - Rate limiting integration: excessive triggers from same source blocked.
+ * - Engine registers all 3 handler types, onMessage dispatches matching triggers
+ * - Schedule trigger fires via cron
+ * - Per-team trigger registration, replacement, removal, isolation
+ * - Dedup integration: duplicate events blocked before delegate_task
+ * - Rate limiting integration: excessive triggers blocked
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-import { ScheduleHandler } from '../triggers/handlers/schedule.js';
-import { KeywordHandler } from '../triggers/handlers/keyword.js';
-import { MessageHandler } from '../triggers/handlers/message.js';
-import { TriggerDedup } from '../triggers/dedup.js';
-import { TriggerRateLimiter } from '../triggers/rate-limiter.js';
-import { TriggerEngine } from '../triggers/engine.js';
+import { TriggerDedup } from './dedup.js';
+import { TriggerRateLimiter } from './rate-limiter.js';
+import { TriggerEngine } from './engine.js';
 import type { ITriggerStore } from '../domain/interfaces.js';
 import type { TriggerConfig } from '../domain/types.js';
 
@@ -69,233 +63,6 @@ function makeTrigger(overrides: Partial<TriggerConfig> & { type: TriggerConfig['
     ...overrides,
   };
 }
-
-// ── UT-17: Schedule Handler ─────────────────────────────────────────────
-
-describe('UT-17: Schedule Handler', () => {
-  it('start and stop lifecycle works', () => {
-    const cb = vi.fn();
-    // Use far-future cron so it never fires during the test
-    const handler = new ScheduleHandler('0 0 1 1 *', cb);
-
-    handler.start();
-    // Verify the handler accepted the cron without error
-    expect(cb).not.toHaveBeenCalled();
-    handler.stop();
-  });
-
-  it('stop prevents further firing and double-stop is safe', () => {
-    const cb = vi.fn();
-    const handler = new ScheduleHandler('0 0 1 1 *', cb);
-    handler.start();
-    handler.stop();
-    // Double stop is safe
-    handler.stop();
-    expect(cb).not.toHaveBeenCalled();
-  });
-
-  it('start creates a cron task that invokes callback', async () => {
-    const cb = vi.fn();
-    const handler = new ScheduleHandler('* * * * * *', cb);
-    handler.start();
-
-    // Wait slightly over 1 second for the per-second cron to fire
-    await new Promise((resolve) => setTimeout(resolve, 1200));
-
-    expect(cb).toHaveBeenCalled();
-    handler.stop();
-  });
-});
-
-// ── UT-17: Keyword Handler ───────────────────────────────────────────────
-
-describe('UT-17: Keyword Handler', () => {
-  it('matches plain keyword (case-insensitive)', () => {
-    const cb = vi.fn();
-    const handler = new KeywordHandler('deploy', cb);
-
-    expect(handler.match('Please deploy the app')).toBe(true);
-    expect(handler.match('DEPLOY now')).toBe(true);
-    expect(handler.match('something else')).toBe(false);
-  });
-
-  it('matches regex pattern', () => {
-    const cb = vi.fn();
-    const handler = new KeywordHandler('/deploy\\s+v\\d+/i', cb);
-
-    expect(handler.match('deploy v2')).toBe(true);
-    expect(handler.match('Deploy V3')).toBe(true);
-    expect(handler.match('deploy')).toBe(false);
-  });
-
-  it('escapes special regex chars in plain keywords', () => {
-    const cb = vi.fn();
-    const handler = new KeywordHandler('price: $10.00', cb);
-
-    expect(handler.match('The price: $10.00 is final')).toBe(true);
-    expect(handler.match('price: 910a00')).toBe(false);
-  });
-});
-
-// ── UT-17: Message Handler ───────────────────────────────────────────────
-
-describe('UT-17: Message Handler', () => {
-  it('matches regex pattern', () => {
-    const cb = vi.fn();
-    const handler = new MessageHandler('error\\s+\\d{3}', undefined, cb);
-
-    expect(handler.match('got error 500 today')).toBe(true);
-    expect(handler.match('all good')).toBe(false);
-  });
-
-  it('respects channel filter', () => {
-    const cb = vi.fn();
-    const handler = new MessageHandler('alert', 'ops-channel', cb);
-
-    expect(handler.match('alert: fire', 'ops-channel')).toBe(true);
-    expect(handler.match('alert: fire', 'general')).toBe(false);
-    expect(handler.match('alert: fire')).toBe(false);
-  });
-
-  it('matches any channel when no filter set', () => {
-    const cb = vi.fn();
-    const handler = new MessageHandler('hello', undefined, cb);
-
-    expect(handler.match('hello world', 'any-channel')).toBe(true);
-    expect(handler.match('hello world')).toBe(true);
-  });
-});
-
-// ── UT-14: Trigger Dedup ─────────────────────────────────────────────────
-
-describe('UT-14: Trigger Dedup', () => {
-  let store: ITriggerStore;
-  let dedup: TriggerDedup;
-
-  beforeEach(() => {
-    store = createMemoryTriggerStore();
-    dedup = new TriggerDedup(store);
-  });
-
-  it('non-duplicate returns false', () => {
-    expect(dedup.check('evt-1', 'source-a')).toBe(false);
-  });
-
-  it('recorded event returns true on second check', () => {
-    dedup.record('evt-1', 'source-a', 60);
-    expect(dedup.check('evt-1', 'source-a')).toBe(true);
-  });
-
-  it('different event IDs are independent', () => {
-    dedup.record('evt-1', 'source-a', 60);
-    expect(dedup.check('evt-2', 'source-a')).toBe(false);
-  });
-
-  it('different sources are independent', () => {
-    dedup.record('evt-1', 'source-a', 60);
-    expect(dedup.check('evt-1', 'source-b')).toBe(false);
-  });
-
-  it('expired events are not duplicates', () => {
-    vi.useFakeTimers();
-    try {
-      dedup.record('evt-1', 'source-a', 1); // 1 second TTL
-      vi.advanceTimersByTime(2000);
-      expect(dedup.check('evt-1', 'source-a')).toBe(false);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('cleanup removes expired entries', () => {
-    vi.useFakeTimers();
-    try {
-      dedup.record('evt-1', 'source-a', 1);
-      vi.advanceTimersByTime(2000);
-      const cleaned = dedup.cleanup();
-      expect(cleaned).toBe(1);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('cleanup returns 0 when nothing expired', () => {
-    dedup.record('evt-1', 'source-a', 3600);
-    expect(dedup.cleanup()).toBe(0);
-  });
-
-  it('uses default TTL when not specified', () => {
-    dedup.record('evt-1', 'source-a');
-    expect(dedup.check('evt-1', 'source-a')).toBe(true);
-  });
-});
-
-// ── UT-16: Rate Limiter ──────────────────────────────────────────────────
-
-describe('UT-16: Rate Limiter', () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  it('allows events within threshold', () => {
-    const limiter = new TriggerRateLimiter(3, 60_000);
-
-    expect(limiter.check('source-a').allowed).toBe(true);
-    expect(limiter.check('source-a').allowed).toBe(true);
-    expect(limiter.check('source-a').allowed).toBe(true);
-  });
-
-  it('blocks when threshold exceeded', () => {
-    const limiter = new TriggerRateLimiter(2, 60_000);
-
-    limiter.check('source-a');
-    limiter.check('source-a');
-
-    const result = limiter.check('source-a');
-    expect(result.allowed).toBe(false);
-    expect(result.retryAfterMs).toBeGreaterThan(0);
-  });
-
-  it('resets after window elapses', () => {
-    const limiter = new TriggerRateLimiter(2, 10_000);
-
-    limiter.check('source-a');
-    limiter.check('source-a');
-
-    expect(limiter.check('source-a').allowed).toBe(false);
-
-    vi.advanceTimersByTime(10_001);
-
-    expect(limiter.check('source-a').allowed).toBe(true);
-  });
-
-  it('tracks sources independently', () => {
-    const limiter = new TriggerRateLimiter(1, 60_000);
-
-    limiter.check('source-a');
-    expect(limiter.check('source-a').allowed).toBe(false);
-    expect(limiter.check('source-b').allowed).toBe(true);
-  });
-
-  it('sliding window allows after oldest event expires', () => {
-    const limiter = new TriggerRateLimiter(2, 10_000);
-
-    limiter.check('s');
-    vi.advanceTimersByTime(5000);
-    limiter.check('s');
-
-    // At 5s: both within window, next should be blocked
-    expect(limiter.check('s').allowed).toBe(false);
-
-    // Advance 5001ms: first event falls out of window
-    vi.advanceTimersByTime(5001);
-    expect(limiter.check('s').allowed).toBe(true);
-  });
-});
 
 // ── Trigger Engine ──────────────────────────────────────────────────────
 

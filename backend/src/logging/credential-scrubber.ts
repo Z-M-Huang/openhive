@@ -68,5 +68,5 @@ export function createStderrScrubber(
   knownSecrets: readonly SecretString[],
   rawSecrets?: readonly string[],
 ): (data: string) => void {
-  return (data: string) => { scrubSecrets(data, knownSecrets, rawSecrets); };
+  return (data: string) => { process.stderr.write(scrubSecrets(data, knownSecrets, rawSecrets)); };
 }

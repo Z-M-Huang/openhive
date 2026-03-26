@@ -11,6 +11,7 @@ import type { ISessionManager, ITaskQueueStore } from '../../domain/interfaces.j
 
 export const ShutdownTeamInputSchema = z.object({
   name: z.string().min(1),
+  cascade: z.boolean().optional().default(false),
 });
 
 export type ShutdownTeamInput = z.infer<typeof ShutdownTeamInputSchema>;
@@ -50,10 +51,23 @@ export async function shutdownTeam(
     return { success: false, error: 'caller is not parent of target team' };
   }
 
-  // Reject shutdown when children exist to prevent orphaned nodes
+  // Reject shutdown when children exist (unless cascade requested)
   const children = deps.orgTree.getChildren(name);
   if (children.length > 0) {
-    return { success: false, error: `team "${name}" has ${children.length} active children — shut them down first` };
+    if (!parsed.data.cascade) {
+      const childNames = children.map(c => c.name).join(', ');
+      return {
+        success: false,
+        error: `team "${name}" has ${children.length} active children (${childNames}) — shut them down first, or pass cascade: true`,
+      };
+    }
+    // Cascade: shut down children depth-first
+    for (const child of children) {
+      const childResult = await shutdownTeam({ name: child.name, cascade: true }, name, deps);
+      if (!childResult.success) {
+        return { success: false, error: `cascade failed on child "${child.name}": ${childResult.error}` };
+      }
+    }
   }
 
   // Pending tasks are already persisted in SQLite via TaskQueueStore.

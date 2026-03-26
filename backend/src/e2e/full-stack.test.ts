@@ -183,8 +183,8 @@ describe('E2E-4: Workspace boundary + audit hooks compose correctly', () => {
     const hookOut = (denyResult as Record<string, unknown>)['hookSpecificOutput'] as Record<string, unknown>;
     expect(hookOut?.['permissionDecision']).toBe('deny');
 
-    // Audit hook fires on any tool
-    await config.PreToolUse[2].hooks[0](
+    // Audit hook fires on any tool (index 3 after workspace boundary, governance+cred, bash guard)
+    await config.PreToolUse[3].hooks[0](
       hookInput({ tool_name: 'Read', tool_input: { file_path: join(dir, 'f.ts') } }), 'tu3', hookOpts,
     );
     expect(logs.some((l) => l.msg === 'PreToolUse')).toBe(true);
@@ -193,7 +193,7 @@ describe('E2E-4: Workspace boundary + audit hooks compose correctly', () => {
 
 // ── E2E-5: Org MCP 6 tools ───────────────────────────────────────────────
 
-describe('E2E-5: Org MCP 9 tools with real stores', () => {
+describe('E2E-5: Org MCP 10 tools with real stores', () => {
   it('spawn, delegate, escalate, message, status, shutdown', async () => {
     const dir = makeTempDir();
     const { db, raw } = makeDb(dir);

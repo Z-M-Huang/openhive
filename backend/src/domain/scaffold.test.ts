@@ -1,5 +1,5 @@
 /**
- * Layer 0 Phase Gate — Stub scaffold
+ * Domain scaffold tests (migrated from layer-0.test.ts)
  *
  * Verifies that:
  * 1. TypeScript compiles (domain types can be imported)
@@ -24,7 +24,7 @@ import {
   type LogEntry,
   type OrgTreeNode,
   type TaskEntry,
-} from '../domain/types.js';
+} from './types.js';
 
 import type {
   ISessionSpawner,
@@ -36,7 +36,7 @@ import type {
   ILogStore,
   IEscalationStore,
   IMemoryStore,
-} from '../domain/interfaces.js';
+} from './interfaces.js';
 
 import {
   OpenHiveError,
@@ -45,7 +45,7 @@ import {
   ScopeRejectionError,
   WorkspaceBoundaryError,
   SecretLeakError,
-} from '../domain/errors.js';
+} from './errors.js';
 
 // ── 1. TypeScript compiles (imports above succeed) ─────────────────────────
 

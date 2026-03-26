@@ -7,10 +7,12 @@
 
 import type { ITaskQueueStore } from '../domain/interfaces.js';
 import type { OrgTree } from '../domain/org-tree.js';
+import type { TeamConfig } from '../domain/types.js';
 import { TaskStatus } from '../domain/types.js';
 import { handleMessage } from './message-handler.js';
 import type { MessageHandlerDeps } from './message-handler.js';
 import type { QueryFn } from './spawner.js';
+import { scrubSecrets } from '../logging/credential-scrubber.js';
 
 export interface TaskConsumerOpts {
   readonly taskQueueStore: ITaskQueueStore;
@@ -18,6 +20,9 @@ export interface TaskConsumerOpts {
   readonly handlerDeps: MessageHandlerDeps;
   readonly pollIntervalMs?: number;
   readonly queryFn?: QueryFn;
+  readonly notifyChannel?: (content: string) => Promise<void>;
+  readonly getTeamConfig?: (teamId: string) => TeamConfig | undefined;
+  readonly syncTeamTriggers?: (teamId: string) => void;
 }
 
 export class TaskConsumer {
@@ -26,6 +31,9 @@ export class TaskConsumer {
   readonly #deps: MessageHandlerDeps;
   readonly #pollMs: number;
   readonly #queryFn?: QueryFn;
+  readonly #notifyChannel?: (content: string) => Promise<void>;
+  readonly #getTeamConfig?: (teamId: string) => TeamConfig | undefined;
+  readonly #syncTeamTriggers?: (teamId: string) => void;
   #timer: ReturnType<typeof setInterval> | null = null;
   #processing = false;
 
@@ -35,6 +43,9 @@ export class TaskConsumer {
     this.#deps = opts.handlerDeps;
     this.#pollMs = opts.pollIntervalMs ?? 5_000;
     this.#queryFn = opts.queryFn;
+    this.#notifyChannel = opts.notifyChannel;
+    this.#getTeamConfig = opts.getTeamConfig;
+    this.#syncTeamTriggers = opts.syncTeamTriggers;
   }
 
   start(): void {
@@ -79,15 +90,34 @@ export class TaskConsumer {
           // Detect error responses (handleMessage returns "Error: ..." on failure)
           const isError = typeof response === 'string' && response.startsWith('Error processing');
           this.#taskQueue.updateStatus(dequeued.id, isError ? TaskStatus.Failed : TaskStatus.Completed);
-          // Store LLM response so task outcomes are queryable
+          // Auto-sync triggers after successful bootstrap
+          if (!isError && dequeued.task.startsWith('Bootstrap this team')) {
+            this.#tryAutoSyncTriggers(task.teamId);
+          }
+          // Scrub credentials from response — use safeResponse for ALL downstream consumers
+          let safeResponse = response;
           if (response) {
-            this.#taskQueue.updateResult(dequeued.id, response.slice(0, 10_000));
+            const config = this.#getTeamConfig?.(task.teamId);
+            const creds = Object.values(config?.credentials ?? {}).filter(
+              (v): v is string => typeof v === 'string' && v.length >= 8,
+            );
+            if (creds.length > 0) safeResponse = scrubSecrets(response, [], creds);
+          }
+          // Store scrubbed result so task outcomes are queryable
+          if (safeResponse) {
+            this.#taskQueue.updateResult(dequeued.id, safeResponse.slice(0, 10_000));
           }
           this.#deps.logger.info(isError ? 'Task failed (handler error)' : 'Task completed', {
             taskId: dequeued.id, team: task.teamId,
-            responseLength: response?.length ?? 0,
-            responseSnippet: response ? response.slice(0, 200) : null,
+            responseLength: safeResponse?.length ?? 0,
+            responseSnippet: safeResponse ? safeResponse.slice(0, 200) : null,
           });
+          // Notify connected channels about task completion (scrubbed)
+          if (this.#notifyChannel && safeResponse) {
+            const summary = safeResponse.slice(0, 500);
+            const notif = `[${task.teamId}] Task completed: ${dequeued.task.slice(0, 100)}\n\nResult: ${summary}`;
+            this.#notifyChannel(notif).catch(() => {});
+          }
         } catch (err) {
           this.#taskQueue.updateStatus(dequeued.id, TaskStatus.Failed);
           const msg = err instanceof Error ? err.message : String(err);
@@ -96,6 +126,17 @@ export class TaskConsumer {
       }
     } finally {
       this.#processing = false;
+    }
+  }
+
+  #tryAutoSyncTriggers(teamId: string): void {
+    if (!this.#syncTeamTriggers) return;
+    try {
+      this.#syncTeamTriggers(teamId);
+    } catch (err) {
+      this.#deps.logger.info('Failed to auto-sync triggers after bootstrap', {
+        team: teamId, error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 

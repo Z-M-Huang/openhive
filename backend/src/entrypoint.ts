@@ -20,11 +20,33 @@ const handleSignal = (): void => {
 process.on('SIGTERM', handleSignal);
 process.on('SIGINT', handleSignal);
 
-// Prevent SDK subprocess EPIPE from crashing the server
+// Transient errors that should not crash the server
+const SURVIVABLE_CODES = new Set([
+  'EPIPE', 'UND_ERR_CONNECT_TIMEOUT', 'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT',
+]);
+
 process.on('uncaughtException', (err) => {
-  if ('code' in err && err.code === 'EPIPE') return;
+  const code = 'code' in err ? (err as { code?: string }).code : undefined;
+  if (code && SURVIVABLE_CODES.has(code)) {
+    // eslint-disable-next-line no-console
+    console.error(`Transient error (survived): ${code} — ${err.message}`);
+    return;
+  }
   // eslint-disable-next-line no-console
   console.error('Uncaught exception:', err);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason) => {
+  const err = reason instanceof Error ? reason : new Error(String(reason));
+  const code = 'code' in err ? (err as { code?: string }).code : undefined;
+  if (code && SURVIVABLE_CODES.has(code)) {
+    // eslint-disable-next-line no-console
+    console.error(`Transient rejection (survived): ${code} — ${err.message}`);
+    return;
+  }
+  // eslint-disable-next-line no-console
+  console.error('Unhandled rejection:', reason);
   process.exit(1);
 });
 

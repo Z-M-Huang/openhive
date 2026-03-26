@@ -100,6 +100,10 @@ export function buildQueryOptions(opts: BuildQueryOptionsInput): QueryOptions {
     logger: cascadeLogger,
   });
 
+  // Extract team credentials from config for redaction and hook injection
+  const teamCreds = opts.teamConfig.credentials ?? {};
+  const teamCredentialValues = Object.values(teamCreds).filter(v => typeof v === 'string');
+
   const hookOpts: BuildHookConfigOpts = {
     teamName: opts.teamName,
     cwd: ctx.cwd,
@@ -111,10 +115,8 @@ export function buildQueryOptions(opts: BuildQueryOptionsInput): QueryOptions {
     },
     logger: opts.logger,
     knownSecrets: providerSecrets,
+    teamCredentials: teamCreds,
   };
-  // Extract team credentials from config for redaction and prompt injection
-  const teamCreds = opts.teamConfig.credentials ?? {};
-  const teamCredentialValues = Object.values(teamCreds).filter(v => typeof v === 'string');
 
   const hooks = buildHookConfig(hookOpts);
   const stderr = createStderrScrubber(providerSecrets, teamCredentialValues);
@@ -130,13 +132,17 @@ export function buildQueryOptions(opts: BuildQueryOptionsInput): QueryOptions {
     });
   }
 
-  // Build credentials section for prompt injection (read-only — agent can't modify config.yaml)
-  const credEntries = Object.entries(teamCreds);
-  const credentialsSection = credEntries.length > 0
-    ? '--- Team Credentials ---\n' + credEntries.map(([k, v]) => `${k}: ${v}`).join('\n')
+  // Dynamic tool availability note — tells the agent what tools are actually enabled
+  const toolsNote = buildToolAvailabilityNote(opts.teamConfig.allowed_tools);
+
+  // Dynamic credential availability note — tells the agent what credential keys exist
+  const credKeys = Object.keys(opts.teamConfig.credentials ?? {});
+  const credNote = credKeys.length > 0
+    ? `\n## Available Credentials\nThis team has credentials configured: ${credKeys.map(k => `\`${k}\``).join(', ')}. Use \`get_credential({ key: "KEY_NAME" })\` to retrieve each value at point of use. Never hardcode or store credential values.\n`
     : '';
 
-  const fullAppend = [ruleCascade, skillsContent, memorySection, credentialsSection].filter(Boolean).join('\n');
+  // Tool availability note goes FIRST so the agent sees it before any rules that might create doubt.
+  const fullAppend = [toolsNote, credNote, ruleCascade, skillsContent, memorySection].filter(Boolean).join('\n');
 
   // Load subagent definitions for the SDK agents option
   const agents = loadSubagents(opts.runDir, opts.teamName);
@@ -158,4 +164,26 @@ export function buildQueryOptions(opts: BuildQueryOptionsInput): QueryOptions {
     additionalDirectories: ctx.additionalDirectories,
     agents,
   };
+}
+
+/**
+ * Build a dynamic tool availability note for the system prompt.
+ * Tells the agent which tools are actually enabled for this team,
+ * preventing the LLM from incorrectly believing tools like Bash are denied.
+ */
+function buildToolAvailabilityNote(allowedTools: readonly string[]): string {
+  const allowAll = allowedTools.includes('*');
+  const lines: string[] = ['--- Tool Availability for This Team ---'];
+  if (allowAll) {
+    lines.push('All tools are ENABLED for this team. You HAVE Bash and MUST use it when you need to run shell commands, make HTTP requests (curl), or execute scripts (python3, node).');
+  } else {
+    const builtins = ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash'] as const;
+    for (const tool of builtins) {
+      const enabled = allowedTools.includes(tool) ||
+        allowedTools.some(e => e.endsWith('*') && tool.startsWith(e.slice(0, -1)));
+      lines.push(`- **${tool}** — ${enabled ? 'ENABLED' : 'DISABLED'}`);
+    }
+  }
+  lines.push('Use Bash for HTTP requests (curl), script execution, and system commands when enabled.');
+  return lines.join('\n');
 }

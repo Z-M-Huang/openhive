@@ -9,7 +9,6 @@ export default defineConfig({
       include: ['src/**/*.ts'],
       exclude: [
         'src/**/*.test.ts',           // Test files
-        'src/phase-gates/**',         // Phase gate test files
         'src/domain/interfaces.ts',   // Pure type definitions (no runtime code)
         'src/types/**',               // Type declaration shims
       ],

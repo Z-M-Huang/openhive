@@ -11,14 +11,15 @@ import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 import Fastify from 'fastify';
 import { createLogger } from './logging/logger.js';
-import { loadProviders, loadTeamConfig, loadSystemConfig } from './config/loader.js';
+import { loadProviders, loadTeamConfig, loadTeamTriggers, loadSystemConfig } from './config/loader.js';
 import { OrgTree } from './domain/org-tree.js';
 import { startOrgMcpHttpServer } from './org-mcp/http-server.js';
 import { createToolInvoker, type OrgMcpDeps, type OrgToolInvoker } from './org-mcp/registry.js';
 import { TeamRegistry } from './sessions/team-registry.js';
 import { ChannelRouter } from './channels/router.js';
 import { registerHealthEndpoint } from './health.js';
-import { registerWsRoute } from './channels/ws-adapter.js';
+import { WsAdapter } from './channels/ws-adapter.js';
+import { DiscordAdapter } from './channels/discord-adapter.js';
 import { handleMessage } from './sessions/message-handler.js';
 import { TaskConsumer } from './sessions/task-consumer.js';
 import { recoverFromCrash } from './recovery/startup-recovery.js';
@@ -28,6 +29,7 @@ import {
 } from './bootstrap-helpers.js';
 import type { TriggerEngine } from './triggers/engine.js';
 import type { ChannelMessage } from './domain/interfaces.js';
+import type { TriggerConfig } from './domain/types.js';
 import type { ProvidersOutput } from './config/validation.js';
 import type { Readable, Writable } from 'node:stream';
 import type Database from 'better-sqlite3';
@@ -186,22 +188,61 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
       );
   }
 
-  const channelRouter = new ChannelRouter(adapters, async (msg: ChannelMessage) => {
+  // WsAdapter added to ChannelRouter for sendResponse (notifications), not for message routing.
+  // WsAdapter handles its own message flow with progress/ack support.
+  const wsAdapter = new WsAdapter();
+
+  const channelRouter = new ChannelRouter([wsAdapter, ...adapters], async (msg: ChannelMessage) => {
     logger.info({ channelId: msg.channelId, userId: msg.userId }, 'Received message');
     triggerEngine.onMessage(msg.content, msg.channelId);
     return handlerDeps ? handleMessage(msg, handlerDeps) : 'No providers configured.';
   });
 
+  // Set WS-specific handler with progress support (bypasses ChannelRouter for incoming messages)
+  wsAdapter.setHandler(async (msg, onProgress) => {
+    triggerEngine.onMessage(msg.content, msg.channelId);
+    if (!handlerDeps) return 'No providers configured.';
+    return handleMessage(msg, handlerDeps, undefined, 'main', onProgress);
+  });
+
+  // Wire Discord adapters with progress support (same pattern as WsAdapter)
+  for (const adapter of adapters) {
+    if (adapter instanceof DiscordAdapter) {
+      adapter.setHandler(async (msg, onProgress) => {
+        triggerEngine.onMessage(msg.content, msg.channelId);
+        if (!handlerDeps) return 'No providers configured.';
+        return handleMessage(msg, handlerDeps, undefined, 'main', onProgress);
+      });
+    }
+  }
+
   const fastify = Fastify({ logger: false });
   await fastify.register(import('@fastify/websocket'));
   registerHealthEndpoint(fastify, { raw, sessionManager, triggerEngine, channelRouter });
-  const wsHandler = async (msg: ChannelMessage) => {
-    triggerEngine.onMessage(msg.content, msg.channelId);
-    return handlerDeps ? handleMessage(msg, handlerDeps) : 'No providers configured.';
-  };
-  registerWsRoute(fastify, wsHandler);
+  wsAdapter.registerRoute(fastify);
 
-  const taskConsumer = handlerDeps ? new TaskConsumer({ taskQueueStore, orgTree, handlerDeps }) : null;
+  const taskConsumer = handlerDeps ? new TaskConsumer({
+    taskQueueStore, orgTree, handlerDeps,
+    notifyChannel: async (content) => {
+      // Broadcast to all connected WS clients (v1 — simple broadcast)
+      for (const chId of wsAdapter.getConnectedChannelIds()) {
+        await wsAdapter.sendResponse(chId, content);
+      }
+    },
+    getTeamConfig: (teamId: string) => safeLoadConfig(runDir, teamId),
+    syncTeamTriggers: (teamId: string) => {
+      const triggerPath = join(runDir, 'teams', teamId, 'triggers.yaml');
+      if (!existsSync(triggerPath)) return;
+      try {
+        const result = loadTeamTriggers(triggerPath);
+        const configs: TriggerConfig[] = result.triggers.map(t => ({ ...t, team: teamId }));
+        triggerEngine.replaceTeamTriggers(teamId, configs);
+        logger.info({ team: teamId, count: configs.length }, 'Auto-synced triggers post-bootstrap');
+      } catch (err) {
+        logger.warn({ err, team: teamId }, 'Failed to load triggers.yaml post-bootstrap');
+      }
+    },
+  }) : null;
   taskConsumer?.start(); triggerEngine.start(); await channelRouter.start();
 
   if (!deps?.skipListen) {

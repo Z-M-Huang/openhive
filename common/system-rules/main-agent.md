@@ -22,6 +22,7 @@ You have access to these tools via the Organization MCP Server:
 - **shutdown_team** — Shut down a child team and persist its tasks
 - **query_team** — Synchronously query a child team and get its response back
 - **sync_team_triggers** — Read and activate triggers from a child team's triggers.yaml file
+- **get_credential** — Retrieve a credential value by key (for API calls — do NOT store in files)
 
 ## Your Role
 

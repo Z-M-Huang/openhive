@@ -11,6 +11,7 @@
 
 import type { SecretString } from '../secrets/secret-string.js';
 import type { ChannelMessage, IChannelAdapter } from '../domain/interfaces.js';
+import type { ProgressUpdate } from '../sessions/spawner.js';
 
 // ── Narrow Discord.js interfaces ──────────────────────────────────────────
 // These describe only the subset of the discord.js API we actually use.
@@ -21,7 +22,10 @@ export interface DiscordMessage {
   readonly channelId: string;
   readonly content: string;
   readonly createdTimestamp: number;
-  readonly channel: { sendTyping?: () => Promise<void> };
+  readonly channel: {
+    sendTyping?: () => Promise<void>;
+    send?: (content: string) => Promise<unknown>;
+  };
 }
 
 export interface DiscordTextChannel {
@@ -44,12 +48,19 @@ export interface DiscordAdapterOptions {
   readonly client?: DiscordClient;
 }
 
+export type DiscordProgressSender = (update: ProgressUpdate) => void;
+export type DiscordMessageHandler = (
+  msg: ChannelMessage,
+  onProgress?: DiscordProgressSender,
+) => Promise<string | void>;
+
 export class DiscordAdapter implements IChannelAdapter {
   readonly #token: SecretString;
   readonly #watchedChannelIds: ReadonlySet<string> | null;
   #client: DiscordClient | null;
   readonly #ownsClient: boolean;
   #handler: ((msg: ChannelMessage) => Promise<void>) | null = null;
+  #directHandler: DiscordMessageHandler | null = null;
 
   constructor(options: DiscordAdapterOptions) {
     this.#token = options.token;
@@ -86,6 +97,10 @@ export class DiscordAdapter implements IChannelAdapter {
     this.#handler = handler;
   }
 
+  setHandler(handler: DiscordMessageHandler): void {
+    this.#directHandler = handler;
+  }
+
   async sendResponse(channelId: string, content: string): Promise<void> {
     if (!this.#client) return;
     const channel = await this.#client.channels.fetch(channelId);
@@ -102,7 +117,6 @@ export class DiscordAdapter implements IChannelAdapter {
   async #handleMessage(message: DiscordMessage): Promise<void> {
     if (message.author.bot) return;
     if (this.#watchedChannelIds && !this.#watchedChannelIds.has(message.channelId)) return;
-    if (!this.#handler) return;
 
     // Show typing indicator and keep it alive every 8s while processing
     let typingInterval: ReturnType<typeof setInterval> | null = null;
@@ -121,7 +135,31 @@ export class DiscordAdapter implements IChannelAdapter {
     };
 
     try {
-      await this.#handler(msg);
+      if (this.#directHandler) {
+        // Progress-aware path — send first assistant text as quick ack
+        let ackSent = false;
+        let ackContent = '';
+        const sendProgress: DiscordProgressSender = (update) => {
+          if (update.kind === 'assistant_text' && !ackSent && message.channel.send) {
+            ackSent = true;
+            ackContent = update.content;
+            message.channel.send(update.content).catch(() => {});
+          }
+        };
+        const response = await this.#directHandler(msg, sendProgress);
+        if (response && message.channel.send) {
+          // Strip ack'd prefix to avoid sending duplicate content
+          let toSend = response;
+          if (ackSent && ackContent && response.startsWith(ackContent)) {
+            toSend = response.slice(ackContent.length).trim();
+          }
+          if (toSend) {
+            await message.channel.send(toSend);
+          }
+        }
+      } else if (this.#handler) {
+        await this.#handler(msg);
+      }
     } finally {
       if (typingInterval) clearInterval(typingInterval);
     }

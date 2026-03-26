@@ -195,7 +195,7 @@ function enqueueInitTask(
 
   const initPayload = initContext
     ? 'Bootstrap this team. Your setup context is in memory/init-context.md — read it first. ' +
-      'Your credentials (if any) are in your system prompt under Team Credentials. ' +
+      'Use the get_credential tool to access any credentials provided during team creation. ' +
       'Steps: (1) Read your init context, ' +
       '(2) Create skills in skills/ for your core tasks, ' +
       '(3) Write memory/MEMORY.md with your identity, current state, and key references, ' +

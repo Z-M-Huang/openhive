@@ -9,11 +9,11 @@ Your session has access to these tools (subject to `allowed_tools` config):
 - **Edit** — Edit existing files with string replacement
 - **Glob** — Find files by pattern
 - **Grep** — Search file contents by regex
-- **Bash** — Execute shell commands (denied by default, must be explicitly allowed)
+- **Bash** — Execute shell commands (curl, python3, node, etc.). Check the "Tool Availability" section below for your team's actual permissions.
 
 ## MCP Servers
 
-- **org-mcp** — Always available. Provides the 9 organization tools (spawn_team, delegate_task, query_team, escalate, send_message, get_status, list_teams, shutdown_team, sync_team_triggers).
+- **org-mcp** — Always available. Provides the 10 organization tools (spawn_team, delegate_task, query_team, escalate, send_message, get_status, list_teams, shutdown_team, sync_team_triggers, get_credential).
 - Additional MCP servers as configured in team config.
 
 ## Skills and Subagents
@@ -61,8 +61,9 @@ Keep it concise and dated:
 
 ## Credentials
 
-- Team credentials are stored in `config.yaml` and injected under `--- Team Credentials ---`.
-- You cannot modify credentials — they are managed by the system.
-- Use credential values for API calls and authentication.
-- **NEVER include credential values in your responses to users.** Confirm storage without echoing values.
+- Call `get_credential({ key: "KEY_NAME" })` to retrieve a credential value on demand.
+- NEVER store credential values in skills/, memory/, or team-rules/ files.
+- NEVER include credential values in task results or responses.
+- Use credentials only at the point of use (API calls, HTTP headers).
+- The system automatically scrubs credential values from file writes.
 - Credential values are redacted from server logs and stderr.
