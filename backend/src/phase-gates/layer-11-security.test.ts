@@ -107,7 +107,7 @@ describe('E2E-11: Tool defense bypass -- 3 layers', () => {
       runDir: '/tmp/test-run',
       taskQueue: {
         enqueue: () => 'task-1', dequeue: () => undefined, peek: () => undefined,
-        getByTeam: () => [], updateStatus: () => {}, getPending: () => [], getByStatus: () => [],
+        getByTeam: () => [], updateStatus: () => {}, updateResult: () => {}, getPending: () => [], getByStatus: () => [],
       },
       escalationStore: {
         create: () => {}, updateStatus: () => {}, getByCorrelationId: () => undefined,

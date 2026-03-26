@@ -51,7 +51,8 @@ export function createTables(raw: Database.Database): void {
       priority TEXT NOT NULL DEFAULT 'normal',
       status TEXT NOT NULL DEFAULT 'pending',
       created_at TEXT NOT NULL,
-      correlation_id TEXT
+      correlation_id TEXT,
+      result TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_task_queue_team_id ON task_queue(team_id);
     CREATE INDEX IF NOT EXISTS idx_task_queue_status ON task_queue(status);
@@ -90,4 +91,7 @@ export function createTables(raw: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_escalation_source_team ON escalation_correlations(source_team);
   `);
+
+  // Safe migration: add result column if it doesn't exist yet (for existing DBs)
+  try { raw.exec('ALTER TABLE task_queue ADD COLUMN result TEXT'); } catch { /* already exists */ }
 }

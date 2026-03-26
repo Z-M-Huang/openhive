@@ -23,6 +23,7 @@ export interface TeamStatusInfo {
   readonly queueDepth: number;
   readonly currentTask: string | null;
   readonly pendingCount: number;
+  readonly latestResult: string | null;
 }
 
 export interface GetStatusResult {
@@ -73,6 +74,8 @@ function buildStatusInfo(teamId: string, deps: GetStatusDeps): TeamStatusInfo {
 
   const runningTask = tasks.find((t) => t.status === TaskStatus.Running);
   const pendingTasks = tasks.filter((t) => t.status === TaskStatus.Pending);
+  const completed = tasks.filter((t) => t.status === TaskStatus.Completed || t.status === TaskStatus.Failed);
+  const latest = completed.sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
 
   return {
     teamId,
@@ -81,5 +84,6 @@ function buildStatusInfo(teamId: string, deps: GetStatusDeps): TeamStatusInfo {
     queueDepth: tasks.length,
     currentTask: runningTask?.task ?? null,
     pendingCount: pendingTasks.length,
+    latestResult: latest?.result ?? null,
   };
 }

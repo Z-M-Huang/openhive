@@ -47,6 +47,7 @@ export const taskQueue = sqliteTable(
     status: text('status').notNull().default('pending'),
     createdAt: text('created_at').notNull(),
     correlationId: text('correlation_id'),
+    result: text('result'),
   },
   (table) => [
     index('idx_task_queue_team_id').on(table.teamId),

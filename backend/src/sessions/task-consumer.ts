@@ -79,9 +79,14 @@ export class TaskConsumer {
           // Detect error responses (handleMessage returns "Error: ..." on failure)
           const isError = typeof response === 'string' && response.startsWith('Error processing');
           this.#taskQueue.updateStatus(dequeued.id, isError ? TaskStatus.Failed : TaskStatus.Completed);
+          // Store LLM response so task outcomes are queryable
+          if (response) {
+            this.#taskQueue.updateResult(dequeued.id, response.slice(0, 10_000));
+          }
           this.#deps.logger.info(isError ? 'Task failed (handler error)' : 'Task completed', {
             taskId: dequeued.id, team: task.teamId,
             responseLength: response?.length ?? 0,
+            responseSnippet: response ? response.slice(0, 200) : null,
           });
         } catch (err) {
           this.#taskQueue.updateStatus(dequeued.id, TaskStatus.Failed);

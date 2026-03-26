@@ -36,7 +36,14 @@ export interface MessageHandlerDeps {
 function loadConfig(runDir: string, teamName: string): TeamConfig | undefined {
   const path = join(runDir, 'teams', teamName, 'config.yaml');
   if (!existsSync(path)) return undefined;
-  try { return loadTeamConfig(path); } catch { return undefined; }
+  try {
+    const config = loadTeamConfig(path);
+    // Safeguard: 'org' MCP server must always be present (mirrors spawn-team.ts:125-127)
+    if (!config.mcp_servers.includes('org')) {
+      return { ...config, mcp_servers: ['org', ...config.mcp_servers] };
+    }
+    return config;
+  } catch { return undefined; }
 }
 
 /**

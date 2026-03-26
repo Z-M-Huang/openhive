@@ -106,6 +106,14 @@ export class TaskQueueStore implements ITaskQueueStore {
       .run();
   }
 
+  updateResult(taskId: string, result: string): void {
+    this.db
+      .update(schema.taskQueue)
+      .set({ result })
+      .where(eq(schema.taskQueue.id, taskId))
+      .run();
+  }
+
   getPending(): TaskEntry[] {
     return this.getByStatus(TaskStatus.Pending);
   }
@@ -128,6 +136,7 @@ export class TaskQueueStore implements ITaskQueueStore {
     status: string;
     createdAt: string;
     correlationId: string | null;
+    result: string | null;
   }): TaskEntry {
     return {
       id: row.id,
@@ -137,6 +146,7 @@ export class TaskQueueStore implements ITaskQueueStore {
       status: (row.status as TaskStatus) || TaskStatus.Pending,
       createdAt: row.createdAt,
       correlationId: row.correlationId,
+      result: row.result,
     };
   }
 }

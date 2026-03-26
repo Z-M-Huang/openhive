@@ -125,6 +125,7 @@ describe('Layer 0: Domain type shapes', () => {
       status: TaskStatus.Pending,
       createdAt: new Date().toISOString(),
       correlationId: null,
+      result: null,
     };
 
     expect(entry.id).toBe('task-001');
@@ -268,6 +269,7 @@ describe('Layer 0: Interfaces exist', () => {
       peek: () => undefined,
       getByTeam: () => [],
       updateStatus: () => {},
+      updateResult: () => {},
       getPending: () => [],
       getByStatus: () => [],
     };

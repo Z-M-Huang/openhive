@@ -86,6 +86,7 @@ function createMockTaskQueue(): ITaskQueueStore & { tasks: TaskEntry[] } {
         status: TaskStatus.Pending,
         createdAt: new Date().toISOString(),
         correlationId: correlationId ?? null,
+        result: null,
       });
       return id;
     },
@@ -106,6 +107,12 @@ function createMockTaskQueue(): ITaskQueueStore & { tasks: TaskEntry[] } {
       const idx = tasks.findIndex((t) => t.id === taskId);
       if (idx !== -1) {
         tasks[idx] = { ...tasks[idx], status };
+      }
+    },
+    updateResult(taskId: string, result: string): void {
+      const idx = tasks.findIndex((t) => t.id === taskId);
+      if (idx !== -1) {
+        tasks[idx] = { ...tasks[idx], result };
       }
     },
     getPending(): TaskEntry[] {

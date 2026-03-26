@@ -81,6 +81,7 @@ export interface TaskEntry {
   readonly status: TaskStatus;
   readonly createdAt: string;
   readonly correlationId: string | null;
+  readonly result: string | null;
 }
 
 export interface LogEntry {

@@ -63,6 +63,7 @@ export interface ITaskQueueStore {
   peek(teamId: string): TaskEntry | undefined;
   getByTeam(teamId: string): TaskEntry[];
   updateStatus(taskId: string, status: TaskStatus): void;
+  updateResult(taskId: string, result: string): void;
   getPending(): TaskEntry[];
   getByStatus(status: TaskStatus): TaskEntry[];
 }
