@@ -2,11 +2,12 @@
  * Trigger engine -- registers and manages all trigger handlers.
  *
  * Supports three trigger types: schedule, keyword, and message.
- * Integrates deduplication and rate limiting before dispatching.
+ * Integrates deduplication, rate limiting, state checks, and circuit breaker.
  * Uses a per-team keyed registry for dynamic add/replace/remove.
  */
 
 import type { TriggerConfig } from '../domain/types.js';
+import type { ITriggerConfigStore } from '../domain/interfaces.js';
 import { ScheduleHandler } from './handlers/schedule.js';
 import { KeywordHandler } from './handlers/keyword.js';
 import { MessageHandler } from './handlers/message.js';
@@ -22,8 +23,10 @@ export interface TriggerEngineOpts {
   readonly triggers?: readonly TriggerConfig[];
   readonly dedup: TriggerDedup;
   readonly rateLimiter: TriggerRateLimiter;
-  readonly delegateTask: (team: string, task: string, priority?: string) => Promise<void>;
+  readonly delegateTask: (team: string, task: string, priority?: string, triggerName?: string) => Promise<void>;
   readonly logger: TriggerEngineLogger;
+  readonly configStore?: ITriggerConfigStore;
+  readonly onTriggerDeactivated?: (team: string, triggerName: string, reason: string) => void;
 }
 
 /** Simple string hash for deterministic dedup keys. */
@@ -60,7 +63,6 @@ export class TriggerEngine {
   /** Register triggers from opts.triggers (grouped by team). Backward-compatible entry point. */
   register(): void {
     const triggers = this.opts.triggers ?? [];
-    // Group by team
     const byTeam = new Map<string, TriggerConfig[]>();
     for (const t of triggers) {
       const arr = byTeam.get(t.team) ?? [];
@@ -70,6 +72,26 @@ export class TriggerEngine {
     for (const [team, teamTriggers] of byTeam) {
       this.replaceTeamTriggers(team, teamTriggers);
     }
+  }
+
+  /** Load and register all active triggers from the config store. */
+  loadFromStore(): void {
+    if (!this.opts.configStore) return;
+    const all = this.opts.configStore.getAll();
+    const active = all.filter(t => t.state === 'active');
+    const byTeam = new Map<string, TriggerConfig[]>();
+    for (const t of active) {
+      const arr = byTeam.get(t.team) ?? [];
+      arr.push(t);
+      byTeam.set(t.team, arr);
+    }
+    for (const [team, teamTriggers] of byTeam) {
+      this.replaceTeamTriggers(team, teamTriggers);
+    }
+    this.opts.logger.info('Loaded triggers from store', {
+      total: all.length,
+      active: active.length,
+    });
   }
 
   onMessage(text: string, channel?: string): void {
@@ -154,6 +176,31 @@ export class TriggerEngine {
     return set.schedule.length + set.keyword.length + set.message.length;
   }
 
+  /** Report a task outcome for circuit breaker accounting. */
+  reportTaskOutcome(team: string, triggerName: string, success: boolean): void {
+    if (!this.opts.configStore) return;
+
+    if (success) {
+      this.opts.configStore.resetFailures(team, triggerName);
+      return;
+    }
+
+    const count = this.opts.configStore.incrementFailures(team, triggerName);
+    const entry = this.opts.configStore.get(team, triggerName);
+    const threshold = entry?.failureThreshold ?? 3;
+
+    if (count >= threshold) {
+      const reason = `${count} consecutive failures`;
+      this.opts.configStore.setState(team, triggerName, 'disabled', reason);
+      this.removeTeamTriggers(team);
+      // Re-register remaining active triggers for this team
+      const remaining = this.opts.configStore.getByTeam(team).filter(t => t.state === 'active');
+      if (remaining.length > 0) this.replaceTeamTriggers(team, remaining);
+      this.opts.logger.warn('Circuit breaker tripped', { team, trigger: triggerName, failures: count });
+      this.opts.onTriggerDeactivated?.(team, triggerName, reason);
+    }
+  }
+
   private registerScheduleInto(set: TeamHandlerSet, trigger: TriggerConfig): void {
     const expression = trigger.config['cron'] as string;
     const handler = new ScheduleHandler(expression, () => {
@@ -191,6 +238,17 @@ export class TriggerEngine {
   }
 
   private async fireTrigger(trigger: TriggerConfig, eventId: string): Promise<void> {
+    // Check state from config store (cheapest guard)
+    if (this.opts.configStore) {
+      const entry = this.opts.configStore.get(trigger.team, trigger.name);
+      if (!entry || entry.state !== 'active') {
+        this.opts.logger.info('Trigger skipped (not active)', {
+          name: trigger.name, state: entry?.state ?? 'unknown',
+        });
+        return;
+      }
+    }
+
     const source = trigger.team;
 
     if (this.opts.dedup.check(eventId, source)) {
@@ -205,6 +263,6 @@ export class TriggerEngine {
     }
 
     this.opts.dedup.record(eventId, source);
-    await this.opts.delegateTask(trigger.team, trigger.task);
+    await this.opts.delegateTask(trigger.team, trigger.task, undefined, trigger.name);
   }
 }

@@ -86,7 +86,7 @@ export function createMockTaskQueue(): ITaskQueueStore & { tasks: TaskEntry[] } 
 
   return {
     tasks,
-    enqueue(teamId: string, task: string, priority: string, correlationId?: string): string {
+    enqueue(teamId: string, task: string, priority: string, correlationId?: string, options?: string): string {
       idCounter += 1;
       const id = `task-${String(idCounter).padStart(4, '0')}`;
       tasks.push({
@@ -98,6 +98,8 @@ export function createMockTaskQueue(): ITaskQueueStore & { tasks: TaskEntry[] } 
         createdAt: new Date().toISOString(),
         correlationId: correlationId ?? null,
         result: null,
+        durationMs: null,
+        options: options ?? null,
       });
       return id;
     },

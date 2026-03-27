@@ -90,8 +90,52 @@ export function createTables(raw: Database.Database): void {
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_escalation_source_team ON escalation_correlations(source_team);
+
+    CREATE TABLE IF NOT EXISTS trigger_configs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      team TEXT NOT NULL,
+      name TEXT NOT NULL,
+      type TEXT NOT NULL,
+      config TEXT NOT NULL,
+      task TEXT NOT NULL,
+      skill TEXT,
+      state TEXT NOT NULL DEFAULT 'pending',
+      max_turns INTEGER NOT NULL DEFAULT 100,
+      failure_threshold INTEGER NOT NULL DEFAULT 3,
+      consecutive_failures INTEGER NOT NULL DEFAULT 0,
+      disabled_reason TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(team, name)
+    );
+    CREATE INDEX IF NOT EXISTS idx_trigger_configs_team ON trigger_configs(team);
+    CREATE INDEX IF NOT EXISTS idx_trigger_configs_state ON trigger_configs(state);
+
+    CREATE TABLE IF NOT EXISTS channel_interactions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      direction TEXT NOT NULL,
+      channel_type TEXT NOT NULL,
+      channel_id TEXT NOT NULL,
+      user_id TEXT,
+      team_id TEXT,
+      content_snippet TEXT,
+      content_length INTEGER,
+      duration_ms INTEGER,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_interactions_channel ON channel_interactions(channel_id);
+    CREATE INDEX IF NOT EXISTS idx_interactions_direction ON channel_interactions(direction);
+    CREATE INDEX IF NOT EXISTS idx_interactions_created_at ON channel_interactions(created_at);
   `);
 
-  // Safe migration: add result column if it doesn't exist yet (for existing DBs)
-  try { raw.exec('ALTER TABLE task_queue ADD COLUMN result TEXT'); } catch { /* already exists */ }
+  // Safe migrations: add columns that may not exist yet (for existing DBs)
+  const migrations = [
+    'ALTER TABLE task_queue ADD COLUMN result TEXT',
+    'ALTER TABLE task_queue ADD COLUMN duration_ms INTEGER',
+    'ALTER TABLE task_queue ADD COLUMN options TEXT',
+    'ALTER TABLE log_entries ADD COLUMN duration_ms INTEGER',
+  ];
+  for (const sql of migrations) {
+    try { raw.prepare(sql).run(); } catch { /* already exists */ }
+  }
 }

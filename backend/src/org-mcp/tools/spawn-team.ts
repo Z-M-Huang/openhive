@@ -21,6 +21,7 @@ import type { OrgTree } from '../../domain/org-tree.js';
 import type { ISessionSpawner, ITaskQueueStore } from '../../domain/interfaces.js';
 import { TeamStatus, TaskPriority } from '../../domain/types.js';
 import type { TeamConfig } from '../../domain/types.js';
+import { scrubSecrets } from '../../logging/credential-scrubber.js';
 
 /** Team names must be lowercase slugs to prevent path traversal. */
 const TEAM_SLUG_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
@@ -137,10 +138,17 @@ export async function spawnTeam(
     const cfgPath = join(deps.runDir, 'teams', name, 'config.yaml');
     writeFileSync(cfgPath, yamlStringify(config), 'utf-8');
 
-    // Write initialization context to memory/init-context.md
+    // Write initialization context to memory/init-context.md (scrub credential values)
     if (parsed.data.init_context) {
       const initPath = join(deps.runDir, 'teams', name, 'memory', 'init-context.md');
-      writeFileSync(initPath, parsed.data.init_context, 'utf-8');
+      let safeContext = parsed.data.init_context;
+      if (parsed.data.credentials) {
+        const credValues = Object.values(parsed.data.credentials).filter(
+          (v): v is string => typeof v === 'string' && v.length >= 8,
+        );
+        if (credValues.length > 0) safeContext = scrubSecrets(safeContext, [], credValues);
+      }
+      writeFileSync(initPath, safeContext, 'utf-8');
     }
   } catch (err) {
     cleanupTeamDirs(deps.runDir, name);

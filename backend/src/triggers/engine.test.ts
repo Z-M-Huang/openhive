@@ -104,7 +104,7 @@ describe('Trigger Engine', () => {
     engine.register();
 
     engine.onMessage('please deploy now');
-    expect(delegateTask).toHaveBeenCalledWith('weather-team', 'check weather');
+    expect(delegateTask).toHaveBeenCalledWith('weather-team', 'check weather', undefined, 'kw-deploy');
   });
 
   it('onMessage does not dispatch non-matching keyword', () => {
@@ -132,7 +132,7 @@ describe('Trigger Engine', () => {
     engine.register();
 
     engine.onMessage('got error 500', 'ops');
-    expect(delegateTask).toHaveBeenCalledWith('weather-team', 'check weather');
+    expect(delegateTask).toHaveBeenCalledWith('weather-team', 'check weather', undefined, 'msg-error');
   });
 
   it('onMessage respects message trigger channel filter', () => {
@@ -213,7 +213,7 @@ describe('Dedup Integration', () => {
     // gets a unique event_id. The dedup prevents replay of the *same* event,
     // not repeated triggers from different messages.
     // This test verifies the dedup.record() path was exercised.
-    expect(delegateTask).toHaveBeenCalledWith('weather-team', 'check weather');
+    expect(delegateTask).toHaveBeenCalledWith('weather-team', 'check weather', undefined, 'kw-test');
   });
 });
 
@@ -325,8 +325,8 @@ describe('Trigger Engine: Per-Team Registry', () => {
 
     engine.onMessage('shared event');
     expect(delegateTask).toHaveBeenCalledTimes(2);
-    expect(delegateTask).toHaveBeenCalledWith('alpha', 'alpha task');
-    expect(delegateTask).toHaveBeenCalledWith('beta', 'beta task');
+    expect(delegateTask).toHaveBeenCalledWith('alpha', 'alpha task', undefined, 'kw-a');
+    expect(delegateTask).toHaveBeenCalledWith('beta', 'beta task', undefined, 'kw-b');
   });
 });
 

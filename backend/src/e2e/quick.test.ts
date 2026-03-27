@@ -6,7 +6,7 @@
 
 import { describe, it, expect, afterAll } from 'vitest';
 import { tmpdir } from 'node:os';
-import { mkdtempSync, existsSync, readdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { bootstrap } from '../index.js';
@@ -48,12 +48,21 @@ describe('Quick E2E: Bootstrap wiring', () => {
     }
   });
 
-  it('health shows triggers registered', async () => {
-    // Write per-team triggers.yaml under main (always exists after bootstrap)
-    const triggersYaml = `triggers:\n  - name: e2e-kw\n    type: keyword\n    config:\n      pattern: "e2e-test"\n    task: handle test\n`;
-    writeFileSync(join(dir, 'teams', 'main', 'triggers.yaml'), triggersYaml);
+  it('health shows triggers registered (via SQLite config store)', async () => {
+    // Create trigger via MCP tool (root caller bypasses parent check for main team)
+    const createResult = await result.orgToolInvoker.invoke('create_trigger', {
+      team: 'main', name: 'e2e-kw', type: 'keyword',
+      config: { pattern: 'e2e-test' }, task: 'handle test',
+    }, 'root') as { success: boolean };
+    expect(createResult.success).toBe(true);
 
-    // Re-bootstrap with triggers
+    // Enable the trigger (moves from pending → active)
+    const enableResult = await result.orgToolInvoker.invoke('enable_trigger', {
+      team: 'main', trigger_name: 'e2e-kw',
+    }, 'root') as { success: boolean };
+    expect(enableResult.success).toBe(true);
+
+    // Re-bootstrap to verify triggers are loaded from SQLite on startup
     await result.shutdown();
     result = await bootstrap({
       runDir: dir, dataDir: join(dir, 'data'),

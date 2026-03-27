@@ -1,7 +1,8 @@
 /**
  * Drizzle ORM schema definitions for OpenHive v3.
  *
- * 7 tables: org_tree, scope_keywords, task_queue, trigger_dedup, team_status, log_entries, escalation_correlations
+ * 10 tables: org_tree, scope_keywords, task_queue, trigger_dedup, team_status,
+ * log_entries, escalation_correlations, trigger_configs, channel_interactions
  */
 
 import {
@@ -48,6 +49,8 @@ export const taskQueue = sqliteTable(
     createdAt: text('created_at').notNull(),
     correlationId: text('correlation_id'),
     result: text('result'),
+    durationMs: integer('duration_ms'),
+    options: text('options'),
   },
   (table) => [
     index('idx_task_queue_team_id').on(table.teamId),
@@ -87,6 +90,7 @@ export const logEntries = sqliteTable(
     level: text('level').notNull(),
     message: text('message').notNull(),
     context: text('context'),
+    durationMs: integer('duration_ms'),
     createdAt: text('created_at').notNull(),
   },
   (table) => [
@@ -109,5 +113,54 @@ export const escalationCorrelations = sqliteTable(
   },
   (table) => [
     index('idx_escalation_source_team').on(table.sourceTeam),
+  ],
+);
+
+// ── trigger_configs ───────────────────────────────────────────────────────
+
+export const triggerConfigs = sqliteTable(
+  'trigger_configs',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    team: text('team').notNull(),
+    name: text('name').notNull(),
+    type: text('type').notNull(),
+    config: text('config').notNull(),
+    task: text('task').notNull(),
+    skill: text('skill'),
+    state: text('state').notNull().default('pending'),
+    maxTurns: integer('max_turns').notNull().default(100),
+    failureThreshold: integer('failure_threshold').notNull().default(3),
+    consecutiveFailures: integer('consecutive_failures').notNull().default(0),
+    disabledReason: text('disabled_reason'),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => [
+    index('idx_trigger_configs_team').on(table.team),
+    index('idx_trigger_configs_state').on(table.state),
+  ],
+);
+
+// ── channel_interactions ──────────────────────────────────────────────────
+
+export const channelInteractions = sqliteTable(
+  'channel_interactions',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    direction: text('direction').notNull(),
+    channelType: text('channel_type').notNull(),
+    channelId: text('channel_id').notNull(),
+    userId: text('user_id'),
+    teamId: text('team_id'),
+    contentSnippet: text('content_snippet'),
+    contentLength: integer('content_length'),
+    durationMs: integer('duration_ms'),
+    createdAt: text('created_at').notNull(),
+  },
+  (table) => [
+    index('idx_interactions_channel').on(table.channelId),
+    index('idx_interactions_direction').on(table.direction),
+    index('idx_interactions_created_at').on(table.createdAt),
   ],
 );

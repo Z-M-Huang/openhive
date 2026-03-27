@@ -5,7 +5,7 @@
 import { existsSync, mkdirSync, cpSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { stringify as yamlStringify } from 'yaml';
-import { loadTriggers, loadTeamTriggers, loadChannels } from './config/loader.js';
+import { loadChannels } from './config/loader.js';
 import { createDatabase, createTables } from './storage/database.js';
 import { OrgStore } from './storage/stores/org-store.js';
 import { TaskQueueStore } from './storage/stores/task-queue-store.js';
@@ -13,6 +13,8 @@ import { TriggerStore } from './storage/stores/trigger-store.js';
 import { LogStore } from './storage/stores/log-store.js';
 import { EscalationStore } from './storage/stores/escalation-store.js';
 import { MemoryStore } from './storage/stores/memory-store.js';
+import { TriggerConfigStore } from './storage/stores/trigger-config-store.js';
+import { InteractionStore } from './storage/stores/interaction-store.js';
 import { TriggerDedup } from './triggers/dedup.js';
 import { TriggerRateLimiter } from './triggers/rate-limiter.js';
 import { TriggerEngine } from './triggers/engine.js';
@@ -20,7 +22,7 @@ import { CLIAdapter } from './channels/cli-adapter.js';
 import { DiscordAdapter } from './channels/discord-adapter.js';
 import { SecretString } from './secrets/secret-string.js';
 import type { IChannelAdapter } from './domain/interfaces.js';
-import type { TriggerConfig } from './domain/types.js';
+// TriggerConfig import removed — trigger configs now managed via SQLite/TriggerConfigStore
 import type { ChannelsOutput } from './config/validation.js';
 import type { Readable, Writable } from 'node:stream';
 import type { DatabaseInstance } from './storage/database.js';
@@ -66,6 +68,8 @@ export interface StorageResult extends DatabaseInstance {
   readonly logStore: LogStore;
   readonly escalationStore: EscalationStore;
   readonly memoryStore: MemoryStore;
+  readonly triggerConfigStore: TriggerConfigStore;
+  readonly interactionStore: InteractionStore;
 }
 
 export function initStorage(_dataDir: string, runDir: string): StorageResult {
@@ -80,85 +84,41 @@ export function initStorage(_dataDir: string, runDir: string): StorageResult {
   const escalationStore = new EscalationStore(db);
   const memoryDir = join(runDir, 'teams');
   const memoryStore = new MemoryStore(memoryDir);
+  const triggerConfigStore = new TriggerConfigStore(db);
+  const interactionStore = new InteractionStore(db);
 
-  return { db, raw, orgStore, taskQueueStore, triggerStore, logStore, escalationStore, memoryStore };
-}
-
-export function loadTriggerConfigs(runDir: string, logger: AppLogger): TriggerConfig[] {
-  const triggersPath = join(runDir, 'triggers.yaml');
-  if (!existsSync(triggersPath)) {
-    logger.info('No triggers.yaml found in .run/, skipping trigger loading');
-    return [];
-  }
-  try {
-    const result = loadTriggers(triggersPath);
-    return result.triggers as TriggerConfig[];
-  } catch (err) {
-    logger.warn('Failed to load triggers.yaml', { err });
-    return [];
-  }
-}
-
-export function loadAllTeamTriggerConfigs(runDir: string, orgTree: OrgTree, logger: AppLogger): TriggerConfig[] {
-  const teamsDir = join(runDir, 'teams');
-  if (!existsSync(teamsDir)) return [];
-
-  const allConfigs: TriggerConfig[] = [];
-  for (const entry of readdirSync(teamsDir, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
-    const teamName = entry.name;
-    if (!orgTree.getTeam(teamName)) continue;
-
-    const path = join(teamsDir, teamName, 'triggers.yaml');
-    if (!existsSync(path)) continue;
-
-    try {
-      const result = loadTeamTriggers(path);
-      for (const t of result.triggers) allConfigs.push({ ...t, team: teamName });
-      logger.info('Loaded team triggers', { team: teamName, count: result.triggers.length });
-    } catch (err) {
-      logger.warn('Failed to load team triggers.yaml, skipping', { err, team: teamName });
-    }
-  }
-
-  // Legacy fallback: .run/triggers.yaml (deprecated)
-  const teamsWithTriggers = new Set(allConfigs.map(c => c.team));
-  const legacyPath = join(runDir, 'triggers.yaml');
-  if (existsSync(legacyPath)) {
-    logger.warn('DEPRECATED: .run/triggers.yaml found — migrate to per-team triggers.yaml');
-    try {
-      const legacy = loadTriggers(legacyPath);
-      for (const t of legacy.triggers as TriggerConfig[]) {
-        if (!teamsWithTriggers.has(t.team)) allConfigs.push(t);
-        else logger.info('Skipping legacy trigger (per-team file takes precedence)', { team: t.team, trigger: t.name });
-      }
-    } catch (err) {
-      logger.warn('Failed to load legacy triggers.yaml', { err });
-    }
-  }
-
-  return allConfigs;
+  return { db, raw, orgStore, taskQueueStore, triggerStore, logStore, escalationStore, memoryStore, triggerConfigStore, interactionStore };
 }
 
 export function initTriggerEngine(
   triggerStore: TriggerStore,
   taskQueueStore: TaskQueueStore,
   logger: AppLogger,
-  triggers: TriggerConfig[],
+  triggerConfigStore: TriggerConfigStore,
+  onTriggerDeactivated?: (team: string, triggerName: string, reason: string) => void,
 ): TriggerEngine {
   const dedup = new TriggerDedup(triggerStore);
   const rateLimiter = new TriggerRateLimiter(10, 60_000);
   const engine = new TriggerEngine({
-    triggers,
     dedup,
     rateLimiter,
-    delegateTask: (team, task, priority) => {
-      taskQueueStore.enqueue(team, task, priority ?? 'normal');
+    configStore: triggerConfigStore,
+    delegateTask: (team, task, priority, triggerName) => {
+      // Unique correlationId per task: trigger:{name}:{timestamp}
+      const correlationId = triggerName ? `trigger:${triggerName}:${Date.now()}` : undefined;
+      // Snapshot max_turns from trigger config
+      let options: string | undefined;
+      if (triggerName) {
+        const entry = triggerConfigStore.get(team, triggerName);
+        if (entry?.maxTurns) options = JSON.stringify({ max_turns: entry.maxTurns });
+      }
+      taskQueueStore.enqueue(team, task, priority ?? 'normal', correlationId, options);
       return Promise.resolve();
     },
     logger,
+    onTriggerDeactivated,
   });
-  engine.register();
+  engine.loadFromStore();
   return engine;
 }
 

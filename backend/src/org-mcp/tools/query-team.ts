@@ -74,12 +74,6 @@ export async function queryTeam(
       return { success: false, error: 'Team returned empty response' };
     }
 
-    // handleMessage returns error strings like "Error processing message: ..."
-    // instead of throwing — detect and propagate as failures
-    if (response.startsWith('Error processing message:') || response.startsWith('OpenHive is not configured')) {
-      return { success: false, error: response };
-    }
-
     // Scrub child team credential values from response
     const config = deps.getTeamConfig(team);
     const childCreds = config?.credentials ?? {};

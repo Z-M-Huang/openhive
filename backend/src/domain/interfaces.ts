@@ -7,6 +7,7 @@
 import type {
   TeamConfig,
   TriggerConfig,
+  TriggerState,
   LogEntry,
   OrgTreeNode,
   TaskEntry,
@@ -58,12 +59,13 @@ export interface IOrgStore {
 }
 
 export interface ITaskQueueStore {
-  enqueue(teamId: string, task: string, priority: string, correlationId?: string): string;
+  enqueue(teamId: string, task: string, priority: string, correlationId?: string, options?: string): string;
   dequeue(teamId: string): TaskEntry | undefined;
   peek(teamId: string): TaskEntry | undefined;
   getByTeam(teamId: string): TaskEntry[];
   updateStatus(taskId: string, status: TaskStatus): void;
   updateResult(taskId: string, result: string): void;
+  updateDuration?(taskId: string, durationMs: number): void;
   getPending(): TaskEntry[];
   getByStatus(status: TaskStatus): TaskEntry[];
 }
@@ -97,6 +99,37 @@ export interface IMemoryStore {
   listFiles(teamName: string): string[];
 }
 
+// ── Trigger Config Store ──────────────────────────────────────────────────
+
+export interface ITriggerConfigStore {
+  upsert(config: TriggerConfig): void;
+  remove(team: string, name: string): void;
+  removeByTeam(team: string): void;
+  getByTeam(team: string): TriggerConfig[];
+  getAll(): TriggerConfig[];
+  setState(team: string, name: string, state: TriggerState, reason?: string): void;
+  incrementFailures(team: string, name: string): number;
+  resetFailures(team: string, name: string): void;
+  get(team: string, name: string): TriggerConfig | undefined;
+}
+
+// ── Interaction Store ─────────────────────────────────────────────────────
+
+export interface InteractionRecord {
+  readonly direction: 'inbound' | 'outbound';
+  readonly channelType: string;
+  readonly channelId: string;
+  readonly userId?: string;
+  readonly teamId?: string;
+  readonly contentSnippet?: string;
+  readonly contentLength?: number;
+  readonly durationMs?: number;
+}
+
+export interface IInteractionStore {
+  log(record: InteractionRecord): void;
+}
+
 // ── Config (used by L1+ layers) ────────────────────────────────────────────
 
-export type { TeamConfig, TriggerConfig };
+export type { TeamConfig, TriggerConfig, TriggerState };

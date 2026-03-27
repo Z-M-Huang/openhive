@@ -1,0 +1,58 @@
+/**
+ * create_trigger tool — register a new trigger in pending state.
+ */
+
+import { z } from 'zod';
+import type { OrgTree } from '../../domain/org-tree.js';
+import type { ITriggerConfigStore } from '../../domain/interfaces.js';
+
+export const CreateTriggerInputSchema = z.object({
+  team: z.string().min(1),
+  name: z.string().min(1).regex(/^[a-z0-9]+(-[a-z0-9]+)*$/, 'trigger name must be a lowercase slug'),
+  type: z.enum(['schedule', 'keyword', 'message']),
+  config: z.record(z.unknown()),
+  task: z.string().min(1),
+  skill: z.string().optional(),
+  max_turns: z.number().int().min(1).max(500).optional(),
+  failure_threshold: z.number().int().min(1).max(100).optional(),
+});
+
+export interface CreateTriggerResult {
+  readonly success: boolean;
+  readonly error?: string;
+}
+
+export interface CreateTriggerDeps {
+  readonly orgTree: OrgTree;
+  readonly configStore: ITriggerConfigStore;
+  readonly log: (msg: string, meta?: Record<string, unknown>) => void;
+}
+
+export function createTrigger(
+  input: z.infer<typeof CreateTriggerInputSchema>,
+  callerId: string,
+  deps: CreateTriggerDeps,
+): CreateTriggerResult {
+  const team = deps.orgTree.getTeam(input.team);
+  if (!team) return { success: false, error: `team "${input.team}" not found` };
+  if (callerId !== 'root' && team.parentId !== callerId)
+    return { success: false, error: 'caller is not parent of target team' };
+
+  const existing = deps.configStore.get(input.team, input.name);
+  if (existing) return { success: false, error: `trigger "${input.name}" already exists for team "${input.team}"` };
+
+  deps.configStore.upsert({
+    name: input.name,
+    type: input.type,
+    config: input.config as Record<string, unknown>,
+    team: input.team,
+    task: input.task,
+    skill: input.skill,
+    state: 'pending',
+    maxTurns: input.max_turns ?? 100,
+    failureThreshold: input.failure_threshold ?? 3,
+  });
+
+  deps.log('Created trigger', { team: input.team, trigger: input.name, state: 'pending' });
+  return { success: true };
+}

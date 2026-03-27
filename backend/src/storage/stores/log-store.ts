@@ -14,10 +14,14 @@ export class LogStore implements ILogStore {
   constructor(private readonly db: BetterSQLite3Database<typeof schema>) {}
 
   append(entry: LogEntry): void {
+    const durationMs = typeof entry.metadata?.['durationMs'] === 'number'
+      ? entry.metadata['durationMs'] as number
+      : null;
     this.db.insert(schema.logEntries).values({
       level: entry.level,
       message: entry.message,
       context: entry.metadata ? JSON.stringify(entry.metadata) : null,
+      durationMs,
       createdAt: new Date(entry.timestamp).toISOString(),
     }).run();
   }

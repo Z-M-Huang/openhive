@@ -15,7 +15,7 @@ import * as schema from '../schema.js';
 export class TaskQueueStore implements ITaskQueueStore {
   constructor(private readonly db: BetterSQLite3Database<typeof schema>) {}
 
-  enqueue(teamId: string, task: string, priority: string, correlationId?: string): string {
+  enqueue(teamId: string, task: string, priority: string, correlationId?: string, options?: string): string {
     const id = `task-${randomBytes(8).toString('hex')}`;
     this.db.insert(schema.taskQueue).values({
       id,
@@ -25,6 +25,7 @@ export class TaskQueueStore implements ITaskQueueStore {
       status: TaskStatus.Pending,
       createdAt: new Date().toISOString(),
       correlationId: correlationId ?? null,
+      options: options ?? null,
     }).run();
     return id;
   }
@@ -114,6 +115,14 @@ export class TaskQueueStore implements ITaskQueueStore {
       .run();
   }
 
+  updateDuration(taskId: string, durationMs: number): void {
+    this.db
+      .update(schema.taskQueue)
+      .set({ durationMs })
+      .where(eq(schema.taskQueue.id, taskId))
+      .run();
+  }
+
   getPending(): TaskEntry[] {
     return this.getByStatus(TaskStatus.Pending);
   }
@@ -137,6 +146,8 @@ export class TaskQueueStore implements ITaskQueueStore {
     createdAt: string;
     correlationId: string | null;
     result: string | null;
+    durationMs: number | null;
+    options: string | null;
   }): TaskEntry {
     return {
       id: row.id,
@@ -147,6 +158,8 @@ export class TaskQueueStore implements ITaskQueueStore {
       createdAt: row.createdAt,
       correlationId: row.correlationId,
       result: row.result,
+      durationMs: row.durationMs,
+      options: row.options,
     };
   }
 }

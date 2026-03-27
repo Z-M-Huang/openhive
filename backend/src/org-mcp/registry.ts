@@ -1,5 +1,5 @@
 /**
- * Org-MCP tool registry — single source of truth for all 10 org tool definitions.
+ * Org-MCP tool registry — single source of truth for all org tool definitions.
  *
  * Provides:
  * - buildToolDefs(): pure data array of tool definitions
@@ -17,6 +17,7 @@ import type {
   ISessionManager,
   ITaskQueueStore,
   IEscalationStore,
+  ITriggerConfigStore,
 } from '../domain/interfaces.js';
 import type { TeamConfig } from '../domain/types.js';
 import type { SpawnTeamConfigHints } from './tools/spawn-team.js';
@@ -29,8 +30,12 @@ import { GetStatusInputSchema, getStatus } from './tools/get-status.js';
 import { QueryTeamInputSchema, queryTeam } from './tools/query-team.js';
 import { ListTeamsInputSchema, listTeams } from './tools/list-teams.js';
 import type { TriggerEngine } from '../triggers/engine.js';
-import { SyncTeamTriggersInputSchema, syncTeamTriggers } from './tools/sync-team-triggers.js';
 import { GetCredentialInputSchema, getCredential } from './tools/get-credential.js';
+import { CreateTriggerInputSchema, createTrigger } from './tools/create-trigger.js';
+import { EnableTriggerInputSchema, enableTrigger } from './tools/enable-trigger.js';
+import { DisableTriggerInputSchema, disableTrigger } from './tools/disable-trigger.js';
+import { TestTriggerInputSchema, testTrigger } from './tools/test-trigger.js';
+import { ListTriggersInputSchema, listTriggers } from './tools/list-triggers.js';
 
 export interface ToolDefinition {
   readonly name: string;
@@ -59,6 +64,7 @@ export interface OrgMcpDeps {
   readonly log: (msg: string, meta?: Record<string, unknown>) => void;
   readonly queryRunner?: TeamQueryRunner;
   readonly triggerEngine?: TriggerEngine;
+  readonly triggerConfigStore?: ITriggerConfigStore;
 }
 
 export interface OrgToolInvoker {
@@ -70,7 +76,7 @@ export interface OrgToolInvoker {
  * Build the tool definitions array. Pure data — no SDK dependency.
  */
 export function buildToolDefs(deps: OrgMcpDeps): ToolDefinition[] {
-  return [
+  const tools: ToolDefinition[] = [
     {
       name: 'spawn_team',
       description: 'Create a new team and spawn its session',
@@ -123,20 +129,6 @@ export function buildToolDefs(deps: OrgMcpDeps): ToolDefinition[] {
       handler: (input, callerId) => queryTeam(input as never, callerId, deps),
     },
     {
-      name: 'sync_team_triggers',
-      description: 'Read and activate triggers from a child team\'s triggers.yaml file',
-      inputSchema: SyncTeamTriggersInputSchema,
-      handler: (input, callerId) => {
-        if (!deps.triggerEngine) return Promise.resolve({ success: false, error: 'trigger engine not available' });
-        return Promise.resolve(
-          syncTeamTriggers(input as never, callerId, {
-            orgTree: deps.orgTree, triggerEngine: deps.triggerEngine,
-            runDir: deps.runDir, log: deps.log,
-          })
-        );
-      },
-    },
-    {
       name: 'get_credential',
       description: 'Retrieve a credential value by key. Use for API calls — do NOT store returned values in files.',
       inputSchema: GetCredentialInputSchema,
@@ -147,6 +139,74 @@ export function buildToolDefs(deps: OrgMcpDeps): ToolDefinition[] {
       ),
     },
   ];
+
+  // Trigger management tools (require configStore + triggerEngine)
+  if (deps.triggerConfigStore) {
+    const configStore = deps.triggerConfigStore;
+
+    tools.push({
+      name: 'create_trigger',
+      description: 'Create a new trigger in pending state for a child team',
+      inputSchema: CreateTriggerInputSchema,
+      handler: (input, callerId) => Promise.resolve(
+        createTrigger(input as never, callerId, {
+          orgTree: deps.orgTree, configStore, log: deps.log,
+        })
+      ),
+    });
+
+    tools.push({
+      name: 'enable_trigger',
+      description: 'Activate a pending or disabled trigger and register its handler',
+      inputSchema: EnableTriggerInputSchema,
+      handler: (input, callerId) => {
+        if (!deps.triggerEngine) return Promise.resolve({ success: false, error: 'trigger engine not available' });
+        return Promise.resolve(
+          enableTrigger(input as never, callerId, {
+            orgTree: deps.orgTree, configStore, triggerEngine: deps.triggerEngine, log: deps.log,
+          })
+        );
+      },
+    });
+
+    tools.push({
+      name: 'disable_trigger',
+      description: 'Deactivate a trigger and unregister its handler',
+      inputSchema: DisableTriggerInputSchema,
+      handler: (input, callerId) => {
+        if (!deps.triggerEngine) return Promise.resolve({ success: false, error: 'trigger engine not available' });
+        return Promise.resolve(
+          disableTrigger(input as never, callerId, {
+            orgTree: deps.orgTree, configStore, triggerEngine: deps.triggerEngine, log: deps.log,
+          })
+        );
+      },
+    });
+
+    tools.push({
+      name: 'test_trigger',
+      description: 'Fire a trigger once for testing without changing its state. Supports max_turns override.',
+      inputSchema: TestTriggerInputSchema,
+      handler: (input, callerId) => Promise.resolve(
+        testTrigger(input as never, callerId, {
+          orgTree: deps.orgTree, configStore, taskQueue: deps.taskQueue, log: deps.log,
+        })
+      ),
+    });
+
+    tools.push({
+      name: 'list_triggers',
+      description: 'List all triggers and their states for a team',
+      inputSchema: ListTriggersInputSchema,
+      handler: (input, callerId) => Promise.resolve(
+        listTriggers(input as never, callerId, {
+          orgTree: deps.orgTree, configStore,
+        })
+      ),
+    });
+  }
+
+  return tools;
 }
 
 /**

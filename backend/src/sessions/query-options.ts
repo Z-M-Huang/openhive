@@ -141,8 +141,16 @@ export function buildQueryOptions(opts: BuildQueryOptionsInput): QueryOptions {
     ? `\n## Available Credentials\nThis team has credentials configured: ${credKeys.map(k => `\`${k}\``).join(', ')}. Use \`get_credential({ key: "KEY_NAME" })\` to retrieve each value at point of use. Never hardcode or store credential values.\n`
     : '';
 
+  const httpTimeoutRules = `
+## HTTP Request Rules
+- ALWAYS use timeouts on HTTP requests. For curl: \`--connect-timeout 10 --max-time 60\`.
+- For wget: \`--timeout=60\`. For Python requests: \`timeout=60\`.
+- If a request fails due to authentication, do NOT retry more than twice. Report the error clearly.
+- Never retry indefinitely — 2 attempts max for auth failures, 3 for transient errors.
+`;
+
   // Tool availability note goes FIRST so the agent sees it before any rules that might create doubt.
-  const fullAppend = [toolsNote, credNote, ruleCascade, skillsContent, memorySection].filter(Boolean).join('\n');
+  const fullAppend = [toolsNote, credNote, httpTimeoutRules, ruleCascade, skillsContent, memorySection].filter(Boolean).join('\n');
 
   // Load subagent definitions for the SDK agents option
   const agents = loadSubagents(opts.runDir, opts.teamName);

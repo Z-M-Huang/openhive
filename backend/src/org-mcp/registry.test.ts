@@ -11,15 +11,15 @@ import type { ServerFixtures } from './__test-helpers.js';
 
 // ── UT-6: Tool Registration ──────────────────────────────────────────────
 
-describe('UT-6: All 10 tools registered', () => {
+describe('UT-6: Core tools registered', () => {
   let server: OrgToolInvoker;
 
   beforeEach(() => {
     ({ server } = setupServer());
   });
 
-  it('registers exactly 10 tools', () => {
-    expect(server.tools.size).toBe(10);
+  it('registers exactly 9 core tools (trigger tools require configStore)', () => {
+    expect(server.tools.size).toBe(9);
   });
 
   it('registers spawn_team with correct name', () => {
@@ -64,14 +64,6 @@ describe('UT-6: All 10 tools registered', () => {
     const tool = server.tools.get('query_team');
     expect(tool).toBeDefined();
     expect(tool!.name).toBe('query_team');
-    expect(tool!.description).toBeTruthy();
-    expect(tool!.inputSchema).toBeDefined();
-  });
-
-  it('registers sync_team_triggers with correct name', () => {
-    const tool = server.tools.get('sync_team_triggers');
-    expect(tool).toBeDefined();
-    expect(tool!.name).toBe('sync_team_triggers');
     expect(tool!.description).toBeTruthy();
     expect(tool!.inputSchema).toBeDefined();
   });

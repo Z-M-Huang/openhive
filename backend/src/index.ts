@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 import Fastify from 'fastify';
 import { createLogger, type AppLogger } from './logging/logger.js';
-import { loadProviders, loadTeamConfig, loadTeamTriggers, loadSystemConfig } from './config/loader.js';
+import { loadProviders, loadTeamConfig, loadSystemConfig } from './config/loader.js';
 import { OrgTree } from './domain/org-tree.js';
 import { startOrgMcpHttpServer } from './org-mcp/http-server.js';
 import { createToolInvoker, type OrgMcpDeps, type OrgToolInvoker } from './org-mcp/registry.js';
@@ -25,11 +25,10 @@ import { TaskConsumer } from './sessions/task-consumer.js';
 import { recoverFromCrash } from './recovery/startup-recovery.js';
 import {
   ensureRunDir, seedOrgRules, initStorage,
-  loadAllTeamTriggerConfigs, initTriggerEngine, initChannels, ensureMainTeam,
+  initTriggerEngine, initChannels, ensureMainTeam,
 } from './bootstrap-helpers.js';
 import type { TriggerEngine } from './triggers/engine.js';
 import type { ChannelMessage } from './domain/interfaces.js';
-import type { TriggerConfig } from './domain/types.js';
 import type { ProvidersOutput } from './config/validation.js';
 import type { Readable, Writable } from 'node:stream';
 import type Database from 'better-sqlite3';
@@ -92,7 +91,13 @@ function resolveLogLevel(dataDir: string): string {
 }
 
 function buildOrgMcpDeps(
-  opts: { orgTree: OrgTree; sessionManager: TeamRegistry; taskQueueStore: import('./domain/interfaces.js').ITaskQueueStore; escalationStore: import('./domain/interfaces.js').IEscalationStore; runDir: string; logger: AppLogger },
+  opts: {
+    orgTree: OrgTree; sessionManager: TeamRegistry;
+    taskQueueStore: import('./domain/interfaces.js').ITaskQueueStore;
+    escalationStore: import('./domain/interfaces.js').IEscalationStore;
+    triggerConfigStore: import('./domain/interfaces.js').ITriggerConfigStore;
+    runDir: string; logger: AppLogger;
+  },
   getQueryRunner: () => import('./org-mcp/registry.js').TeamQueryRunner | undefined,
   getTriggerEngine: () => TriggerEngine | undefined,
 ): OrgMcpDeps {
@@ -105,6 +110,7 @@ function buildOrgMcpDeps(
     },
     taskQueue: opts.taskQueueStore,
     escalationStore: opts.escalationStore,
+    triggerConfigStore: opts.triggerConfigStore,
     runDir: opts.runDir,
     loadConfig: (name: string, cp?: string, hints?: { description?: string; scopeAccepts?: string[] }) =>
       loadOrGenerateConfig(opts.runDir, name, cp, hints),
@@ -152,8 +158,10 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   let queryRunnerRef: import('./org-mcp/registry.js').TeamQueryRunner | undefined;
   let triggerEngineRef: TriggerEngine | undefined;
 
+  const { triggerConfigStore } = stores;
+
   const orgMcpDeps = buildOrgMcpDeps(
-    { orgTree, sessionManager, taskQueueStore, escalationStore, runDir, logger },
+    { orgTree, sessionManager, taskQueueStore, escalationStore, triggerConfigStore, runDir, logger },
     () => queryRunnerRef,
     () => triggerEngineRef,
   );
@@ -163,8 +171,13 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   // Synchronous invoker for tests and direct tool calls
   const orgToolInvoker = createToolInvoker(orgMcpDeps);
 
-  const triggerConfigs = loadAllTeamTriggerConfigs(runDir, orgTree, logger);
-  const triggerEngine = initTriggerEngine(stores.triggerStore, taskQueueStore, logger, triggerConfigs);
+  // Notification helper for trigger deactivation
+  const notifyTriggerDeactivated = (team: string, triggerName: string, reason: string): void => {
+    logger.warn('Trigger auto-disabled', { team, trigger: triggerName, reason });
+  };
+  const triggerEngine = initTriggerEngine(
+    stores.triggerStore, taskQueueStore, logger, triggerConfigStore, notifyTriggerDeactivated,
+  );
   triggerEngineRef = triggerEngine;
 
   const adapters = initChannels(
@@ -178,12 +191,15 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
 
   // Wire queryRunner: query_team → handleMessage for synchronous child queries
   if (handlerDeps) {
-    queryRunnerRef = (query, team, callerId, ancestors) =>
-      handleMessage(
+    queryRunnerRef = async (query, team, callerId, ancestors) => {
+      const result = await handleMessage(
         { channelId: `query:${callerId}:${team}:${Date.now()}`, userId: callerId, content: query, timestamp: Date.now() },
         { ...handlerDeps, orgAncestors: ancestors },
-        undefined, team,
+        { teamName: team },
       );
+      if (!result.ok) throw new Error(result.error ?? 'unknown error');
+      return result.content;
+    };
   }
 
   // WsAdapter added to ChannelRouter for sendResponse (notifications), not for message routing.
@@ -193,14 +209,17 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   const channelRouter = new ChannelRouter([wsAdapter, ...adapters], async (msg: ChannelMessage) => {
     logger.info('Received message', { channelId: msg.channelId, userId: msg.userId });
     triggerEngine.onMessage(msg.content, msg.channelId);
-    return handlerDeps ? handleMessage(msg, handlerDeps) : 'No providers configured.';
+    if (!handlerDeps) return 'No providers configured.';
+    const result = await handleMessage(msg, handlerDeps);
+    return result.ok ? (result.content ?? '') : `Error: ${result.error}`;
   });
 
   // Set WS-specific handler with progress support (bypasses ChannelRouter for incoming messages)
   wsAdapter.setHandler(async (msg, onProgress) => {
     triggerEngine.onMessage(msg.content, msg.channelId);
     if (!handlerDeps) return 'No providers configured.';
-    return handleMessage(msg, handlerDeps, undefined, 'main', onProgress);
+    const result = await handleMessage(msg, handlerDeps, { onProgress });
+    return result.ok ? (result.content ?? '') : `Error: ${result.error}`;
   });
 
   // Wire Discord adapters with progress support (same pattern as WsAdapter)
@@ -209,7 +228,8 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
       adapter.setHandler(async (msg, onProgress) => {
         triggerEngine.onMessage(msg.content, msg.channelId);
         if (!handlerDeps) return 'No providers configured.';
-        return handleMessage(msg, handlerDeps, undefined, 'main', onProgress);
+        const result = await handleMessage(msg, handlerDeps, { onProgress });
+        return result.ok ? (result.content ?? '') : `Error: ${result.error}`;
       });
     }
   }
@@ -227,11 +247,9 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   const taskConsumer = handlerDeps ? new TaskConsumer({
     taskQueueStore, orgTree, handlerDeps,
     notifyChannel: async (content) => {
-      // Broadcast to all connected WS clients
       for (const chId of wsAdapter.getConnectedChannelIds()) {
         await wsAdapter.sendResponse(chId, content);
       }
-      // Discord — watched channels (durable) or last-active (bounded fallback)
       for (const da of discordAdapters) {
         for (const chId of da.getNotifyChannelIds()) {
           try { await da.sendResponse(chId, content); } catch { /* channel gone */ }
@@ -239,17 +257,8 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
       }
     },
     getTeamConfig: (teamId: string) => safeLoadConfig(runDir, teamId),
-    syncTeamTriggers: (teamId: string) => {
-      const triggerPath = join(runDir, 'teams', teamId, 'triggers.yaml');
-      if (!existsSync(triggerPath)) return;
-      try {
-        const result = loadTeamTriggers(triggerPath);
-        const configs: TriggerConfig[] = result.triggers.map(t => ({ ...t, team: teamId }));
-        triggerEngine.replaceTeamTriggers(teamId, configs);
-        logger.info('Auto-synced triggers post-bootstrap', { team: teamId, count: configs.length });
-      } catch (err) {
-        logger.warn('Failed to load triggers.yaml post-bootstrap', { err, team: teamId });
-      }
+    reportTriggerOutcome: (team, triggerName, success) => {
+      triggerEngine.reportTaskOutcome(team, triggerName, success);
     },
   }) : null;
   taskConsumer?.start(); triggerEngine.start(); await channelRouter.start();

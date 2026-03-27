@@ -98,7 +98,7 @@ describe('query_team handler logic', () => {
     expect(result.response).toBe('The weather is sunny');
   });
 
-  it('detects error strings from queryRunner as failures', async () => {
+  it('detects thrown errors from queryRunner as failures', async () => {
     const store = createMemoryOrgStore();
     const tree = new OrgTree(store);
     tree.addTeam(makeNode({ teamId: 'root', name: 'root' }));
@@ -113,13 +113,13 @@ describe('query_team handler logic', () => {
       {
         orgTree: tree,
         getTeamConfig: (id) => configs.get(id),
-        queryRunner: async () => 'Error processing message: SDK not available',
+        queryRunner: async () => { throw new Error('SDK not available'); },
         log: () => {},
       },
     );
 
     expect(result.success).toBe(false);
-    expect(result.error).toContain('Error processing message');
+    expect(result.error).toContain('SDK not available');
   });
 });
 

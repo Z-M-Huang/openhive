@@ -2,7 +2,7 @@
  * Task consumer — processes pending tasks for child teams.
  *
  * Polls the task queue and spawns SDK sessions for pending tasks.
- * Runs as a background loop started by bootstrap.
+ * Reports trigger outcomes back for circuit breaker accounting.
  */
 
 import type { ITaskQueueStore } from '../domain/interfaces.js';
@@ -10,7 +10,7 @@ import type { OrgTree } from '../domain/org-tree.js';
 import type { TeamConfig } from '../domain/types.js';
 import { TaskStatus } from '../domain/types.js';
 import { handleMessage } from './message-handler.js';
-import type { MessageHandlerDeps } from './message-handler.js';
+import type { MessageHandlerDeps, MessageResult } from './message-handler.js';
 import type { QueryFn } from './spawner.js';
 import { scrubSecrets } from '../logging/credential-scrubber.js';
 
@@ -23,6 +23,7 @@ export interface TaskConsumerOpts {
   readonly notifyChannel?: (content: string) => Promise<void>;
   readonly getTeamConfig?: (teamId: string) => TeamConfig | undefined;
   readonly syncTeamTriggers?: (teamId: string) => void;
+  readonly reportTriggerOutcome?: (team: string, triggerName: string, success: boolean) => void;
 }
 
 export class TaskConsumer {
@@ -34,6 +35,7 @@ export class TaskConsumer {
   readonly #notifyChannel?: (content: string) => Promise<void>;
   readonly #getTeamConfig?: (teamId: string) => TeamConfig | undefined;
   readonly #syncTeamTriggers?: (teamId: string) => void;
+  readonly #reportTriggerOutcome?: (team: string, triggerName: string, success: boolean) => void;
   #timer: ReturnType<typeof setInterval> | null = null;
   #processing = false;
 
@@ -46,6 +48,7 @@ export class TaskConsumer {
     this.#notifyChannel = opts.notifyChannel;
     this.#getTeamConfig = opts.getTeamConfig;
     this.#syncTeamTriggers = opts.syncTeamTriggers;
+    this.#reportTriggerOutcome = opts.reportTriggerOutcome;
   }
 
   start(): void {
@@ -67,23 +70,23 @@ export class TaskConsumer {
     try {
       const pending = this.#taskQueue.getPending();
       for (const task of pending) {
-        // Skip main team tasks (handled by channel router directly)
         if (task.teamId === 'main') continue;
 
-        // Dequeue and mark running
         const dequeued = this.#taskQueue.dequeue(task.teamId);
         if (!dequeued) continue;
 
         try {
-          // Replace [CREDENTIAL:xxx] placeholders with get_credential instructions.
-          // Agents sometimes write triggers with this pattern during bootstrap,
-          // but it's never resolved — rewrite to actionable tool calls.
+          // Replace [CREDENTIAL:xxx] placeholders with get_credential instructions
           const taskContent = dequeued.task.replace(
             /\[CREDENTIAL:(\w+)\]/g,
             (_, key: string) => `(use get_credential({ key: "${key}" }) to retrieve this value)`,
           );
 
-          const response = await handleMessage(
+          // Parse max_turns from task options (snapshot at enqueue time)
+          const taskOpts = dequeued.options ? JSON.parse(dequeued.options) as Record<string, unknown> : {};
+          const maxTurns = typeof taskOpts['max_turns'] === 'number' ? taskOpts['max_turns'] as number : undefined;
+
+          const result: MessageResult = await handleMessage(
             {
               channelId: `task:${dequeued.id}`,
               userId: 'system',
@@ -91,36 +94,51 @@ export class TaskConsumer {
               timestamp: Date.now(),
             },
             { ...this.#deps, orgAncestors: this.#getAncestorNames(task.teamId) },
-            this.#queryFn,
-            task.teamId,
+            { teamName: task.teamId, queryFn: this.#queryFn, maxTurns },
           );
 
-          // Detect error responses (handleMessage returns "Error: ..." on failure)
-          const isError = typeof response === 'string' && response.startsWith('Error processing');
+          const isError = !result.ok;
           this.#taskQueue.updateStatus(dequeued.id, isError ? TaskStatus.Failed : TaskStatus.Completed);
+
+          // Record duration
+          if (this.#taskQueue.updateDuration) {
+            this.#taskQueue.updateDuration(dequeued.id, result.durationMs);
+          }
+
           // Auto-sync triggers after successful bootstrap
           if (!isError && dequeued.task.startsWith('Bootstrap this team')) {
             this.#tryAutoSyncTriggers(task.teamId);
           }
-          // Scrub credentials from response — use safeResponse for ALL downstream consumers
-          let safeResponse = response;
-          if (response) {
+
+          // Report trigger outcome for circuit breaker
+          const triggerMatch = dequeued.correlationId?.match(/^trigger:([^:]+):/);
+          if (triggerMatch) {
+            this.#reportTriggerOutcome?.(task.teamId, triggerMatch[1], !isError);
+          }
+
+          // Build safe response text
+          const responseText = result.ok ? result.content : `Error: ${result.error}`;
+          let safeResponse = responseText;
+          if (responseText) {
             const config = this.#getTeamConfig?.(task.teamId);
             const creds = Object.values(config?.credentials ?? {}).filter(
               (v): v is string => typeof v === 'string' && v.length >= 8,
             );
-            if (creds.length > 0) safeResponse = scrubSecrets(response, [], creds);
+            if (creds.length > 0) safeResponse = scrubSecrets(responseText, [], creds);
           }
-          // Store scrubbed result so task outcomes are queryable
+
+          // Store scrubbed result (10KB cap)
           if (safeResponse) {
             this.#taskQueue.updateResult(dequeued.id, safeResponse.slice(0, 10_000));
           }
+
           this.#deps.logger.info(isError ? 'Task failed (handler error)' : 'Task completed', {
-            taskId: dequeued.id, team: task.teamId,
+            taskId: dequeued.id, team: task.teamId, durationMs: result.durationMs,
             responseLength: safeResponse?.length ?? 0,
             responseSnippet: safeResponse ? safeResponse.slice(0, 200) : null,
           });
-          // Notify connected channels about task completion (scrubbed, full content)
+
+          // Notify connected channels
           if (this.#notifyChannel && safeResponse) {
             const notif = `[${task.teamId}] Task completed: ${dequeued.task}\n\nResult: ${safeResponse}`;
             this.#notifyChannel(notif).catch(() => {});
@@ -129,6 +147,12 @@ export class TaskConsumer {
           this.#taskQueue.updateStatus(dequeued.id, TaskStatus.Failed);
           const msg = err instanceof Error ? err.message : String(err);
           this.#deps.logger.info('Task failed', { taskId: dequeued.id, team: task.teamId, error: msg });
+
+          // Report trigger failure for circuit breaker
+          const triggerMatch = dequeued.correlationId?.match(/^trigger:([^:]+):/);
+          if (triggerMatch) {
+            this.#reportTriggerOutcome?.(task.teamId, triggerMatch[1], false);
+          }
         }
       }
     } finally {

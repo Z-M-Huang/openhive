@@ -126,6 +126,8 @@ describe('Layer 0: Domain type shapes', () => {
       createdAt: new Date().toISOString(),
       correlationId: null,
       result: null,
+      durationMs: null,
+      options: null,
     };
 
     expect(entry.id).toBe('task-001');

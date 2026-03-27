@@ -44,6 +44,8 @@ export interface TeamConfig {
   readonly credentials?: Readonly<Record<string, string>>;
 }
 
+export type TriggerState = 'pending' | 'active' | 'disabled';
+
 export interface TriggerConfig {
   readonly name: string;
   readonly type: 'schedule' | 'keyword' | 'message';
@@ -51,6 +53,11 @@ export interface TriggerConfig {
   readonly team: string;
   readonly task: string;
   readonly skill?: string;
+  readonly state?: TriggerState;
+  readonly maxTurns?: number;
+  readonly failureThreshold?: number;
+  readonly consecutiveFailures?: number;
+  readonly disabledReason?: string;
 }
 
 export interface ProviderProfile {
@@ -82,6 +89,8 @@ export interface TaskEntry {
   readonly createdAt: string;
   readonly correlationId: string | null;
   readonly result: string | null;
+  readonly durationMs: number | null;
+  readonly options: string | null;
 }
 
 export interface LogEntry {
