@@ -211,4 +211,108 @@ describe('UT-20: Discord Adapter', () => {
     // Should not throw
     await adapter.sendResponse('nonexistent', 'hello');
   });
+
+  // ── getNotifyChannelIds ──────────────────────────────────────────────
+
+  describe('getNotifyChannelIds()', () => {
+    it('returns empty array initially (no watched, no messages)', () => {
+      const adapter = new DiscordAdapter({ token, client: mockClient });
+      expect(adapter.getNotifyChannelIds()).toEqual([]);
+    });
+
+    it('returns watched channel IDs when configured', () => {
+      const adapter = new DiscordAdapter({
+        token,
+        watchedChannelIds: ['chan-A', 'chan-B'],
+        client: mockClient,
+      });
+      const ids = adapter.getNotifyChannelIds();
+      expect(ids).toContain('chan-A');
+      expect(ids).toContain('chan-B');
+      expect(ids).toHaveLength(2);
+    });
+
+    it('returns watched channels regardless of messages received', async () => {
+      const adapter = new DiscordAdapter({
+        token,
+        watchedChannelIds: ['chan-A'],
+        client: mockClient,
+      });
+
+      adapter.onMessage(async () => {});
+
+      mockClient.emit('messageCreate', {
+        author: { bot: false, id: 'user-1' },
+        channelId: 'chan-A',
+        content: 'hi',
+        createdTimestamp: Date.now(),
+        channel: { sendTyping: vi.fn().mockResolvedValue(undefined) },
+      });
+
+      await flush();
+
+      // Still returns watched, not last-active
+      expect(adapter.getNotifyChannelIds()).toEqual(['chan-A']);
+    });
+
+    it('returns last-active channel after a message (no watched)', async () => {
+      const adapter = new DiscordAdapter({ token, client: mockClient });
+
+      adapter.onMessage(async () => {});
+
+      mockClient.emit('messageCreate', {
+        author: { bot: false, id: 'user-1' },
+        channelId: 'chan-123',
+        content: 'hello',
+        createdTimestamp: Date.now(),
+        channel: { sendTyping: vi.fn().mockResolvedValue(undefined) },
+      });
+
+      await flush();
+
+      expect(adapter.getNotifyChannelIds()).toEqual(['chan-123']);
+    });
+
+    it('bot messages do NOT update last-active', async () => {
+      const adapter = new DiscordAdapter({ token, client: mockClient });
+
+      adapter.onMessage(async () => {});
+
+      mockClient.emit('messageCreate', {
+        author: { bot: true, id: 'bot-1' },
+        channelId: 'chan-bot',
+        content: 'bot msg',
+        createdTimestamp: Date.now(),
+        channel: {},
+      });
+
+      await flush();
+
+      expect(adapter.getNotifyChannelIds()).toEqual([]);
+    });
+
+    it('filtered-out channels do NOT update last-active', async () => {
+      const adapter = new DiscordAdapter({
+        token,
+        watchedChannelIds: ['chan-allowed'],
+        client: mockClient,
+      });
+
+      adapter.onMessage(async () => {});
+
+      // Message in unwatched channel
+      mockClient.emit('messageCreate', {
+        author: { bot: false, id: 'user-1' },
+        channelId: 'chan-ignored',
+        content: 'should be filtered',
+        createdTimestamp: Date.now(),
+        channel: {},
+      });
+
+      await flush();
+
+      // Still returns watched channels, not the ignored one
+      expect(adapter.getNotifyChannelIds()).toEqual(['chan-allowed']);
+    });
+  });
 });

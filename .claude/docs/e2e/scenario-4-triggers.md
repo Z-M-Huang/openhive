@@ -115,7 +115,7 @@
    done
    ```
 
-10. VERIFY TASK OUTCOME:
+10. VERIFY TASK OUTCOME — agent must have ATTEMPTED the HTTP call:
     ```bash
     node -e "
     const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
@@ -126,6 +126,26 @@
     ```
     - Task should be completed or failed
     - **`result` column should contain the LLM response text** (task result capture)
+    - **CRITICAL — Validate result quality.** The credentials are fake, so the Loggly API SHOULD return an auth error (401/403). This is the EXPECTED outcome — it PROVES the agent successfully executed the HTTP call.
+      - **PASS indicators** (agent reached the API): result mentions `401`, `403`, `Unauthorized`, `Forbidden`, `authentication failed`, `invalid token`, `loggly.com`, `curl`, `HTTP`, or similar API error responses
+      - **FAIL indicators** (env/PATH broken — regression): result mentions `not found`, `command not found`, `no HTTP client tools`, `unable to complete`, `doesn't have the necessary`, or `cannot execute`
+      - If FAIL indicators are present, the `process.env` spread in `query-options.ts:164` may have regressed — investigate immediately
+
+10b. VERIFY LOG QUALITY — entries must contain metadata:
+    ```bash
+    node -e "
+    const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+    const rows = D.prepare(\"SELECT message, context FROM log_entries WHERE message IN ('PreToolUse','PostToolUse') ORDER BY created_at DESC LIMIT 5\").all();
+    for (const r of rows) {
+      const ctx = JSON.parse(r.context || '{}');
+      console.log(JSON.stringify({ msg: r.message, tool: ctx.tool, hasParams: !!ctx.params, hasDuration: !!ctx.durationMs }));
+    }
+    D.close();
+    "
+    ```
+    - PreToolUse MUST have `tool` field (e.g., "Read", "Bash")
+    - PostToolUse MUST have `tool` + `durationMs`
+    - If bare `{"msg":"PreToolUse"}` only → adaptLogger() broken
 
 11. **VERIFY WS NOTIFICATION RECEIVED:**
     ```bash
@@ -137,6 +157,20 @@
     - The listener should have received a `{ type: "notification" }` message after the background task completed
     - The notification content should mention "loggly-monitor" and "Task completed"
     - **CRITICAL**: Notification content should NOT contain credential values ("fake-loggly-apikey-9876")
+
+11b. VERIFY TASK CONSUMER LOGS contain team context:
+    ```bash
+    node -e "
+    const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+    const rows = D.prepare(\"SELECT message, context FROM log_entries WHERE message LIKE '%Task%' ORDER BY created_at DESC LIMIT 3\").all();
+    for (const r of rows) {
+      const ctx = JSON.parse(r.context || '{}');
+      console.log(JSON.stringify({ msg: r.message, team: ctx.team, taskId: ctx.taskId }));
+    }
+    D.close();
+    "
+    ```
+    - 'Task completed'/'Task failed' MUST have `team` and `taskId` in context
 
 12. VERIFY CREDENTIALS NOT LEAKED:
     - `sudo docker logs deployments-openhive-1 2>&1 | grep "fake-loggly-apikey-9876"` — should NOT appear
@@ -212,6 +246,7 @@
     done
     ```
     - Task should complete/fail with result populated (trigger survived restart)
+    - Apply the same result quality check as step 10: look for PASS indicators (401, Unauthorized, curl, HTTP) vs FAIL indicators (not found, unable to complete)
 
 18. Send: "What is the status of loggly-monitor?"
     - VERIFY: Response includes status info (latestResult should be surfaced)

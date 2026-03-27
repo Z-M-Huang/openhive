@@ -159,7 +159,9 @@ export function buildQueryOptions(opts: BuildQueryOptionsInput): QueryOptions {
     canUseTool,
     hooks,
     stderr,
-    env: { ...providerEnv, CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', CLAUDE_CODE_STREAM_CLOSE_TIMEOUT: '1800000' },
+    // Spread process.env so child sessions inherit PATH, HOME, etc.
+    // Without this, the SDK replaces the environment entirely and Bash can't find any executables.
+    env: { ...process.env, ...providerEnv, CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', CLAUDE_CODE_STREAM_CLOSE_TIMEOUT: '1800000' },
     cwd: ctx.cwd,
     additionalDirectories: ctx.additionalDirectories,
     agents,

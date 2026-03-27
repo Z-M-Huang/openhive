@@ -24,7 +24,9 @@ export function buildMemorySection(memoryStore: IMemoryStore, teamName: string):
     const content = memoryStore.readFile(teamName, MEMORY_FILE);
     const trimmed = content?.trim();
     if (!trimmed) return '';
-    return '--- Team Memory ---\n' + trimmed;
+    return '--- Team Memory (persists across sessions — update after significant actions) ---\n'
+      + trimmed
+      + '\n\n**ACTION REQUIRED:** After completing this request, update memory/MEMORY.md if you created/modified/shut down a team, learned user preferences, or made decisions that affect future interactions. Read the file first, merge new info, then write back.';
   } catch {
     return ''; // Corrupt file — skip, don't crash
   }

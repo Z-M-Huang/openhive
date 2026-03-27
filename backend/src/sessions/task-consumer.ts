@@ -75,11 +75,19 @@ export class TaskConsumer {
         if (!dequeued) continue;
 
         try {
+          // Replace [CREDENTIAL:xxx] placeholders with get_credential instructions.
+          // Agents sometimes write triggers with this pattern during bootstrap,
+          // but it's never resolved — rewrite to actionable tool calls.
+          const taskContent = dequeued.task.replace(
+            /\[CREDENTIAL:(\w+)\]/g,
+            (_, key: string) => `(use get_credential({ key: "${key}" }) to retrieve this value)`,
+          );
+
           const response = await handleMessage(
             {
               channelId: `task:${dequeued.id}`,
               userId: 'system',
-              content: dequeued.task,
+              content: taskContent,
               timestamp: Date.now(),
             },
             { ...this.#deps, orgAncestors: this.#getAncestorNames(task.teamId) },
@@ -112,10 +120,9 @@ export class TaskConsumer {
             responseLength: safeResponse?.length ?? 0,
             responseSnippet: safeResponse ? safeResponse.slice(0, 200) : null,
           });
-          // Notify connected channels about task completion (scrubbed)
+          // Notify connected channels about task completion (scrubbed, full content)
           if (this.#notifyChannel && safeResponse) {
-            const summary = safeResponse.slice(0, 500);
-            const notif = `[${task.teamId}] Task completed: ${dequeued.task.slice(0, 100)}\n\nResult: ${summary}`;
+            const notif = `[${task.teamId}] Task completed: ${dequeued.task}\n\nResult: ${safeResponse}`;
             this.#notifyChannel(notif).catch(() => {});
           }
         } catch (err) {

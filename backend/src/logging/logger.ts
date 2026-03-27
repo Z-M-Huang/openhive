@@ -4,6 +4,10 @@
  * Outputs to stdout (primary). When a LogStore is provided, each log entry
  * is also written to SQLite (secondary, best-effort — errors are swallowed
  * to avoid recursive logging failures).
+ *
+ * Pino's native API is (meta, msg). The codebase convention is (msg, meta?).
+ * createLogger() returns an AppLogger that uses our convention, wrapping pino
+ * internally. There is ONE logger — no separate "adapted" wrapper.
  */
 
 import { Writable } from 'node:stream';
@@ -21,19 +25,53 @@ const VALID_LOG_LEVELS = new Set<string>(['trace', 'debug', 'info', 'warn', 'err
 
 let logEntryCounter = 0;
 
-export function createLogger(options?: LoggerOptions): pino.Logger {
+type LogMethod = (msg: string, meta?: Record<string, unknown>) => void;
+
+/** Application logger — all standard levels, (msg, meta?) convention. */
+export interface AppLogger {
+  trace: LogMethod;
+  debug: LogMethod;
+  info: LogMethod;
+  warn: LogMethod;
+  error: LogMethod;
+  fatal: LogMethod;
+}
+
+/** Wrap a pino level method to accept (msg, meta?) instead of pino's (meta?, msg). */
+function wrapLevel(pinoLogger: pino.Logger, level: keyof AppLogger): LogMethod {
+  return (msg, meta) => {
+    if (meta) pinoLogger[level](meta, msg);
+    else pinoLogger[level](msg);
+  };
+}
+
+/** Wrap a pino.Logger into our AppLogger convention. Internal — prefer createLogger(). */
+export function wrapPinoLogger(pinoLogger: pino.Logger): AppLogger {
+  return {
+    trace: wrapLevel(pinoLogger, 'trace'),
+    debug: wrapLevel(pinoLogger, 'debug'),
+    info: wrapLevel(pinoLogger, 'info'),
+    warn: wrapLevel(pinoLogger, 'warn'),
+    error: wrapLevel(pinoLogger, 'error'),
+    fatal: wrapLevel(pinoLogger, 'fatal'),
+  };
+}
+
+export function createLogger(options?: LoggerOptions): AppLogger {
   const logStore = options?.logStore;
 
-  if (!logStore) {
-    return pino({
-      level: options?.level ?? 'info',
-      timestamp: pino.stdTimeFunctions.isoTime,
-      formatters: {
-        level(label) {
-          return { level: label };
-        },
+  const pinoOpts: pino.LoggerOptions = {
+    level: options?.level ?? 'info',
+    timestamp: pino.stdTimeFunctions.isoTime,
+    formatters: {
+      level(label) {
+        return { level: label };
       },
-    });
+    },
+  };
+
+  if (!logStore) {
+    return wrapPinoLogger(pino(pinoOpts));
   }
 
   // Tee stream: write to stdout and also persist to the log store.
@@ -68,13 +106,5 @@ export function createLogger(options?: LoggerOptions): pino.Logger {
     },
   });
 
-  return pino({
-    level: options?.level ?? 'info',
-    timestamp: pino.stdTimeFunctions.isoTime,
-    formatters: {
-      level(label) {
-        return { level: label };
-      },
-    },
-  }, tee);
+  return wrapPinoLogger(pino(pinoOpts, tee));
 }

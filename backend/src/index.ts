@@ -10,7 +10,7 @@
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 import Fastify from 'fastify';
-import { createLogger } from './logging/logger.js';
+import { createLogger, type AppLogger } from './logging/logger.js';
 import { loadProviders, loadTeamConfig, loadTeamTriggers, loadSystemConfig } from './config/loader.js';
 import { OrgTree } from './domain/org-tree.js';
 import { startOrgMcpHttpServer } from './org-mcp/http-server.js';
@@ -34,8 +34,6 @@ import type { ProvidersOutput } from './config/validation.js';
 import type { Readable, Writable } from 'node:stream';
 import type Database from 'better-sqlite3';
 import type { FastifyInstance } from 'fastify';
-import type pino from 'pino';
-
 export interface BootstrapDeps {
   readonly dataDir?: string;
   readonly runDir?: string;
@@ -51,7 +49,7 @@ export interface BootstrapDeps {
 }
 
 export interface BootstrapResult {
-  readonly logger: pino.Logger;
+  readonly logger: AppLogger;
   readonly raw: Database.Database;
   readonly fastify: FastifyInstance;
   readonly sessionManager: TeamRegistry;
@@ -94,7 +92,7 @@ function resolveLogLevel(dataDir: string): string {
 }
 
 function buildOrgMcpDeps(
-  opts: { orgTree: OrgTree; sessionManager: TeamRegistry; taskQueueStore: import('./domain/interfaces.js').ITaskQueueStore; escalationStore: import('./domain/interfaces.js').IEscalationStore; runDir: string; logger: pino.Logger },
+  opts: { orgTree: OrgTree; sessionManager: TeamRegistry; taskQueueStore: import('./domain/interfaces.js').ITaskQueueStore; escalationStore: import('./domain/interfaces.js').IEscalationStore; runDir: string; logger: AppLogger },
   getQueryRunner: () => import('./org-mcp/registry.js').TeamQueryRunner | undefined,
   getTriggerEngine: () => TriggerEngine | undefined,
 ): OrgMcpDeps {
@@ -111,7 +109,7 @@ function buildOrgMcpDeps(
     loadConfig: (name: string, cp?: string, hints?: { description?: string; scopeAccepts?: string[] }) =>
       loadOrGenerateConfig(opts.runDir, name, cp, hints),
     getTeamConfig: (id: string) => safeLoadConfig(opts.runDir, id),
-    log: (msg, meta) => opts.logger.info(meta ?? {}, msg),
+    log: (msg, meta) => opts.logger.info(msg, meta),
     get queryRunner() { return getQueryRunner(); },
     get triggerEngine() { return getTriggerEngine(); },
   };
@@ -136,7 +134,7 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   let providersConfig: ProvidersOutput | null = null;
   try {
     providersConfig = loadProviders(providersPath);
-    logger.info({ profiles: Object.keys(providersConfig.profiles) }, 'Loaded provider profiles');
+    logger.info('Loaded provider profiles', { profiles: Object.keys(providersConfig.profiles) });
   } catch {
     logger.warn('No providers.yaml found');
   }
@@ -145,7 +143,7 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   orgTree.loadFromStore();
 
   const recovery = recoverFromCrash({ orgStore, taskQueueStore, orgTree, runDir, logger });
-  if (recovery.recovered > 0) logger.info({ recovered: recovery.recovered }, 'Recovery completed');
+  if (recovery.recovered > 0) logger.info('Recovery completed', { recovered: recovery.recovered });
 
   ensureMainTeam(runDir, orgTree);
   const sessionManager = new TeamRegistry();
@@ -193,7 +191,7 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   const wsAdapter = new WsAdapter();
 
   const channelRouter = new ChannelRouter([wsAdapter, ...adapters], async (msg: ChannelMessage) => {
-    logger.info({ channelId: msg.channelId, userId: msg.userId }, 'Received message');
+    logger.info('Received message', { channelId: msg.channelId, userId: msg.userId });
     triggerEngine.onMessage(msg.content, msg.channelId);
     return handlerDeps ? handleMessage(msg, handlerDeps) : 'No providers configured.';
   });
@@ -221,12 +219,23 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   registerHealthEndpoint(fastify, { raw, sessionManager, triggerEngine, channelRouter });
   wsAdapter.registerRoute(fastify);
 
+  // Collect Discord adapters for notification routing
+  const discordAdapters = adapters.filter(
+    (a): a is DiscordAdapter => a instanceof DiscordAdapter,
+  );
+
   const taskConsumer = handlerDeps ? new TaskConsumer({
     taskQueueStore, orgTree, handlerDeps,
     notifyChannel: async (content) => {
-      // Broadcast to all connected WS clients (v1 — simple broadcast)
+      // Broadcast to all connected WS clients
       for (const chId of wsAdapter.getConnectedChannelIds()) {
         await wsAdapter.sendResponse(chId, content);
+      }
+      // Discord — watched channels (durable) or last-active (bounded fallback)
+      for (const da of discordAdapters) {
+        for (const chId of da.getNotifyChannelIds()) {
+          try { await da.sendResponse(chId, content); } catch { /* channel gone */ }
+        }
       }
     },
     getTeamConfig: (teamId: string) => safeLoadConfig(runDir, teamId),
@@ -237,9 +246,9 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
         const result = loadTeamTriggers(triggerPath);
         const configs: TriggerConfig[] = result.triggers.map(t => ({ ...t, team: teamId }));
         triggerEngine.replaceTeamTriggers(teamId, configs);
-        logger.info({ team: teamId, count: configs.length }, 'Auto-synced triggers post-bootstrap');
+        logger.info('Auto-synced triggers post-bootstrap', { team: teamId, count: configs.length });
       } catch (err) {
-        logger.warn({ err, team: teamId }, 'Failed to load triggers.yaml post-bootstrap');
+        logger.warn('Failed to load triggers.yaml post-bootstrap', { err, team: teamId });
       }
     },
   }) : null;
@@ -248,7 +257,7 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   if (!deps?.skipListen) {
     await fastify.listen({ host: deps?.listenAddress ?? '0.0.0.0', port: deps?.listenPort ?? 8080 });
   }
-  logger.info({ dataDir, runDir, systemRulesDir }, 'OpenHive v3 started');
+  logger.info('OpenHive v3 started', { dataDir, runDir, systemRulesDir });
 
   const shutdown = async (): Promise<void> => {
     taskConsumer?.stop(); triggerEngine.stop();

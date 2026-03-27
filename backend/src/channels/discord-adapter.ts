@@ -32,6 +32,27 @@ export interface DiscordTextChannel {
   send(content: string): Promise<unknown>;
 }
 
+const DISCORD_MAX_LENGTH = 2000;
+
+/** Send text to a Discord channel, splitting into multiple messages if needed. */
+async function sendChunked(channel: DiscordTextChannel, text: string): Promise<void> {
+  if (text.length <= DISCORD_MAX_LENGTH) {
+    await channel.send(text);
+    return;
+  }
+  let remaining = text;
+  while (remaining.length > 0) {
+    if (remaining.length <= DISCORD_MAX_LENGTH) {
+      await channel.send(remaining);
+      break;
+    }
+    let splitAt = remaining.lastIndexOf('\n', DISCORD_MAX_LENGTH);
+    if (splitAt <= 0) splitAt = DISCORD_MAX_LENGTH;
+    await channel.send(remaining.slice(0, splitAt));
+    remaining = remaining.slice(splitAt).replace(/^\n/, '');
+  }
+}
+
 export interface DiscordClient {
   login(token: string): Promise<string>;
   destroy(): Promise<void>;
@@ -59,6 +80,7 @@ export class DiscordAdapter implements IChannelAdapter {
   readonly #watchedChannelIds: ReadonlySet<string> | null;
   #client: DiscordClient | null;
   readonly #ownsClient: boolean;
+  #lastActiveChannelId: string | null = null;
   #handler: ((msg: ChannelMessage) => Promise<void>) | null = null;
   #directHandler: DiscordMessageHandler | null = null;
 
@@ -101,11 +123,17 @@ export class DiscordAdapter implements IChannelAdapter {
     this.#directHandler = handler;
   }
 
+  /** Channels to notify: watched (durable) or last-active (fallback, max 1). */
+  getNotifyChannelIds(): string[] {
+    if (this.#watchedChannelIds) return Array.from(this.#watchedChannelIds);
+    return this.#lastActiveChannelId ? [this.#lastActiveChannelId] : [];
+  }
+
   async sendResponse(channelId: string, content: string): Promise<void> {
     if (!this.#client) return;
     const channel = await this.#client.channels.fetch(channelId);
     if (!this.#isTextChannel(channel)) return;
-    await channel.send(content);
+    await sendChunked(channel, content);
   }
 
   #registerMessageListener(client: DiscordClient): void {
@@ -117,6 +145,8 @@ export class DiscordAdapter implements IChannelAdapter {
   async #handleMessage(message: DiscordMessage): Promise<void> {
     if (message.author.bot) return;
     if (this.#watchedChannelIds && !this.#watchedChannelIds.has(message.channelId)) return;
+
+    this.#lastActiveChannelId = message.channelId;
 
     // Show typing indicator and keep it alive every 8s while processing
     let typingInterval: ReturnType<typeof setInterval> | null = null;
@@ -153,8 +183,8 @@ export class DiscordAdapter implements IChannelAdapter {
           if (ackSent && ackContent && response.startsWith(ackContent)) {
             toSend = response.slice(ackContent.length).trim();
           }
-          if (toSend) {
-            await message.channel.send(toSend);
+          if (toSend && this.#isTextChannel(message.channel)) {
+            await sendChunked(message.channel, toSend);
           }
         }
       } else if (this.#handler) {

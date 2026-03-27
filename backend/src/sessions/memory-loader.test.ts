@@ -30,11 +30,13 @@ describe('Memory Loader', () => {
     expect(buildMemorySection(store, 'test-team')).toBe('');
   });
 
-  it('injects MEMORY.md content with header', () => {
+  it('injects MEMORY.md content with header and update reminder', () => {
     store.writeFile('test-team', 'MEMORY.md', '# Memory Index\nTeam context here');
     const result = buildMemorySection(store, 'test-team');
-    expect(result).toContain('--- Team Memory ---');
+    expect(result).toContain('--- Team Memory');
     expect(result).toContain('# Memory Index');
+    expect(result).toContain('ACTION REQUIRED');
+    expect(result).toContain('update memory/MEMORY.md');
   });
 
   it('does NOT inject other memory files (no fallbacks)', () => {

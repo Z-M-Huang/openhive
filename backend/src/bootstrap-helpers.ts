@@ -26,7 +26,7 @@ import type { Readable, Writable } from 'node:stream';
 import type { DatabaseInstance } from './storage/database.js';
 import type { OrgTree } from './domain/org-tree.js';
 import { TeamStatus } from './domain/types.js';
-import type pino from 'pino';
+import type { AppLogger } from './logging/logger.js';
 
 export interface ChannelDeps {
   readonly dataDir: string;
@@ -84,7 +84,7 @@ export function initStorage(_dataDir: string, runDir: string): StorageResult {
   return { db, raw, orgStore, taskQueueStore, triggerStore, logStore, escalationStore, memoryStore };
 }
 
-export function loadTriggerConfigs(runDir: string, logger: pino.Logger): TriggerConfig[] {
+export function loadTriggerConfigs(runDir: string, logger: AppLogger): TriggerConfig[] {
   const triggersPath = join(runDir, 'triggers.yaml');
   if (!existsSync(triggersPath)) {
     logger.info('No triggers.yaml found in .run/, skipping trigger loading');
@@ -94,12 +94,12 @@ export function loadTriggerConfigs(runDir: string, logger: pino.Logger): Trigger
     const result = loadTriggers(triggersPath);
     return result.triggers as TriggerConfig[];
   } catch (err) {
-    logger.warn({ err }, 'Failed to load triggers.yaml');
+    logger.warn('Failed to load triggers.yaml', { err });
     return [];
   }
 }
 
-export function loadAllTeamTriggerConfigs(runDir: string, orgTree: OrgTree, logger: pino.Logger): TriggerConfig[] {
+export function loadAllTeamTriggerConfigs(runDir: string, orgTree: OrgTree, logger: AppLogger): TriggerConfig[] {
   const teamsDir = join(runDir, 'teams');
   if (!existsSync(teamsDir)) return [];
 
@@ -115,9 +115,9 @@ export function loadAllTeamTriggerConfigs(runDir: string, orgTree: OrgTree, logg
     try {
       const result = loadTeamTriggers(path);
       for (const t of result.triggers) allConfigs.push({ ...t, team: teamName });
-      logger.info({ team: teamName, count: result.triggers.length }, 'Loaded team triggers');
+      logger.info('Loaded team triggers', { team: teamName, count: result.triggers.length });
     } catch (err) {
-      logger.warn({ err, team: teamName }, 'Failed to load team triggers.yaml, skipping');
+      logger.warn('Failed to load team triggers.yaml, skipping', { err, team: teamName });
     }
   }
 
@@ -130,10 +130,10 @@ export function loadAllTeamTriggerConfigs(runDir: string, orgTree: OrgTree, logg
       const legacy = loadTriggers(legacyPath);
       for (const t of legacy.triggers as TriggerConfig[]) {
         if (!teamsWithTriggers.has(t.team)) allConfigs.push(t);
-        else logger.info({ team: t.team, trigger: t.name }, 'Skipping legacy trigger (per-team file takes precedence)');
+        else logger.info('Skipping legacy trigger (per-team file takes precedence)', { team: t.team, trigger: t.name });
       }
     } catch (err) {
-      logger.warn({ err }, 'Failed to load legacy triggers.yaml');
+      logger.warn('Failed to load legacy triggers.yaml', { err });
     }
   }
 
@@ -143,7 +143,7 @@ export function loadAllTeamTriggerConfigs(runDir: string, orgTree: OrgTree, logg
 export function initTriggerEngine(
   triggerStore: TriggerStore,
   taskQueueStore: TaskQueueStore,
-  logger: pino.Logger,
+  logger: AppLogger,
   triggers: TriggerConfig[],
 ): TriggerEngine {
   const dedup = new TriggerDedup(triggerStore);
@@ -156,10 +156,7 @@ export function initTriggerEngine(
       taskQueueStore.enqueue(team, task, priority ?? 'normal');
       return Promise.resolve();
     },
-    logger: {
-      info: (msg, meta) => logger.info(meta ?? {}, msg),
-      warn: (msg, meta) => logger.warn(meta ?? {}, msg),
-    },
+    logger,
   });
   engine.register();
   return engine;
@@ -167,7 +164,7 @@ export function initTriggerEngine(
 
 export function initChannels(
   channelDeps: ChannelDeps | undefined,
-  logger: pino.Logger,
+  logger: AppLogger,
 ): IChannelAdapter[] {
   if (!channelDeps) return [];
   const adapters: IChannelAdapter[] = [];
@@ -177,7 +174,7 @@ export function initChannels(
   const channelsPath = join(channelDeps.dataDir, 'config', 'channels.yaml');
   if (existsSync(channelsPath)) {
     try { channelsConfig = loadChannels(channelsPath); }
-    catch (err) { logger.warn({ err }, 'Failed to load channels.yaml'); }
+    catch (err) { logger.warn('Failed to load channels.yaml', { err }); }
   }
 
   // CLI adapter

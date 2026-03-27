@@ -113,13 +113,46 @@ describe('UT-7: Query Options Assembler', () => {
     expect(typeof opts.stderr).toBe('function');
     opts.stderr('leaked ' + TEST_KEY_VALUE + ' here');
 
-    // env (provider env only — no merged secrets)
+    // env — process.env is spread so child sessions inherit PATH, HOME, etc.
     expect(opts.env['ANTHROPIC_API_KEY']).toBe(TEST_KEY_VALUE);
+    expect(opts.env['PATH']).toBe(process.env['PATH']);
+    expect(opts.env['HOME']).toBe(process.env['HOME']);
+    expect(opts.env['CLAUDE_CODE_DISABLE_AUTO_MEMORY']).toBe('1');
 
     // cwd
     expect(opts.cwd).toBe(join('/run', 'teams', 'weather-team'));
 
     // additionalDirectories
     expect(opts.additionalDirectories).toEqual([]);
+  });
+
+  it('env inherits process.env so Bash can find executables (PATH, HOME)', () => {
+    const log = captureLog();
+    const input: BuildQueryOptionsInput = {
+      teamName: 'env-test',
+      teamConfig: makeTeamConfig({ allowed_tools: ['*'] }),
+      runDir: '/run',
+      dataDir: '/data',
+      systemRulesDir: '/app/system-rules',
+      providers: makeProviders(),
+      ancestors: [],
+      availableMcpServers: {},
+      logger: log.logger,
+    };
+
+    const opts = buildQueryOptions(input);
+
+    // Without process.env spread, Bash tool can't find curl, node, python, ls, etc.
+    // This test guards against the regression where env only had providerEnv.
+    expect(opts.env['PATH']).toBeTruthy();
+    expect(opts.env['PATH']).toContain('/');  // PATH must have at least one directory
+    expect(opts.env['HOME']).toBeTruthy();
+
+    // Provider env overrides process.env (not the other way around)
+    expect(opts.env['ANTHROPIC_API_KEY']).toBe(TEST_KEY_VALUE);
+
+    // SDK control vars are set
+    expect(opts.env['CLAUDE_CODE_DISABLE_AUTO_MEMORY']).toBe('1');
+    expect(opts.env['CLAUDE_CODE_STREAM_CLOSE_TIMEOUT']).toBe('1800000');
   });
 });
