@@ -128,6 +128,7 @@ describe('Layer 0: Domain type shapes', () => {
       result: null,
       durationMs: null,
       options: null,
+      sourceChannelId: null,
     };
 
     expect(entry.id).toBe('task-001');

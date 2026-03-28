@@ -34,13 +34,13 @@ Progressive WS Protocol:
 
 System Rules:
 20. sdk-capabilities.md inside container does NOT contain "denied by default" for Bash
-    sudo docker exec deployments-openhive-1 grep -c "denied by default" /app/system-rules/sdk-capabilities.md
+    sudo docker exec openhive grep -c "denied by default" /app/system-rules/sdk-capabilities.md
     — should return 0
 
 Report: N/20 smoke checks passed.
 
 **STOP GATE:** If any smoke check fails, investigate container logs
-(`sudo docker logs deployments-openhive-1 2>&1`) and report root causes
+(`sudo docker logs openhive 2>&1`) and report root causes
 BEFORE proceeding to Phase B. Only proceed when all 20 pass or failures
 are understood and documented.
 ```

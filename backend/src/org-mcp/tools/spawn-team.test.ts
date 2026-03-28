@@ -51,6 +51,21 @@ describe('spawn_team', () => {
     expect(result).toEqual(expect.objectContaining({ success: false }));
   });
 
+  it('threads sourceChannelId into bootstrap task via registry', async () => {
+    f.teamConfigs.set('routed-team', makeTeamConfig({ name: 'routed-team' }));
+
+    const result = await f.server.invoke(
+      'spawn_team',
+      { name: 'routed-team', scope_accepts: ['test'] },
+      'root',
+      'ws:spawn123',
+    );
+
+    expect(result).toEqual(expect.objectContaining({ success: true }));
+    const initTask = f.taskQueue.tasks.find(t => t.teamId === 'routed-team');
+    expect(initTask?.sourceChannelId).toBe('ws:spawn123');
+  });
+
   it('rolls back org tree on spawn failure', async () => {
     f.teamConfigs.set('fail-team', makeTeamConfig({ name: 'fail-team' }));
     vi.mocked(f.spawner.spawn).mockRejectedValueOnce(new Error('docker unavailable'));

@@ -30,7 +30,7 @@ Continue using single WS messages (each is a fresh session):
      - If "Mark" IS in MEMORY.md: memory injection broken -> check context-builder.ts
      - If "Mark" NOT in MEMORY.md: agent didn't save correctly
 
-5. `sudo docker restart deployments-openhive-1` — wait for health
+5. `sudo docker restart openhive` — wait for health
 
 6. Send: "What is my name and where do I work?"
    - VERIFY: Says Mark + Acme (cross-session persistence via MEMORY.md)

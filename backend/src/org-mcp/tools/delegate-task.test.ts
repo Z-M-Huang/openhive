@@ -57,4 +57,28 @@ describe('delegate_task', () => {
     expect(result).toEqual(expect.objectContaining({ success: true }));
     expect(f.taskQueue.tasks[0].priority).toBe('critical');
   });
+
+  it('threads sourceChannelId into task queue options', async () => {
+    const result = await f.server.invoke(
+      'delegate_task',
+      { team: 'weather-team', task: 'check NYC weather' },
+      'root',
+      'ws:abc123',
+    );
+
+    expect(result).toEqual(expect.objectContaining({ success: true }));
+    expect(f.taskQueue.tasks).toHaveLength(1);
+    expect(f.taskQueue.tasks[0].sourceChannelId).toBe('ws:abc123');
+  });
+
+  it('enqueues without sourceChannelId when none provided', async () => {
+    const result = await f.server.invoke(
+      'delegate_task',
+      { team: 'weather-team', task: 'check weather' },
+      'root',
+    );
+
+    expect(result).toEqual(expect.objectContaining({ success: true }));
+    expect(f.taskQueue.tasks[0].sourceChannelId).toBeNull();
+  });
 });

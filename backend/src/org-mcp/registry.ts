@@ -37,11 +37,41 @@ import { DisableTriggerInputSchema, disableTrigger } from './tools/disable-trigg
 import { TestTriggerInputSchema, testTrigger } from './tools/test-trigger.js';
 import { ListTriggersInputSchema, listTriggers } from './tools/list-triggers.js';
 
+
+/**
+ * Wraps a task queue so every enqueue() auto-injects sourceChannelId into options JSON.
+ * Wrapper sourceChannelId always wins over any value already in options.
+ */
+function scopeQueue(queue: ITaskQueueStore, channelId?: string): ITaskQueueStore {
+  if (!channelId) return queue;
+  return {
+    enqueue(teamId: string, task: string, priority: string, correlationId?: string, options?: string) {
+      let parsed: Record<string, unknown>;
+      try {
+        parsed = options ? JSON.parse(options) as Record<string, unknown> : {};
+        if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) parsed = {};
+      } catch { parsed = {}; }
+      parsed.sourceChannelId = channelId;
+      return queue.enqueue(teamId, task, priority, correlationId, JSON.stringify(parsed));
+    },
+    dequeue: (teamId) => queue.dequeue(teamId),
+    peek: (teamId) => queue.peek(teamId),
+    getByTeam: (teamId) => queue.getByTeam(teamId),
+    updateStatus: (taskId, status) => queue.updateStatus(taskId, status),
+    updateResult: (taskId, result) => queue.updateResult(taskId, result),
+    ...(queue.updateDuration
+      ? { updateDuration: (taskId: string, ms: number) => queue.updateDuration!(taskId, ms) }
+      : {}),
+    getPending: () => queue.getPending(),
+    getByStatus: (status) => queue.getByStatus(status),
+  };
+}
+
 export interface ToolDefinition {
   readonly name: string;
   readonly description: string;
   readonly inputSchema: z.ZodType;
-  readonly handler: (input: unknown, callerId: string) => Promise<unknown>;
+  readonly handler: (input: unknown, callerId: string, sourceChannelId?: string) => Promise<unknown>;
 }
 
 /**
@@ -69,7 +99,7 @@ export interface OrgMcpDeps {
 
 export interface OrgToolInvoker {
   readonly tools: ReadonlyMap<string, ToolDefinition>;
-  invoke(toolName: string, input: unknown, callerId: string): Promise<unknown>;
+  invoke(toolName: string, input: unknown, callerId: string, sourceChannelId?: string): Promise<unknown>;
 }
 
 /**
@@ -81,9 +111,9 @@ export function buildToolDefs(deps: OrgMcpDeps): ToolDefinition[] {
       name: 'spawn_team',
       description: 'Create a new team and spawn its session',
       inputSchema: SpawnTeamInputSchema,
-      handler: (input, callerId) => spawnTeam(input as never, callerId, {
+      handler: (input, callerId, sourceChannelId) => spawnTeam(input as never, callerId, {
         orgTree: deps.orgTree, spawner: deps.spawner, runDir: deps.runDir,
-        loadConfig: deps.loadConfig, taskQueue: deps.taskQueue,
+        loadConfig: deps.loadConfig, taskQueue: scopeQueue(deps.taskQueue, sourceChannelId),
       }),
     },
     {
@@ -96,13 +126,17 @@ export function buildToolDefs(deps: OrgMcpDeps): ToolDefinition[] {
       name: 'delegate_task',
       description: 'Delegate a task to a child team',
       inputSchema: DelegateTaskInputSchema,
-      handler: (input, callerId) => Promise.resolve(delegateTask(input as never, callerId, deps)),
+      handler: (input, callerId, sourceChannelId) => Promise.resolve(
+        delegateTask(input as never, callerId, { ...deps, taskQueue: scopeQueue(deps.taskQueue, sourceChannelId) })
+      ),
     },
     {
       name: 'escalate',
       description: 'Escalate an issue to parent team',
       inputSchema: EscalateInputSchema,
-      handler: (input, callerId) => Promise.resolve(escalate(input as never, callerId, deps)),
+      handler: (input, callerId, sourceChannelId) => Promise.resolve(
+        escalate(input as never, callerId, { ...deps, taskQueue: scopeQueue(deps.taskQueue, sourceChannelId) })
+      ),
     },
     {
       name: 'send_message',
@@ -148,10 +182,10 @@ export function buildToolDefs(deps: OrgMcpDeps): ToolDefinition[] {
       name: 'create_trigger',
       description: 'Create a new trigger in pending state for a child team',
       inputSchema: CreateTriggerInputSchema,
-      handler: (input, callerId) => Promise.resolve(
+      handler: (input, callerId, sourceChannelId) => Promise.resolve(
         createTrigger(input as never, callerId, {
           orgTree: deps.orgTree, configStore, log: deps.log,
-        })
+        }, sourceChannelId)
       ),
     });
 
@@ -187,9 +221,9 @@ export function buildToolDefs(deps: OrgMcpDeps): ToolDefinition[] {
       name: 'test_trigger',
       description: 'Fire a trigger once for testing without changing its state. Supports max_turns override.',
       inputSchema: TestTriggerInputSchema,
-      handler: (input, callerId) => Promise.resolve(
+      handler: (input, callerId, sourceChannelId) => Promise.resolve(
         testTrigger(input as never, callerId, {
-          orgTree: deps.orgTree, configStore, taskQueue: deps.taskQueue, log: deps.log,
+          orgTree: deps.orgTree, configStore, taskQueue: scopeQueue(deps.taskQueue, sourceChannelId), log: deps.log,
         })
       ),
     });
@@ -204,6 +238,7 @@ export function buildToolDefs(deps: OrgMcpDeps): ToolDefinition[] {
         })
       ),
     });
+
   }
 
   return tools;
@@ -232,13 +267,13 @@ export function createToolInvoker(deps: OrgMcpDeps): OrgToolInvoker {
   const tools = new Map(toolDefs.map(d => [d.name, d] as const));
   return {
     tools,
-    async invoke(toolName: string, input: unknown, callerId: string): Promise<unknown> {
+    async invoke(toolName: string, input: unknown, callerId: string, sourceChannelId?: string): Promise<unknown> {
       const tool = tools.get(toolName);
       if (!tool) {
         return { success: false, error: `unknown tool: ${toolName}` };
       }
       try {
-        return await tool.handler(input, callerId);
+        return await tool.handler(input, callerId, sourceChannelId);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return { success: false, error: `tool error: ${msg}` };

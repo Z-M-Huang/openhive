@@ -145,13 +145,14 @@ export class DiscordAdapter implements IChannelAdapter {
   async #handleMessage(message: DiscordMessage): Promise<void> {
     if (message.author.bot) return;
     if (this.#watchedChannelIds && !this.#watchedChannelIds.has(message.channelId)) return;
+    if (!message.content.trim()) return; // Ignore empty/whitespace-only messages
 
     this.#lastActiveChannelId = message.channelId;
 
     // Show typing indicator and keep it alive every 8s while processing
     let typingInterval: ReturnType<typeof setInterval> | null = null;
     if (message.channel.sendTyping) {
-      await message.channel.sendTyping();
+      await message.channel.sendTyping().catch(() => {});
       typingInterval = setInterval(() => {
         message.channel.sendTyping?.().catch(() => {});
       }, 8000);
@@ -167,23 +168,27 @@ export class DiscordAdapter implements IChannelAdapter {
     try {
       if (this.#directHandler) {
         // Progress-aware path — send first assistant text as quick ack
-        let ackSent = false;
+        let ackPromise: Promise<void> | null = null;
         let ackContent = '';
         const sendProgress: DiscordProgressSender = (update) => {
-          if (update.kind === 'assistant_text' && !ackSent && message.channel.send) {
-            ackSent = true;
-            ackContent = update.content;
-            message.channel.send(update.content).catch(() => {});
+          if (update.kind === 'assistant_text' && !ackPromise && this.#isTextChannel(message.channel)) {
+            const trimmed = update.content.trim();
+            if (trimmed) {
+              ackContent = trimmed;
+              ackPromise = sendChunked(message.channel, trimmed)
+                .catch(() => { ackContent = ''; }); // Failed — don't dedup
+            }
           }
         };
         const response = await this.#directHandler(msg, sendProgress);
-        if (response && message.channel.send) {
+        if (ackPromise) await ackPromise; // wait for ack outcome before dedup
+        if (response && this.#isTextChannel(message.channel)) {
           // Strip ack'd prefix to avoid sending duplicate content
           let toSend = response;
-          if (ackSent && ackContent && response.startsWith(ackContent)) {
+          if (ackContent && response.startsWith(ackContent)) {
             toSend = response.slice(ackContent.length).trim();
           }
-          if (toSend && this.#isTextChannel(message.channel)) {
+          if (toSend) {
             await sendChunked(message.channel, toSend);
           }
         }

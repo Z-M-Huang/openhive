@@ -40,11 +40,13 @@ export class ChannelRouter {
     return this.#adapters.size;
   }
 
-  async sendResponse(channelId: string, content: string): Promise<void> {
+  async sendResponse(channelId: string, content: string): Promise<boolean> {
     const owner = this.#channelOwners.get(channelId);
     if (owner) {
       await owner.sendResponse(channelId, content);
+      return true;
     }
+    return false;
   }
 
   /**

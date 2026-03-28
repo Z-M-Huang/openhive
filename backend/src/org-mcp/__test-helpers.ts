@@ -89,6 +89,14 @@ export function createMockTaskQueue(): ITaskQueueStore & { tasks: TaskEntry[] } 
     enqueue(teamId: string, task: string, priority: string, correlationId?: string, options?: string): string {
       idCounter += 1;
       const id = `task-${String(idCounter).padStart(4, '0')}`;
+      // Extract sourceChannelId from options JSON if present
+      let sourceChannelId: string | null = null;
+      if (options) {
+        try {
+          const parsed = JSON.parse(options) as Record<string, unknown>;
+          if (typeof parsed.sourceChannelId === 'string') sourceChannelId = parsed.sourceChannelId;
+        } catch { /* not JSON */ }
+      }
       tasks.push({
         id,
         teamId,
@@ -100,6 +108,7 @@ export function createMockTaskQueue(): ITaskQueueStore & { tasks: TaskEntry[] } 
         result: null,
         durationMs: null,
         options: options ?? null,
+        sourceChannelId,
       });
       return id;
     },

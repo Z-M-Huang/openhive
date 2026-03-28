@@ -23,7 +23,7 @@ export interface TriggerEngineOpts {
   readonly triggers?: readonly TriggerConfig[];
   readonly dedup: TriggerDedup;
   readonly rateLimiter: TriggerRateLimiter;
-  readonly delegateTask: (team: string, task: string, priority?: string, triggerName?: string) => Promise<void>;
+  readonly delegateTask: (team: string, task: string, priority?: string, triggerName?: string, sourceChannelId?: string) => Promise<void>;
   readonly logger: TriggerEngineLogger;
   readonly configStore?: ITriggerConfigStore;
   readonly onTriggerDeactivated?: (team: string, triggerName: string, reason: string) => void;
@@ -99,14 +99,14 @@ export class TriggerEngine {
       for (const handler of set.keyword) {
         if (handler.match(text)) {
           this.dispatch(() => {
-            void this.fireTrigger(handler.trigger, `keyword:${handler.trigger.name}:${simpleHash(text)}`);
+            void this.fireTrigger(handler.trigger, `keyword:${handler.trigger.name}:${simpleHash(text)}`, channel);
           });
         }
       }
       for (const handler of set.message) {
         if (handler.match(text, channel)) {
           this.dispatch(() => {
-            void this.fireTrigger(handler.trigger, `message:${handler.trigger.name}:${simpleHash(text + (channel ?? ''))}`);
+            void this.fireTrigger(handler.trigger, `message:${handler.trigger.name}:${simpleHash(text + (channel ?? ''))}`, channel);
           });
         }
       }
@@ -205,7 +205,7 @@ export class TriggerEngine {
     const expression = trigger.config['cron'] as string;
     const handler = new ScheduleHandler(expression, () => {
       this.dispatch(() => {
-        void this.fireTrigger(trigger, `schedule:${trigger.name}:${cronSlotKey()}`);
+        void this.fireTrigger(trigger, `schedule:${trigger.name}:${cronSlotKey()}`, trigger.sourceChannelId);
       });
     });
     set.schedule.push(handler);
@@ -237,7 +237,7 @@ export class TriggerEngine {
     fn();
   }
 
-  private async fireTrigger(trigger: TriggerConfig, eventId: string): Promise<void> {
+  private async fireTrigger(trigger: TriggerConfig, eventId: string, sourceChannelId?: string): Promise<void> {
     // Check state from config store (cheapest guard)
     if (this.opts.configStore) {
       const entry = this.opts.configStore.get(trigger.team, trigger.name);
@@ -263,6 +263,6 @@ export class TriggerEngine {
     }
 
     this.opts.dedup.record(eventId, source);
-    await this.opts.delegateTask(trigger.team, trigger.task, undefined, trigger.name);
+    await this.opts.delegateTask(trigger.team, trigger.task, undefined, trigger.name, sourceChannelId);
   }
 }

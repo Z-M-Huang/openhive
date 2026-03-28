@@ -14,9 +14,9 @@
 - Team config loading MUST use the shared `loadConfig()`/`safeLoadConfig()` from index.ts
 
 ## Lifecycle & Triggers
-- Trigger syncing MUST happen automatically after team bootstrap completes
+- Triggers are managed exclusively via MCP tools (create_trigger, enable_trigger, disable_trigger, list_triggers, test_trigger)
 - The `TriggerEngine` MUST support dynamic registration (not just startup-time)
-- Never depend on manual `sync_team_triggers` for triggers created during bootstrap
+- At startup, `loadFromStore()` loads all active triggers from the SQLite `trigger_configs` table
 
 ## Error Handling
 - `entrypoint.ts` MUST handle both `uncaughtException` and `unhandledRejection`

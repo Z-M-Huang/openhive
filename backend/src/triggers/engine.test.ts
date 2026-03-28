@@ -104,7 +104,7 @@ describe('Trigger Engine', () => {
     engine.register();
 
     engine.onMessage('please deploy now');
-    expect(delegateTask).toHaveBeenCalledWith('weather-team', 'check weather', undefined, 'kw-deploy');
+    expect(delegateTask).toHaveBeenCalledWith('weather-team', 'check weather', undefined, 'kw-deploy', undefined);
   });
 
   it('onMessage does not dispatch non-matching keyword', () => {
@@ -132,7 +132,7 @@ describe('Trigger Engine', () => {
     engine.register();
 
     engine.onMessage('got error 500', 'ops');
-    expect(delegateTask).toHaveBeenCalledWith('weather-team', 'check weather', undefined, 'msg-error');
+    expect(delegateTask).toHaveBeenCalledWith('weather-team', 'check weather', undefined, 'msg-error', 'ops');
   });
 
   it('onMessage respects message trigger channel filter', () => {
@@ -213,7 +213,7 @@ describe('Dedup Integration', () => {
     // gets a unique event_id. The dedup prevents replay of the *same* event,
     // not repeated triggers from different messages.
     // This test verifies the dedup.record() path was exercised.
-    expect(delegateTask).toHaveBeenCalledWith('weather-team', 'check weather', undefined, 'kw-test');
+    expect(delegateTask).toHaveBeenCalledWith('weather-team', 'check weather', undefined, 'kw-test', undefined);
   });
 });
 
@@ -325,8 +325,83 @@ describe('Trigger Engine: Per-Team Registry', () => {
 
     engine.onMessage('shared event');
     expect(delegateTask).toHaveBeenCalledTimes(2);
-    expect(delegateTask).toHaveBeenCalledWith('alpha', 'alpha task', undefined, 'kw-a');
-    expect(delegateTask).toHaveBeenCalledWith('beta', 'beta task', undefined, 'kw-b');
+    expect(delegateTask).toHaveBeenCalledWith('alpha', 'alpha task', undefined, 'kw-a', undefined);
+    expect(delegateTask).toHaveBeenCalledWith('beta', 'beta task', undefined, 'kw-b', undefined);
+  });
+});
+
+// ── Channel Threading ──────────────────────────────────────────────────
+
+describe('Channel threading through onMessage → delegateTask', () => {
+  let delegateTask: ReturnType<typeof vi.fn>;
+  let dedup: TriggerDedup;
+  let rateLimiter: TriggerRateLimiter;
+  let logger: ReturnType<typeof makeLogger>;
+
+  beforeEach(() => {
+    const store = createMemoryTriggerStore();
+    dedup = new TriggerDedup(store);
+    rateLimiter = new TriggerRateLimiter(100, 60_000);
+    delegateTask = vi.fn().mockResolvedValue(undefined);
+    logger = makeLogger();
+  });
+
+  it('passes channel to delegateTask for keyword triggers', () => {
+    const triggers: TriggerConfig[] = [
+      makeTrigger({ name: 'kw-alert', type: 'keyword', config: { pattern: 'alert' } }),
+    ];
+    const engine = new TriggerEngine({ triggers, dedup, rateLimiter, delegateTask, logger });
+    engine.register();
+
+    engine.onMessage('alert now', 'ws:chan1');
+    expect(delegateTask).toHaveBeenCalledWith('weather-team', 'check weather', undefined, 'kw-alert', 'ws:chan1');
+  });
+
+  it('passes channel to delegateTask for message triggers', () => {
+    const triggers: TriggerConfig[] = [
+      makeTrigger({ name: 'msg-notify', type: 'message', config: { pattern: 'notify', channel: 'general' } }),
+    ];
+    const engine = new TriggerEngine({ triggers, dedup, rateLimiter, delegateTask, logger });
+    engine.register();
+
+    engine.onMessage('notify me', 'general');
+    expect(delegateTask).toHaveBeenCalledWith('weather-team', 'check weather', undefined, 'msg-notify', 'general');
+  });
+
+  it('passes undefined channel for scheduled triggers without sourceChannelId', () => {
+    // Schedule triggers fire without a channel context when no sourceChannelId stored
+    const triggers: TriggerConfig[] = [
+      makeTrigger({ name: 'sched-daily', type: 'schedule', config: { cron: '0 9 * * *' } }),
+    ];
+    const engine = new TriggerEngine({ triggers, dedup, rateLimiter, delegateTask, logger });
+    engine.register();
+    // Schedule triggers fire via their handler callback, not onMessage — sourceChannelId is undefined
+    // We don't test cron firing directly here; the key assertion is in the onMessage tests above
+  });
+
+  it('schedule trigger passes stored sourceChannelId from config', async () => {
+    // When a trigger is created via WS, sourceChannelId is stored in trigger config
+    // Schedule handler should pass it through to delegateTask
+    const triggers: TriggerConfig[] = [
+      makeTrigger({
+        name: 'sched-ws',
+        type: 'schedule',
+        config: { cron: '* * * * * *' }, // every second
+        sourceChannelId: 'ws:originator-123',
+      }),
+    ];
+    const engine = new TriggerEngine({ triggers, dedup, rateLimiter, delegateTask, logger });
+    engine.register();
+    engine.start();
+
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+
+    expect(delegateTask).toHaveBeenCalled();
+    // sourceChannelId should be passed through from the trigger config
+    expect(delegateTask).toHaveBeenCalledWith(
+      'weather-team', 'check weather', undefined, 'sched-ws', 'ws:originator-123',
+    );
+    engine.stop();
   });
 });
 

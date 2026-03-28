@@ -32,17 +32,22 @@
    done
    ```
 
-4. Write per-team triggers.yaml to the team's directory (host filesystem via bind mount):
+4. Create and activate a trigger via MCP tools (from WS connection):
+   Send: "Create a schedule trigger for loggly-monitor called loggly-fetch with cron */2 * * * * and task: Fetch recent logs from Loggly using your credentials (subdomain and api_key) and report a summary of any errors found. Use the Loggly Search API."
+   - VERIFY: Response confirms trigger created in pending state
+
+   Send: "Enable the loggly-fetch trigger for loggly-monitor."
+   - VERIFY: Response confirms trigger enabled/activated
+
+   VERIFY trigger in DB:
    ```bash
-   cat > /app/openhive/.run/teams/loggly-monitor/triggers.yaml << 'YAML'
-   triggers:
-     - name: loggly-fetch
-       type: schedule
-       config:
-         cron: "*/2 * * * *"
-       task: "Fetch recent logs from Loggly using your credentials (subdomain and api_key) and report a summary of any errors found. Use the Loggly Search API."
-   YAML
+   node -e "
+   const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+   console.log('trigger:', JSON.stringify(D.prepare(\"SELECT name, type, state, task FROM trigger_configs WHERE team='loggly-monitor'\").get()));
+   D.close();
+   "
    ```
+   - Trigger should exist with state='active'
 
 5. **START NOTIFICATION LISTENER** — open a WS connection in background to capture notifications:
    ```bash
@@ -65,16 +70,13 @@
    cat /tmp/ws-notifications.log  # Should show LISTENER_CONNECTED
    ```
 
-6. Send WS (from a SEPARATE connection): "Sync the triggers for loggly-monitor team. Call sync_team_triggers with team loggly-monitor."
-   - VERIFY: Response acknowledges trigger sync
-
-7. VERIFY TRIGGER REGISTERED (no restart needed):
+6. VERIFY TRIGGER REGISTERED (no restart needed):
    ```bash
-   sudo docker logs deployments-openhive-1 2>&1 | grep -i "Synced team triggers\|schedule\|trigger" | tail -10
+   sudo docker logs openhive 2>&1 | grep -i "Registered schedule\|schedule\|trigger" | tail -10
    curl -sf http://localhost:8080/health | python3 -m json.tool
    ```
    - Health should show `"registered": 1` or higher
-   - Container logs should contain "Synced team triggers"
+   - Container logs should contain "Registered schedule trigger"
 
 #### Part B: Trigger Firing, Notifications & Error Propagation (continues from Part A — NO restart)
 
@@ -158,7 +160,159 @@
     - The notification content should mention "loggly-monitor" and "Task completed"
     - **CRITICAL**: Notification content should NOT contain credential values ("fake-loggly-apikey-9876")
 
-11b. VERIFY TASK CONSUMER LOGS contain team context:
+11c. **VERIFY NOTIFICATION ROUTING ISOLATION (sourceChannelId):**
+    This test verifies that task completion notifications go ONLY to the originating WS connection, not broadcast to all.
+
+    ```bash
+    # Create two-connection isolation test script
+    cat > /app/openhive/backend/ws-isolation.cjs << 'ISOEOF'
+    const WebSocket = require('ws');
+    // Connection A: sends a delegate_task request
+    const wsA = new WebSocket('ws://localhost:8080/ws');
+    // Connection B: passive listener (should NOT receive task notification)
+    const wsB = new WebSocket('ws://localhost:8080/ws');
+    const notifsA = [];
+    const notifsB = [];
+    let ready = 0;
+
+    function onReady() {
+      ready++;
+      if (ready === 2) {
+        // Both connected — send a message from A that triggers delegate_task
+        wsA.send(JSON.stringify({ content: 'Ask loggly-monitor to check recent error logs right now.' }));
+      }
+    }
+
+    wsA.on('open', onReady);
+    wsB.on('open', onReady);
+
+    wsA.on('message', (d) => {
+      const p = JSON.parse(d.toString());
+      if (p.type === 'notification') notifsA.push(p);
+    });
+    wsB.on('message', (d) => {
+      const p = JSON.parse(d.toString());
+      if (p.type === 'notification') notifsB.push(p);
+    });
+
+    // Wait up to 180s for task to complete and notification to arrive
+    setTimeout(() => {
+      console.log(JSON.stringify({
+        connectionA_notifications: notifsA.length,
+        connectionB_notifications: notifsB.length,
+        isolation_pass: notifsA.length > 0 && notifsB.length === 0,
+        a_content: notifsA.map(n => (n.content || '').slice(0, 200)),
+        b_content: notifsB.map(n => (n.content || '').slice(0, 200)),
+      }, null, 2));
+      wsA.close(); wsB.close();
+      process.exit(0);
+    }, 180000);
+
+    wsA.on('error', (e) => { console.error('A_ERROR:', e.message); });
+    wsB.on('error', (e) => { console.error('B_ERROR:', e.message); });
+    ISOEOF
+    node /app/openhive/backend/ws-isolation.cjs > /tmp/ws-isolation.log 2>&1 &
+    ISOLATION_PID=$!
+    echo "Isolation test PID: $ISOLATION_PID"
+    ```
+
+    After the task completes (check DB for status), stop the script and verify:
+    ```bash
+    kill $ISOLATION_PID 2>/dev/null || true
+    echo "=== Isolation test result ==="
+    cat /tmp/ws-isolation.log
+    ```
+
+    **Expected:**
+    - `connectionA_notifications > 0` — originator got the notification
+    - `connectionB_notifications === 0` — passive listener did NOT
+    - `isolation_pass === true`
+
+    **If `isolation_pass` is false:** The `sourceChannelId` threading is broken — notifications are still broadcasting to all connections.
+
+    ```bash
+    rm -f /app/openhive/backend/ws-isolation.cjs /tmp/ws-isolation.log
+    ```
+
+11e. **VERIFY test_trigger NOTIFICATION ROUTING (sourceChannelId via scoped queue):**
+    This test verifies that `test_trigger` (which was previously broken — missing sourceChannelId threading)
+    now correctly routes notifications only to the originating WS connection via the registry's `scopeQueue` wrapper.
+
+    ```bash
+    cat > /app/openhive/backend/ws-scenario-4-trigger.cjs << 'TRIGEOF'
+    const WebSocket = require('ws');
+    // Connection A: sends test_trigger request
+    const wsA = new WebSocket('ws://localhost:8080/ws');
+    // Connection B: passive listener (should NOT receive notification)
+    const wsB = new WebSocket('ws://localhost:8080/ws');
+    const notifsA = [];
+    const notifsB = [];
+    let ready = 0;
+
+    function onReady() {
+      ready++;
+      if (ready === 2) {
+        wsA.send(JSON.stringify({ content: 'Test-fire the loggly-fetch trigger for loggly-monitor.' }));
+      }
+    }
+
+    wsA.on('open', onReady);
+    wsB.on('open', onReady);
+
+    wsA.on('message', (d) => {
+      const p = JSON.parse(d.toString());
+      if (p.type === 'notification') notifsA.push(p);
+    });
+    wsB.on('message', (d) => {
+      const p = JSON.parse(d.toString());
+      if (p.type === 'notification') notifsB.push(p);
+    });
+
+    setTimeout(() => {
+      console.log(JSON.stringify({
+        test: 'test_trigger_routing',
+        connectionA_notifications: notifsA.length,
+        connectionB_notifications: notifsB.length,
+        isolation_pass: notifsA.length > 0 && notifsB.length === 0,
+      }, null, 2));
+      wsA.close(); wsB.close();
+      process.exit(0);
+    }, 180000);
+
+    wsA.on('error', (e) => { console.error('A_ERROR:', e.message); });
+    wsB.on('error', (e) => { console.error('B_ERROR:', e.message); });
+    TRIGEOF
+    node /app/openhive/backend/ws-scenario-4-trigger.cjs > /tmp/ws-trigger-isolation.log 2>&1 &
+    TRIGGER_ISO_PID=$!
+    echo "test_trigger isolation PID: $TRIGGER_ISO_PID"
+    ```
+
+    After the test-fired task completes, stop and verify:
+    ```bash
+    kill $TRIGGER_ISO_PID 2>/dev/null || true
+    echo "=== test_trigger isolation result ==="
+    cat /tmp/ws-trigger-isolation.log
+    ```
+
+    **Expected:** `isolation_pass === true` (Connection A got notification, Connection B did not).
+
+    Also verify the test-fired task has sourceChannelId in DB:
+    ```bash
+    node -e "
+    const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+    const r = D.prepare(\"SELECT id, source_channel_id, options FROM task_queue WHERE correlation_id LIKE 'test-trigger:%' ORDER BY created_at DESC LIMIT 1\").get();
+    console.log(JSON.stringify(r, null, 2));
+    D.close();
+    "
+    ```
+    - `source_channel_id` should be non-null (a `ws:` prefixed value)
+    - `options` JSON should contain both `max_turns` and `sourceChannelId`
+
+    ```bash
+    rm -f /app/openhive/backend/ws-scenario-4-trigger.cjs /tmp/ws-trigger-isolation.log
+    ```
+
+11d. VERIFY TASK CONSUMER LOGS contain team context:
     ```bash
     node -e "
     const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
@@ -173,7 +327,7 @@
     - 'Task completed'/'Task failed' MUST have `team` and `taskId` in context
 
 12. VERIFY CREDENTIALS NOT LEAKED:
-    - `sudo docker logs deployments-openhive-1 2>&1 | grep "fake-loggly-apikey-9876"` — should NOT appear
+    - `sudo docker logs openhive 2>&1 | grep "fake-loggly-apikey-9876"` — should NOT appear
     - Check result column text for credential values
     - Check notification log for credential values:
     ```bash
@@ -196,16 +350,16 @@
 
 14. Restart the container:
     ```bash
-    sudo docker restart deployments-openhive-1
+    sudo docker restart openhive
     for i in $(seq 1 30); do curl -sf http://localhost:8080/health >/dev/null 2>&1 && echo "Ready" && break; sleep 3; done
     ```
 
-15. VERIFY TRIGGER STILL REGISTERED after restart (loaded from per-team file):
+15. VERIFY TRIGGER STILL REGISTERED after restart (loaded from SQLite trigger_configs):
     ```bash
-    sudo docker logs deployments-openhive-1 2>&1 | grep -i "Loaded team triggers\|schedule\|trigger" | tail -5
+    sudo docker logs openhive 2>&1 | grep -i "Loaded triggers from store\|schedule\|trigger" | tail -5
     curl -sf http://localhost:8080/health | python3 -m json.tool
     ```
-    - Should see "Loaded team triggers" with team=loggly-monitor in post-restart logs
+    - Should see "Loaded triggers from store" with active=1 in post-restart logs
     - Should see "Registered schedule trigger" in post-restart logs
     - Health should show `"registered": 1`
 
@@ -253,9 +407,8 @@
 
 19. CLEANUP:
     ```bash
-    rm -f /app/openhive/.run/teams/loggly-monitor/triggers.yaml
     rm -f /app/openhive/backend/ws-listener.cjs
     rm -f /tmp/ws-notifications.log
     ```
 
-**Report:** Trigger registered via sync_team_triggers? Fired on time? Result column populated? WS notification received? Notification content correct (task summary, no credentials)? Credentials protected (logs, DB, notifications)? **Trigger survived restart and fired again?**
+**Report:** Trigger created and enabled via MCP tools? Fired on time? Result column populated? WS notification received? Notification content correct (task summary, no credentials)? Credentials protected (logs, DB, notifications)? **Trigger survived restart and fired again?**

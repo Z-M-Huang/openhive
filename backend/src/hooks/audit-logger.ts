@@ -16,10 +16,12 @@ import type { SecretString } from '../secrets/secret-string.js';
  *
  * @param logger        Logger with info method.
  * @param knownSecrets  Known secret values to scrub from logged output.
+ * @param rawSecrets    Additional raw secret strings (e.g. team credentials) to scrub.
  */
 export function createAuditPreHook(
   logger: { info: (msg: string, meta?: Record<string, unknown>) => void },
   knownSecrets: readonly SecretString[] = [],
+  rawSecrets: readonly string[] = [],
 ): { hook: HookCallback; startTimes: Map<string, number> } {
   const startTimes = new Map<string, number>();
 
@@ -30,7 +32,7 @@ export function createAuditPreHook(
       startTimes.set(toolUseId, now);
     }
     const rawParams = JSON.stringify(tool_input);
-    const scrubbedJson = scrubSecrets(rawParams, knownSecrets);
+    const scrubbedJson = scrubSecrets(rawParams, knownSecrets, rawSecrets);
     let params: unknown;
     try {
       params = JSON.parse(scrubbedJson) as unknown;
@@ -55,11 +57,13 @@ export function createAuditPreHook(
  * @param logger        Logger with info method.
  * @param startTimes    Shared start-time map from createAuditPreHook.
  * @param knownSecrets  Known secret values to scrub from logged output.
+ * @param rawSecrets    Additional raw secret strings (e.g. team credentials) to scrub.
  */
 export function createAuditPostHook(
   logger: { info: (msg: string, meta?: Record<string, unknown>) => void },
   startTimes: Map<string, number>,
   knownSecrets: readonly SecretString[] = [],
+  rawSecrets: readonly string[] = [],
 ): HookCallback {
   return (input, toolUseId) => {
     const { tool_name, tool_response } = input as { tool_name: string; tool_response?: unknown };
@@ -72,7 +76,7 @@ export function createAuditPostHook(
 
     // Scrub BEFORE truncating to prevent partial secret leakage at cutoff
     const summary = tool_response
-      ? scrubSecrets(JSON.stringify(tool_response), knownSecrets).slice(0, 200)
+      ? scrubSecrets(JSON.stringify(tool_response), knownSecrets, rawSecrets).slice(0, 200)
       : undefined;
 
     logger.info('PostToolUse', {

@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { loadTeamConfig } from '../config/loader.js';
 import { buildQueryOptions } from './query-options.js';
-import type { QueryFn, SdkMessage, ProgressCallback } from './spawner.js';
+import type { QueryFn, SdkMessage, ProgressCallback, ProgressUpdate } from './spawner.js';
 import { spawnSession, getAssistantContentBlocks } from './spawner.js';
 import type { ChannelMessage } from '../domain/interfaces.js';
 import type { ProvidersOutput } from '../config/validation.js';
@@ -30,6 +30,7 @@ export interface HandleMessageOpts {
   teamName?: string;
   onProgress?: ProgressCallback;
   maxTurns?: number;
+  sourceChannelId?: string;
 }
 
 export interface MessageHandlerDeps {
@@ -122,6 +123,7 @@ export async function handleMessage(
       providers: deps.providers, orgMcpPort: deps.orgMcpPort,
       availableMcpServers: deps.availableMcpServers,
       ancestors: deps.orgAncestors, logger: deps.logger,
+      sourceChannelId: opts?.sourceChannelId,
     });
 
     const sdkOpts: Record<string, unknown> = {
@@ -141,8 +143,22 @@ export async function handleMessage(
       canUseTool: queryOpts.canUseTool,
       stderr: queryOpts.stderr,
     };
+    // Wrap onProgress with credential scrubbing so ack/progress never leaks secrets
+    const teamCreds = teamConfig.credentials ?? {};
+    const credValues = Object.values(teamCreds).filter(
+      (v): v is string => typeof v === 'string' && v.length >= 8,
+    );
+    const safeOnProgress = opts?.onProgress && credValues.length > 0
+      ? (update: ProgressUpdate) => {
+          opts.onProgress!({
+            ...update,
+            content: scrubSecrets(update.content, [], credValues),
+          });
+        }
+      : opts?.onProgress;
+
     const qFn = opts?.queryFn ?? await createSdkQueryFn();
-    const result = await spawnSession(msg.content, sdkOpts, qFn, opts?.onProgress);
+    const result = await spawnSession(msg.content, sdkOpts, qFn, safeOnProgress);
     const text = extractText(result.messages);
     const durationMs = Date.now() - startMs;
 
@@ -152,10 +168,6 @@ export async function handleMessage(
     }
 
     // Scrub team credential values from response (defense in depth)
-    const teamCreds = teamConfig.credentials ?? {};
-    const credValues = Object.values(teamCreds).filter(
-      (v): v is string => typeof v === 'string' && v.length >= 8,
-    );
     const safeText = credValues.length > 0 ? scrubSecrets(text, [], credValues) : text;
     deps.logger.info('Session completed', { teamName, durationMs });
     return { ok: true, content: safeText, durationMs };

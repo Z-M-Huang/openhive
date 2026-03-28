@@ -12,14 +12,14 @@ import {
   TeamConfigSchema,
   ProvidersSchema,
   TriggersSchema,
-  TeamTriggersSchema,
+
   ChannelsSchema,
   SystemConfigSchema,
   LoggingSchema,
   type TeamConfigOutput,
   type ProvidersOutput,
   type TriggersOutput,
-  type TeamTriggersOutput,
+
   type ChannelsOutput,
   type SystemConfigOutput,
   type LoggingOutput,
@@ -70,10 +70,6 @@ export function loadProviders(path: string): ProvidersOutput {
 
 export function loadTriggers(path: string): TriggersOutput {
   return loadAndValidate(path, TriggersSchema) as TriggersOutput;
-}
-
-export function loadTeamTriggers(path: string): TeamTriggersOutput {
-  return loadAndValidate(path, TeamTriggersSchema) as TeamTriggersOutput;
 }
 
 export function loadChannels(path: string): ChannelsOutput {

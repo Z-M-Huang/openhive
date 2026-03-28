@@ -58,6 +58,8 @@ export interface TriggerConfig {
   readonly failureThreshold?: number;
   readonly consecutiveFailures?: number;
   readonly disabledReason?: string;
+  /** Channel that created this trigger — used for notification routing when the trigger fires. */
+  readonly sourceChannelId?: string;
 }
 
 export interface ProviderProfile {
@@ -91,6 +93,7 @@ export interface TaskEntry {
   readonly result: string | null;
   readonly durationMs: number | null;
   readonly options: string | null;
+  readonly sourceChannelId: string | null;
 }
 
 export interface LogEntry {

@@ -32,6 +32,7 @@ export function createTrigger(
   input: z.infer<typeof CreateTriggerInputSchema>,
   callerId: string,
   deps: CreateTriggerDeps,
+  sourceChannelId?: string,
 ): CreateTriggerResult {
   const team = deps.orgTree.getTeam(input.team);
   if (!team) return { success: false, error: `team "${input.team}" not found` };
@@ -51,6 +52,7 @@ export function createTrigger(
     state: 'pending',
     maxTurns: input.max_turns ?? 100,
     failureThreshold: input.failure_threshold ?? 3,
+    sourceChannelId,
   });
 
   deps.log('Created trigger', { team: input.team, trigger: input.name, state: 'pending' });

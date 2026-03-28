@@ -53,7 +53,6 @@ export function delegateTask(
     return { success: false, reason: 'caller is not parent of target team' };
   }
 
-  // Enqueue task
   const taskId = deps.taskQueue.enqueue(team, task, priority);
 
   return { success: true, task_id: taskId };

@@ -294,6 +294,27 @@ describe('Task Queue Store', () => {
     const task = tasks.find((t) => t.id === id);
     expect(task?.correlationId).toBe('corr-123');
   });
+
+  it('enqueue extracts sourceChannelId from options JSON', () => {
+    const opts = JSON.stringify({ sourceChannelId: 'ws:abc123', max_turns: 50 });
+    const id = store.enqueue('team-1', 'routed task', TaskPriority.Normal, undefined, opts);
+    const task = store.getByTeam('team-1').find((t) => t.id === id);
+    expect(task?.sourceChannelId).toBe('ws:abc123');
+    expect(task?.options).toBe(opts);
+  });
+
+  it('enqueue without options sets sourceChannelId to null', () => {
+    const id = store.enqueue('team-1', 'unrouted', TaskPriority.Normal);
+    const task = store.getByTeam('team-1').find((t) => t.id === id);
+    expect(task?.sourceChannelId).toBeNull();
+  });
+
+  it('dequeue preserves sourceChannelId', () => {
+    const opts = JSON.stringify({ sourceChannelId: 'discord:12345' });
+    store.enqueue('team-1', 'discord task', TaskPriority.Normal, undefined, opts);
+    const dequeued = store.dequeue('team-1');
+    expect(dequeued?.sourceChannelId).toBe('discord:12345');
+  });
 });
 
 // ── Trigger Dedup Store ─────────────────────────────────────────────────────

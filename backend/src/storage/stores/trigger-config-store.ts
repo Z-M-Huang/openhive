@@ -44,6 +44,7 @@ export class TriggerConfigStore implements ITriggerConfigStore {
         maxTurns: config.maxTurns ?? 100,
         failureThreshold: config.failureThreshold ?? 3,
         consecutiveFailures: 0,
+        sourceChannelId: config.sourceChannelId ?? null,
         createdAt: now,
         updatedAt: now,
       }).run();
@@ -144,6 +145,7 @@ export class TriggerConfigStore implements ITriggerConfigStore {
       failureThreshold: row.failureThreshold,
       consecutiveFailures: row.consecutiveFailures,
       disabledReason: row.disabledReason ?? undefined,
+      sourceChannelId: row.sourceChannelId ?? undefined,
     };
   }
 }

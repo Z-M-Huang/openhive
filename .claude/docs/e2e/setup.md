@@ -8,7 +8,7 @@ cd /app/openhive
 sudo docker compose -f deployments/docker-compose.yml down -v 2>&1 || true
 sudo rm -rf .run && mkdir -p .run
 sudo docker system prune -af 2>&1 | tail -3
-sudo docker build -t openhive:latest -f deployments/Dockerfile . 2>&1 | tail -5
+sudo docker compose -f deployments/docker-compose.yml build --no-cache 2>&1 | tail -5
 sudo docker compose -f deployments/docker-compose.yml up -d 2>&1
 ```
 
@@ -162,13 +162,13 @@ cat /app/openhive/.run/teams/main/config.yaml
 ls /app/openhive/.run/teams/ops-team/
 
 # Use docker exec ONLY for container-baked files not on host:
-sudo docker exec deployments-openhive-1 ls /app/system-rules/
-sudo docker exec deployments-openhive-1 cat /data/rules/escalation-policy.md
+sudo docker exec openhive ls /app/system-rules/
+sudo docker exec openhive cat /data/rules/escalation-policy.md
 ```
 
 ### Clean Restart Helper
 
-Before **every scenario** (except Scenario 4 step 2 which continues from step 1), run a full clean restart:
+Before **every scenario** (except Scenario 4 Part B/C which continues from Part A), wipe runtime state and restart the container. **Do NOT rebuild** — the image was already built in Section 1.
 
 ```bash
 cd /app/openhive

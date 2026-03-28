@@ -136,7 +136,7 @@ describe('UT-21: Channel Router', () => {
     expect(a1._sent).toHaveLength(0);
   });
 
-  it('sendResponse routes to the adapter that owns the channelId', async () => {
+  it('sendResponse routes to the adapter that owns the channelId and returns true', async () => {
     const a1 = createMockAdapter('adapter-1');
     const a2 = createMockAdapter('adapter-2');
     const callback = vi.fn().mockResolvedValue(undefined);
@@ -152,23 +152,25 @@ describe('UT-21: Channel Router', () => {
       timestamp: Date.now(),
     });
 
-    await router.sendResponse('some-chan', 'targeted msg');
+    const sent = await router.sendResponse('some-chan', 'targeted msg');
 
+    expect(sent).toBe(true);
     // Only a1 should receive it, not a2
     expect(a1._sent).toHaveLength(1);
     expect(a1._sent[0]).toEqual({ channelId: 'some-chan', content: 'targeted msg' });
     expect(a2._sent).toHaveLength(0);
   });
 
-  it('sendResponse is a no-op for unknown channelId', async () => {
+  it('sendResponse returns false for unknown channelId', async () => {
     const a1 = createMockAdapter('adapter-1');
     const callback = vi.fn().mockResolvedValue(undefined);
 
     const router = new ChannelRouter([a1], callback);
     await router.start();
 
-    await router.sendResponse('unknown-chan', 'should not arrive');
+    const sent = await router.sendResponse('unknown-chan', 'should not arrive');
 
+    expect(sent).toBe(false);
     expect(a1._sent).toHaveLength(0);
   });
 });

@@ -32,7 +32,7 @@
 
 3. CREDENTIAL SECURITY:
    - VERIFY: WS response from step 1 does NOT contain "test-fake-key-value-12345" in cleartext
-   - `sudo docker logs deployments-openhive-1 2>&1 | grep "test-fake-key-value-12345"` — should NOT appear in logs
+   - `sudo docker logs openhive 2>&1 | grep "test-fake-key-value-12345"` — should NOT appear in logs
    - config.yaml should have credentials stored (that's OK — it's server-side only)
 
 4. WAIT for bootstrap:
@@ -98,13 +98,13 @@
 8. VERIFY CREDENTIAL NOT IN SYSTEM PROMPT (runtime, not just static file):
    - Static file check — sdk-capabilities.md no longer has "Team Credentials" section:
    ```bash
-   sudo docker exec deployments-openhive-1 grep -c "Team Credentials" /app/system-rules/sdk-capabilities.md
+   sudo docker exec openhive grep -c "Team Credentials" /app/system-rules/sdk-capabilities.md
    ```
    — should return 0
 
    - sdk-capabilities.md references get_credential:
    ```bash
-   sudo docker exec deployments-openhive-1 grep -c "get_credential" /app/system-rules/sdk-capabilities.md
+   sudo docker exec openhive grep -c "get_credential" /app/system-rules/sdk-capabilities.md
    ```
    — should return > 0
 
@@ -123,7 +123,7 @@
     - Static checks:
     ```bash
     cat /app/openhive/.run/teams/ops-team/config.yaml | grep -A5 "allowed_tools"
-    sudo docker exec deployments-openhive-1 grep "Availability depends" /app/system-rules/sdk-capabilities.md
+    sudo docker exec openhive grep "Availability depends" /app/system-rules/sdk-capabilities.md
     ```
     - **Runtime exercise**: Send: "Ask ops-team to run a Bash command: echo BASH_WORKS"
       - Wait for task completion
@@ -157,7 +157,7 @@
 
 #### Part E: Recovery
 
-14. `sudo docker restart deployments-openhive-1` — wait for health
+14. `sudo docker restart openhive` — wait for health
 
 15. Send: "What teams do I have and what do I prefer for reports?"
     - VERIFY: Knows ops-team + daily reports at 9am (from MEMORY.md)

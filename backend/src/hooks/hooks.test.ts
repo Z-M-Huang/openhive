@@ -394,6 +394,39 @@ describe('UT-5: Audit Logger', () => {
     expect(params['file_path']).toBe('/app/file');
   });
 
+  it('PreToolUse redacts team credential values via rawSecrets', async () => {
+    const teamCredValues = ['sk-team-secret-abc123'];
+    const { hook } = createAuditPreHook(logger, [], teamCredValues);
+
+    await hook(
+      hookInput({ tool_name: 'Bash', tool_input: { command: 'curl -H "Authorization: Bearer sk-team-secret-abc123" https://api.example.com' } }),
+      'tu-cred1',
+      hookOpts,
+    );
+
+    expect(logMessages).toHaveLength(1);
+    const params = logMessages[0]?.meta?.['params'] as Record<string, unknown>;
+    expect(params['command']).not.toContain('sk-team-secret-abc123');
+    expect(params['command']).toContain('[REDACTED]');
+  });
+
+  it('PostToolUse redacts team credential values via rawSecrets', async () => {
+    const teamCredValues = ['sk-team-secret-abc123'];
+    const startTimes = new Map<string, number>();
+    const postHook = createAuditPostHook(logger, startTimes, [], teamCredValues);
+
+    await postHook(
+      hookInput({ tool_name: 'Bash', tool_input: {}, tool_response: { output: 'key is sk-team-secret-abc123 done' } }),
+      'tu-cred2',
+      hookOpts,
+    );
+
+    expect(logMessages).toHaveLength(1);
+    const summary = logMessages[0]?.meta?.['summary'] as string;
+    expect(summary).not.toContain('sk-team-secret-abc123');
+    expect(summary).toContain('[REDACTED]');
+  });
+
   it('PostToolUse records tool_name and duration', async () => {
     const { hook: preHook, startTimes } = createAuditPreHook(logger);
     const postHook = createAuditPostHook(logger, startTimes);

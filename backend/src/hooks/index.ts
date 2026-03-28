@@ -36,8 +36,13 @@ export function buildHookConfig(opts: BuildHookConfigOpts): HookConfig {
   const governanceHook = createGovernanceHook(opts.teamName, opts.paths, opts.logger);
   const credentialWriteGuard = createCredentialWriteGuard(() => opts.teamCredentials ?? {});
   const bashCredentialGuard = createBashCredentialGuard(() => opts.teamCredentials ?? {});
-  const { hook: auditPreHook, startTimes } = createAuditPreHook(opts.logger, opts.knownSecrets);
-  const auditPostHook = createAuditPostHook(opts.logger, startTimes, opts.knownSecrets);
+  const teamCredentialValues = opts.teamCredentials
+    ? [...new Set(Object.values(opts.teamCredentials).filter(
+        (v): v is string => typeof v === 'string' && v.length >= 4,
+      ))]
+    : [];
+  const { hook: auditPreHook, startTimes } = createAuditPreHook(opts.logger, opts.knownSecrets, teamCredentialValues);
+  const auditPostHook = createAuditPostHook(opts.logger, startTimes, opts.knownSecrets, teamCredentialValues);
 
   return {
     PreToolUse: [

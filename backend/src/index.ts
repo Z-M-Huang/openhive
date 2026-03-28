@@ -210,7 +210,7 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
     logger.info('Received message', { channelId: msg.channelId, userId: msg.userId });
     triggerEngine.onMessage(msg.content, msg.channelId);
     if (!handlerDeps) return 'No providers configured.';
-    const result = await handleMessage(msg, handlerDeps);
+    const result = await handleMessage(msg, handlerDeps, { sourceChannelId: msg.channelId });
     return result.ok ? (result.content ?? '') : `Error: ${result.error}`;
   });
 
@@ -218,7 +218,7 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   wsAdapter.setHandler(async (msg, onProgress) => {
     triggerEngine.onMessage(msg.content, msg.channelId);
     if (!handlerDeps) return 'No providers configured.';
-    const result = await handleMessage(msg, handlerDeps, { onProgress });
+    const result = await handleMessage(msg, handlerDeps, { onProgress, sourceChannelId: msg.channelId });
     return result.ok ? (result.content ?? '') : `Error: ${result.error}`;
   });
 
@@ -228,7 +228,7 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
       adapter.setHandler(async (msg, onProgress) => {
         triggerEngine.onMessage(msg.content, msg.channelId);
         if (!handlerDeps) return 'No providers configured.';
-        const result = await handleMessage(msg, handlerDeps, { onProgress });
+        const result = await handleMessage(msg, handlerDeps, { onProgress, sourceChannelId: msg.channelId });
         return result.ok ? (result.content ?? '') : `Error: ${result.error}`;
       });
     }
@@ -246,7 +246,23 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
 
   const taskConsumer = handlerDeps ? new TaskConsumer({
     taskQueueStore, orgTree, handlerDeps,
-    notifyChannel: async (content) => {
+    notifyChannel: async (content, sourceChannelId) => {
+      if (sourceChannelId) {
+        // Try router first (works for CLI and any adapter using ChannelRouter flow)
+        const sent = await channelRouter.sendResponse(sourceChannelId, content);
+        if (sent) return;
+        // Router didn't know this channel — route directly to bypass adapters
+        // (WS/Discord use setHandler(), so their IDs are never in #channelOwners)
+        if (sourceChannelId.startsWith('ws:')) {
+          await wsAdapter.sendResponse(sourceChannelId, content);
+        } else {
+          for (const da of discordAdapters) {
+            try { await da.sendResponse(sourceChannelId, content); } catch { /* channel gone */ }
+          }
+        }
+        return;
+      }
+      // Fallback broadcast (no source channel — manual enqueue, MCP tools, etc.)
       for (const chId of wsAdapter.getConnectedChannelIds()) {
         await wsAdapter.sendResponse(chId, content);
       }

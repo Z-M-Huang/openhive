@@ -1,7 +1,7 @@
 /**
  * Drizzle ORM schema definitions for OpenHive v3.
  *
- * 10 tables: org_tree, scope_keywords, task_queue, trigger_dedup, team_status,
+ * 9 tables: org_tree, scope_keywords, task_queue, trigger_dedup, team_status,
  * log_entries, escalation_correlations, trigger_configs, channel_interactions
  */
 
@@ -51,6 +51,7 @@ export const taskQueue = sqliteTable(
     result: text('result'),
     durationMs: integer('duration_ms'),
     options: text('options'),
+    sourceChannelId: text('source_channel_id'),
   },
   (table) => [
     index('idx_task_queue_team_id').on(table.teamId),
@@ -133,6 +134,7 @@ export const triggerConfigs = sqliteTable(
     failureThreshold: integer('failure_threshold').notNull().default(3),
     consecutiveFailures: integer('consecutive_failures').notNull().default(0),
     disabledReason: text('disabled_reason'),
+    sourceChannelId: text('source_channel_id'),
     createdAt: text('created_at').notNull(),
     updatedAt: text('updated_at').notNull(),
   },

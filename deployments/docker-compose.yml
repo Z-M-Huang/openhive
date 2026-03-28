@@ -1,8 +1,10 @@
 services:
   openhive:
+    image: openhive:latest
     build:
       context: ..
       dockerfile: deployments/Dockerfile
+    container_name: openhive
     volumes:
       - ${HOST_PATH}\data\config:/data/config:ro    # Admin config (read-only)
       - ${HOST_PATH}\data\rules:/data/rules         # Org rules (writable, seeded)

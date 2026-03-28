@@ -55,6 +55,7 @@ export interface BuildQueryOptionsInput {
   readonly availableMcpServers: Record<string, unknown>;
   readonly ancestors: string[];
   readonly logger: Logger;
+  readonly sourceChannelId?: string;
 }
 
 /**
@@ -74,7 +75,10 @@ export function buildQueryOptions(opts: BuildQueryOptionsInput): QueryOptions {
   const orgHttpConfig = {
     type: 'http' as const,
     url: `http://127.0.0.1:${opts.orgMcpPort ?? 3001}/mcp`,
-    headers: { 'X-Caller-Id': opts.teamName },
+    headers: {
+      'X-Caller-Id': opts.teamName,
+      ...(opts.sourceChannelId ? { 'X-Source-Channel': opts.sourceChannelId } : {}),
+    },
   };
   const mcpServers = buildMcpServers(
     opts.teamConfig.mcp_servers,

@@ -104,6 +104,7 @@ export function createTables(raw: Database.Database): void {
       failure_threshold INTEGER NOT NULL DEFAULT 3,
       consecutive_failures INTEGER NOT NULL DEFAULT 0,
       disabled_reason TEXT,
+      source_channel_id TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       UNIQUE(team, name)
@@ -133,7 +134,9 @@ export function createTables(raw: Database.Database): void {
     'ALTER TABLE task_queue ADD COLUMN result TEXT',
     'ALTER TABLE task_queue ADD COLUMN duration_ms INTEGER',
     'ALTER TABLE task_queue ADD COLUMN options TEXT',
+    'ALTER TABLE task_queue ADD COLUMN source_channel_id TEXT',
     'ALTER TABLE log_entries ADD COLUMN duration_ms INTEGER',
+    'ALTER TABLE trigger_configs ADD COLUMN source_channel_id TEXT',
   ];
   for (const sql of migrations) {
     try { raw.prepare(sql).run(); } catch { /* already exists */ }

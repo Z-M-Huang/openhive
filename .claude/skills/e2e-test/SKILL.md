@@ -44,7 +44,7 @@ After every AI response, independently check filesystem + database. Don't trust 
 (Sibling teams, list_teams routing, child team hierarchy, error handling, shutdown cascade)
 
 **Scenario 4 — Scheduled Jobs & Notifications:** Read and execute `.claude/docs/e2e/scenario-4-triggers.md`
-(Trigger setup via sync_team_triggers, cron firing, task result capture, WS notifications, credential protection, trigger persistence across restart)
+(Trigger setup via create_trigger + enable_trigger MCP tools, cron firing, task result capture, WS notifications, credential protection, trigger persistence across restart)
 
 **Scenario 5 — Stress & Recovery:** Read and execute `.claude/docs/e2e/scenario-5-stress.md`
 (5 concurrent messages, per-socket serialization, restart recovery, system stability)
@@ -57,8 +57,8 @@ After every AI response, independently check filesystem + database. Don't trust 
 ```bash
 cd /app/openhive
 sudo docker compose -f deployments/docker-compose.yml down -v 2>&1
-rm -f backend/ws-scenario-*.cjs backend/ws-stress.cjs backend/ws-concurrent.cjs backend/ws-progressive.cjs backend/ws-listener.cjs
-rm -f /tmp/ws-notifications.log
+rm -f backend/ws-scenario-*.cjs backend/ws-stress.cjs backend/ws-concurrent.cjs backend/ws-progressive.cjs backend/ws-listener.cjs backend/ws-isolation.cjs
+rm -f /tmp/ws-notifications.log /tmp/ws-isolation.log
 ```
 
 ### Step 5: Final Report
@@ -102,6 +102,7 @@ Phase B: Investigative Scenarios
     - WS notification received: [pass/fail]
     - Notification content correct: [pass/fail]
     - Credential protection (logs + DB + notifications): [pass/fail]
+    - Notification routing isolation (sourceChannelId): [pass/fail]
     - Trigger survives restart: [pass/fail]
     - Post-restart trigger fires: [pass/fail]
   Scenario 5 (Stress & Recovery):        [summary + evidence]

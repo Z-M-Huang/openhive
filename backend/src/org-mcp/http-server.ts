@@ -18,13 +18,13 @@ import { buildToolDefs, extractShape, type OrgMcpDeps } from './registry.js';
 /**
  * Create a fresh McpServer instance with all 8 org tools, callerId baked in.
  */
-function createOrgMcpInstance(deps: OrgMcpDeps, callerId: string): McpServer {
+function createOrgMcpInstance(deps: OrgMcpDeps, callerId: string, sourceChannelId?: string): McpServer {
   const server = new McpServer({ name: 'org', version: '1.0.0' });
 
   for (const def of buildToolDefs(deps)) {
     server.tool(def.name, extractShape(def.inputSchema), async (args) => {
       try {
-        const result = await def.handler(args, callerId);
+        const result = await def.handler(args, callerId, sourceChannelId);
         return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -98,7 +98,8 @@ async function handleMcpPost(
   res: ServerResponse,
 ): Promise<void> {
   const callerId = (req.headers['x-caller-id'] as string) || 'main';
-  const mcpServer = createOrgMcpInstance(deps, callerId);
+  const sourceChannelId = req.headers['x-source-channel'] as string | undefined;
+  const mcpServer = createOrgMcpInstance(deps, callerId, sourceChannelId);
 
   try {
     const rawBody = await readBody(req);

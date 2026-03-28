@@ -10,3 +10,4 @@ coverage/
 data/config/providers.yaml
 data/config/channels.yaml
 data/config/config.yaml
+.claude/worktrees

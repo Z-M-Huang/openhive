@@ -106,7 +106,7 @@
 
 #### Part D: Recovery After Restart
 
-8. `sudo docker restart deployments-openhive-1` — wait for health
+8. `sudo docker restart openhive` — wait for health
 
 9. VERIFY post-restart:
    ```bash
@@ -121,7 +121,7 @@
    # Config files intact
    cat /app/openhive/.run/teams/stress-team/config.yaml
    # Recovery log
-   sudo docker logs deployments-openhive-1 2>&1 | grep "Recovery"
+   sudo docker logs openhive 2>&1 | grep "Recovery"
    ```
 
 10. Send: "Hello, are you working?"

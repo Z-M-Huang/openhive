@@ -20,9 +20,8 @@ export interface TaskConsumerOpts {
   readonly handlerDeps: MessageHandlerDeps;
   readonly pollIntervalMs?: number;
   readonly queryFn?: QueryFn;
-  readonly notifyChannel?: (content: string) => Promise<void>;
+  readonly notifyChannel?: (content: string, sourceChannelId?: string | null) => Promise<void>;
   readonly getTeamConfig?: (teamId: string) => TeamConfig | undefined;
-  readonly syncTeamTriggers?: (teamId: string) => void;
   readonly reportTriggerOutcome?: (team: string, triggerName: string, success: boolean) => void;
 }
 
@@ -32,9 +31,8 @@ export class TaskConsumer {
   readonly #deps: MessageHandlerDeps;
   readonly #pollMs: number;
   readonly #queryFn?: QueryFn;
-  readonly #notifyChannel?: (content: string) => Promise<void>;
+  readonly #notifyChannel?: (content: string, sourceChannelId?: string | null) => Promise<void>;
   readonly #getTeamConfig?: (teamId: string) => TeamConfig | undefined;
-  readonly #syncTeamTriggers?: (teamId: string) => void;
   readonly #reportTriggerOutcome?: (team: string, triggerName: string, success: boolean) => void;
   #timer: ReturnType<typeof setInterval> | null = null;
   #processing = false;
@@ -47,7 +45,6 @@ export class TaskConsumer {
     this.#queryFn = opts.queryFn;
     this.#notifyChannel = opts.notifyChannel;
     this.#getTeamConfig = opts.getTeamConfig;
-    this.#syncTeamTriggers = opts.syncTeamTriggers;
     this.#reportTriggerOutcome = opts.reportTriggerOutcome;
   }
 
@@ -94,7 +91,10 @@ export class TaskConsumer {
               timestamp: Date.now(),
             },
             { ...this.#deps, orgAncestors: this.#getAncestorNames(task.teamId) },
-            { teamName: task.teamId, queryFn: this.#queryFn, maxTurns },
+            {
+              teamName: task.teamId, queryFn: this.#queryFn, maxTurns,
+              sourceChannelId: dequeued.sourceChannelId ?? undefined,
+            },
           );
 
           const isError = !result.ok;
@@ -103,11 +103,6 @@ export class TaskConsumer {
           // Record duration
           if (this.#taskQueue.updateDuration) {
             this.#taskQueue.updateDuration(dequeued.id, result.durationMs);
-          }
-
-          // Auto-sync triggers after successful bootstrap
-          if (!isError && dequeued.task.startsWith('Bootstrap this team')) {
-            this.#tryAutoSyncTriggers(task.teamId);
           }
 
           // Report trigger outcome for circuit breaker
@@ -138,10 +133,10 @@ export class TaskConsumer {
             responseSnippet: safeResponse ? safeResponse.slice(0, 200) : null,
           });
 
-          // Notify connected channels
+          // Notify originating channel (or broadcast if no source)
           if (this.#notifyChannel && safeResponse) {
             const notif = `[${task.teamId}] Task completed: ${dequeued.task}\n\nResult: ${safeResponse}`;
-            this.#notifyChannel(notif).catch(() => {});
+            this.#notifyChannel(notif, dequeued.sourceChannelId).catch(() => {});
           }
         } catch (err) {
           this.#taskQueue.updateStatus(dequeued.id, TaskStatus.Failed);
@@ -157,17 +152,6 @@ export class TaskConsumer {
       }
     } finally {
       this.#processing = false;
-    }
-  }
-
-  #tryAutoSyncTriggers(teamId: string): void {
-    if (!this.#syncTeamTriggers) return;
-    try {
-      this.#syncTeamTriggers(teamId);
-    } catch (err) {
-      this.#deps.logger.info('Failed to auto-sync triggers after bootstrap', {
-        team: teamId, error: err instanceof Error ? err.message : String(err),
-      });
     }
   }
 

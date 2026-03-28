@@ -17,6 +17,18 @@ export class TaskQueueStore implements ITaskQueueStore {
 
   enqueue(teamId: string, task: string, priority: string, correlationId?: string, options?: string): string {
     const id = `task-${randomBytes(8).toString('hex')}`;
+
+    // Extract sourceChannelId from options JSON if present
+    let sourceChannelId: string | null = null;
+    if (options) {
+      try {
+        const parsed = JSON.parse(options) as Record<string, unknown>;
+        if (typeof parsed.sourceChannelId === 'string') {
+          sourceChannelId = parsed.sourceChannelId;
+        }
+      } catch { /* not JSON or no sourceChannelId */ }
+    }
+
     this.db.insert(schema.taskQueue).values({
       id,
       teamId,
@@ -26,6 +38,7 @@ export class TaskQueueStore implements ITaskQueueStore {
       createdAt: new Date().toISOString(),
       correlationId: correlationId ?? null,
       options: options ?? null,
+      sourceChannelId,
     }).run();
     return id;
   }
@@ -148,6 +161,7 @@ export class TaskQueueStore implements ITaskQueueStore {
     result: string | null;
     durationMs: number | null;
     options: string | null;
+    sourceChannelId: string | null;
   }): TaskEntry {
     return {
       id: row.id,
@@ -160,6 +174,7 @@ export class TaskQueueStore implements ITaskQueueStore {
       result: row.result,
       durationMs: row.durationMs,
       options: row.options,
+      sourceChannelId: row.sourceChannelId ?? null,
     };
   }
 }

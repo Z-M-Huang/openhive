@@ -6,7 +6,8 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { OrgToolInvoker } from './registry.js';
-import { setupServer, makeTeamConfig } from './__test-helpers.js';
+import { createToolInvoker } from './registry.js';
+import { setupServer, makeTeamConfig, makeNode } from './__test-helpers.js';
 import type { ServerFixtures } from './__test-helpers.js';
 
 // ── UT-6: Tool Registration ──────────────────────────────────────────────
@@ -74,6 +75,107 @@ describe('UT-6: Core tools registered', () => {
     expect(tool!.name).toBe('get_credential');
     expect(tool!.description).toBeTruthy();
     expect(tool!.inputSchema).toBeDefined();
+  });
+});
+
+// ── Trigger tool registration (requires configStore + triggerEngine) ────
+
+describe('Trigger tools registered with configStore + triggerEngine', () => {
+  it('registers trigger management tools when triggerConfigStore and triggerEngine are provided', () => {
+    const f = setupServer();
+    const mockConfigStore = {
+      upsert: vi.fn(), remove: vi.fn(), removeByTeam: vi.fn(),
+      getByTeam: vi.fn().mockReturnValue([]), getAll: vi.fn().mockReturnValue([]),
+      setState: vi.fn(), incrementFailures: vi.fn(), resetFailures: vi.fn(),
+      get: vi.fn(),
+    };
+    const mockTriggerEngine = {
+      replaceTeamTriggers: vi.fn(), removeTeamTriggers: vi.fn(),
+    };
+    const server = createToolInvoker({
+      orgTree: f.orgTree,
+      spawner: f.spawner,
+      sessionManager: f.sessionManager,
+      taskQueue: f.taskQueue,
+      escalationStore: f.escalationStore,
+      runDir: '/tmp/openhive-test',
+      loadConfig: () => { throw new Error('no config'); },
+      getTeamConfig: () => undefined,
+      log: () => {},
+      triggerConfigStore: mockConfigStore,
+      triggerEngine: mockTriggerEngine as never,
+    });
+
+    expect(server.tools.has('create_trigger')).toBe(true);
+    expect(server.tools.has('enable_trigger')).toBe(true);
+    expect(server.tools.has('disable_trigger')).toBe(true);
+    expect(server.tools.has('list_triggers')).toBe(true);
+    expect(server.tools.has('test_trigger')).toBe(true);
+    expect(server.tools.has('sync_team_triggers')).toBe(false);
+  });
+
+  it('test_trigger threads sourceChannelId via scoped queue', () => {
+    const f = setupServer();
+    const mockConfigStore = {
+      upsert: vi.fn(), remove: vi.fn(), removeByTeam: vi.fn(),
+      getByTeam: vi.fn().mockReturnValue([]), getAll: vi.fn().mockReturnValue([]),
+      setState: vi.fn(), incrementFailures: vi.fn(), resetFailures: vi.fn(),
+      get: vi.fn().mockReturnValue({ task: 'run test', maxTurns: 100 }),
+    };
+    const server = createToolInvoker({
+      orgTree: f.orgTree,
+      spawner: f.spawner,
+      sessionManager: f.sessionManager,
+      taskQueue: f.taskQueue,
+      escalationStore: f.escalationStore,
+      runDir: '/tmp/openhive-test',
+      loadConfig: () => { throw new Error('no config'); },
+      getTeamConfig: () => undefined,
+      log: () => {},
+      triggerConfigStore: mockConfigStore,
+      triggerEngine: { replaceTeamTriggers: vi.fn(), removeTeamTriggers: vi.fn() } as never,
+    });
+
+    f.orgTree.addTeam(makeNode({ teamId: 'root', name: 'root' }));
+    f.orgTree.addTeam(makeNode({ teamId: 'trigger-team', name: 'trigger-team', parentId: 'root' }));
+
+    server.invoke('test_trigger', { team: 'trigger-team', trigger_name: 'my-trig' }, 'root', 'ws:xyz');
+
+    expect(f.taskQueue.tasks).toHaveLength(1);
+    expect(f.taskQueue.tasks[0].sourceChannelId).toBe('ws:xyz');
+  });
+
+  it('test_trigger preserves max_turns alongside sourceChannelId', async () => {
+    const f = setupServer();
+    const mockConfigStore = {
+      upsert: vi.fn(), remove: vi.fn(), removeByTeam: vi.fn(),
+      getByTeam: vi.fn().mockReturnValue([]), getAll: vi.fn().mockReturnValue([]),
+      setState: vi.fn(), incrementFailures: vi.fn(), resetFailures: vi.fn(),
+      get: vi.fn().mockReturnValue({ task: 'run test', maxTurns: 100 }),
+    };
+    const server = createToolInvoker({
+      orgTree: f.orgTree,
+      spawner: f.spawner,
+      sessionManager: f.sessionManager,
+      taskQueue: f.taskQueue,
+      escalationStore: f.escalationStore,
+      runDir: '/tmp/openhive-test',
+      loadConfig: () => { throw new Error('no config'); },
+      getTeamConfig: () => undefined,
+      log: () => {},
+      triggerConfigStore: mockConfigStore,
+      triggerEngine: { replaceTeamTriggers: vi.fn(), removeTeamTriggers: vi.fn() } as never,
+    });
+
+    f.orgTree.addTeam(makeNode({ teamId: 'root', name: 'root' }));
+    f.orgTree.addTeam(makeNode({ teamId: 'trigger-team', name: 'trigger-team', parentId: 'root' }));
+
+    await server.invoke('test_trigger', { team: 'trigger-team', trigger_name: 'my-trig', max_turns: 50 }, 'root', 'ws:xyz');
+
+    expect(f.taskQueue.tasks).toHaveLength(1);
+    const opts = JSON.parse(f.taskQueue.tasks[0].options!) as Record<string, unknown>;
+    expect(opts.max_turns).toBe(50);
+    expect(f.taskQueue.tasks[0].sourceChannelId).toBe('ws:xyz');
   });
 });
 

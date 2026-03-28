@@ -103,15 +103,17 @@ export function initTriggerEngine(
     dedup,
     rateLimiter,
     configStore: triggerConfigStore,
-    delegateTask: (team, task, priority, triggerName) => {
+    delegateTask: (team, task, priority, triggerName, sourceChannelId) => {
       // Unique correlationId per task: trigger:{name}:{timestamp}
       const correlationId = triggerName ? `trigger:${triggerName}:${Date.now()}` : undefined;
-      // Snapshot max_turns from trigger config
-      let options: string | undefined;
+      // Snapshot max_turns from trigger config + source channel for notification routing
+      const opts: Record<string, unknown> = {};
       if (triggerName) {
         const entry = triggerConfigStore.get(team, triggerName);
-        if (entry?.maxTurns) options = JSON.stringify({ max_turns: entry.maxTurns });
+        if (entry?.maxTurns) opts.max_turns = entry.maxTurns;
       }
+      if (sourceChannelId) opts.sourceChannelId = sourceChannelId;
+      const options = Object.keys(opts).length > 0 ? JSON.stringify(opts) : undefined;
       taskQueueStore.enqueue(team, task, priority ?? 'normal', correlationId, options);
       return Promise.resolve();
     },

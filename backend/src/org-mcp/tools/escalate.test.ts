@@ -61,6 +61,18 @@ describe('escalate', () => {
     expect(typed.error).toContain('no parent');
   });
 
+  it('threads sourceChannelId when provided', async () => {
+    const result = await f.server.invoke('escalate', { message: 'need help' }, 'child', 'ws:abc123');
+    expect(result).toEqual(expect.objectContaining({ success: true }));
+    expect(f.taskQueue.tasks[0].sourceChannelId).toBe('ws:abc123');
+  });
+
+  it('sets sourceChannelId null when not provided', async () => {
+    const result = await f.server.invoke('escalate', { message: 'need help' }, 'child');
+    expect(result).toEqual(expect.objectContaining({ success: true }));
+    expect(f.taskQueue.tasks[0].sourceChannelId).toBeNull();
+  });
+
   it('fails when caller not found in org tree', async () => {
     const result = await f.server.invoke(
       'escalate',
