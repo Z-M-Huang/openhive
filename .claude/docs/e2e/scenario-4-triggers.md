@@ -1,11 +1,19 @@
 # Scenario 4: Scheduled Jobs, Notifications & Error Propagation
 
-**Run the Clean Restart Helper from setup.md.**
+**Run the Clean Restart Helper from setup.md. Then reset harness and reconnect:**
+```bash
+curl -s localhost:9876/reset
+curl -s localhost:9876/connect -d '{"name":"main"}'
+```
 
 #### Part A: Team Setup & Trigger Configuration
 
-1. Send: "Create a team called loggly-monitor for monitoring Loggly logs. Give it credentials: subdomain is test, api_key is fake-loggly-apikey-9876. Accept keywords: logs, monitoring, loggly."
-   - OBSERVE: What did the AI claim?
+1. ```bash
+   curl -s localhost:9876/send -d @- <<'EOF'
+   {"name":"main","content":"Create a team called loggly-monitor for monitoring Loggly logs. Give it credentials: subdomain is test, api_key is fake-loggly-apikey-9876. Accept keywords: logs, monitoring, loggly.","timeout":300000}
+   EOF
+   ```
+   - OBSERVE: What did the AI claim in `.final`?
 
 2. VERIFY (host filesystem + DB):
    ```bash
@@ -32,12 +40,20 @@
    done
    ```
 
-4. Create and activate a trigger via MCP tools (from WS connection):
-   Send: "Create a schedule trigger for loggly-monitor called loggly-fetch with cron */2 * * * * and task: Fetch recent logs from Loggly using your credentials (subdomain and api_key) and report a summary of any errors found. Use the Loggly Search API."
-   - VERIFY: Response confirms trigger created in pending state
+4. Create and activate a trigger via MCP tools:
+   ```bash
+   curl -s localhost:9876/send -d @- <<'EOF'
+   {"name":"main","content":"Create a schedule trigger for loggly-monitor called loggly-fetch with cron */2 * * * * and task: Fetch recent logs from Loggly using your credentials (subdomain and api_key) and report a summary of any errors found. Use the Loggly Search API.","timeout":300000}
+   EOF
+   ```
+   - VERIFY: `.final` confirms trigger created in pending state
 
-   Send: "Enable the loggly-fetch trigger for loggly-monitor."
-   - VERIFY: Response confirms trigger enabled/activated
+   ```bash
+   curl -s localhost:9876/send -d @- <<'EOF'
+   {"name":"main","content":"Enable the loggly-fetch trigger for loggly-monitor.","timeout":300000}
+   EOF
+   ```
+   - VERIFY: `.final` confirms trigger enabled/activated
 
    VERIFY trigger in DB:
    ```bash
@@ -49,26 +65,11 @@
    ```
    - Trigger should exist with state='active'
 
-5. **START NOTIFICATION LISTENER** — open a WS connection in background to capture notifications:
+5. Record current notification state (baseline for detecting new notifications):
    ```bash
-   cat > /app/openhive/backend/ws-listener.cjs << 'EOF'
-   const WebSocket = require('ws');
-   const ws = new WebSocket('ws://localhost:8080/ws');
-   ws.on('open', () => console.log('LISTENER_CONNECTED'));
-   ws.on('message', (d) => {
-     const p = JSON.parse(d.toString());
-     console.log(JSON.stringify({ ts: new Date().toISOString(), type: p.type, content: (p.content || p.error || '').slice(0, 300) }));
-   });
-   ws.on('close', () => { console.log('DISCONNECTED'); process.exit(0); });
-   ws.on('error', (e) => { console.error('WS_ERROR:', e.message); process.exit(1); });
-   setTimeout(() => { console.log('LISTENER_TIMEOUT'); ws.close(); process.exit(0); }, 300000);
-   EOF
-   node /app/openhive/backend/ws-listener.cjs > /tmp/ws-notifications.log 2>&1 &
-   LISTENER_PID=$!
-   echo "Listener PID: $LISTENER_PID"
-   sleep 2
-   cat /tmp/ws-notifications.log  # Should show LISTENER_CONNECTED
+   curl -s localhost:9876/notifications -d '{"name":"main"}'
    ```
+   Note the count — this is the baseline before trigger fires.
 
 6. VERIFY TRIGGER REGISTERED (no restart needed):
    ```bash
@@ -151,150 +152,65 @@
 
 11. **VERIFY WS NOTIFICATION RECEIVED:**
     ```bash
-    echo "=== Notification log ==="
-    cat /tmp/ws-notifications.log
-    echo "=== Checking for notification type ==="
-    grep '"type":"notification"' /tmp/ws-notifications.log && echo "NOTIFICATION RECEIVED" || echo "NO NOTIFICATION"
+    curl -s localhost:9876/notifications -d '{"name":"main"}'
     ```
-    - The listener should have received a `{ type: "notification" }` message after the background task completed
-    - The notification content should mention "loggly-monitor" and "Task completed"
+    - Should have received a notification (count > baseline from step 5)
+    - Notification content should mention "loggly-monitor" and "Task completed"
     - **CRITICAL**: Notification content should NOT contain credential values ("fake-loggly-apikey-9876")
 
 11c. **VERIFY NOTIFICATION ROUTING ISOLATION (sourceChannelId):**
     This test verifies that task completion notifications go ONLY to the originating WS connection, not broadcast to all.
 
     ```bash
-    # Create two-connection isolation test script
-    cat > /app/openhive/backend/ws-isolation.cjs << 'ISOEOF'
-    const WebSocket = require('ws');
-    // Connection A: sends a delegate_task request
-    const wsA = new WebSocket('ws://localhost:8080/ws');
-    // Connection B: passive listener (should NOT receive task notification)
-    const wsB = new WebSocket('ws://localhost:8080/ws');
-    const notifsA = [];
-    const notifsB = [];
-    let ready = 0;
-
-    function onReady() {
-      ready++;
-      if (ready === 2) {
-        // Both connected — send a message from A that triggers delegate_task
-        wsA.send(JSON.stringify({ content: 'Ask loggly-monitor to check recent error logs right now.' }));
-      }
-    }
-
-    wsA.on('open', onReady);
-    wsB.on('open', onReady);
-
-    wsA.on('message', (d) => {
-      const p = JSON.parse(d.toString());
-      if (p.type === 'notification') notifsA.push(p);
-    });
-    wsB.on('message', (d) => {
-      const p = JSON.parse(d.toString());
-      if (p.type === 'notification') notifsB.push(p);
-    });
-
-    // Wait up to 180s for task to complete and notification to arrive
-    setTimeout(() => {
-      console.log(JSON.stringify({
-        connectionA_notifications: notifsA.length,
-        connectionB_notifications: notifsB.length,
-        isolation_pass: notifsA.length > 0 && notifsB.length === 0,
-        a_content: notifsA.map(n => (n.content || '').slice(0, 200)),
-        b_content: notifsB.map(n => (n.content || '').slice(0, 200)),
-      }, null, 2));
-      wsA.close(); wsB.close();
-      process.exit(0);
-    }, 180000);
-
-    wsA.on('error', (e) => { console.error('A_ERROR:', e.message); });
-    wsB.on('error', (e) => { console.error('B_ERROR:', e.message); });
-    ISOEOF
-    node /app/openhive/backend/ws-isolation.cjs > /tmp/ws-isolation.log 2>&1 &
-    ISOLATION_PID=$!
-    echo "Isolation test PID: $ISOLATION_PID"
+    # Open two connections
+    curl -s localhost:9876/connect -d '{"name":"iso-a"}'
+    curl -s localhost:9876/connect -d '{"name":"iso-b"}'
     ```
 
-    After the task completes (check DB for status), stop the script and verify:
     ```bash
-    kill $ISOLATION_PID 2>/dev/null || true
-    echo "=== Isolation test result ==="
-    cat /tmp/ws-isolation.log
+    # Send a delegate_task request from iso-a
+    curl -s localhost:9876/send -d @- <<'EOF'
+    {"name":"iso-a","content":"Ask loggly-monitor to check recent error logs right now.","timeout":300000}
+    EOF
+    ```
+
+    Wait for task completion (check DB), then verify notification isolation:
+    ```bash
+    curl -s localhost:9876/notifications -d '{"name":"iso-a"}'
+    curl -s localhost:9876/notifications -d '{"name":"iso-b"}'
     ```
 
     **Expected:**
-    - `connectionA_notifications > 0` — originator got the notification
-    - `connectionB_notifications === 0` — passive listener did NOT
-    - `isolation_pass === true`
-
-    **If `isolation_pass` is false:** The `sourceChannelId` threading is broken — notifications are still broadcasting to all connections.
+    - `iso-a` notifications count > 0 — originator got the notification
+    - `iso-b` notifications count === 0 — passive listener did NOT
+    - If iso-b has notifications: The `sourceChannelId` threading is broken — notifications are still broadcasting to all connections.
 
     ```bash
-    rm -f /app/openhive/backend/ws-isolation.cjs /tmp/ws-isolation.log
+    curl -s localhost:9876/disconnect -d '{"name":"iso-a"}'
+    curl -s localhost:9876/disconnect -d '{"name":"iso-b"}'
     ```
 
 11e. **VERIFY test_trigger NOTIFICATION ROUTING (sourceChannelId via scoped queue):**
-    This test verifies that `test_trigger` (which was previously broken — missing sourceChannelId threading)
-    now correctly routes notifications only to the originating WS connection via the registry's `scopeQueue` wrapper.
+    This test verifies that `test_trigger` correctly routes notifications only to the originating WS connection.
 
     ```bash
-    cat > /app/openhive/backend/ws-scenario-4-trigger.cjs << 'TRIGEOF'
-    const WebSocket = require('ws');
-    // Connection A: sends test_trigger request
-    const wsA = new WebSocket('ws://localhost:8080/ws');
-    // Connection B: passive listener (should NOT receive notification)
-    const wsB = new WebSocket('ws://localhost:8080/ws');
-    const notifsA = [];
-    const notifsB = [];
-    let ready = 0;
-
-    function onReady() {
-      ready++;
-      if (ready === 2) {
-        wsA.send(JSON.stringify({ content: 'Test-fire the loggly-fetch trigger for loggly-monitor.' }));
-      }
-    }
-
-    wsA.on('open', onReady);
-    wsB.on('open', onReady);
-
-    wsA.on('message', (d) => {
-      const p = JSON.parse(d.toString());
-      if (p.type === 'notification') notifsA.push(p);
-    });
-    wsB.on('message', (d) => {
-      const p = JSON.parse(d.toString());
-      if (p.type === 'notification') notifsB.push(p);
-    });
-
-    setTimeout(() => {
-      console.log(JSON.stringify({
-        test: 'test_trigger_routing',
-        connectionA_notifications: notifsA.length,
-        connectionB_notifications: notifsB.length,
-        isolation_pass: notifsA.length > 0 && notifsB.length === 0,
-      }, null, 2));
-      wsA.close(); wsB.close();
-      process.exit(0);
-    }, 180000);
-
-    wsA.on('error', (e) => { console.error('A_ERROR:', e.message); });
-    wsB.on('error', (e) => { console.error('B_ERROR:', e.message); });
-    TRIGEOF
-    node /app/openhive/backend/ws-scenario-4-trigger.cjs > /tmp/ws-trigger-isolation.log 2>&1 &
-    TRIGGER_ISO_PID=$!
-    echo "test_trigger isolation PID: $TRIGGER_ISO_PID"
+    curl -s localhost:9876/connect -d '{"name":"trig-a"}'
+    curl -s localhost:9876/connect -d '{"name":"trig-b"}'
     ```
 
-    After the test-fired task completes, stop and verify:
     ```bash
-    kill $TRIGGER_ISO_PID 2>/dev/null || true
-    echo "=== test_trigger isolation result ==="
-    cat /tmp/ws-trigger-isolation.log
+    curl -s localhost:9876/send -d @- <<'EOF'
+    {"name":"trig-a","content":"Test-fire the loggly-fetch trigger for loggly-monitor.","timeout":300000}
+    EOF
     ```
 
-    **Expected:** `isolation_pass === true` (Connection A got notification, Connection B did not).
+    Wait for test-fired task completion, then verify:
+    ```bash
+    curl -s localhost:9876/notifications -d '{"name":"trig-a"}'
+    curl -s localhost:9876/notifications -d '{"name":"trig-b"}'
+    ```
+
+    **Expected:** `trig-a` has notification, `trig-b` does NOT (`isolation_pass`).
 
     Also verify the test-fired task has sourceChannelId in DB:
     ```bash
@@ -309,7 +225,8 @@
     - `options` JSON should contain both `max_turns` and `sourceChannelId`
 
     ```bash
-    rm -f /app/openhive/backend/ws-scenario-4-trigger.cjs /tmp/ws-trigger-isolation.log
+    curl -s localhost:9876/disconnect -d '{"name":"trig-a"}'
+    curl -s localhost:9876/disconnect -d '{"name":"trig-b"}'
     ```
 
 11d. VERIFY TASK CONSUMER LOGS contain team context:
@@ -329,16 +246,15 @@
 12. VERIFY CREDENTIALS NOT LEAKED:
     - `sudo docker logs openhive 2>&1 | grep "fake-loggly-apikey-9876"` — should NOT appear
     - Check result column text for credential values
-    - Check notification log for credential values:
+    - Check notification content for credential values:
     ```bash
-    grep "fake-loggly-apikey-9876" /tmp/ws-notifications.log && echo "CREDENTIAL LEAK IN NOTIFICATION!" || echo "Notification credential check: CLEAN"
+    curl -s localhost:9876/notifications -d '{"name":"main"}' | grep "fake-loggly-apikey-9876" && echo "CREDENTIAL LEAK IN NOTIFICATION!" || echo "Notification credential check: CLEAN"
     ```
 
 #### Part C: Trigger Persistence Across Restart (continues — NO clean restart)
 
-13. Kill the notification listener and record current task count:
+13. Record current task count:
     ```bash
-    kill $LISTENER_PID 2>/dev/null || true
     BEFORE=$(node -e "
       const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
       const r = D.prepare(\"SELECT COUNT(*) as c FROM task_queue WHERE team_id='loggly-monitor' AND task LIKE '%Loggly%'\").get();
@@ -348,10 +264,11 @@
     echo "Tasks before restart: $BEFORE"
     ```
 
-14. Restart the container:
+14. Restart the container and reconnect:
     ```bash
     sudo docker restart openhive
     for i in $(seq 1 30); do curl -sf http://localhost:8080/health >/dev/null 2>&1 && echo "Ready" && break; sleep 3; done
+    curl -s localhost:9876/reconnect -d '{"name":"main"}'
     ```
 
 15. VERIFY TRIGGER STILL REGISTERED after restart (loaded from SQLite trigger_configs):
@@ -402,13 +319,11 @@
     - Task should complete/fail with result populated (trigger survived restart)
     - Apply the same result quality check as step 10: look for PASS indicators (401, Unauthorized, curl, HTTP) vs FAIL indicators (not found, unable to complete)
 
-18. Send: "What is the status of loggly-monitor?"
-    - VERIFY: Response includes status info (latestResult should be surfaced)
-
-19. CLEANUP:
-    ```bash
-    rm -f /app/openhive/backend/ws-listener.cjs
-    rm -f /tmp/ws-notifications.log
+18. ```bash
+    curl -s localhost:9876/send -d @- <<'EOF'
+    {"name":"main","content":"What is the status of loggly-monitor?","timeout":300000}
+    EOF
     ```
+    - VERIFY: `.final` includes status info (latestResult should be surfaced)
 
-**Report:** Trigger created and enabled via MCP tools? Fired on time? Result column populated? WS notification received? Notification content correct (task summary, no credentials)? Credentials protected (logs, DB, notifications)? **Trigger survived restart and fired again?**
+**Report:** Trigger created and enabled via MCP tools? Fired on time? Result column populated? WS notification received? Notification content correct (task summary, no credentials)? Credentials protected (logs, DB, notifications)? Notification routing isolation works? **Trigger survived restart and fired again?**

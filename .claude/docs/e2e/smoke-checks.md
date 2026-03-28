@@ -22,15 +22,21 @@ Database:
 12. task_queue has result column: SELECT result FROM task_queue LIMIT 0
 13. 10 concurrent SELECT COUNT(*) FROM org_tree -- no errors
 
-WebSocket:
-14. Send {"content":"ping"} -> get response (connection works)
-15. Send invalid JSON -> get error response, not crash
-16. Send {"content":""} -> get error response
+WebSocket (via harness):
+14. curl -s localhost:9876/send -d '{"name":"main","content":"ping","timeout":30000}'
+    -> .ok is true, .final contains a response
+15. curl -s localhost:9876/send_raw -d '{"name":"main","payload":"not json","timeout":10000}'
+    -> response contains type "error", server did not crash
+16. curl -s localhost:9876/send_raw -d '{"name":"main","payload":"{\"content\":\"\"}","timeout":10000}'
+    -> response contains type "error"
 17. Health still 200 after error messages
 
-Progressive WS Protocol:
-18. Send a message and verify response has a 'type' field (ack, progress, or response)
-19. Verify final message has type="response" with content field
+Progressive WS Protocol (via harness):
+18. Send a message and verify .exchange[0] has a 'type' field (ack, progress, or response)
+    curl -s localhost:9876/send -d '{"name":"main","content":"Hello","timeout":60000}'
+    -> .exchange array entries have type field
+19. Verify terminal frame has type="response" with content field
+    -> .exchange last entry has type "response"
 
 System Rules:
 20. sdk-capabilities.md inside container does NOT contain "denied by default" for Bash

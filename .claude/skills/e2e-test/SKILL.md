@@ -1,6 +1,6 @@
 ---
 name: e2e-test
-description: Investigative QA for OpenHive. Acts as a skeptical QA engineer — multi-message conversations, independent side-effect verification, root cause investigation.
+description: Investigative QA for OpenHive. Acts as a skeptical QA engineer — sends messages via persistent WS harness, independently verifies side effects, investigates failures.
 user-invocable: true
 ---
 
@@ -8,7 +8,7 @@ user-invocable: true
 
 You are a **skeptical QA engineer**. Assume nothing works until you prove it does. After every AI response, independently verify filesystem and database state. When something fails, investigate WHY — don't just report "FAIL."
 
-**Critical constraint:** Each WebSocket message spawns a FRESH session. There is NO multi-turn conversation state. "Memory" between messages works ONLY through MEMORY.md file persistence + system injection. Design all checks around this reality.
+**Critical constraint:** Each WS message spawns a FRESH server-side session. There is NO multi-turn conversation state. The persistent WS connection is client-side convenience only. "Memory" between messages works ONLY through MEMORY.md file persistence + system injection. Design all checks around this reality.
 
 **Run everything autonomously. Never stop to ask the user if you should proceed.**
 
@@ -16,11 +16,26 @@ You are a **skeptical QA engineer**. Assume nothing works until you prove it doe
 
 ---
 
+## How You Test
+
+You are a **conversational driver**, not a script generator. You send messages via `curl` to the WS harness (`localhost:9876`), read the JSON response, and verify side effects independently via DB queries and filesystem checks.
+
+**Workflow per test step:**
+1. **Send** — `curl localhost:9876/send -d '{"name":"...","content":"...","timeout":300000}'`
+2. **Read response** — Check `.ok`, `.final`, `.exchange` array
+3. **Verify independently** — DB queries, filesystem reads, docker logs
+4. **Check notifications** — `curl localhost:9876/notifications -d '{"name":"..."}'` after every exchange
+5. **Investigate failures** — When something fails, send a follow-up diagnostic question on the same connection. Note: each message is still a fresh session — provide full context in the follow-up message itself.
+
+**Never generate `.cjs` scripts.** All WS interaction goes through the harness.
+
+---
+
 ## Execution Plan
 
 ### Step 1: Setup
 
-Read and execute `.claude/docs/e2e/setup.md` (build, start, wait for health, prepare helpers).
+Read and execute `.claude/docs/e2e/setup.md` (build, start, wait for health, start harness, connect "main").
 
 ### Step 2: Phase A — Smoke Checks
 
@@ -30,9 +45,21 @@ Read and execute `.claude/docs/e2e/smoke-checks.md` (20 deterministic checks).
 
 ### Step 3: Phase B — Investigative QA Scenarios
 
-For each scenario: ACT -> OBSERVE -> VERIFY -> INVESTIGATE -> REPORT.
+For each scenario: SEND → READ RESPONSE → VERIFY INDEPENDENTLY → INVESTIGATE → REPORT.
 
 After every AI response, independently check filesystem + database. Don't trust the AI's claims — verify them.
+
+**Between scenarios:** Run the Clean Restart Helper, then reset the harness and reconnect:
+```bash
+curl -s localhost:9876/reset
+curl -s localhost:9876/connect -d '{"name":"main"}'
+```
+
+**After `docker restart openhive`** (mid-scenario restart, NOT clean restart):
+```bash
+curl -s localhost:9876/reconnect -d '{"name":"main"}'
+```
+Reconnect any other named connections too.
 
 **Scenario 1 — Core Platform:** Read and execute `.claude/docs/e2e/scenario-1-core.md`
 (Identity, memory persistence, skill/rule/memory injection, recovery)
@@ -55,10 +82,9 @@ After every AI response, independently check filesystem + database. Don't trust 
 ### Step 4: Cleanup
 
 ```bash
+curl -s localhost:9876/shutdown
 cd /app/openhive
 sudo docker compose -f deployments/docker-compose.yml down -v 2>&1
-rm -f backend/ws-scenario-*.cjs backend/ws-stress.cjs backend/ws-concurrent.cjs backend/ws-progressive.cjs backend/ws-listener.cjs backend/ws-isolation.cjs
-rm -f /tmp/ws-notifications.log /tmp/ws-isolation.log
 ```
 
 ### Step 5: Final Report

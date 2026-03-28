@@ -1,14 +1,26 @@
 # Scenario 3: Multi-Team, Hierarchy, Routing & Errors
 
-**Run the Clean Restart Helper from setup.md.**
+**Run the Clean Restart Helper from setup.md. Then reset harness and reconnect:**
+```bash
+curl -s localhost:9876/reset
+curl -s localhost:9876/connect -d '{"name":"main"}'
+```
 
 #### Part A: Create Sibling Teams
 
-Write a multi-turn WS script with these messages:
-1. "Create a team called team-alpha for API development. Accept keywords: api, development, coding"
-2. "Create a team called team-beta for operations and monitoring. Accept keywords: ops, monitoring, deployment"
+1. ```bash
+   curl -s localhost:9876/send -d @- <<'EOF'
+   {"name":"main","content":"Create a team called team-alpha for API development. Accept keywords: api, development, coding","timeout":300000}
+   EOF
+   ```
 
-Run it. Then VERIFY independently:
+2. ```bash
+   curl -s localhost:9876/send -d @- <<'EOF'
+   {"name":"main","content":"Create a team called team-beta for operations and monitoring. Accept keywords: ops, monitoring, deployment","timeout":300000}
+   EOF
+   ```
+
+VERIFY independently:
 ```bash
 # Host filesystem
 cat /app/openhive/.run/teams/team-alpha/config.yaml
@@ -29,22 +41,38 @@ D.close();
 
 #### Part B: list_teams & Routing
 
-3. Send: "What teams do you have?"
-   - VERIFY: Response mentions both team-alpha and team-beta with descriptions
-   - VERIFY: Response is NOT "I don't have any teams" (proves list_teams was called)
+3. ```bash
+   curl -s localhost:9876/send -d '{"name":"main","content":"What teams do you have?","timeout":300000}'
+   ```
+   - VERIFY: `.final` mentions both team-alpha and team-beta with descriptions
+   - VERIFY: `.final` is NOT "I don't have any teams" (proves list_teams was called)
 
-4. Send: "Delegate to team-alpha: build a REST endpoint for user profiles"
+4. ```bash
+   curl -s localhost:9876/send -d @- <<'EOF'
+   {"name":"main","content":"Delegate to team-alpha: build a REST endpoint for user profiles","timeout":300000}
+   EOF
+   ```
    - VERIFY DB: `SELECT team_id FROM task_queue ORDER BY created_at DESC LIMIT 1` -> team-alpha
 
-5. Send: "Delegate to team-beta: check production logs for errors"
+5. ```bash
+   curl -s localhost:9876/send -d @- <<'EOF'
+   {"name":"main","content":"Delegate to team-beta: check production logs for errors","timeout":300000}
+   EOF
+   ```
    - VERIFY DB: `SELECT team_id FROM task_queue ORDER BY created_at DESC LIMIT 1` -> team-beta
 
-6. Send: "Get the status of team-alpha"
-   - VERIFY: Response contains status info (not an error)
+6. ```bash
+   curl -s localhost:9876/send -d '{"name":"main","content":"Get the status of team-alpha","timeout":300000}'
+   ```
+   - VERIFY: `.final` contains status info (not an error)
 
 #### Part C: Hierarchy — Child Team Creation
 
-7. Send: "Ask team-alpha to create a child team called alpha-child for frontend work. Accept keywords: frontend, ui"
+7. ```bash
+   curl -s localhost:9876/send -d @- <<'EOF'
+   {"name":"main","content":"Ask team-alpha to create a child team called alpha-child for frontend work. Accept keywords: frontend, ui","timeout":300000}
+   EOF
+   ```
 
 8. Wait for alpha-child bootstrap:
    ```bash
@@ -66,26 +94,42 @@ D.close();
 
 #### Part D: Error Handling
 
-10. Send invalid JSON via WS: send raw bytes `not json at all`
-    - VERIFY: Get error response, connection still alive
+10. Send invalid JSON via harness:
+    ```bash
+    curl -s localhost:9876/send_raw -d '{"name":"main","payload":"not json at all","timeout":10000}'
+    ```
+    - VERIFY: `.exchange` contains an error frame, connection still alive
 
-11. Send: `{"content":""}`
+11. Send empty content:
+    ```bash
+    curl -s localhost:9876/send_raw -d '{"name":"main","payload":"{\"content\":\"\"}","timeout":10000}'
+    ```
     - VERIFY: Error response
 
-12. Send: "Create a team called team-alpha for something"
+12. ```bash
+    curl -s localhost:9876/send -d @- <<'EOF'
+    {"name":"main","content":"Create a team called team-alpha for something","timeout":300000}
+    EOF
+    ```
     - VERIFY: Duplicate rejection (team-alpha already exists)
 
 13. VERIFY: `curl -sf http://localhost:8080/health` still returns 200
 
-14. Send: "Hello, are you still working?"
+14. ```bash
+    curl -s localhost:9876/send -d '{"name":"main","content":"Hello, are you still working?","timeout":300000}'
+    ```
     - VERIFY: Normal response (system recovered from errors)
 
 #### Part E: Shutdown Cascade
 
-15. Send: "Shut down team-alpha"
+15. ```bash
+    curl -s localhost:9876/send -d '{"name":"main","content":"Shut down team-alpha","timeout":300000}'
+    ```
     - VERIFY DB: team-alpha AND alpha-child both removed from org_tree
 
-16. Send: "Shut down team-beta"
+16. ```bash
+    curl -s localhost:9876/send -d '{"name":"main","content":"Shut down team-beta","timeout":300000}'
+    ```
     - VERIFY DB: team-beta removed
 
 17. VERIFY: Health still 200 after all operations

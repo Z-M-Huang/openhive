@@ -1,112 +1,90 @@
 # Scenario 5: Stress, Recovery & Edge Cases
 
-**Run the Clean Restart Helper from setup.md.**
+**Run the Clean Restart Helper from setup.md. Then reset harness and reconnect:**
+```bash
+curl -s localhost:9876/reset
+curl -s localhost:9876/connect -d '{"name":"main"}'
+```
 
 #### Part A: Setup State
 
-1. Send: "Create a team called stress-team for testing. Accept keywords: testing"
+1. ```bash
+   curl -s localhost:9876/send -d @- <<'EOF'
+   {"name":"main","content":"Create a team called stress-team for testing. Accept keywords: testing","timeout":300000}
+   EOF
+   ```
 2. Write memory: `echo "Stress test baseline" > /app/openhive/.run/teams/main/memory/MEMORY.md`
 3. VERIFY: stress-team in org_tree, MEMORY.md exists
 
 #### Part B: Stress Test — 5 Rapid Concurrent Messages
 
-4. Write a concurrent WS script (`/app/openhive/backend/ws-stress.cjs`):
-   ```javascript
-   const WebSocket = require('ws');
-   const messages = [
-     'What is 2+2?',
-     'What is the capital of France?',
-     'List 3 colors',
-     'What teams do you have?',
-     'Who are you?',
-   ];
-   let completed = 0;
-   let successes = 0;
-   let failures = 0;
-   for (let i = 0; i < messages.length; i++) {
-     const ws = new WebSocket('ws://localhost:8080/ws');
-     const allMsgs = [];
-     ws.on('open', () => ws.send(JSON.stringify({ content: messages[i] })));
-     ws.on('message', (d) => {
-       const p = JSON.parse(d.toString());
-       if (p.type === 'notification') return; // skip async notifications
-       allMsgs.push(p);
-       if (p.type === 'response') {
-         console.log(`---RESPONSE ${i + 1} OK (${allMsgs.length} messages, types: ${allMsgs.map(m=>m.type).join(',')})---`);
-         console.log((p.content || '').slice(0, 200));
-         successes++;
-       } else if (p.type === 'error') {
-         console.log(`---RESPONSE ${i + 1} ERROR: ${p.error}---`);
-         failures++;
-       } else { return; } // ack/progress — keep waiting
-       completed++;
-       ws.close();
-       if (completed === messages.length) {
-         console.log(`\nSUMMARY: ${successes} successes, ${failures} failures`);
-         process.exit(failures > 0 ? 1 : 0);
-       }
-     });
-     ws.on('error', (e) => {
-       console.error(`WS_ERROR ${i + 1}: ${e.message}`);
-       failures++;
-       completed++;
-       if (completed === messages.length) process.exit(1);
-     });
-   }
-   setTimeout(() => { console.error('TIMEOUT'); process.exit(2); }, 300000);
+4. Open 5 connections and send in parallel:
+   ```bash
+   for i in 1 2 3 4 5; do
+     curl -s localhost:9876/connect -d "{\"name\":\"s$i\"}"
+   done
    ```
 
-   Run: `node /app/openhive/backend/ws-stress.cjs`
+   Fire all 5 sends in parallel:
+   ```bash
+   curl -s localhost:9876/send -d '{"name":"s1","content":"What is 2+2?","timeout":300000}' > /tmp/stress1.json &
+   curl -s localhost:9876/send -d '{"name":"s2","content":"What is the capital of France?","timeout":300000}' > /tmp/stress2.json &
+   curl -s localhost:9876/send -d '{"name":"s3","content":"List 3 colors","timeout":300000}' > /tmp/stress3.json &
+   curl -s localhost:9876/send -d '{"name":"s4","content":"What teams do you have?","timeout":300000}' > /tmp/stress4.json &
+   curl -s localhost:9876/send -d '{"name":"s5","content":"Who are you?","timeout":300000}' > /tmp/stress5.json &
+   wait
+   ```
 
-5. VERIFY: All 5 got responses (no crashes)
+5. VERIFY: All 5 got responses:
+   ```bash
+   for i in 1 2 3 4 5; do
+     echo "=== Stress $i ==="
+     cat /tmp/stress$i.json | python3 -c "import sys,json; d=json.load(sys.stdin); print('ok:', d.get('ok'), 'final:', (d.get('final','')or'')[:100])" 2>/dev/null || echo "PARSE FAILED"
+   done
+   rm -f /tmp/stress*.json
+   ```
+   - All 5 should have `ok: true`
+
 6. VERIFY: `curl -sf http://localhost:8080/health` returns 200
+
+   ```bash
+   for i in 1 2 3 4 5; do
+     curl -s localhost:9876/disconnect -d "{\"name\":\"s$i\"}"
+   done
+   ```
 
 #### Part C: Per-Socket Request Serialization
 
-7. Test that a second message on the same socket while the first is processing gets rejected:
+7. Test that a second message on the same socket while the first is processing gets rejected.
+   Use `/send_fire` (no client-side serialization) to send two messages rapidly on the same connection, then collect the results:
+
    ```bash
-   cat > /app/openhive/backend/ws-concurrent.cjs << 'EOF'
-   const WebSocket = require('ws');
-   const ws = new WebSocket('ws://localhost:8080/ws');
-   const allMsgs = [];
-   ws.on('open', () => {
-     // Send two messages immediately on the same socket
-     ws.send(JSON.stringify({ content: 'Tell me a long story about dragons' }));
-     // Send second message 100ms later (first is still processing)
-     setTimeout(() => {
-       ws.send(JSON.stringify({ content: 'What is 1+1?' }));
-     }, 100);
-   });
-   ws.on('message', (d) => {
-     const p = JSON.parse(d.toString());
-     allMsgs.push(p);
-     console.log('MSG: type=' + p.type + ' content=' + (p.content || p.error || '').slice(0, 100));
-     // Wait for both the error and the response to come back
-     const hasResponse = allMsgs.some(m => m.type === 'response');
-     const hasError = allMsgs.some(m => m.type === 'error' && (m.error || '').includes('request in progress'));
-     if (hasResponse && hasError) {
-       console.log('SERIALIZATION_VERIFIED: Got both response and "request in progress" error');
-       ws.close();
-       process.exit(0);
-     }
-   });
-   ws.on('error', (e) => { console.error('WS_ERROR:', e.message); process.exit(1); });
-   setTimeout(() => {
-     const hasError = allMsgs.some(m => m.type === 'error' && (m.error || '').includes('request in progress'));
-     const hasResponse = allMsgs.some(m => m.type === 'response');
-     console.log('TIMEOUT: serialization error received=' + hasError + ' response received=' + hasResponse);
-     console.log('All messages: ' + JSON.stringify(allMsgs.map(m => ({type: m.type, content: (m.content||m.error||'').slice(0,80)}))));
-     process.exit(hasError && hasResponse ? 0 : 2);
-   }, 240000);
-   EOF
-   node /app/openhive/backend/ws-concurrent.cjs
+   # Record current seq
+   SEQ_BEFORE=$(curl -s localhost:9876/traffic -d '{"name":"main","limit":1}' | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['entries'][-1]['seq'] if d['entries'] else 0)" 2>/dev/null || echo "0")
+
+   # Fire first message (long-running) — does NOT block
+   curl -s localhost:9876/send_fire -d '{"name":"main","content":"Tell me a long story about dragons"}'
+
+   # Wait 100ms then fire second message — server should reject with "request in progress"
+   sleep 0.1
+   curl -s localhost:9876/send_fire -d '{"name":"main","content":"What is 1+1?"}'
+
+   # Collect all frames — wait for BOTH terminal frames (error + response) using terminal_count: 2
+   curl -s localhost:9876/exchange -d "{\"name\":\"main\",\"since_seq\":$SEQ_BEFORE,\"timeout\":300000,\"terminal_count\":2}"
    ```
-   - VERIFY: Output contains "request in progress" error AND a successful response
+
+   - VERIFY: Exchange frames contain both:
+     - A `type: "error"` frame with content containing "request in progress"
+     - A `type: "response"` frame with the story content
    - This proves per-socket request serialization works
 
 #### Part D: Recovery After Restart
 
-8. `sudo docker restart openhive` — wait for health
+8. `sudo docker restart openhive` — wait for health, then reconnect:
+   ```bash
+   for i in $(seq 1 30); do curl -sf http://localhost:8080/health >/dev/null 2>&1 && echo "Ready" && break; sleep 3; done
+   curl -s localhost:9876/reconnect -d '{"name":"main"}'
+   ```
 
 9. VERIFY post-restart:
    ```bash
@@ -124,19 +102,21 @@
    sudo docker logs openhive 2>&1 | grep "Recovery"
    ```
 
-10. Send: "Hello, are you working?"
-    - VERIFY: Normal response (system works after restart)
+10. ```bash
+    curl -s localhost:9876/send -d '{"name":"main","content":"Hello, are you working?","timeout":300000}'
+    ```
+    - VERIFY: `.final` contains normal response (system works after restart)
 
 11. VERIFY: Health still 200
 
 #### Part E: Cleanup
 
-12. Send: "Shut down stress-team"
+12. ```bash
+    curl -s localhost:9876/send -d '{"name":"main","content":"Shut down stress-team","timeout":300000}'
+    ```
 13. Remove test files:
     ```bash
     rm -f /app/openhive/.run/teams/main/memory/MEMORY.md
-    rm -f /app/openhive/backend/ws-stress.cjs
-    rm -f /app/openhive/backend/ws-concurrent.cjs
     ```
 
 **Report:** All 5 concurrent messages got responses? Per-socket serialization works? Health stable? Recovery preserved all state? System functional after stress?

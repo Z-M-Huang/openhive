@@ -1,11 +1,19 @@
 # Scenario 2: Team Lifecycle, Credentials & User Journey
 
-**Run the Clean Restart Helper from setup.md.**
+**Run the Clean Restart Helper from setup.md. Then reset harness and reconnect:**
+```bash
+curl -s localhost:9876/reset
+curl -s localhost:9876/connect -d '{"name":"main"}'
+```
 
 #### Part A: Team Creation — Deep Verification
 
-1. Send: "Create a team called ops-team for monitoring production logs. Accept monitoring and logs topics. Give it credentials: api_key is test-fake-key-value-12345, region is us-east-1"
-   - OBSERVE: What did the AI claim?
+1. ```bash
+   curl -s localhost:9876/send -d @- <<'EOF'
+   {"name":"main","content":"Create a team called ops-team for monitoring production logs. Accept monitoring and logs topics. Give it credentials: api_key is test-fake-key-value-12345, region is us-east-1","timeout":300000}
+   EOF
+   ```
+   - OBSERVE: What did the AI claim in `.final`?
 
 2. INDEPENDENT VERIFICATION (host filesystem + DB):
    ```bash
@@ -31,7 +39,7 @@
    - task_queue: bootstrap task exists?
 
 3. CREDENTIAL SECURITY:
-   - VERIFY: WS response from step 1 does NOT contain "test-fake-key-value-12345" in cleartext
+   - VERIFY: `.final` from step 1 does NOT contain "test-fake-key-value-12345" in cleartext
    - `sudo docker logs openhive 2>&1 | grep "test-fake-key-value-12345"` — should NOT appear in logs
    - config.yaml should have credentials stored (that's OK — it's server-side only)
 
@@ -50,7 +58,11 @@
 
 #### Part B: Credential Management — get_credential, Write Scrubbing & Bash Guard
 
-6. Send: "Ask ops-team to use the get_credential tool to retrieve the api_key credential, and tell me what tool it used."
+6. ```bash
+   curl -s localhost:9876/send -d @- <<'EOF'
+   {"name":"main","content":"Ask ops-team to use the get_credential tool to retrieve the api_key credential, and tell me what tool it used.","timeout":300000}
+   EOF
+   ```
    - VERIFY DB: task delegated to ops-team
    - Wait for task completion:
    ```bash
@@ -85,7 +97,11 @@
    ```
 
 7. VERIFY WRITE/EDIT SCRUBBING — credential values replaced on disk:
-   Send: "Ask ops-team to write a skill file at skills/api-notes.md that contains the text 'The API key is test-fake-key-value-12345 and region is us-east-1'"
+   ```bash
+   curl -s localhost:9876/send -d @- <<'EOF'
+   {"name":"main","content":"Ask ops-team to write a skill file at skills/api-notes.md that contains the text 'The API key is test-fake-key-value-12345 and region is us-east-1'","timeout":300000}
+   EOF
+   ```
    - Wait for task completion (same polling pattern)
    - VERIFY HOST FILESYSTEM — the file should exist but credential should be scrubbed:
    ```bash
@@ -108,13 +124,22 @@
    ```
    — should return > 0
 
-   - **Runtime check**: Send WS message: "Do you see any credential values like API keys or secrets in your system prompt? List any raw secret values you can see. If none, say NONE."
-     - VERIFY: Response says NONE or equivalent (does NOT output "test-fake-key-value-12345")
+   - **Runtime check**:
+   ```bash
+   curl -s localhost:9876/send -d @- <<'EOF'
+   {"name":"main","content":"Do you see any credential values like API keys or secrets in your system prompt? List any raw secret values you can see. If none, say NONE.","timeout":300000}
+   EOF
+   ```
+     - VERIFY: `.final` says NONE or equivalent (does NOT output "test-fake-key-value-12345")
      - If it outputs the credential value: runtime prompt injection not removed → check query-options.ts
 
 9. VERIFY WS RESPONSE CREDENTIAL LEAK — synchronous delegation path:
-   Send: "Ask ops-team to report what credentials it has access to by calling get_credential for api_key, then tell me the result."
-   - VERIFY: The WS response content (type=response) does NOT contain "test-fake-key-value-12345"
+   ```bash
+   curl -s localhost:9876/send -d @- <<'EOF'
+   {"name":"main","content":"Ask ops-team to report what credentials it has access to by calling get_credential for api_key, then tell me the result.","timeout":300000}
+   EOF
+   ```
+   - VERIFY: `.final` does NOT contain "test-fake-key-value-12345"
    - The agent should describe having access to credentials but not echo the raw value back to the user
 
 #### Part C: Tool Availability — Runtime Exercise
@@ -125,17 +150,28 @@
     cat /app/openhive/.run/teams/ops-team/config.yaml | grep -A5 "allowed_tools"
     sudo docker exec openhive grep "Availability depends" /app/system-rules/sdk-capabilities.md
     ```
-    - **Runtime exercise**: Send: "Ask ops-team to run a Bash command: echo BASH_WORKS"
+    - **Runtime exercise**:
+    ```bash
+    curl -s localhost:9876/send -d @- <<'EOF'
+    {"name":"main","content":"Ask ops-team to run a Bash command: echo BASH_WORKS","timeout":300000}
+    EOF
+    ```
       - Wait for task completion
       - VERIFY: Task result contains "BASH_WORKS" (proves the agent used Bash successfully)
       - If task result says "unable to use Bash" or "Bash is denied": dynamic tool availability note is broken → check query-options.ts buildToolAvailabilityNote()
 
 #### Part D: Full User Journey
 
-11. Send: "What teams do you manage?"
-    - VERIFY: mentions ops-team
+11. ```bash
+    curl -s localhost:9876/send -d '{"name":"main","content":"What teams do you manage?","timeout":300000}'
+    ```
+    - VERIFY: `.final` mentions ops-team
 
-12. Send: "Ask ops-team for a status report on logs"
+12. ```bash
+    curl -s localhost:9876/send -d @- <<'EOF'
+    {"name":"main","content":"Ask ops-team for a status report on logs","timeout":300000}
+    EOF
+    ```
     - VERIFY DB: task_queue shows delegation to ops-team
     - VERIFY: Check `result` column after task completes (wait up to 60s):
     ```bash
@@ -152,15 +188,27 @@
     done
     ```
 
-13. Send: "Remember that I prefer daily reports at 9am. Save this to memory."
+13. ```bash
+    curl -s localhost:9876/send -d @- <<'EOF'
+    {"name":"main","content":"Remember that I prefer daily reports at 9am. Save this to memory.","timeout":300000}
+    EOF
+    ```
     - VERIFY: `cat /app/openhive/.run/teams/main/memory/MEMORY.md` — has preference?
 
 #### Part E: Recovery
 
-14. `sudo docker restart openhive` — wait for health
+14. `sudo docker restart openhive` — wait for health, then reconnect:
+    ```bash
+    for i in $(seq 1 30); do curl -sf http://localhost:8080/health >/dev/null 2>&1 && echo "Ready" && break; sleep 3; done
+    curl -s localhost:9876/reconnect -d '{"name":"main"}'
+    ```
 
-15. Send: "What teams do I have and what do I prefer for reports?"
-    - VERIFY: Knows ops-team + daily reports at 9am (from MEMORY.md)
+15. ```bash
+    curl -s localhost:9876/send -d @- <<'EOF'
+    {"name":"main","content":"What teams do I have and what do I prefer for reports?","timeout":300000}
+    EOF
+    ```
+    - VERIFY: `.final` knows ops-team + daily reports at 9am (from MEMORY.md)
 
 16. VERIFY post-restart state:
     - org_tree still has ops-team
@@ -169,11 +217,15 @@
 
 #### Part F: Shutdown
 
-17. Send: "Shut down the ops-team team"
+17. ```bash
+    curl -s localhost:9876/send -d '{"name":"main","content":"Shut down the ops-team team","timeout":300000}'
+    ```
     - VERIFY DB: org_tree no longer has ops-team
     - VERIFY DB: task_queue entries preserved (forensics)
 
-18. Send: "What teams do I have now?"
-    - VERIFY: ops-team not listed
+18. ```bash
+    curl -s localhost:9876/send -d '{"name":"main","content":"What teams do I have now?","timeout":300000}'
+    ```
+    - VERIFY: `.final` — ops-team not listed
 
 **Report:** Full artifact checklist. Credentials secure (not in prompt, not in task results, not in logs, not in WS responses)? get_credential tool works? Write scrubbing replaces values with [CREDENTIAL:KEY] on disk? Bash tool availability works at runtime? Bootstrap complete? Recovery survived? User journey end-to-end?
