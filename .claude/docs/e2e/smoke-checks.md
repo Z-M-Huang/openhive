@@ -43,10 +43,20 @@ System Rules:
     sudo docker exec openhive grep -c "denied by default" /app/system-rules/sdk-capabilities.md
     — should return 0
 
-Report: N/20 smoke checks passed.
+Browser Relay:
+21. Container has @playwright/mcp installed:
+    sudo docker exec deployments-openhive-1 node -e "require('@playwright/mcp'); console.log('OK')"
+    — should print OK (if not, browser scenarios 7-10 will be skipped)
+22. Startup logs contain browser relay status:
+    sudo docker logs deployments-openhive-1 2>&1 | grep -i "browser relay\|playwright"
+    — should show "Browser relay initialized" with tool count
+    — OR "browser tools disabled" (graceful degradation — acceptable, browser scenarios skipped)
+
+Report: N/22 smoke checks passed.
 
 **STOP GATE:** If any smoke check fails, investigate container logs
 (`sudo docker logs openhive 2>&1`) and report root causes
-BEFORE proceeding to Phase B. Only proceed when all 20 pass or failures
-are understood and documented.
+BEFORE proceeding to Phase B. Only proceed when all 22 pass or failures
+are understood and documented. If checks 21-22 fail, skip browser
+scenarios (7-10) but continue with scenarios 1-6.
 ```

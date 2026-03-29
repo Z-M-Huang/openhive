@@ -39,9 +39,9 @@ Read and execute `.claude/docs/e2e/setup.md` (build, start, wait for health, sta
 
 ### Step 2: Phase A — Smoke Checks
 
-Read and execute `.claude/docs/e2e/smoke-checks.md` (20 deterministic checks).
+Read and execute `.claude/docs/e2e/smoke-checks.md` (22 deterministic checks).
 
-**STOP GATE:** All 20 must pass (or failures understood) before continuing.
+**STOP GATE:** All 22 must pass (or failures understood) before continuing. If browser checks 21-22 fail, browser scenarios 7-10 are skipped.
 
 ### Step 3: Phase B — Investigative QA Scenarios
 
@@ -79,6 +79,20 @@ Reconnect any other named connections too.
 **Scenario 6 — Progressive WS Responses:** Read and execute `.claude/docs/e2e/scenario-6-protocol.md`
 (Message types ack/progress/response, ordering, error protocol, JSON structure)
 
+**Scenario 7 — Browser Tool Gating:** Read and execute `.claude/docs/e2e/scenario-7-browser-gating.md`
+(Pre-flight, Gate 1 MCP registration, Gate 2 allowed_tools, domain allowlist, graceful degradation)
+
+**Scenario 8 — Browser Operations:** Read and execute `.claude/docs/e2e/scenario-8-browser-ops.md`
+(Navigation + snapshot, screenshot ImageContent, SSRF protection for metadata/localhost/RFC1918)
+
+**Scenario 9 — Browser Isolation:** Read and execute `.claude/docs/e2e/scenario-9-browser-isolation.md`
+(Two teams with different domain allowlists, cross-team domain isolation, delegation + file write)
+
+**Scenario 10 — Browser Lifecycle:** Read and execute `.claude/docs/e2e/scenario-10-browser-lifecycle.md`
+(Idle TTL cleanup, on-demand re-spawn, restart persistence — continues from Scenario 9, NO clean restart)
+
+**NOTE:** If smoke checks 21-22 (browser relay) failed, skip scenarios 7-10 entirely.
+
 ### Step 4: Cleanup
 
 ```bash
@@ -93,7 +107,7 @@ sudo docker compose -f deployments/docker-compose.yml down -v 2>&1
 === OpenHive QA Investigation Report ===
 
 Phase A: Smoke Checks
-  N/20 passed
+  N/22 passed
   Failures: [list with evidence]
 
 Phase B: Investigative Scenarios
@@ -143,6 +157,31 @@ Phase B: Investigative Scenarios
     - Simple request protocol: [pass/fail]
     - Error messages follow protocol: [pass/fail]
     - JSON structure consistency: [pass/fail]
+  Scenarios 7-10 (Browser): Mark "skipped" if smoke checks 21-22 failed.
+  Scenario 7 (Browser Gating):          [summary + evidence]
+    - Pre-flight (@playwright/mcp installed): [pass/fail/skipped]
+    - Gate 1 (MCP registration — browser: config): [pass/fail/skipped]
+    - Gate 2 (allowed_tools restriction): [pass/fail/skipped]
+    - Domain allowlist (allowed vs blocked): [pass/fail/skipped]
+    - Graceful degradation: [pass/fail/skipped]
+  Scenario 8 (Browser Operations):      [summary + evidence]
+    - Navigation + accessibility snapshot: [pass/fail/skipped]
+    - Screenshot (ImageContent passthrough): [pass/fail/skipped]
+    - SSRF metadata endpoint (169.254.169.254): [pass/fail/skipped]
+    - SSRF localhost (127.0.0.1): [pass/fail/skipped]
+    - SSRF RFC1918 (10.0.0.1): [pass/fail/skipped]
+  Scenario 9 (Browser Isolation):       [summary + evidence]
+    - Two separate relay processes: [pass/fail/skipped]
+    - Domain isolation (cross-team blocked): [pass/fail/skipped]
+    - Process isolation (separate PIDs): [pass/fail/skipped]
+    - Delegation + browser + file write: [pass/fail/skipped]
+    - Main team without browser: [pass/fail/skipped]
+  Scenario 10 (Browser Lifecycle):      [summary + evidence]
+    - Idle TTL cleanup (processes killed): [pass/fail/skipped]
+    - On-demand re-spawn after cleanup: [pass/fail/skipped]
+    - Config survived restart: [pass/fail/skipped]
+    - Org tree survived restart: [pass/fail/skipped]
+    - Browser tools functional after restart: [pass/fail/skipped]
 
 Critical Findings:
   [List any bugs found with root cause analysis]
