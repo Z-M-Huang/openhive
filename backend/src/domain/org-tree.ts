@@ -69,6 +69,10 @@ export class OrgTree {
     this.store.removeScopeKeywords(teamId);
   }
 
+  removeScopeKeyword(teamId: string, keyword: string): void {
+    this.store.removeScopeKeyword(teamId, keyword);
+  }
+
   getOwnScope(teamId: string): string[] {
     return this.store.getOwnScope(teamId);
   }

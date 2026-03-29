@@ -220,6 +220,7 @@ describe('Layer 0: Interfaces exist', () => {
       getAll: () => [],
       addScopeKeywords: () => {},
       removeScopeKeywords: () => {},
+      removeScopeKeyword: () => {},
       getOwnScope: () => [],
       getEffectiveScope: () => [],
     };

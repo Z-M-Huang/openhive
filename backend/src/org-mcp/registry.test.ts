@@ -19,8 +19,16 @@ describe('UT-6: Core tools registered', () => {
     ({ server } = setupServer());
   });
 
-  it('registers exactly 9 core tools (trigger tools require configStore)', () => {
-    expect(server.tools.size).toBe(9);
+  it('registers exactly 10 core tools (trigger tools require configStore)', () => {
+    expect(server.tools.size).toBe(10);
+  });
+
+  it('registers update_team with correct name', () => {
+    const tool = server.tools.get('update_team');
+    expect(tool).toBeDefined();
+    expect(tool!.name).toBe('update_team');
+    expect(tool!.description).toBeTruthy();
+    expect(tool!.inputSchema).toBeDefined();
   });
 
   it('registers spawn_team with correct name', () => {
@@ -111,6 +119,7 @@ describe('Trigger tools registered with configStore + triggerEngine', () => {
     expect(server.tools.has('disable_trigger')).toBe(true);
     expect(server.tools.has('list_triggers')).toBe(true);
     expect(server.tools.has('test_trigger')).toBe(true);
+    expect(server.tools.has('update_trigger')).toBe(true);
     expect(server.tools.has('sync_team_triggers')).toBe(false);
   });
 

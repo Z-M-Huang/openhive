@@ -54,6 +54,7 @@ export interface IOrgStore {
   getAll(): OrgTreeNode[];
   addScopeKeywords(teamId: string, keywords: string[]): void;
   removeScopeKeywords(teamId: string): void;
+  removeScopeKeyword(teamId: string, keyword: string): void;
   getOwnScope(teamId: string): string[];
   getEffectiveScope(teamId: string): string[];
 }

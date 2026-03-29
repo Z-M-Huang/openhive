@@ -4,7 +4,7 @@
  * Stores flat org tree rows and reconstructs hierarchy on read.
  */
 
-import { eq } from 'drizzle-orm';
+import { eq, and } from 'drizzle-orm';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import type Database from 'better-sqlite3';
 import type { IOrgStore } from '../../domain/interfaces.js';
@@ -82,6 +82,15 @@ export class OrgStore implements IOrgStore {
   removeScopeKeywords(teamId: string): void {
     this.db.delete(schema.scopeKeywords)
       .where(eq(schema.scopeKeywords.teamId, teamId))
+      .run();
+  }
+
+  removeScopeKeyword(teamId: string, keyword: string): void {
+    this.db.delete(schema.scopeKeywords)
+      .where(and(
+        eq(schema.scopeKeywords.teamId, teamId),
+        eq(schema.scopeKeywords.keyword, keyword.toLowerCase().trim()),
+      ))
       .run();
   }
 

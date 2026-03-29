@@ -134,9 +134,20 @@ export class TaskConsumer {
           });
 
           // Notify originating channel (or broadcast if no source)
-          if (this.#notifyChannel && safeResponse) {
-            const notif = `[${task.teamId}] Task completed: ${dequeued.task}\n\nResult: ${safeResponse}`;
-            this.#notifyChannel(notif, dequeued.sourceChannelId).catch(() => {});
+          // Internal tasks (e.g. bootstrap) get a clean summary — no implementation details
+          if (this.#notifyChannel) {
+            const isInternal = taskOpts['internal'] === true;
+            let notif: string | null = null;
+            if (isInternal) {
+              notif = isError
+                ? `[${task.teamId}] Team bootstrap failed — check logs for details.`
+                : `[${task.teamId}] Team bootstrapped and ready.`;
+            } else if (safeResponse) {
+              notif = `[${task.teamId}] ${safeResponse}`;
+            }
+            if (notif) {
+              this.#notifyChannel(notif, dequeued.sourceChannelId).catch(() => {});
+            }
           }
         } catch (err) {
           this.#taskQueue.updateStatus(dequeued.id, TaskStatus.Failed);

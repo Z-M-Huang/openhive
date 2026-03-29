@@ -209,13 +209,13 @@ function enqueueInitTask(
       '(3) Write memory/MEMORY.md with your identity, current state, and key references, ' +
       '(4) If memory/.bootstrapped exists, skip — you are already initialized, ' +
       '(5) Create memory/.bootstrapped when done, ' +
-      '(6) Summarize what you set up.'
+      '(6) Respond with a brief, user-friendly summary of what capabilities you now have — do NOT list file paths or internal details.'
     : 'Bootstrap this team. Your description and scope are in your system prompt. ' +
       'Create initial skills in skills/ and write memory/MEMORY.md with your identity. ' +
       'Create memory/.bootstrapped when done.';
 
   try {
-    deps.taskQueue.enqueue(name, initPayload, TaskPriority.Critical);
+    deps.taskQueue.enqueue(name, initPayload, TaskPriority.Critical, undefined, JSON.stringify({ internal: true }));
     return null;
   } catch (err) {
     // Roll back everything: session + org tree + dirs

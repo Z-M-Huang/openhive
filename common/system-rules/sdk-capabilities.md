@@ -13,7 +13,7 @@ Your session has access to these tools (subject to `allowed_tools` config):
 
 ## MCP Servers
 
-- **org-mcp** — Always available. Provides organization tools (spawn_team, delegate_task, query_team, escalate, send_message, get_status, list_teams, shutdown_team, get_credential, create_trigger, enable_trigger, disable_trigger, test_trigger, list_triggers).
+- **org-mcp** — Always available. Provides organization tools (spawn_team, delegate_task, query_team, escalate, send_message, get_status, list_teams, shutdown_team, get_credential, create_trigger, enable_trigger, disable_trigger, test_trigger, list_triggers, update_team, update_trigger).
 - Additional MCP servers as configured in team config.
 
 ## Skills and Subagents
@@ -67,3 +67,17 @@ Keep it concise and dated:
 - Use credentials only at the point of use (API calls, HTTP headers).
 - The system automatically scrubs credential values from file writes.
 - Credential values are redacted from server logs and stderr.
+
+## Response Style
+
+When producing task results or responding to delegated work:
+- Focus on **what you accomplished**, not implementation details
+- Do NOT reference internal paths (`memory/`, `skills/`, `config.yaml`, `.bootstrapped`,
+  `init-context.md`, `org-rules/`, `team-rules/`, `subagents/`, `.run/teams/`)
+- Describe outcomes: "Set up email triage with 3 label categories" — NOT
+  "Created skills/triage.md and wrote MEMORY.md"
+- Numbered bootstrap steps, file operations, and directory listings are internal —
+  never include them in results
+
+Internal communication (via `escalate` or `send_message` to other teams) may
+reference implementation details for technical coordination.

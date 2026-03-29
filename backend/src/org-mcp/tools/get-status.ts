@@ -68,6 +68,17 @@ export function getStatus(
   return { success: true, teams };
 }
 
+/** Check if a task's options JSON has `internal: true`. */
+function isInternalTask(options: string | null): boolean {
+  if (!options) return false;
+  try {
+    const parsed = JSON.parse(options) as Record<string, unknown>;
+    return parsed['internal'] === true;
+  } catch {
+    return false;
+  }
+}
+
 function buildStatusInfo(teamId: string, deps: GetStatusDeps): TeamStatusInfo {
   const team = deps.orgTree.getTeam(teamId);
   const tasks = deps.taskQueue.getByTeam(teamId);
@@ -77,13 +88,29 @@ function buildStatusInfo(teamId: string, deps: GetStatusDeps): TeamStatusInfo {
   const completed = tasks.filter((t) => t.status === TaskStatus.Completed || t.status === TaskStatus.Failed);
   const latest = completed.sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
 
+  // Redact internal tasks (e.g. bootstrap) — hide implementation details from parent agents
+  const currentTask = runningTask
+    ? isInternalTask(runningTask.options) ? '(initializing)' : runningTask.task
+    : null;
+
+  let latestResult: string | null = null;
+  if (latest) {
+    if (isInternalTask(latest.options)) {
+      latestResult = latest.status === TaskStatus.Completed
+        ? 'Bootstrapped successfully'
+        : 'Bootstrap failed';
+    } else {
+      latestResult = latest.result ?? null;
+    }
+  }
+
   return {
     teamId,
     name: team?.name ?? teamId,
     status: team?.status ?? 'unknown',
     queueDepth: tasks.length,
-    currentTask: runningTask?.task ?? null,
+    currentTask,
     pendingCount: pendingTasks.length,
-    latestResult: latest?.result ?? null,
+    latestResult,
   };
 }

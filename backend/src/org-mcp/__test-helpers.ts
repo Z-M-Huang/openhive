@@ -65,6 +65,9 @@ export function createMemoryOrgStore(): IOrgStore {
       scopeMap.set(teamId, set);
     },
     removeScopeKeywords(teamId: string): void { scopeMap.delete(teamId); },
+    removeScopeKeyword(teamId: string, keyword: string): void {
+      scopeMap.get(teamId)?.delete(keyword.toLowerCase().trim());
+    },
     getOwnScope(teamId: string): string[] { return [...(scopeMap.get(teamId) ?? [])]; },
     getEffectiveScope(teamId: string): string[] {
       const collect = (id: string): string[] => {

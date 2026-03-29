@@ -14,7 +14,7 @@
 - Team config loading MUST use the shared `loadConfig()`/`safeLoadConfig()` from index.ts
 
 ## Lifecycle & Triggers
-- Triggers are managed exclusively via MCP tools (create_trigger, enable_trigger, disable_trigger, list_triggers, test_trigger)
+- Triggers are managed exclusively via MCP tools (create_trigger, enable_trigger, disable_trigger, list_triggers, test_trigger, update_trigger)
 - The `TriggerEngine` MUST support dynamic registration (not just startup-time)
 - At startup, `loadFromStore()` loads all active triggers from the SQLite `trigger_configs` table
 
