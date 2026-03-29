@@ -1,11 +1,4 @@
-/**
- * OpenHive v3 entry point — bootstrap and graceful shutdown.
- *
- * Three-tier data model:
- *   Tier 1: /app/system-rules/  (baked into image, immutable)
- *   Tier 2: /data/              (admin config + org rules, read-only volume)
- *   Tier 3: .run/               (runtime workspace, writable volume)
- */
+/** OpenHive v3 entry point — bootstrap and graceful shutdown. */
 
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
@@ -26,6 +19,7 @@ import { recoverFromCrash } from './recovery/startup-recovery.js';
 import {
   ensureRunDir, seedOrgRules, initStorage,
   initTriggerEngine, initChannels, ensureMainTeam,
+  initBrowserRelay,
 } from './bootstrap-helpers.js';
 import type { TriggerEngine } from './triggers/engine.js';
 import type { ChannelMessage } from './domain/interfaces.js';
@@ -97,6 +91,7 @@ function buildOrgMcpDeps(
     escalationStore: import('./domain/interfaces.js').IEscalationStore;
     triggerConfigStore: import('./domain/interfaces.js').ITriggerConfigStore;
     runDir: string; logger: AppLogger;
+    browserRelay?: import('./org-mcp/browser-proxy.js').BrowserRelay;
   },
   getQueryRunner: () => import('./org-mcp/registry.js').TeamQueryRunner | undefined,
   getTriggerEngine: () => TriggerEngine | undefined,
@@ -118,6 +113,7 @@ function buildOrgMcpDeps(
     log: (msg, meta) => opts.logger.info(msg, meta),
     get queryRunner() { return getQueryRunner(); },
     get triggerEngine() { return getTriggerEngine(); },
+    browserRelay: opts.browserRelay,
   };
 }
 
@@ -154,6 +150,10 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   ensureMainTeam(runDir, orgTree);
   const sessionManager = new TeamRegistry();
 
+  // Browser relay initializes in background — lazy getter defers until ready
+  let browserRelayRef: import('./org-mcp/browser-proxy.js').BrowserRelay | undefined;
+  const browserRelayReady = initBrowserRelay(logger).then(r => { browserRelayRef = r; });
+
   // Lazy refs — break circular dependency between org-MCP and trigger engine / query runner
   let queryRunnerRef: import('./org-mcp/registry.js').TeamQueryRunner | undefined;
   let triggerEngineRef: TriggerEngine | undefined;
@@ -161,7 +161,8 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   const { triggerConfigStore } = stores;
 
   const orgMcpDeps = buildOrgMcpDeps(
-    { orgTree, sessionManager, taskQueueStore, escalationStore, triggerConfigStore, runDir, logger },
+    { orgTree, sessionManager, taskQueueStore, escalationStore, triggerConfigStore, runDir, logger,
+      get browserRelay() { return browserRelayRef; } },
     () => queryRunnerRef,
     () => triggerEngineRef,
   );
@@ -287,13 +288,12 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   const shutdown = async (): Promise<void> => {
     taskConsumer?.stop(); triggerEngine.stop();
     await channelRouter.stop(); sessionManager.stopAll();
-    orgMcpHttpServer.close();
-    await fastify.close(); raw.close();
+    await browserRelayReady; await browserRelayRef?.close();
+    orgMcpHttpServer.close(); await fastify.close(); raw.close();
   };
 
-  const result: BootstrapResult = {
+  return {
     logger, raw, fastify, sessionManager, triggerEngine, channelRouter, orgTree,
     orgToolInvoker, providersConfig, dataDir, runDir, systemRulesDir, shutdown,
   };
-  return result;
 }

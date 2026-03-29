@@ -188,6 +188,64 @@ describe('Trigger tools registered with configStore + triggerEngine', () => {
   });
 });
 
+// ── Browser tool registration ────────────────────────────────────────────
+
+describe('Browser tools registered with browserRelay', () => {
+  it('includes browser tools when browserRelay is available', () => {
+    const f = setupServer();
+    const mockRelay = {
+      available: true,
+      getToolNames: () => ['browser_navigate', 'browser_snapshot'],
+      callTool: vi.fn().mockResolvedValue([]),
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+    const server = createToolInvoker({
+      orgTree: f.orgTree,
+      spawner: f.spawner,
+      sessionManager: f.sessionManager,
+      taskQueue: f.taskQueue,
+      escalationStore: f.escalationStore,
+      runDir: '/tmp/openhive-test',
+      loadConfig: () => { throw new Error('no config'); },
+      getTeamConfig: () => undefined,
+      log: () => {},
+      browserRelay: mockRelay,
+    });
+
+    expect(server.tools.has('browser_navigate')).toBe(true);
+    expect(server.tools.has('browser_snapshot')).toBe(true);
+    expect(server.tools.has('browser_screenshot')).toBe(true);
+    expect(server.tools.has('browser_click')).toBe(true);
+    expect(server.tools.has('browser_type')).toBe(true);
+    expect(server.tools.has('browser_go_back')).toBe(true);
+    expect(server.tools.has('browser_go_forward')).toBe(true);
+    expect(server.tools.has('browser_close')).toBe(true);
+  });
+
+  it('excludes browser tools when browserRelay is undefined', () => {
+    const f = setupServer();
+    expect(f.server.tools.has('browser_navigate')).toBe(false);
+  });
+
+  it('excludes browser tools when browserRelay is not available', () => {
+    const f = setupServer();
+    const server = createToolInvoker({
+      orgTree: f.orgTree,
+      spawner: f.spawner,
+      sessionManager: f.sessionManager,
+      taskQueue: f.taskQueue,
+      escalationStore: f.escalationStore,
+      runDir: '/tmp/openhive-test',
+      loadConfig: () => { throw new Error('no config'); },
+      getTeamConfig: () => undefined,
+      log: () => {},
+      browserRelay: { available: false, getToolNames: () => [], callTool: vi.fn(), close: vi.fn() },
+    });
+
+    expect(server.tools.has('browser_navigate')).toBe(false);
+  });
+});
+
 // ── R-1: Server error handling ──────────────────────────────────────────
 
 describe('R-1: Server error handling', () => {

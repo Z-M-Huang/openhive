@@ -24,6 +24,8 @@ import { QueryTeamInputSchema, queryTeam } from './tools/query-team.js';
 import { ListTeamsInputSchema, listTeams } from './tools/list-teams.js';
 import type { TriggerEngine } from '../triggers/engine.js';
 import { GetCredentialInputSchema, getCredential } from './tools/get-credential.js';
+import type { BrowserRelay } from './browser-proxy.js';
+import { buildBrowserToolDefs } from './browser-tools.js';
 import { CreateTriggerInputSchema, createTrigger } from './tools/create-trigger.js';
 import { EnableTriggerInputSchema, enableTrigger } from './tools/enable-trigger.js';
 import { DisableTriggerInputSchema, disableTrigger } from './tools/disable-trigger.js';
@@ -84,6 +86,7 @@ export interface OrgMcpDeps {
   readonly queryRunner?: TeamQueryRunner;
   readonly triggerEngine?: TriggerEngine;
   readonly triggerConfigStore?: ITriggerConfigStore;
+  readonly browserRelay?: BrowserRelay;
 }
 
 export interface OrgToolInvoker {
@@ -248,6 +251,11 @@ export function buildToolDefs(deps: OrgMcpDeps): ToolDefinition[] {
       },
     });
 
+  }
+
+  // Browser tools (require browserRelay)
+  if (deps.browserRelay?.available) {
+    tools.push(...buildBrowserToolDefs({ ...deps, browserRelay: deps.browserRelay }));
   }
 
   return tools;

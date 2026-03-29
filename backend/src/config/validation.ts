@@ -24,6 +24,10 @@ export const TeamConfigSchema = z.object({
   provider_profile: z.string().min(1),
   maxTurns: z.number().int().positive().default(50),
   credentials: z.record(z.string(), z.string()).optional().default({}),
+  browser: z.object({
+    allowed_domains: z.array(z.string()).optional(),
+    timeout_ms: z.number().int().positive().optional().default(30000),
+  }).optional(),
 });
 
 export type TeamConfigInput = z.input<typeof TeamConfigSchema>;

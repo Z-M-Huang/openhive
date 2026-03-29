@@ -482,6 +482,102 @@ describe('UT-5: Audit Logger', () => {
     expect(logMessages).toHaveLength(1);
     expect(logMessages[0]?.meta?.['durationMs']).toBeUndefined();
   });
+
+  // ── Dynamic credential extraction tests ──────────────────────────────
+
+  it('PreToolUse scrubs credentials from tool_input', async () => {
+    const credValue = randomBytes(16).toString('hex');
+    const { hook } = createAuditPreHook(logger);
+
+    await hook(
+      hookInput({ tool_name: 'spawn_team', tool_input: { name: 'child', credentials: { api_key: credValue } } }),
+      'tu-dyn1',
+      hookOpts,
+    );
+
+    expect(logMessages).toHaveLength(1);
+    const params = logMessages[0]?.meta?.['params'] as Record<string, unknown>;
+    const paramStr = JSON.stringify(params);
+    expect(paramStr).not.toContain(credValue);
+    expect(paramStr).toContain('[REDACTED]');
+  });
+
+  it('PostToolUse scrubs credentials echoed in tool_response', async () => {
+    const credValue = randomBytes(16).toString('hex');
+    const startTimes = new Map<string, number>();
+    const postHook = createAuditPostHook(logger, startTimes);
+
+    await postHook(
+      hookInput({
+        tool_name: 'spawn_team',
+        tool_input: { name: 'child', credentials: { api_key: credValue } },
+        tool_response: { status: 'ok', echo: credValue },
+      }),
+      'tu-dyn2',
+      hookOpts,
+    );
+
+    expect(logMessages).toHaveLength(1);
+    const summary = logMessages[0]?.meta?.['summary'] as string;
+    expect(summary).not.toContain(credValue);
+    expect(summary).toContain('[REDACTED]');
+  });
+
+  it('PreToolUse extracts credentials generically (not tool-name specific)', async () => {
+    const credValue = randomBytes(16).toString('hex');
+    const { hook } = createAuditPreHook(logger);
+
+    await hook(
+      hookInput({ tool_name: 'custom_tool', tool_input: { credentials: { token: credValue } } }),
+      'tu-dyn3',
+      hookOpts,
+    );
+
+    expect(logMessages).toHaveLength(1);
+    const params = logMessages[0]?.meta?.['params'] as Record<string, unknown>;
+    const paramStr = JSON.stringify(params);
+    expect(paramStr).not.toContain(credValue);
+    expect(paramStr).toContain('[REDACTED]');
+  });
+
+  it('PreToolUse skips short credential values (< 8 chars)', async () => {
+    const { hook } = createAuditPreHook(logger);
+
+    await hook(
+      hookInput({ tool_name: 'spawn_team', tool_input: { credentials: { pin: 'short' } } }),
+      'tu-dyn4',
+      hookOpts,
+    );
+
+    expect(logMessages).toHaveLength(1);
+    const params = logMessages[0]?.meta?.['params'] as Record<string, unknown>;
+    const paramStr = JSON.stringify(params);
+    expect(paramStr).toContain('short');
+  });
+
+  it('Pre-configured rawSecrets AND dynamic credentials both scrubbed', async () => {
+    const dynamicCred = randomBytes(16).toString('hex');
+    const staticCred = randomBytes(16).toString('hex');
+    const { hook } = createAuditPreHook(logger, [], [staticCred]);
+
+    await hook(
+      hookInput({
+        tool_name: 'spawn_team',
+        tool_input: {
+          credentials: { new_key: dynamicCred },
+          command: `use ${staticCred} and ${dynamicCred}`,
+        },
+      }),
+      'tu-dyn5',
+      hookOpts,
+    );
+
+    expect(logMessages).toHaveLength(1);
+    const params = logMessages[0]?.meta?.['params'] as Record<string, unknown>;
+    const paramStr = JSON.stringify(params);
+    expect(paramStr).not.toContain(dynamicCred);
+    expect(paramStr).not.toContain(staticCred);
+  });
 });
 
 // ── Hook Composer ──────────────────────────────────────────────────────────

@@ -194,3 +194,22 @@ export function ensureMainTeam(runDir: string, orgTree: OrgTree): void {
     });
   }
 }
+
+export async function initBrowserRelay(
+  logger: AppLogger,
+): Promise<import('./org-mcp/browser-proxy.js').BrowserRelay | undefined> {
+  try {
+    const { createBrowserRelay } = await import('./org-mcp/browser-proxy.js');
+    const relay = await createBrowserRelay({ logger });
+    logger.info('Browser relay initialized', { tools: relay.getToolNames().length });
+    return relay;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const isModuleError = msg.includes('Cannot find module') || msg.includes('MODULE_NOT_FOUND');
+    const logMsg = isModuleError
+      ? 'Browser relay failed to initialize — @playwright/mcp not found, please update to the latest OpenHive version'
+      : `Browser relay failed to initialize: ${msg}`;
+    logger.error(logMsg, { error: msg });
+    return undefined;
+  }
+}

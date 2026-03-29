@@ -38,7 +38,7 @@ export function buildHookConfig(opts: BuildHookConfigOpts): HookConfig {
   const bashCredentialGuard = createBashCredentialGuard(() => opts.teamCredentials ?? {});
   const teamCredentialValues = opts.teamCredentials
     ? [...new Set(Object.values(opts.teamCredentials).filter(
-        (v): v is string => typeof v === 'string' && v.length >= 4,
+        (v): v is string => typeof v === 'string' && v.length >= 8,
       ))]
     : [];
   const { hook: auditPreHook, startTimes } = createAuditPreHook(opts.logger, opts.knownSecrets, teamCredentialValues);

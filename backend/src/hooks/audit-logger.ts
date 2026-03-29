@@ -31,8 +31,18 @@ export function createAuditPreHook(
     if (toolUseId) {
       startTimes.set(toolUseId, now);
     }
+    // Augment rawSecrets for credential-bearing tools (e.g. spawn_team)
+    let effectiveRawSecrets: readonly string[] = rawSecrets;
+    if (tool_input && typeof tool_input === 'object') {
+      const creds = (tool_input as Record<string, unknown>).credentials;
+      if (creds && typeof creds === 'object' && !Array.isArray(creds)) {
+        const extra = Object.values(creds as Record<string, unknown>)
+          .filter((v): v is string => typeof v === 'string' && v.length >= 8);
+        if (extra.length > 0) effectiveRawSecrets = [...rawSecrets, ...extra];
+      }
+    }
     const rawParams = JSON.stringify(tool_input);
-    const scrubbedJson = scrubSecrets(rawParams, knownSecrets, rawSecrets);
+    const scrubbedJson = scrubSecrets(rawParams, knownSecrets, effectiveRawSecrets);
     let params: unknown;
     try {
       params = JSON.parse(scrubbedJson) as unknown;
@@ -66,7 +76,7 @@ export function createAuditPostHook(
   rawSecrets: readonly string[] = [],
 ): HookCallback {
   return (input, toolUseId) => {
-    const { tool_name, tool_response } = input as { tool_name: string; tool_response?: unknown };
+    const { tool_name, tool_input, tool_response } = input as { tool_name: string; tool_input?: unknown; tool_response?: unknown };
     const start = toolUseId ? startTimes.get(toolUseId) : undefined;
     const durationMs = start !== undefined ? Date.now() - start : undefined;
 
@@ -74,9 +84,20 @@ export function createAuditPostHook(
       startTimes.delete(toolUseId);
     }
 
+    // Augment rawSecrets for credential-bearing tools (e.g. spawn_team)
+    let effectiveRawSecrets: readonly string[] = rawSecrets;
+    if (tool_input && typeof tool_input === 'object') {
+      const creds = (tool_input as Record<string, unknown>).credentials;
+      if (creds && typeof creds === 'object' && !Array.isArray(creds)) {
+        const extra = Object.values(creds as Record<string, unknown>)
+          .filter((v): v is string => typeof v === 'string' && v.length >= 8);
+        if (extra.length > 0) effectiveRawSecrets = [...rawSecrets, ...extra];
+      }
+    }
+
     // Scrub BEFORE truncating to prevent partial secret leakage at cutoff
     const summary = tool_response
-      ? scrubSecrets(JSON.stringify(tool_response), knownSecrets, rawSecrets).slice(0, 200)
+      ? scrubSecrets(JSON.stringify(tool_response), knownSecrets, effectiveRawSecrets).slice(0, 200)
       : undefined;
 
     logger.info('PostToolUse', {

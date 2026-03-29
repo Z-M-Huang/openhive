@@ -13,7 +13,7 @@ Your session has access to these tools (subject to `allowed_tools` config):
 
 ## MCP Servers
 
-- **org-mcp** — Always available. Provides organization tools (spawn_team, delegate_task, query_team, escalate, send_message, get_status, list_teams, shutdown_team, get_credential, create_trigger, enable_trigger, disable_trigger, test_trigger, list_triggers, update_team, update_trigger).
+- **org-mcp** — Always available. Provides organization tools (spawn_team, delegate_task, query_team, escalate, send_message, get_status, list_teams, shutdown_team, get_credential, create_trigger, enable_trigger, disable_trigger, test_trigger, list_triggers, update_team, update_trigger). Teams with `browser:` config also get browser tools (browser_navigate, browser_snapshot, browser_screenshot, browser_click, browser_type, browser_go_back, browser_go_forward, browser_close).
 - Additional MCP servers as configured in team config.
 
 ## Skills and Subagents

@@ -31,6 +31,11 @@ export interface TeamScope {
   readonly rejects: readonly string[];
 }
 
+export interface BrowserConfig {
+  readonly allowed_domains?: readonly string[];
+  readonly timeout_ms?: number;
+}
+
 export interface TeamConfig {
   readonly name: string;
   readonly parent: string | null;
@@ -42,6 +47,7 @@ export interface TeamConfig {
   readonly provider_profile: string;
   readonly maxTurns: number;
   readonly credentials?: Readonly<Record<string, string>>;
+  readonly browser?: BrowserConfig;
 }
 
 export type TriggerState = 'pending' | 'active' | 'disabled';
