@@ -52,22 +52,7 @@ describe('query_team', () => {
     expect(typed.error).toContain('not available');
   });
 
-  it('buildAiSessionConfig returns correct maxTurns and profileName', async () => {
-    const { buildAiSessionConfig } = await import('../../sessions/query-options.js');
-    const config = buildAiSessionConfig({
-      teamName: 'child',
-      teamConfig: makeTeamConfig({ name: 'child' }),
-      runDir: '/tmp/test',
-      dataDir: '/tmp/data',
-      systemRulesDir: '/tmp/rules',
-      providers: { profiles: { default: { type: 'api', model: 'claude-sonnet-4-5-20250514', api_key: process.env['ANTHROPIC_API_KEY'] ?? 'test-placeholder' } } } as never,
-      ancestors: [],
-      logger: { info: () => {} },
-    });
-
-    expect(config.profileName).toBe('default');
-    expect(config.maxTurns).toBe(50);
-  });
+  // buildAiSessionConfig test migrated to message-handler.test.ts (Unit 8)
 });
 
 // ── query_team: happy path + error detection ──────────────────────────────

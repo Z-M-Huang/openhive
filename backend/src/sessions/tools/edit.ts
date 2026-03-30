@@ -1,7 +1,7 @@
 /**
  * Built-in Edit tool — find-and-replace within a file.
  *
- * Guards: assertInsideBoundary, assertGovernanceAllowed, scrubCredentialsFromContent.
+ * Guards: assertInsideBoundary, assertGovernanceAllowed, scrubCredentialsFromContent (credential-scrubber).
  */
 
 import { tool } from 'ai';
@@ -10,8 +10,8 @@ import { readFile, writeFile } from 'node:fs/promises';
 import {
   assertInsideBoundary,
   assertGovernanceAllowed,
-  scrubCredentialsFromContent,
 } from './tool-guards.js';
+import { scrubCredentialsFromContent } from '../../logging/credential-scrubber.js';
 
 export function createEditTool(
   cwd: string,

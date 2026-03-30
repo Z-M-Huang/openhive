@@ -2,22 +2,40 @@
  * Built-in Bash tool — execute shell commands with safety guards.
  *
  * Guards: assertBashSafe (prevents writing credentials to files),
- *         scrubCredentialsFromContent (scrubs output).
+ *         scrubCredentialsFromContent (credential-scrubber — scrubs output).
  */
 
 import { tool } from 'ai';
 import { z } from 'zod';
 import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
-import {
-  assertBashSafe,
-  scrubCredentialsFromContent,
-} from './tool-guards.js';
+import { assertBashSafe } from './tool-guards.js';
+import { scrubCredentialsFromContent } from '../../logging/credential-scrubber.js';
 
 const execFile = promisify(execFileCb);
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_TIMEOUT_MS = 600_000;
+
+/** Only these env vars are forwarded to child processes — keeps secrets out. */
+const ENV_ALLOWLIST = [
+  'PATH',
+  'HOME',
+  'USER',
+  'LANG',
+  'TERM',
+  'SHELL',
+  'TMPDIR',
+] as const;
+
+function buildSanitizedEnv(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const key of ENV_ALLOWLIST) {
+    const val = process.env[key];
+    if (val !== undefined) env[key] = val;
+  }
+  return env;
+}
 
 export function createBashTool(cwd: string, credentials: Record<string, string>) {
   return tool({
@@ -44,7 +62,7 @@ export function createBashTool(cwd: string, credentials: Record<string, string>)
             cwd,
             timeout: timeoutMs,
             maxBuffer: 10 * 1024 * 1024,
-            env: { ...process.env },
+            env: buildSanitizedEnv(),
           },
         );
         return scrubCredentialsFromContent(stdout, credentials);

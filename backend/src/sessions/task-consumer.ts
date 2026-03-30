@@ -12,6 +12,9 @@ import { TaskStatus } from '../domain/types.js';
 import { handleMessage } from './message-handler.js';
 import type { MessageHandlerDeps, MessageResult } from './message-handler.js';
 import { scrubSecrets } from '../logging/credential-scrubber.js';
+import { errorMessage } from '../domain/errors.js';
+import { extractStringCredentials } from '../domain/credential-utils.js';
+import { safeJsonParse } from '../domain/safe-json.js';
 
 export interface TaskConsumerOpts {
   readonly taskQueueStore: ITaskQueueStore;
@@ -76,7 +79,7 @@ export class TaskConsumer {
           );
 
           // Parse max_turns from task options (snapshot at enqueue time)
-          const taskOpts = dequeued.options ? JSON.parse(dequeued.options) as Record<string, unknown> : {};
+          const taskOpts = dequeued.options ? safeJsonParse<Record<string, unknown>>(dequeued.options, 'task-options') ?? {} : {};
           const maxTurns = typeof taskOpts['max_turns'] === 'number' ? taskOpts['max_turns'] as number : undefined;
 
           const result: MessageResult = await handleMessage(
@@ -112,9 +115,7 @@ export class TaskConsumer {
           let safeResponse = responseText;
           if (responseText) {
             const config = this.#getTeamConfig?.(task.teamId);
-            const creds = Object.values(config?.credentials ?? {}).filter(
-              (v): v is string => typeof v === 'string' && v.length >= 8,
-            );
+            const creds = extractStringCredentials(config?.credentials ?? {});
             if (creds.length > 0) safeResponse = scrubSecrets(responseText, [], creds);
           }
 
@@ -147,7 +148,7 @@ export class TaskConsumer {
           }
         } catch (err) {
           this.#taskQueue.updateStatus(dequeued.id, TaskStatus.Failed);
-          const msg = err instanceof Error ? err.message : String(err);
+          const msg = errorMessage(err);
           this.#deps.logger.info('Task failed', { taskId: dequeued.id, team: task.teamId, error: msg });
 
           // Report trigger failure for circuit breaker

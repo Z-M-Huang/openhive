@@ -194,27 +194,6 @@ export function assertGovernanceAllowed(
 
 // ── Credential Guards ───────────────────────────────────────────────────────
 
-/**
- * Replace credential values in `content` with `[CREDENTIAL:key]` placeholders.
- * Only credentials with values >= 8 characters are scrubbed (short values
- * produce too many false positives).
- *
- * Returns the (possibly modified) content string.
- */
-export function scrubCredentialsFromContent(
-  content: string,
-  credentials: Record<string, string>,
-): string {
-  const entries = Object.entries(credentials).filter(([, v]) => v.length >= 8);
-  if (entries.length === 0) return content;
-
-  let scrubbed = content;
-  for (const [key, value] of entries) {
-    scrubbed = scrubbed.replaceAll(value, `[CREDENTIAL:${key}]`);
-  }
-  return scrubbed;
-}
-
 /** File-write shell patterns that indicate a credential is being persisted to disk. */
 const FILE_WRITE_PATTERNS = /[>]{1,2}\s|tee\s|cat\s.*>\s|printf\s.*>\s/;
 

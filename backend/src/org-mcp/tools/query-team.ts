@@ -13,6 +13,8 @@ import type { OrgTree } from '../../domain/org-tree.js';
 import type { TeamConfig } from '../../domain/types.js';
 import type { TeamQueryRunner } from '../registry.js';
 import { scrubSecrets } from '../../logging/credential-scrubber.js';
+import { errorMessage } from '../../domain/errors.js';
+import { extractStringCredentials } from '../../domain/credential-utils.js';
 
 export const QueryTeamInputSchema = z.object({
   team: z.string().min(1),
@@ -78,15 +80,13 @@ export async function queryTeam(
     // Scrub child team credential values from response
     const config = deps.getTeamConfig(team);
     const childCreds = config?.credentials ?? {};
-    const childCredValues = Object.values(childCreds).filter(
-      (v): v is string => typeof v === 'string' && v.length >= 8,
-    );
+    const childCredValues = extractStringCredentials(childCreds);
     const scrubbedResponse = childCredValues.length > 0
       ? scrubSecrets(response, [], childCredValues) : response;
 
     return { success: true, response: scrubbedResponse };
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = errorMessage(err);
     deps.log('query_team error', { team, error: msg });
     return { success: false, error: `query_team failed: ${msg}` };
   }

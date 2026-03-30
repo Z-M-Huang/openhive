@@ -6,11 +6,14 @@
  */
 
 import { join } from 'node:path';
-import { existsSync } from 'node:fs';
-import { loadTeamConfig } from '../config/loader.js';
+import { getTeamConfig } from '../config/loader.js';
+import { errorMessage } from '../domain/errors.js';
+import { extractStringCredentials } from '../domain/credential-utils.js';
 import { resolveProvider } from './provider-resolver.js';
 import { buildProviderRegistry, resolveModel, getContextWindow } from './provider-registry.js';
 import { buildBuiltinTools } from './tools/index.js';
+import { withAudit } from './tools/tool-audit.js';
+import type { AuditWrapperOpts } from './tools/tool-audit.js';
 import { connectMcpServers, resolveActiveTools } from './mcp-bridge.js';
 import { buildSubagentTools } from './subagent-factory.js';
 import { buildSystemPrompt } from './prompt-builder.js';
@@ -57,21 +60,6 @@ export interface MessageHandlerDeps {
   };
 }
 
-// ── Internal helpers ──────────────────────────────────────────────────────
-
-/** Load team config from disk, or return undefined. */
-function loadConfig(runDir: string, teamName: string): TeamConfig | undefined {
-  const path = join(runDir, 'teams', teamName, 'config.yaml');
-  if (!existsSync(path)) return undefined;
-  try {
-    const config = loadTeamConfig(path);
-    if (!config.mcp_servers.includes('org')) {
-      return { ...config, mcp_servers: ['org', ...config.mcp_servers] };
-    }
-    return config;
-  } catch { return undefined; }
-}
-
 // ── Tool assembly ────────────────────────────────────────────────────────
 
 /** Build all tools (builtin + MCP + subagent) and return cleanup fn. */
@@ -98,6 +86,7 @@ async function assembleTools(
       logger: deps.logger,
       knownSecrets: providerSecrets,
       rawSecrets: credValues,
+      callerId: teamName,
     },
   });
 
@@ -108,11 +97,28 @@ async function assembleTools(
     sourceChannelId,
   });
 
+  // Wrap MCP tools with audit logging (same pattern as built-in tools)
+  const auditOpts: AuditWrapperOpts = {
+    logger: deps.logger,
+    knownSecrets: providerSecrets,
+    rawSecrets: credValues,
+    callerId: teamName,
+  };
+  const auditedMcpTools: typeof mcp.tools = {};
+  for (const [name, t] of Object.entries(mcp.tools)) {
+    const tool = t as unknown as { execute?: (...args: unknown[]) => Promise<unknown> };
+    if (tool.execute) {
+      auditedMcpTools[name] = { ...t, execute: withAudit(name, tool.execute, auditOpts) } as typeof t;
+    } else {
+      auditedMcpTools[name] = t;
+    }
+  }
+
   // Resolve which built-in + MCP tools this team is allowed to use
-  const baseTools = { ...builtinTools, ...mcp.tools };
+  const baseTools = { ...builtinTools, ...auditedMcpTools };
   const allowedNames = resolveActiveTools(Object.keys(baseTools), teamConfig.allowed_tools);
   const allowedSet = new Set(allowedNames);
-  const filteredTools: typeof baseTools = {};
+  const filteredTools: typeof baseTools = {} as typeof baseTools;
   for (const [k, v] of Object.entries(baseTools)) {
     if (allowedSet.has(k)) (filteredTools as Record<string, unknown>)[k] = v;
   }
@@ -176,7 +182,7 @@ export async function handleMessage(
   const startMs = Date.now();
   const teamName = opts?.teamName ?? 'main';
 
-  const teamConfig = loadConfig(deps.runDir, teamName);
+  const teamConfig = getTeamConfig(deps.runDir, teamName);
   if (!teamConfig) {
     return {
       ok: false,
@@ -195,9 +201,7 @@ export async function handleMessage(
     const ctx = buildSessionContext(teamName, deps.runDir);
 
     const teamCreds = teamConfig.credentials ?? {};
-    const credValues = Object.values(teamCreds).filter(
-      (v): v is string => typeof v === 'string' && v.length >= 8,
-    );
+    const credValues = extractStringCredentials(teamCreds);
 
     const tools = await assembleTools(teamConfig, teamName, deps, registry, profileName, modelId, ctx, providerSecrets, credValues, opts?.sourceChannelId);
     mcpCleanup = tools.mcpCleanup;
@@ -229,7 +233,7 @@ export async function handleMessage(
     return { ok: true, content: safeText, durationMs };
   } catch (err) {
     const durationMs = Date.now() - startMs;
-    const errMsg = err instanceof Error ? err.message : String(err);
+    const errMsg = errorMessage(err);
     deps.logger.info('Message handler error', { teamName, error: errMsg, durationMs });
     return { ok: false, error: errMsg, durationMs };
   } finally {

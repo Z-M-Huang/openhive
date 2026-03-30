@@ -19,6 +19,7 @@ import { randomBytes } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import type { ChannelMessage, IChannelAdapter } from '../domain/interfaces.js';
 import type { ProgressUpdate } from '../sessions/ai-engine.js';
+import { errorMessage } from '../domain/errors.js';
 
 export type WsProgressSender = (update: ProgressUpdate) => void;
 
@@ -138,7 +139,7 @@ export class WsAdapter implements IChannelAdapter {
               socket.send(JSON.stringify({ type: 'response', content: response ?? '' }));
             }
           } catch (err) {
-            const errMsg = err instanceof Error ? err.message : String(err);
+            const errMsg = errorMessage(err);
             if (socket.readyState === 1) {
               socket.send(JSON.stringify({ type: 'error', error: errMsg }));
             }

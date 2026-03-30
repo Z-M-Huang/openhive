@@ -7,14 +7,13 @@
  */
 
 import { z } from 'zod';
-import type { ToolDefinition, OrgMcpDeps } from './registry.js';
-import type { BrowserRelay } from './browser-proxy.js';
+import type { ToolDefinition, BrowserToolOrgDeps } from './registry.js';
 import { validateBrowserUrl } from './url-validator.js';
 
-/** Extended deps interface — browser tools require browserRelay. */
-export interface BrowserToolDeps extends OrgMcpDeps {
-  readonly browserRelay: BrowserRelay;
-}
+/** Narrowed deps — browser tools need getTeamConfig + browserRelay + optional logger. */
+export type BrowserToolDeps = BrowserToolOrgDeps & {
+  readonly log?: (msg: string, meta?: Record<string, unknown>) => void;
+};
 
 function gateCheck(deps: BrowserToolDeps, callerId: string): string | null {
   const config = deps.getTeamConfig(callerId);
@@ -37,12 +36,18 @@ function browserTool(
     inputSchema,
     async handler(input: unknown, callerId: string): Promise<unknown> {
       const gateError = gateCheck(deps, callerId);
-      if (gateError) return { success: false, error: gateError };
+      if (gateError) {
+        deps.log?.('BrowserToolCall:denied', { tool: name, callerId, reason: gateError });
+        return { success: false, error: gateError };
+      }
 
       const args = input as Record<string, unknown>;
       if (preCheck) {
         const checkError = preCheck(args, callerId);
-        if (checkError) return { success: false, error: checkError };
+        if (checkError) {
+          deps.log?.('BrowserToolCall:denied', { tool: name, callerId, reason: checkError });
+          return { success: false, error: checkError };
+        }
       }
 
       return deps.browserRelay.callTool(name, args);

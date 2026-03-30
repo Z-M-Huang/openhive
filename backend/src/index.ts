@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 import Fastify from 'fastify';
 import { createLogger, type AppLogger } from './logging/logger.js';
-import { loadProviders, loadTeamConfig, loadSystemConfig } from './config/loader.js';
+import { loadProviders, loadSystemConfig, getTeamConfig, getOrCreateTeamConfig } from './config/loader.js';
 import { OrgTree } from './domain/org-tree.js';
 import { startOrgMcpHttpServer } from './org-mcp/http-server.js';
 import { createToolInvoker, type OrgMcpDeps, type OrgToolInvoker } from './org-mcp/registry.js';
@@ -23,6 +23,7 @@ import {
 } from './bootstrap-helpers.js';
 import type { TriggerEngine } from './triggers/engine.js';
 import type { ChannelMessage } from './domain/interfaces.js';
+import type { ProgressUpdate } from './sessions/ai-engine.js';
 import type { ProvidersOutput } from './config/validation.js';
 import type { Readable, Writable } from 'node:stream';
 import type Database from 'better-sqlite3';
@@ -58,25 +59,6 @@ export interface BootstrapResult {
 }
 
 
-function loadOrGenerateConfig(
-  runDir: string, name: string, configPath?: string,
-  hints?: { description?: string; scopeAccepts?: string[]; parent?: string },
-) {
-  if (configPath) return loadTeamConfig(configPath);
-  const path = join(runDir, 'teams', name, 'config.yaml');
-  if (existsSync(path)) return loadTeamConfig(path);
-  return {
-    name, parent: hints?.parent ?? null, description: hints?.description ?? '',
-    allowed_tools: ['*'],
-    mcp_servers: ['org'], provider_profile: 'default', maxTurns: 100,
-  };
-}
-
-function safeLoadConfig(runDir: string, teamId: string) {
-  const path = join(runDir, 'teams', teamId, 'config.yaml');
-  if (!existsSync(path)) return undefined;
-  try { return loadTeamConfig(path); } catch { return undefined; }
-}
 
 function resolveLogLevel(dataDir: string): string {
   const path = join(dataDir, 'config', 'config.yaml');
@@ -108,12 +90,28 @@ function buildOrgMcpDeps(
     triggerConfigStore: opts.triggerConfigStore,
     runDir: opts.runDir,
     loadConfig: (name: string, cp?: string, hints?: { description?: string; scopeAccepts?: string[] }) =>
-      loadOrGenerateConfig(opts.runDir, name, cp, hints),
-    getTeamConfig: (id: string) => safeLoadConfig(opts.runDir, id),
+      getOrCreateTeamConfig(opts.runDir, name, cp, hints),
+    getTeamConfig: (id: string) => getTeamConfig(opts.runDir, id),
     log: (msg, meta) => opts.logger.info(msg, meta),
     get queryRunner() { return getQueryRunner(); },
     get triggerEngine() { return getTriggerEngine(); },
     get browserRelay() { return opts.browserRelay; },
+  };
+}
+
+/**
+ * Factory that creates a channel message handler closing over shared deps.
+ * Eliminates the 3 near-identical inline handlers (ChannelRouter, WsAdapter, DiscordAdapter).
+ */
+function createChannelHandler(
+  handlerDeps: Parameters<typeof handleMessage>[1] | null,
+  triggerEngine: { onMessage(content: string, channelId: string): void },
+): (msg: ChannelMessage, onProgress?: (update: ProgressUpdate) => void) => Promise<string> {
+  return async (msg, onProgress?) => {
+    triggerEngine.onMessage(msg.content, msg.channelId);
+    if (!handlerDeps) return 'No providers configured.';
+    const result = await handleMessage(msg, handlerDeps, { onProgress, sourceChannelId: msg.channelId });
+    return result.ok ? (result.content ?? '') : `Error: ${result.error}`;
   };
 }
 
@@ -207,31 +205,20 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   // WsAdapter handles its own message flow with progress/ack support.
   const wsAdapter = new WsAdapter();
 
+  const channelHandler = createChannelHandler(handlerDeps, triggerEngine);
+
   const channelRouter = new ChannelRouter([wsAdapter, ...adapters], async (msg: ChannelMessage) => {
     logger.info('Received message', { channelId: msg.channelId, userId: msg.userId });
-    triggerEngine.onMessage(msg.content, msg.channelId);
-    if (!handlerDeps) return 'No providers configured.';
-    const result = await handleMessage(msg, handlerDeps, { sourceChannelId: msg.channelId });
-    return result.ok ? (result.content ?? '') : `Error: ${result.error}`;
+    return channelHandler(msg);
   });
 
   // Set WS-specific handler with progress support (bypasses ChannelRouter for incoming messages)
-  wsAdapter.setHandler(async (msg, onProgress) => {
-    triggerEngine.onMessage(msg.content, msg.channelId);
-    if (!handlerDeps) return 'No providers configured.';
-    const result = await handleMessage(msg, handlerDeps, { onProgress, sourceChannelId: msg.channelId });
-    return result.ok ? (result.content ?? '') : `Error: ${result.error}`;
-  });
+  wsAdapter.setHandler(channelHandler);
 
   // Wire Discord adapters with progress support (same pattern as WsAdapter)
   for (const adapter of adapters) {
     if (adapter instanceof DiscordAdapter) {
-      adapter.setHandler(async (msg, onProgress) => {
-        triggerEngine.onMessage(msg.content, msg.channelId);
-        if (!handlerDeps) return 'No providers configured.';
-        const result = await handleMessage(msg, handlerDeps, { onProgress, sourceChannelId: msg.channelId });
-        return result.ok ? (result.content ?? '') : `Error: ${result.error}`;
-      });
+      adapter.setHandler(channelHandler);
     }
   }
 
@@ -266,7 +253,7 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
       // No source channel — this is a bug, every task should have a sourceChannelId
       logger.error('Task notification has no sourceChannelId — cannot route', { contentLength: content.length });
     },
-    getTeamConfig: (teamId: string) => safeLoadConfig(runDir, teamId),
+    getTeamConfig: (teamId: string) => getTeamConfig(runDir, teamId),
     reportTriggerOutcome: (team, triggerName, success) => {
       triggerEngine.reportTaskOutcome(team, triggerName, success);
     },

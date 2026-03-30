@@ -8,6 +8,7 @@ import { eq, gte, desc, sql } from 'drizzle-orm';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import type { ILogStore, LogFilter } from '../../domain/interfaces.js';
 import type { LogEntry } from '../../domain/types.js';
+import { safeJsonParse } from '../../domain/safe-json.js';
 import * as schema from '../schema.js';
 
 export class LogStore implements ILogStore {
@@ -56,7 +57,7 @@ export class LogStore implements ILogStore {
       message: r.message,
       timestamp: new Date(r.createdAt).getTime(),
       source: '',
-      metadata: r.context ? JSON.parse(r.context) as Record<string, unknown> : undefined,
+      metadata: r.context ? safeJsonParse<Record<string, unknown>>(r.context, 'log-context') ?? {} : undefined,
     }));
   }
 }

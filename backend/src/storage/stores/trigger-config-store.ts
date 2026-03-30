@@ -8,6 +8,7 @@ import { eq, and } from 'drizzle-orm';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import type { ITriggerConfigStore } from '../../domain/interfaces.js';
 import type { TriggerConfig, TriggerState } from '../../domain/types.js';
+import { safeJsonParse } from '../../domain/safe-json.js';
 import * as schema from '../schema.js';
 
 export class TriggerConfigStore implements ITriggerConfigStore {
@@ -136,7 +137,7 @@ export class TriggerConfigStore implements ITriggerConfigStore {
     return {
       name: row.name,
       type: row.type as TriggerConfig['type'],
-      config: JSON.parse(row.config) as Record<string, unknown>,
+      config: safeJsonParse<Record<string, unknown>>(row.config, 'trigger-config') ?? {},
       team: row.team,
       task: row.task,
       skill: row.skill ?? undefined,

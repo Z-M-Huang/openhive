@@ -8,16 +8,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import pino from 'pino';
 import { createLogger, wrapPinoLogger } from './logger.js';
-import { createAuditPreHook, createAuditPostHook } from '../hooks/audit-logger.js';
+import { withAudit } from '../sessions/tools/tool-audit.js';
 import { createDatabase, createTables } from '../storage/database.js';
 import { LogStore } from '../storage/stores/log-store.js';
 import type { DatabaseInstance } from '../storage/database.js';
-import type { HookInput } from '../hooks/types.js';
-
-function hookInput(input: Record<string, unknown>): HookInput {
-  return input as unknown as HookInput;
-}
-const hookOpts = { signal: new AbortController().signal };
 
 // ── Unit: wrapPinoLogger ─────────────────────────────────────────────────
 
@@ -87,7 +81,7 @@ describe('wrapPinoLogger()', () => {
   });
 });
 
-// ── Integration: createLogger → AppLogger → audit hooks → LogStore ──────
+// ── Integration: createLogger → AppLogger → withAudit → LogStore ────────
 
 describe('createLogger integration with LogStore', () => {
   let dbInstance: DatabaseInstance;
@@ -103,51 +97,43 @@ describe('createLogger integration with LogStore', () => {
     dbInstance.raw.close();
   });
 
-  it('PreToolUse metadata reaches LogStore context column', async () => {
+  it('ToolCall:start metadata reaches LogStore via withAudit', async () => {
     const logger = createLogger({ logStore });
 
-    const { hook } = createAuditPreHook(logger);
-    await hook(
-      hookInput({ tool_name: 'Read', tool_input: { file_path: '/tmp/test.ts' } }),
-      'tooluse-123',
-      hookOpts,
-    );
+    const execute = async (input: { file_path: string }) => ({ content: `data from ${input.file_path}` });
+    const wrapped = withAudit('Read', execute, { logger });
+
+    await wrapped({ file_path: '/tmp/test.ts' });
 
     // Flush pino (async tee stream)
     await new Promise((r) => setTimeout(r, 100));
 
     const entries = logStore.query({ limit: 10 });
-    const preToolEntry = entries.find((e) => e.message === 'PreToolUse');
+    const startEntry = entries.find((e) => e.message === 'ToolCall:start');
 
-    expect(preToolEntry).toBeDefined();
-    expect(preToolEntry!.metadata).toBeDefined();
-    expect(preToolEntry!.metadata!['tool']).toBe('Read');
-    expect(preToolEntry!.metadata!['toolUseId']).toBe('tooluse-123');
-    expect(preToolEntry!.metadata!['params']).toEqual({ file_path: '/tmp/test.ts' });
+    expect(startEntry).toBeDefined();
+    expect(startEntry!.metadata).toBeDefined();
+    expect(startEntry!.metadata!['tool']).toBe('Read');
+    expect(startEntry!.metadata!['params']).toEqual({ file_path: '/tmp/test.ts' });
   });
 
-  it('PostToolUse metadata includes tool and durationMs', async () => {
+  it('ToolCall:end metadata includes tool and durationMs', async () => {
     const logger = createLogger({ logStore });
 
-    const startTimes = new Map<string, number>();
-    startTimes.set('tooluse-456', Date.now() - 50);
+    const execute = async (_input: Record<string, unknown>) => 'ok';
+    const wrapped = withAudit('Bash', execute, { logger });
 
-    const postHook = createAuditPostHook(logger, startTimes);
-    await postHook(
-      hookInput({ tool_name: 'Bash', tool_response: 'ok' }),
-      'tooluse-456',
-      hookOpts,
-    );
+    await wrapped({});
 
     await new Promise((r) => setTimeout(r, 100));
 
     const entries = logStore.query({ limit: 10 });
-    const postToolEntry = entries.find((e) => e.message === 'PostToolUse');
+    const endEntry = entries.find((e) => e.message === 'ToolCall:end');
 
-    expect(postToolEntry).toBeDefined();
-    expect(postToolEntry!.metadata).toBeDefined();
-    expect(postToolEntry!.metadata!['tool']).toBe('Bash');
-    expect(postToolEntry!.metadata!['durationMs']).toBeGreaterThanOrEqual(0);
+    expect(endEntry).toBeDefined();
+    expect(endEntry!.metadata).toBeDefined();
+    expect(endEntry!.metadata!['tool']).toBe('Bash');
+    expect(endEntry!.metadata!['durationMs']).toBeGreaterThanOrEqual(0);
   });
 
   it('bare pino call (wrong arg order) drops metadata — proves the bug we fixed', async () => {

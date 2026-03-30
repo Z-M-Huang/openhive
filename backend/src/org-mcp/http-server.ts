@@ -12,6 +12,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { errorMessage } from '../domain/errors.js';
 
 import { buildToolDefs, extractShape, type OrgMcpDeps } from './registry.js';
 
@@ -23,11 +24,19 @@ function createOrgMcpInstance(deps: OrgMcpDeps, callerId: string, sourceChannelI
 
   for (const def of buildToolDefs(deps)) {
     server.tool(def.name, extractShape(def.inputSchema), async (args) => {
+      const start = Date.now();
+      deps.log('McpToolCall:start', { tool: def.name, callerId, timestamp: new Date(start).toISOString() });
       try {
         const result = await def.handler(args, callerId, sourceChannelId);
+        deps.log('McpToolCall:end', {
+          tool: def.name, callerId, durationMs: Date.now() - start, outcome: 'success',
+        });
         return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
+        const msg = errorMessage(err);
+        deps.log('McpToolCall:end', {
+          tool: def.name, callerId, durationMs: Date.now() - start, outcome: 'error', error: msg,
+        });
         return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: `tool error: ${msg}` }) }] };
       }
     });
@@ -114,7 +123,7 @@ async function handleMcpPost(
       void mcpServer.close();
     });
   } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
+    const msg = errorMessage(error);
     deps.log('Org-MCP HTTP error', { error: msg });
     if (!res.headersSent) {
       sendJsonRpcError(res, 500, -32603, 'Internal server error');

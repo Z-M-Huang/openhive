@@ -7,6 +7,8 @@
  */
 
 import { scrubSecrets } from '../../logging/credential-scrubber.js';
+import { errorMessage } from '../../domain/errors.js';
+import { extractStringCredentials } from '../../domain/credential-utils.js';
 import type { SecretString } from '../../secrets/secret-string.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -19,6 +21,8 @@ export interface AuditWrapperOpts {
   readonly logger: AuditLogger;
   readonly knownSecrets?: readonly SecretString[];
   readonly rawSecrets?: readonly string[];
+  /** Identifies the caller (team name or session id) in audit log entries. */
+  readonly callerId?: string;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -31,8 +35,7 @@ function extractDynamicSecrets(input: unknown): readonly string[] {
   if (input == null || typeof input !== 'object') return [];
   const creds = (input as Record<string, unknown>).credentials;
   if (creds == null || typeof creds !== 'object' || Array.isArray(creds)) return [];
-  return Object.values(creds as Record<string, unknown>)
-    .filter((v): v is string => typeof v === 'string' && v.length >= 8);
+  return extractStringCredentials(creds as Record<string, unknown>);
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────
@@ -78,7 +81,7 @@ export function withAudit<TArgs extends unknown[], TReturn>(
     } catch {
       params = scrubbedJson;
     }
-    opts.logger.info('ToolCall:start', { tool: name, params });
+    opts.logger.info('ToolCall:start', { tool: name, callerId: opts.callerId, params });
 
     // Execute
     let result: TReturn;
@@ -88,8 +91,9 @@ export function withAudit<TArgs extends unknown[], TReturn>(
       const durationMs = Date.now() - start;
       opts.logger.info('ToolCall:error', {
         tool: name,
+        callerId: opts.callerId,
         durationMs,
-        error: err instanceof Error ? err.message : String(err),
+        error: errorMessage(err),
       });
       throw err;
     }
@@ -102,6 +106,7 @@ export function withAudit<TArgs extends unknown[], TReturn>(
     ).slice(0, 200);
     opts.logger.info('ToolCall:end', {
       tool: name,
+      callerId: opts.callerId,
       durationMs: Date.now() - start,
       summary,
     });

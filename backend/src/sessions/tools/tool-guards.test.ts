@@ -1,8 +1,8 @@
 /**
  * Tool Guards — unit tests.
  *
- * Tests assertInsideBoundary, assertGovernanceAllowed,
- * scrubCredentialsFromContent, and assertBashSafe.
+ * Tests assertInsideBoundary, assertGovernanceAllowed, assertBashSafe,
+ * and scrubCredentialsFromContent (from credential-scrubber).
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
@@ -13,9 +13,9 @@ import { tmpdir } from 'node:os';
 import {
   assertInsideBoundary,
   assertGovernanceAllowed,
-  scrubCredentialsFromContent,
   assertBashSafe,
 } from './tool-guards.js';
+import { scrubCredentialsFromContent } from '../../logging/credential-scrubber.js';
 import type { GovernancePaths } from './tool-guards.js';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────

@@ -61,6 +61,32 @@ export function scrubSecrets(
 }
 
 /**
+ * Replace credential values in `content` with `[CREDENTIAL:key]` placeholders.
+ * Only credentials with values >= 8 characters are scrubbed (short values
+ * produce too many false positives).
+ *
+ * Unlike `scrubSecrets()` which replaces with a generic `[REDACTED]`, this
+ * function preserves the credential key name in the placeholder, which is
+ * useful for tool output where the agent needs to know which credential
+ * was present.
+ *
+ * Returns the (possibly modified) content string.
+ */
+export function scrubCredentialsFromContent(
+  content: string,
+  credentials: Record<string, string>,
+): string {
+  const entries = Object.entries(credentials).filter(([, v]) => v.length >= 8);
+  if (entries.length === 0) return content;
+
+  let scrubbed = content;
+  for (const [key, value] of entries) {
+    scrubbed = scrubbed.replaceAll(value, `[CREDENTIAL:${key}]`);
+  }
+  return scrubbed;
+}
+
+/**
  * Create a stderr scrubbing callback that replaces secrets before forwarding.
  * Returns a function suitable as a data handler for child process stderr.
  */

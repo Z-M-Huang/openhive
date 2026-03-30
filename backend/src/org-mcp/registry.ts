@@ -4,6 +4,7 @@
  */
 
 import { z } from 'zod';
+import { errorMessage } from '../domain/errors.js';
 import type { OrgTree } from '../domain/org-tree.js';
 import type {
   ISessionSpawner,
@@ -35,30 +36,20 @@ import { UpdateTeamInputSchema, updateTeam } from './tools/update-team.js';
 import { UpdateTriggerInputSchema, updateTrigger } from './tools/update-trigger.js';
 
 
-/** Wraps a task queue to auto-inject sourceChannelId into options JSON. */
+/** Wraps a task queue to auto-inject sourceChannelId into options JSON.
+ *  Only enqueue() is overridden; all other methods pass through via prototype. */
 function scopeQueue(queue: ITaskQueueStore, channelId?: string): ITaskQueueStore {
   if (!channelId) return queue;
-  return {
-    enqueue(teamId: string, task: string, priority: string, correlationId?: string, options?: string) {
-      let parsed: Record<string, unknown>;
-      try {
-        parsed = options ? JSON.parse(options) as Record<string, unknown> : {};
-        if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) parsed = {};
-      } catch { parsed = {}; }
-      parsed.sourceChannelId = channelId;
-      return queue.enqueue(teamId, task, priority, correlationId, JSON.stringify(parsed));
-    },
-    dequeue: (teamId) => queue.dequeue(teamId),
-    peek: (teamId) => queue.peek(teamId),
-    getByTeam: (teamId) => queue.getByTeam(teamId),
-    updateStatus: (taskId, status) => queue.updateStatus(taskId, status),
-    updateResult: (taskId, result) => queue.updateResult(taskId, result),
-    ...(queue.updateDuration
-      ? { updateDuration: (taskId: string, ms: number) => queue.updateDuration!(taskId, ms) }
-      : {}),
-    getPending: () => queue.getPending(),
-    getByStatus: (status) => queue.getByStatus(status),
+  const enqueue: ITaskQueueStore['enqueue'] = (teamId, task, priority, correlationId?, options?) => {
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = options ? JSON.parse(options) as Record<string, unknown> : {};
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) parsed = {};
+    } catch { parsed = {}; }
+    parsed.sourceChannelId = channelId;
+    return queue.enqueue(teamId, task, priority, correlationId, JSON.stringify(parsed));
   };
+  return Object.assign(Object.create(queue) as ITaskQueueStore, { enqueue });
 }
 
 export interface ToolDefinition {
@@ -89,6 +80,24 @@ export interface OrgMcpDeps {
   readonly browserRelay?: BrowserRelay;
 }
 
+/* ── Narrowed dep types — compile-time enforcement that each tool
+      only receives the OrgMcpDeps fields it actually needs. ──────── */
+
+export type ShutdownTeamOrgDeps = Pick<OrgMcpDeps, 'orgTree' | 'sessionManager' | 'taskQueue'> & {
+  readonly triggerEngine?: OrgMcpDeps['triggerEngine'];
+};
+export type DelegateTaskOrgDeps = Pick<OrgMcpDeps, 'orgTree' | 'taskQueue' | 'log'>;
+export type EscalateOrgDeps = Pick<OrgMcpDeps, 'orgTree' | 'escalationStore' | 'taskQueue'>;
+export type SendMessageOrgDeps = Pick<OrgMcpDeps, 'orgTree' | 'log'>;
+export type GetStatusOrgDeps = Pick<OrgMcpDeps, 'orgTree' | 'taskQueue'>;
+export type ListTeamsOrgDeps = Pick<OrgMcpDeps, 'orgTree' | 'taskQueue' | 'getTeamConfig'>;
+export type QueryTeamOrgDeps = Pick<OrgMcpDeps, 'orgTree' | 'getTeamConfig' | 'log'> & {
+  readonly queryRunner?: OrgMcpDeps['queryRunner'];
+};
+export type BrowserToolOrgDeps = Pick<OrgMcpDeps, 'getTeamConfig'> & {
+  readonly browserRelay: BrowserRelay;
+};
+
 export interface OrgToolInvoker {
   readonly tools: ReadonlyMap<string, ToolDefinition>;
   invoke(toolName: string, input: unknown, callerId: string, sourceChannelId?: string): Promise<unknown>;
@@ -110,14 +119,19 @@ export function buildToolDefs(deps: OrgMcpDeps): ToolDefinition[] {
       name: 'shutdown_team',
       description: 'Shut down a team, persist tasks, remove from org tree',
       inputSchema: ShutdownTeamInputSchema,
-      handler: (input, callerId) => shutdownTeam(input as never, callerId, deps),
+      handler: (input, callerId) => shutdownTeam(input as never, callerId, {
+        orgTree: deps.orgTree, sessionManager: deps.sessionManager,
+        taskQueue: deps.taskQueue, triggerEngine: deps.triggerEngine,
+      }),
     },
     {
       name: 'delegate_task',
       description: 'Delegate a task to a child team',
       inputSchema: DelegateTaskInputSchema,
       handler: (input, callerId, sourceChannelId) => Promise.resolve(
-        delegateTask(input as never, callerId, { ...deps, taskQueue: scopeQueue(deps.taskQueue, sourceChannelId) })
+        delegateTask(input as never, callerId, {
+          orgTree: deps.orgTree, taskQueue: scopeQueue(deps.taskQueue, sourceChannelId), log: deps.log,
+        })
       ),
     },
     {
@@ -125,32 +139,44 @@ export function buildToolDefs(deps: OrgMcpDeps): ToolDefinition[] {
       description: 'Escalate an issue to parent team',
       inputSchema: EscalateInputSchema,
       handler: (input, callerId, sourceChannelId) => Promise.resolve(
-        escalate(input as never, callerId, { ...deps, taskQueue: scopeQueue(deps.taskQueue, sourceChannelId) })
+        escalate(input as never, callerId, {
+          orgTree: deps.orgTree, escalationStore: deps.escalationStore,
+          taskQueue: scopeQueue(deps.taskQueue, sourceChannelId),
+        })
       ),
     },
     {
       name: 'send_message',
       description: 'Send a message to a parent or child team',
       inputSchema: SendMessageInputSchema,
-      handler: (input, callerId) => Promise.resolve(sendMessage(input as never, callerId, deps)),
+      handler: (input, callerId) => Promise.resolve(sendMessage(input as never, callerId, {
+        orgTree: deps.orgTree, log: deps.log,
+      })),
     },
     {
       name: 'get_status',
       description: 'Get status of child teams including queue depth',
       inputSchema: GetStatusInputSchema,
-      handler: (input, callerId) => Promise.resolve(getStatus(input as never, callerId, deps)),
+      handler: (input, callerId) => Promise.resolve(getStatus(input as never, callerId, {
+        orgTree: deps.orgTree, taskQueue: deps.taskQueue,
+      })),
     },
     {
       name: 'list_teams',
       description: 'List child teams with descriptions, scope keywords, and status for routing decisions',
       inputSchema: ListTeamsInputSchema,
-      handler: (input, callerId) => Promise.resolve(listTeams(input as never, callerId, deps)),
+      handler: (input, callerId) => Promise.resolve(listTeams(input as never, callerId, {
+        orgTree: deps.orgTree, taskQueue: deps.taskQueue, getTeamConfig: deps.getTeamConfig,
+      })),
     },
     {
       name: 'query_team',
       description: 'Synchronously query a child team and return its response',
       inputSchema: QueryTeamInputSchema,
-      handler: (input, callerId, sourceChannelId) => queryTeam(input as never, callerId, deps, sourceChannelId),
+      handler: (input, callerId, sourceChannelId) => queryTeam(input as never, callerId, {
+        orgTree: deps.orgTree, getTeamConfig: deps.getTeamConfig,
+        queryRunner: deps.queryRunner, log: deps.log,
+      }, sourceChannelId),
     },
     {
       name: 'get_credential',
@@ -255,7 +281,9 @@ export function buildToolDefs(deps: OrgMcpDeps): ToolDefinition[] {
 
   // Browser tools (require browserRelay)
   if (deps.browserRelay?.available) {
-    tools.push(...buildBrowserToolDefs({ ...deps, browserRelay: deps.browserRelay }));
+    tools.push(...buildBrowserToolDefs({
+      getTeamConfig: deps.getTeamConfig, browserRelay: deps.browserRelay,
+    }));
   }
 
   return tools;
@@ -287,7 +315,7 @@ export function createToolInvoker(deps: OrgMcpDeps): OrgToolInvoker {
       try {
         return await tool.handler(input, callerId, sourceChannelId);
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
+        const msg = errorMessage(err);
         return { success: false, error: `tool error: ${msg}` };
       }
     },

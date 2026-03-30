@@ -11,6 +11,7 @@ import {
   integer,
   index,
   primaryKey,
+  unique,
 } from 'drizzle-orm/sqlite-core';
 
 // ── org_tree ────────────────────────────────────────────────────────────────
@@ -141,6 +142,7 @@ export const triggerConfigs = sqliteTable(
   (table) => [
     index('idx_trigger_configs_team').on(table.team),
     index('idx_trigger_configs_state').on(table.state),
+    unique('uq_trigger_configs_team_name').on(table.team, table.name),
   ],
 );
 

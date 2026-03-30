@@ -5,6 +5,7 @@
 import { existsSync, mkdirSync, cpSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { stringify as yamlStringify } from 'yaml';
+import { errorMessage } from './domain/errors.js';
 import { loadChannels } from './config/loader.js';
 import { createDatabase, createTables } from './storage/database.js';
 import { OrgStore } from './storage/stores/org-store.js';
@@ -204,7 +205,7 @@ export async function initBrowserRelay(
     logger.info('Browser relay initialized', { tools: relay.getToolNames().length });
     return relay;
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = errorMessage(err);
     const isModuleError = msg.includes('Cannot find module') || msg.includes('MODULE_NOT_FOUND');
     const logMsg = isModuleError
       ? 'Browser relay failed to initialize — @playwright/mcp not found, please update to the latest OpenHive version'

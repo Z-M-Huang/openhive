@@ -1,7 +1,7 @@
 /**
  * Built-in Write tool — writes content to a file, creating parent dirs.
  *
- * Guards: assertInsideBoundary, assertGovernanceAllowed, scrubCredentialsFromContent.
+ * Guards: assertInsideBoundary, assertGovernanceAllowed, scrubCredentialsFromContent (credential-scrubber).
  */
 
 import { tool } from 'ai';
@@ -11,8 +11,8 @@ import { dirname } from 'node:path';
 import {
   assertInsideBoundary,
   assertGovernanceAllowed,
-  scrubCredentialsFromContent,
 } from './tool-guards.js';
+import { scrubCredentialsFromContent } from '../../logging/credential-scrubber.js';
 
 export function createWriteTool(
   cwd: string,

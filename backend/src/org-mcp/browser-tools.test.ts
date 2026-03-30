@@ -21,15 +21,6 @@ function mockDeps(overrides?: {
   return {
     browserRelay: relay,
     getTeamConfig: vi.fn().mockReturnValue(overrides?.teamConfig),
-    // Stubs — browser tools don't use these
-    orgTree: {} as never,
-    spawner: {} as never,
-    sessionManager: {} as never,
-    taskQueue: {} as never,
-    escalationStore: {} as never,
-    runDir: '/app/run',
-    loadConfig: vi.fn() as never,
-    log: vi.fn(),
   };
 }
 

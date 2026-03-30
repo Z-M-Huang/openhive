@@ -9,7 +9,6 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { tmpdir } from 'node:os';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { HookInput } from '../hooks/types.js';
 import { bootstrap } from '../index.js';
 import type { BootstrapResult } from '../index.js';
 import { createDatabase, createTables } from '../storage/database.js';
@@ -24,7 +23,8 @@ import { TeamStatus, TaskStatus, TaskPriority } from '../domain/types.js';
 import { createToolInvoker } from '../org-mcp/registry.js';
 import type { OrgMcpDeps } from '../org-mcp/registry.js';
 import type { OrgTreeNode, TeamConfig } from '../domain/types.js';
-import { buildHookConfig } from '../hooks/index.js';
+import { assertInsideBoundary, assertGovernanceAllowed } from '../sessions/tools/tool-guards.js';
+import { withAudit } from '../sessions/tools/tool-audit.js';
 import { TriggerDedup } from '../triggers/dedup.js';
 import { TriggerRateLimiter } from '../triggers/rate-limiter.js';
 import { TriggerEngine } from '../triggers/engine.js';
@@ -58,12 +58,6 @@ function makeConfig(o?: Partial<TeamConfig>): TeamConfig {
 }
 
 const noop = { info: () => {}, warn: () => {} };
-
-/** Cast partial hook input for tests — our hooks only read tool_name + tool_input. */
-function hookInput(obj: Record<string, unknown>): HookInput {
-  return obj as unknown as HookInput;
-}
-const hookOpts = { signal: new AbortController().signal };
 
 function createMockAdapter(): IChannelAdapter & {
   _handler: ((msg: ChannelMessage) => Promise<void>) | null;
@@ -156,37 +150,56 @@ describe('E2E-3: Rule cascade resolves for nested hierarchy', () => {
   });
 });
 
-// ── E2E-4: Hooks composition ──────────────────────────────────────────────
+// ── E2E-4: Tool guards + audit compose correctly ─────────────────────────
 
-describe('E2E-4: Workspace boundary + audit hooks compose correctly', () => {
-  it('boundary blocks and audit logs fire in composition', async () => {
-    const logs: Array<{ msg: string }> = [];
-    const logger = { info: (msg: string) => { logs.push({ msg }); } };
+describe('E2E-4: Workspace boundary + governance + audit compose correctly', () => {
+  it('boundary allows inside cwd and blocks outside cwd', () => {
     const dir = makeTempDir();
-    const config = buildHookConfig({
-      teamName: 'alpha', cwd: dir, additionalDirs: [],
-      paths: { systemRulesDir: '/app/system-rules', dataDir: join(dir, 'data'), runDir: dir },
-      logger,
-    });
 
-    // PreToolUse: allowed read inside cwd
-    const okResult = await config.PreToolUse[0].hooks[0](
-      hookInput({ tool_name: 'Read', tool_input: { file_path: join(dir, 'file.ts') } }), 'tu1', hookOpts,
-    );
-    expect(okResult).toEqual({});
+    // Allowed: path inside cwd
+    expect(() =>
+      assertInsideBoundary(join(dir, 'file.ts'), dir, []),
+    ).not.toThrow();
 
-    // PreToolUse: blocked read outside cwd
-    const denyResult = await config.PreToolUse[0].hooks[0](
-      hookInput({ tool_name: 'Read', tool_input: { file_path: '/etc/passwd' } }), 'tu2', hookOpts,
-    );
-    const hookOut = (denyResult as Record<string, unknown>)['hookSpecificOutput'] as Record<string, unknown>;
-    expect(hookOut?.['permissionDecision']).toBe('deny');
+    // Blocked: path outside cwd
+    expect(() =>
+      assertInsideBoundary('/etc/passwd', dir, []),
+    ).toThrow('outside workspace boundaries');
+  });
 
-    // Audit hook fires on any tool (index 3 after workspace boundary, governance+cred, bash guard)
-    await config.PreToolUse[3].hooks[0](
-      hookInput({ tool_name: 'Read', tool_input: { file_path: join(dir, 'f.ts') } }), 'tu3', hookOpts,
-    );
-    expect(logs.some((l) => l.msg === 'PreToolUse')).toBe(true);
+  it('governance blocks system-rules and allows own memory', () => {
+    const dir = makeTempDir();
+    mkdirSync(join(dir, 'system-rules'), { recursive: true });
+    mkdirSync(join(dir, 'run', 'teams', 'alpha', 'memory'), { recursive: true });
+
+    const paths = {
+      systemRulesDir: join(dir, 'system-rules'),
+      dataDir: join(dir, 'data'),
+      runDir: join(dir, 'run'),
+    };
+
+    // Blocked: system-rules
+    expect(() =>
+      assertGovernanceAllowed(join(dir, 'system-rules', 'policy.md'), 'alpha', paths),
+    ).toThrow('system-rules');
+
+    // Allowed: own memory
+    expect(() =>
+      assertGovernanceAllowed(join(dir, 'run', 'teams', 'alpha', 'memory', 'notes.md'), 'alpha', paths),
+    ).not.toThrow();
+  });
+
+  it('audit wrapper logs ToolCall:start and ToolCall:end', async () => {
+    const logs: Array<{ msg: string; meta?: Record<string, unknown> }> = [];
+    const logger = { info: (msg: string, meta?: Record<string, unknown>) => { logs.push({ msg, meta }); } };
+
+    const execute = async (input: { file_path: string }) => ({ content: `read ${input.file_path}` });
+    const wrapped = withAudit('Read', execute, { logger });
+
+    await wrapped({ file_path: '/tmp/test.ts' });
+
+    expect(logs.some((l) => l.msg === 'ToolCall:start' && (l.meta as Record<string, unknown>)?.tool === 'Read')).toBe(true);
+    expect(logs.some((l) => l.msg === 'ToolCall:end' && (l.meta as Record<string, unknown>)?.tool === 'Read')).toBe(true);
   });
 });
 

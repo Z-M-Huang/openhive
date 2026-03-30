@@ -55,7 +55,7 @@ export function buildCoreInstructions(): string {
  * Tells the agent which tools are actually enabled for this team,
  * preventing the LLM from incorrectly believing tools like Bash are denied.
  *
- * Ported from query-options.ts buildToolAvailabilityNote().
+ * Build a note about tool availability for the system prompt.
  */
 export function buildToolAvailabilityNote(allowedTools: readonly string[]): string {
   const allowAll = allowedTools.includes('*');

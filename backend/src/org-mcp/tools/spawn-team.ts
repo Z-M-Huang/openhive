@@ -22,6 +22,8 @@ import type { ISessionSpawner, ITaskQueueStore } from '../../domain/interfaces.j
 import { TeamStatus, TaskPriority } from '../../domain/types.js';
 import type { TeamConfig } from '../../domain/types.js';
 import { scrubSecrets } from '../../logging/credential-scrubber.js';
+import { errorMessage } from '../../domain/errors.js';
+import { extractStringCredentials } from '../../domain/credential-utils.js';
 
 /** Team names must be lowercase slugs to prevent path traversal. */
 const TEAM_SLUG_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
@@ -118,7 +120,7 @@ export async function spawnTeam(
     // Ensure parent matches the actual caller, regardless of config source
     config = { ...config, parent: callerId };
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = errorMessage(err);
     return { success: false, error: `config error: ${msg}` };
   }
 
@@ -143,16 +145,14 @@ export async function spawnTeam(
       const initPath = join(deps.runDir, 'teams', name, 'memory', 'init-context.md');
       let safeContext = parsed.data.init_context;
       if (parsed.data.credentials) {
-        const credValues = Object.values(parsed.data.credentials).filter(
-          (v): v is string => typeof v === 'string' && v.length >= 8,
-        );
+        const credValues = extractStringCredentials(parsed.data.credentials);
         if (credValues.length > 0) safeContext = scrubSecrets(safeContext, [], credValues);
       }
       writeFileSync(initPath, safeContext, 'utf-8');
     }
   } catch (err) {
     cleanupTeamDirs(deps.runDir, name);
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = errorMessage(err);
     return { success: false, error: `scaffold error: ${msg}` };
   }
 
@@ -181,7 +181,7 @@ export async function spawnTeam(
   } catch (err) {
     deps.orgTree.removeTeam(name);
     cleanupTeamDirs(deps.runDir, name);
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = errorMessage(err);
     return { success: false, error: `spawn failed: ${msg}` };
   }
 
@@ -222,7 +222,7 @@ function enqueueInitTask(
     try { deps.spawner.stop?.(name); } catch { /* best effort */ }
     deps.orgTree.removeTeam(name);
     cleanupTeamDirs(deps.runDir, name);
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = errorMessage(err);
     return { success: false, error: `init enqueue failed: ${msg}` };
   }
 }
