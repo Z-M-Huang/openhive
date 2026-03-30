@@ -24,9 +24,15 @@ export class ChannelRouter {
   }
 
   async start(): Promise<void> {
-    for (const [, adapter] of this.#adapters) {
+    for (const [id, adapter] of this.#adapters) {
       adapter.onMessage((msg: ChannelMessage) => this.#handleMessage(adapter, msg));
-      await adapter.connect();
+      try {
+        await adapter.connect();
+      } catch {
+        // Non-fatal: adapter failed to connect (e.g. Discord timeout).
+        // Remove from active adapters so getConnectedCount() is accurate.
+        this.#adapters.delete(id);
+      }
     }
   }
 

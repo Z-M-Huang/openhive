@@ -13,7 +13,7 @@
 import { resolve, dirname } from 'node:path';
 import { realpathSync } from 'node:fs';
 
-import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
+import type { HookCallback } from './types.js';
 
 /** Classification of a target file for governance purposes. */
 type FileClass =

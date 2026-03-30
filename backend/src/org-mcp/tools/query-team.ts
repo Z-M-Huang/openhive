@@ -38,6 +38,7 @@ export async function queryTeam(
   input: QueryTeamInput,
   callerId: string,
   deps: QueryTeamDeps,
+  sourceChannelId?: string,
 ): Promise<QueryTeamResult> {
   const parsed = QueryTeamInputSchema.safeParse(input);
   if (!parsed.success) {
@@ -68,7 +69,7 @@ export async function queryTeam(
   deps.log('query_team: invoking queryRunner', { callerId, team, query: query.slice(0, 100) });
 
   try {
-    const response = await deps.queryRunner(query, team, callerId, ancestors);
+    const response = await deps.queryRunner(query, team, callerId, ancestors, sourceChannelId);
 
     if (!response) {
       return { success: false, error: 'Team returned empty response' };

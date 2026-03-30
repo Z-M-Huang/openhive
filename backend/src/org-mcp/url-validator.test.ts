@@ -31,12 +31,42 @@ describe('URL Validator: validateBrowserUrl', () => {
     expect(result.reason).toContain('evil.com');
   });
 
-  it('allows private IP with no allowlist', () => {
-    expect(validateBrowserUrl('http://192.168.1.1:8080')).toEqual({ allowed: true });
+  it('blocks private IPs even with no allowlist (SSRF protection)', () => {
+    expect(validateBrowserUrl('http://192.168.1.1:8080').allowed).toBe(false);
+    expect(validateBrowserUrl('http://10.0.0.1').allowed).toBe(false);
+    expect(validateBrowserUrl('http://127.0.0.1:8080/health').allowed).toBe(false);
+    expect(validateBrowserUrl('http://169.254.169.254/latest/meta-data/').allowed).toBe(false);
+    expect(validateBrowserUrl('http://localhost:3000').allowed).toBe(false);
+    expect(validateBrowserUrl('http://0.0.0.0').allowed).toBe(false);
   });
 
-  it('allows non-http scheme with no allowlist', () => {
-    expect(validateBrowserUrl('ftp://files.example.com/data')).toEqual({ allowed: true });
+  it('blocks IPv6 loopback and private addresses', () => {
+    expect(validateBrowserUrl('http://[::1]/').allowed).toBe(false);
+    expect(validateBrowserUrl('http://[::ffff:127.0.0.1]/').allowed).toBe(false);
+    expect(validateBrowserUrl('http://[fe80::1]/').allowed).toBe(false);
+    expect(validateBrowserUrl('http://[fc00::1]/').allowed).toBe(false);
+    expect(validateBrowserUrl('http://[fd00::1]/').allowed).toBe(false);
+  });
+
+  it('blocks IPv4-mapped IPv6 private addresses', () => {
+    expect(validateBrowserUrl('http://[::ffff:10.0.0.1]/').allowed).toBe(false);
+    expect(validateBrowserUrl('http://[::ffff:192.168.1.1]/').allowed).toBe(false);
+    expect(validateBrowserUrl('http://[::ffff:172.16.0.1]/').allowed).toBe(false);
+  });
+
+  it('blocks localhost with trailing dot', () => {
+    expect(validateBrowserUrl('http://localhost.:8080').allowed).toBe(false);
+  });
+
+  it('blocks file:// scheme', () => {
+    const result = validateBrowserUrl('file:///etc/passwd');
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toContain('scheme');
+  });
+
+  it('blocks ftp:// and other non-http schemes', () => {
+    expect(validateBrowserUrl('ftp://files.example.com/data').allowed).toBe(false);
+    expect(validateBrowserUrl('gopher://example.com').allowed).toBe(false);
   });
 
   it('rejects invalid URL', () => {

@@ -8,9 +8,18 @@
  * Subagent definitions are returned for the SDK `agents` option.
  */
 
-import type { AgentDefinition } from '@anthropic-ai/claude-agent-sdk';
 import { join } from 'node:path';
 import { loadRulesFromDirectory } from '../rules/loader.js';
+
+/**
+ * A subagent definition parsed from a team's subagents/*.md files.
+ * Replaces the old claude-agent-sdk AgentDefinition type.
+ */
+export interface SubagentDefinition {
+  readonly description: string;
+  readonly prompt: string;
+  readonly skills?: string[];
+}
 
 interface ParsedSubagent {
   readonly name: string;
@@ -51,12 +60,12 @@ function parseSubagent(filename: string, content: string): ParsedSubagent {
 
 /**
  * Load all subagent definitions from a team's subagents/ directory.
- * Returns SDK-compatible Record<string, AgentDefinition>.
+ * Returns Record<string, SubagentDefinition>.
  */
-export function loadSubagents(runDir: string, teamName: string): Record<string, AgentDefinition> {
+export function loadSubagents(runDir: string, teamName: string): Record<string, SubagentDefinition> {
   const dir = join(runDir, 'teams', teamName, 'subagents');
   const files = loadRulesFromDirectory(dir);
-  const result: Record<string, AgentDefinition> = {};
+  const result: Record<string, SubagentDefinition> = {};
   for (const f of files) {
     const def = parseSubagent(f.filename, f.content);
     result[def.name] = { description: def.description, prompt: def.rawContent, skills: def.skills };

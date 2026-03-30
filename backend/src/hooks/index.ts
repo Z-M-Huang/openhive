@@ -2,7 +2,7 @@
  * Hook composer -- builds the full SDK hooks configuration.
  */
 
-import type { HookCallbackMatcher } from '@anthropic-ai/claude-agent-sdk';
+import type { HookCallbackMatcher } from './types.js';
 
 import { createWorkspaceBoundaryHook } from './workspace-boundary.js';
 import { createGovernanceHook } from './governance.js';

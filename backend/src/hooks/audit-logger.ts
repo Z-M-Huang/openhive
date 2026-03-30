@@ -6,7 +6,7 @@
  * known-secret matching).
  */
 
-import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
+import type { HookCallback } from './types.js';
 import { scrubSecrets } from '../logging/credential-scrubber.js';
 import type { SecretString } from '../secrets/secret-string.js';
 

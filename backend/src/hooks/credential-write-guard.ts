@@ -7,7 +7,7 @@
  * 2. Bash guard: denies Bash commands that write credentials to files
  */
 
-import type { HookCallback, PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
+import type { HookCallback, PreToolUseHookInput } from './types.js';
 
 /**
  * Create a PreToolUse hook that scrubs credential values from Write/Edit content.

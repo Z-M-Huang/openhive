@@ -12,7 +12,7 @@ import { createAuditPreHook, createAuditPostHook } from '../hooks/audit-logger.j
 import { createDatabase, createTables } from '../storage/database.js';
 import { LogStore } from '../storage/stores/log-store.js';
 import type { DatabaseInstance } from '../storage/database.js';
-import type { HookInput } from '@anthropic-ai/claude-agent-sdk';
+import type { HookInput } from '../hooks/types.js';
 
 function hookInput(input: Record<string, unknown>): HookInput {
   return input as unknown as HookInput;

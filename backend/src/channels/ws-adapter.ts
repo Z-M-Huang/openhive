@@ -18,7 +18,7 @@
 import { randomBytes } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import type { ChannelMessage, IChannelAdapter } from '../domain/interfaces.js';
-import type { ProgressUpdate } from '../sessions/spawner.js';
+import type { ProgressUpdate } from '../sessions/ai-engine.js';
 
 export type WsProgressSender = (update: ProgressUpdate) => void;
 

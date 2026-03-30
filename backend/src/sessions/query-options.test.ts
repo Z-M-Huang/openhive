@@ -1,14 +1,14 @@
 /**
- * UT-7: Query Options Assembler
+ * UT-7: AI Session Config Assembler
  *
- * Tests: Query options assembler produces correct structure with all fields
+ * Tests: buildAiSessionConfig produces correct structure with all fields
  */
 
 import { describe, it, expect } from 'vitest';
 import { join } from 'node:path';
 
-import { buildQueryOptions } from './query-options.js';
-import type { BuildQueryOptionsInput } from './query-options.js';
+import { buildAiSessionConfig } from './query-options.js';
+import type { BuildAiSessionConfigInput } from './query-options.js';
 import type { ProvidersOutput } from '../config/validation.js';
 import type { TeamConfig } from '../domain/types.js';
 
@@ -16,8 +16,6 @@ import type { TeamConfig } from '../domain/types.js';
 
 /** Test-only placeholder. Not a real key. */
 const TEST_KEY_VALUE = 'test-placeholder-key-not-real';
-
-const canUseToolOpts = { signal: new AbortController().signal, toolUseID: 'test-tu' };
 
 function makeProviders(overrides?: Partial<ProvidersOutput>): ProvidersOutput {
   return {
@@ -57,13 +55,13 @@ function captureLog(): { messages: Array<{ msg: string; meta?: Record<string, un
   };
 }
 
-// ── UT-7: Query Options Assembler ─────────────────────────────────────────
+// ── UT-7: AI Session Config Assembler ─────────────────────────────────────
 
-describe('UT-7: Query Options Assembler', () => {
-  it('produces correct structure with all fields', async () => {
+describe('UT-7: AI Session Config Assembler', () => {
+  it('produces correct structure with all fields', () => {
     const log = captureLog();
 
-    const input: BuildQueryOptionsInput = {
+    const input: BuildAiSessionConfigInput = {
       teamName: 'weather-team',
       teamConfig: makeTeamConfig(),
       runDir: '/run',
@@ -71,88 +69,151 @@ describe('UT-7: Query Options Assembler', () => {
       systemRulesDir: '/app/system-rules',
       providers: makeProviders(),
       orgMcpPort: 3001,
-      availableMcpServers: { analytics: { url: 'http://analytics:3001' } },
       ancestors: ['root-team'],
       logger: log.logger,
     };
 
-    const opts = buildQueryOptions(input);
+    const config = buildAiSessionConfig(input);
 
-    // System prompt
-    expect(opts.systemPrompt.type).toBe('preset');
-    expect(opts.systemPrompt.preset).toBe('claude_code');
-    expect(typeof opts.systemPrompt.append).toBe('string');
+    // Profile name from team config
+    expect(config.profileName).toBe('default');
 
-    // Tools
-    expect(opts.tools).toEqual({ type: 'preset', preset: 'claude_code' });
+    // Model resolved from provider profile
+    expect(config.modelId).toBe('claude-sonnet-4-20250514');
 
-    // Model from provider
-    expect(opts.model).toBe('claude-sonnet-4-20250514');
+    // Context window
+    expect(config.contextWindow).toBe(200_000);
 
-    // Permissions
-    expect(opts.permissionMode).toBe('bypassPermissions');
-    expect(opts.allowDangerouslySkipPermissions).toBe(true);
+    // Team name
+    expect(config.teamName).toBe('weather-team');
 
-    // maxTurns
-    expect(opts.maxTurns).toBe(25);
-
-    // MCP servers (org via HTTP config on localhost:3001)
-    expect(opts.mcpServers['org']).toEqual({ type: 'http', url: 'http://127.0.0.1:3001/mcp', headers: { 'X-Caller-Id': 'weather-team' } });
-    expect(opts.mcpServers['analytics']).toBeUndefined();
-
-    // canUseTool
-    expect((await opts.canUseTool('Read', {}, canUseToolOpts)).behavior).toBe('allow');
-    expect((await opts.canUseTool('Bash', {}, canUseToolOpts)).behavior).toBe('deny');
-    expect((await opts.canUseTool('mcp__org__escalate', {}, canUseToolOpts)).behavior).toBe('allow');
-
-    // Hooks
-    expect(opts.hooks.PreToolUse.length).toBeGreaterThan(0);
-    expect(opts.hooks.PostToolUse.length).toBeGreaterThan(0);
-
-    // stderr scrubber (returns void — just verify it doesn't throw)
-    expect(typeof opts.stderr).toBe('function');
-    opts.stderr('leaked ' + TEST_KEY_VALUE + ' here');
-
-    // env — process.env is spread so child sessions inherit PATH, HOME, etc.
-    expect(opts.env['ANTHROPIC_API_KEY']).toBe(TEST_KEY_VALUE);
-    expect(opts.env['PATH']).toBe(process.env['PATH']);
-    expect(opts.env['HOME']).toBe(process.env['HOME']);
-    expect(opts.env['CLAUDE_CODE_DISABLE_AUTO_MEMORY']).toBe('1');
+    // maxTurns from team config
+    expect(config.maxTurns).toBe(25);
 
     // cwd
-    expect(opts.cwd).toBe(join('/run', 'teams', 'weather-team'));
+    expect(config.cwd).toBe(join('/run', 'teams', 'weather-team'));
 
-    // additionalDirectories
-    expect(opts.additionalDirectories).toEqual([]);
+    // additionalDirs
+    expect(config.additionalDirs).toEqual([]);
+
+    // Allowed tools preserved from config
+    expect(config.allowedTools).toEqual(['Read', 'Write', 'Edit', 'mcp__org__*']);
+
+    // MCP servers
+    expect(config.mcpServers).toEqual(['org']);
+
+    // Governance paths
+    expect(config.governancePaths.systemRulesDir).toBe('/app/system-rules');
+    expect(config.governancePaths.dataDir).toBe('/data');
+    expect(config.governancePaths.runDir).toBe('/run');
+
+    // Rule cascade is a string
+    expect(typeof config.ruleCascade).toBe('string');
+
+    // Skills content is a string
+    expect(typeof config.skillsContent).toBe('string');
+
+    // Memory section is a string
+    expect(typeof config.memorySection).toBe('string');
+
+    // Known secrets (SecretString instances)
+    expect(config.knownSecrets).toHaveLength(1);
+    expect(config.knownSecrets[0].expose()).toBe(TEST_KEY_VALUE);
+
+    // Org MCP port
+    expect(config.orgMcpPort).toBe(3001);
   });
 
-  it('env inherits process.env so Bash can find executables (PATH, HOME)', () => {
+  it('credentials are extracted for scrubbing', () => {
     const log = captureLog();
-    const input: BuildQueryOptionsInput = {
-      teamName: 'env-test',
-      teamConfig: makeTeamConfig({ allowed_tools: ['*'] }),
+    const credValue = 'my-long-secret-value';
+    const input: BuildAiSessionConfigInput = {
+      teamName: 'cred-team',
+      teamConfig: makeTeamConfig({
+        credentials: {
+          API_KEY: credValue,
+          SHORT: 'abc',
+        },
+      }),
       runDir: '/run',
       dataDir: '/data',
       systemRulesDir: '/app/system-rules',
       providers: makeProviders(),
       ancestors: [],
-      availableMcpServers: {},
       logger: log.logger,
     };
 
-    const opts = buildQueryOptions(input);
+    const config = buildAiSessionConfig(input);
 
-    // Without process.env spread, Bash tool can't find curl, node, python, ls, etc.
-    // This test guards against the regression where env only had providerEnv.
-    expect(opts.env['PATH']).toBeTruthy();
-    expect(opts.env['PATH']).toContain('/');  // PATH must have at least one directory
-    expect(opts.env['HOME']).toBeTruthy();
+    // Credential keys
+    expect(config.credentialKeys).toEqual(['API_KEY', 'SHORT']);
 
-    // Provider env overrides process.env (not the other way around)
-    expect(opts.env['ANTHROPIC_API_KEY']).toBe(TEST_KEY_VALUE);
+    // Raw secret values only includes long values (>= 8 chars)
+    expect(config.rawSecretValues).toEqual([credValue]);
 
-    // SDK control vars are set
-    expect(opts.env['CLAUDE_CODE_DISABLE_AUTO_MEMORY']).toBe('1');
-    expect(opts.env['CLAUDE_CODE_STREAM_CLOSE_TIMEOUT']).toBe('1800000');
+    // Credentials map is passed through
+    expect(config.credentials['API_KEY']).toBe(credValue);
+    expect(config.credentials['SHORT']).toBe('abc');
+  });
+
+  it('context window uses provider profile value when set', () => {
+    const log = captureLog();
+    const input: BuildAiSessionConfigInput = {
+      teamName: 'ctx-team',
+      teamConfig: makeTeamConfig(),
+      runDir: '/run',
+      dataDir: '/data',
+      systemRulesDir: '/app/system-rules',
+      providers: makeProviders({
+        profiles: {
+          default: {
+            type: 'api',
+            api_key: TEST_KEY_VALUE,
+            model: 'claude-sonnet-4-20250514',
+            context_window: 128_000,
+          },
+        },
+      }),
+      ancestors: [],
+      logger: log.logger,
+    };
+
+    const config = buildAiSessionConfig(input);
+    expect(config.contextWindow).toBe(128_000);
+  });
+
+  it('orgMcpPort defaults to 3001 when not provided', () => {
+    const log = captureLog();
+    const input: BuildAiSessionConfigInput = {
+      teamName: 'port-team',
+      teamConfig: makeTeamConfig(),
+      runDir: '/run',
+      dataDir: '/data',
+      systemRulesDir: '/app/system-rules',
+      providers: makeProviders(),
+      ancestors: [],
+      logger: log.logger,
+    };
+
+    const config = buildAiSessionConfig(input);
+    expect(config.orgMcpPort).toBe(3001);
+  });
+
+  it('sourceChannelId is passed through', () => {
+    const log = captureLog();
+    const input: BuildAiSessionConfigInput = {
+      teamName: 'chan-team',
+      teamConfig: makeTeamConfig(),
+      runDir: '/run',
+      dataDir: '/data',
+      systemRulesDir: '/app/system-rules',
+      providers: makeProviders(),
+      ancestors: [],
+      logger: log.logger,
+      sourceChannelId: 'discord:1234',
+    };
+
+    const config = buildAiSessionConfig(input);
+    expect(config.sourceChannelId).toBe('discord:1234');
   });
 });

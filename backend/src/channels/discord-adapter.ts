@@ -11,7 +11,7 @@
 
 import type { SecretString } from '../secrets/secret-string.js';
 import type { ChannelMessage, IChannelAdapter } from '../domain/interfaces.js';
-import type { ProgressUpdate } from '../sessions/spawner.js';
+import type { ProgressUpdate } from '../sessions/ai-engine.js';
 
 // ── Narrow Discord.js interfaces ──────────────────────────────────────────
 // These describe only the subset of the discord.js API we actually use.

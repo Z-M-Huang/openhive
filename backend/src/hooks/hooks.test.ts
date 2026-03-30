@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 
-import type { HookInput, HookJSONOutput } from '@anthropic-ai/claude-agent-sdk';
+import type { HookInput, HookJSONOutput } from './types.js';
 import { createWorkspaceBoundaryHook } from './workspace-boundary.js';
 import { createGovernanceHook } from './governance.js';
 import type { GovernancePaths } from './governance.js';

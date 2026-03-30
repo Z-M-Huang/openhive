@@ -11,7 +11,6 @@ import type { TeamConfig } from '../domain/types.js';
 import { TaskStatus } from '../domain/types.js';
 import { handleMessage } from './message-handler.js';
 import type { MessageHandlerDeps, MessageResult } from './message-handler.js';
-import type { QueryFn } from './spawner.js';
 import { scrubSecrets } from '../logging/credential-scrubber.js';
 
 export interface TaskConsumerOpts {
@@ -19,7 +18,6 @@ export interface TaskConsumerOpts {
   readonly orgTree: OrgTree;
   readonly handlerDeps: MessageHandlerDeps;
   readonly pollIntervalMs?: number;
-  readonly queryFn?: QueryFn;
   readonly notifyChannel?: (content: string, sourceChannelId?: string | null) => Promise<void>;
   readonly getTeamConfig?: (teamId: string) => TeamConfig | undefined;
   readonly reportTriggerOutcome?: (team: string, triggerName: string, success: boolean) => void;
@@ -30,7 +28,6 @@ export class TaskConsumer {
   readonly #orgTree: OrgTree;
   readonly #deps: MessageHandlerDeps;
   readonly #pollMs: number;
-  readonly #queryFn?: QueryFn;
   readonly #notifyChannel?: (content: string, sourceChannelId?: string | null) => Promise<void>;
   readonly #getTeamConfig?: (teamId: string) => TeamConfig | undefined;
   readonly #reportTriggerOutcome?: (team: string, triggerName: string, success: boolean) => void;
@@ -42,7 +39,6 @@ export class TaskConsumer {
     this.#orgTree = opts.orgTree;
     this.#deps = opts.handlerDeps;
     this.#pollMs = opts.pollIntervalMs ?? 5_000;
-    this.#queryFn = opts.queryFn;
     this.#notifyChannel = opts.notifyChannel;
     this.#getTeamConfig = opts.getTeamConfig;
     this.#reportTriggerOutcome = opts.reportTriggerOutcome;
@@ -92,7 +88,7 @@ export class TaskConsumer {
             },
             { ...this.#deps, orgAncestors: this.#getAncestorNames(task.teamId) },
             {
-              teamName: task.teamId, queryFn: this.#queryFn, maxTurns,
+              teamName: task.teamId, maxTurns,
               sourceChannelId: dequeued.sourceChannelId ?? undefined,
             },
           );

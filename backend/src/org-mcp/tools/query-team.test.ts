@@ -52,22 +52,21 @@ describe('query_team', () => {
     expect(typed.error).toContain('not available');
   });
 
-  it('CLAUDE_CODE_STREAM_CLOSE_TIMEOUT is set in buildQueryOptions env', async () => {
-    // Verify timeout is included in SDK env options (no longer global process.env mutation)
-    const { buildQueryOptions } = await import('../../sessions/query-options.js');
-    const opts = buildQueryOptions({
+  it('buildAiSessionConfig returns correct maxTurns and profileName', async () => {
+    const { buildAiSessionConfig } = await import('../../sessions/query-options.js');
+    const config = buildAiSessionConfig({
       teamName: 'child',
       teamConfig: makeTeamConfig({ name: 'child' }),
       runDir: '/tmp/test',
       dataDir: '/tmp/data',
       systemRulesDir: '/tmp/rules',
       providers: { profiles: { default: { type: 'api', model: 'claude-sonnet-4-5-20250514', api_key: process.env['ANTHROPIC_API_KEY'] ?? 'test-placeholder' } } } as never,
-      availableMcpServers: {},
       ancestors: [],
       logger: { info: () => {} },
     });
 
-    expect(opts.env['CLAUDE_CODE_STREAM_CLOSE_TIMEOUT']).toBe('1800000');
+    expect(config.profileName).toBe('default');
+    expect(config.maxTurns).toBe(50);
   });
 });
 

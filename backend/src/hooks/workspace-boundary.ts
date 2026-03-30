@@ -90,7 +90,7 @@ function isInsideBoundary(target: string, allowed: string[]): boolean {
 export function createWorkspaceBoundaryHook(
   cwd: string,
   additionalDirs: string[],
-): import('@anthropic-ai/claude-agent-sdk').HookCallback {
+): import('./types.js').HookCallback {
   const allowed = [cwd, ...additionalDirs];
 
   return (input) => {

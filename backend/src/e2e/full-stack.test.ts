@@ -9,8 +9,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { tmpdir } from 'node:os';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { HookInput } from '@anthropic-ai/claude-agent-sdk';
-
+import type { HookInput } from '../hooks/types.js';
 import { bootstrap } from '../index.js';
 import type { BootstrapResult } from '../index.js';
 import { createDatabase, createTables } from '../storage/database.js';

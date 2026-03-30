@@ -9,7 +9,7 @@
 import { describe, it, expect } from 'vitest';
 
 import { createCredentialWriteGuard, createBashCredentialGuard } from './credential-write-guard.js';
-import type { HookInput } from '@anthropic-ai/claude-agent-sdk';
+import type { HookInput } from './types.js';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 

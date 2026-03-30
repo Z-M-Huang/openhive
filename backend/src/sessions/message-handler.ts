@@ -1,5 +1,5 @@
 /**
- * Message handler — routes inbound channel messages to SDK sessions.
+ * Message handler — routes inbound channel messages to AI SDK sessions.
  *
  * Returns a structured MessageResult instead of raw strings, enabling
  * callers to distinguish success/failure without text matching.
@@ -8,13 +8,23 @@
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { loadTeamConfig } from '../config/loader.js';
-import { buildQueryOptions } from './query-options.js';
-import type { QueryFn, SdkMessage, ProgressCallback, ProgressUpdate } from './spawner.js';
-import { spawnSession, getAssistantContentBlocks } from './spawner.js';
+import { resolveProvider } from './provider-resolver.js';
+import { buildProviderRegistry, resolveModel, getContextWindow } from './provider-registry.js';
+import { buildBuiltinTools } from './tools/index.js';
+import { connectMcpServers, resolveActiveTools } from './mcp-bridge.js';
+import { buildSubagentTools } from './subagent-factory.js';
+import { buildSystemPrompt } from './prompt-builder.js';
+import { runSession } from './ai-engine.js';
+import type { ProgressCallback, ProgressUpdate } from './ai-engine.js';
+import { buildSessionContext } from './context-builder.js';
+import { buildRuleCascade } from '../rules/cascade.js';
+import { loadSubagents, loadSkillsContent } from './skill-loader.js';
+import { buildMemorySection } from './memory-loader.js';
+import { MemoryStore } from '../storage/stores/memory-store.js';
+import { scrubSecrets } from '../logging/credential-scrubber.js';
 import type { ChannelMessage } from '../domain/interfaces.js';
 import type { ProvidersOutput } from '../config/validation.js';
 import type { TeamConfig } from '../domain/types.js';
-import { scrubSecrets } from '../logging/credential-scrubber.js';
 
 // ── Public types ──────────────────────────────────────────────────────────
 
@@ -26,7 +36,7 @@ export interface MessageResult {
 }
 
 export interface HandleMessageOpts {
-  queryFn?: QueryFn;
+  runSessionFn?: typeof runSession;
   teamName?: string;
   onProgress?: ProgressCallback;
   maxTurns?: number;
@@ -62,42 +72,101 @@ function loadConfig(runDir: string, teamName: string): TeamConfig | undefined {
   } catch { return undefined; }
 }
 
-/**
- * Extract text from SDK messages (v2 pattern).
- * Handles 'assistant' messages with content blocks and 'result' messages.
- */
-function extractText(messages: readonly SdkMessage[]): string {
-  let output = '';
-  for (const msg of messages) {
-    if (msg.type === 'assistant') {
-      const blocks = getAssistantContentBlocks(msg);
-      if (blocks) {
-        for (const block of blocks) {
-          if (block.type === 'text' && block.text) output += block.text;
-        }
-      }
-    }
-    if (msg.type === 'result') {
-      const result = msg as unknown as { result?: string };
-      if (result.result) output = result.result;
-    }
-    if (msg.type === 'text' && typeof msg.content === 'string') {
-      output += msg.content;
-    }
+// ── Tool assembly ────────────────────────────────────────────────────────
+
+/** Build all tools (builtin + MCP + subagent) and return cleanup fn. */
+async function assembleTools(
+  teamConfig: TeamConfig,
+  teamName: string,
+  deps: MessageHandlerDeps,
+  registry: ReturnType<typeof buildProviderRegistry>,
+  profileName: string,
+  modelId: string,
+  ctx: ReturnType<typeof buildSessionContext>,
+  providerSecrets: readonly import('../secrets/secret-string.js').SecretString[],
+  credValues: readonly string[],
+  sourceChannelId?: string,
+) {
+  const teamCreds = teamConfig.credentials ?? {};
+  const builtinTools = buildBuiltinTools({
+    cwd: ctx.cwd,
+    additionalDirs: ctx.additionalDirectories,
+    credentials: teamCreds,
+    governancePaths: { systemRulesDir: deps.systemRulesDir, dataDir: deps.dataDir, runDir: deps.runDir },
+    teamName,
+    audit: {
+      logger: deps.logger,
+      knownSecrets: providerSecrets,
+      rawSecrets: credValues,
+    },
+  });
+
+  const mcp = await connectMcpServers({
+    configMcpServers: teamConfig.mcp_servers,
+    orgMcpPort: deps.orgMcpPort ?? 3001,
+    teamName,
+    sourceChannelId,
+  });
+
+  // Resolve which built-in + MCP tools this team is allowed to use
+  const baseTools = { ...builtinTools, ...mcp.tools };
+  const allowedNames = resolveActiveTools(Object.keys(baseTools), teamConfig.allowed_tools);
+  const allowedSet = new Set(allowedNames);
+  const filteredTools: typeof baseTools = {};
+  for (const [k, v] of Object.entries(baseTools)) {
+    if (allowedSet.has(k)) (filteredTools as Record<string, unknown>)[k] = v;
   }
-  return output.trim();
+
+  // Subagents receive only the filtered toolset — same activeTools restriction
+  const subagentDefs = loadSubagents(deps.runDir, teamName);
+  const subagentTools = buildSubagentTools({
+    registry, profileName, modelId, subagentDefs,
+    tools: filteredTools,
+  });
+
+  const allTools = { ...baseTools, ...subagentTools };
+  const activeTools = [...allowedNames, ...Object.keys(subagentTools)];
+
+  return { allTools, activeTools, mcpCleanup: mcp.cleanup };
 }
 
-async function createSdkQueryFn(): Promise<QueryFn> {
-  const sdk = await import('@anthropic-ai/claude-agent-sdk');
-  return (prompt: string, options: Record<string, unknown>) =>
-    sdk.query({ prompt, options }) as AsyncIterable<SdkMessage>;
+/** Build the full system prompt from rule cascade, skills, and memory. */
+function assembleSystemPrompt(
+  teamConfig: TeamConfig,
+  teamName: string,
+  deps: MessageHandlerDeps,
+) {
+  const cascadeLogger = {
+    info: (m: string, meta?: Record<string, unknown>) => deps.logger.info(m, meta),
+    warn: (m: string, meta?: Record<string, unknown>) => (deps.logger.warn ?? deps.logger.info)(m, meta),
+  };
+  const ruleCascade = buildRuleCascade({
+    teamName, ancestors: deps.orgAncestors,
+    runDir: deps.runDir, dataDir: deps.dataDir, systemRulesDir: deps.systemRulesDir,
+    logger: cascadeLogger,
+  });
+  const skillsContent = loadSkillsContent(deps.runDir, teamName);
+  const teamMemoryStore = new MemoryStore(join(deps.runDir, 'teams'));
+  const memorySection = buildMemorySection(teamMemoryStore, teamName);
+
+  if (memorySection.length > 12000) {
+    deps.logger.info('Team memory exceeds 12000 chars — consider summarizing', {
+      teamName, length: memorySection.length,
+    });
+  }
+
+  return buildSystemPrompt({
+    teamName,
+    allowedTools: teamConfig.allowed_tools,
+    credentialKeys: Object.keys(teamConfig.credentials ?? {}),
+    ruleCascade, skillsContent, memorySection,
+  });
 }
 
 // ── Main entry point ──────────────────────────────────────────────────────
 
 /**
- * Handle an inbound message by spawning an SDK session.
+ * Handle an inbound message by spawning an AI SDK session.
  */
 export async function handleMessage(
   msg: ChannelMessage,
@@ -116,59 +185,46 @@ export async function handleMessage(
     };
   }
 
+  let mcpCleanup: (() => Promise<void>) | undefined;
   try {
-    const queryOpts = buildQueryOptions({
-      teamName, teamConfig,
-      runDir: deps.runDir, dataDir: deps.dataDir, systemRulesDir: deps.systemRulesDir,
-      providers: deps.providers, orgMcpPort: deps.orgMcpPort,
-      availableMcpServers: deps.availableMcpServers,
-      ancestors: deps.orgAncestors, logger: deps.logger,
-      sourceChannelId: opts?.sourceChannelId,
-    });
+    const { model: modelId, secrets: providerSecrets } = resolveProvider(teamConfig.provider_profile, deps.providers);
+    const registry = buildProviderRegistry(deps.providers);
+    const profileName = teamConfig.provider_profile;
+    const model = resolveModel(registry, profileName, modelId);
+    const contextWindow = getContextWindow(deps.providers, profileName);
+    const ctx = buildSessionContext(teamName, deps.runDir);
 
-    const sdkOpts: Record<string, unknown> = {
-      model: queryOpts.model,
-      permissionMode: queryOpts.permissionMode,
-      allowDangerouslySkipPermissions: queryOpts.allowDangerouslySkipPermissions,
-      pathToClaudeCodeExecutable: queryOpts.pathToClaudeCodeExecutable,
-      maxTurns: opts?.maxTurns ?? queryOpts.maxTurns,
-      cwd: queryOpts.cwd,
-      additionalDirectories: queryOpts.additionalDirectories,
-      systemPrompt: queryOpts.systemPrompt,
-      tools: queryOpts.tools,
-      env: queryOpts.env,
-      mcpServers: queryOpts.mcpServers,
-      hooks: queryOpts.hooks,
-      agents: queryOpts.agents,
-      canUseTool: queryOpts.canUseTool,
-      stderr: queryOpts.stderr,
-    };
-    // Wrap onProgress with credential scrubbing so ack/progress never leaks secrets
     const teamCreds = teamConfig.credentials ?? {};
     const credValues = Object.values(teamCreds).filter(
       (v): v is string => typeof v === 'string' && v.length >= 8,
     );
+
+    const tools = await assembleTools(teamConfig, teamName, deps, registry, profileName, modelId, ctx, providerSecrets, credValues, opts?.sourceChannelId);
+    mcpCleanup = tools.mcpCleanup;
+
+    const system = assembleSystemPrompt(teamConfig, teamName, deps);
     const safeOnProgress = opts?.onProgress && credValues.length > 0
       ? (update: ProgressUpdate) => {
-          opts.onProgress!({
-            ...update,
-            content: scrubSecrets(update.content, [], credValues),
-          });
+          opts.onProgress!({ ...update, content: scrubSecrets(update.content, [], credValues) });
         }
       : opts?.onProgress;
 
-    const qFn = opts?.queryFn ?? await createSdkQueryFn();
-    const result = await spawnSession(msg.content, sdkOpts, qFn, safeOnProgress);
-    const text = extractText(result.messages);
-    const durationMs = Date.now() - startMs;
+    const sessionFn = opts?.runSessionFn ?? runSession;
+    const result = await sessionFn({
+      model, system, prompt: msg.content,
+      tools: tools.allTools, activeTools: tools.activeTools,
+      maxTurns: opts?.maxTurns ?? teamConfig.maxTurns,
+      contextWindow, knownSecrets: providerSecrets, rawSecrets: credValues,
+      onProgress: safeOnProgress,
+    });
 
-    if (!text) {
+    const durationMs = Date.now() - startMs;
+    if (!result.text) {
       deps.logger.info('Session completed (empty response)', { teamName, durationMs });
       return { ok: true, durationMs };
     }
 
-    // Scrub team credential values from response (defense in depth)
-    const safeText = credValues.length > 0 ? scrubSecrets(text, [], credValues) : text;
+    const safeText = credValues.length > 0 ? scrubSecrets(result.text, [], credValues) : result.text;
     deps.logger.info('Session completed', { teamName, durationMs });
     return { ok: true, content: safeText, durationMs };
   } catch (err) {
@@ -176,5 +232,7 @@ export async function handleMessage(
     const errMsg = err instanceof Error ? err.message : String(err);
     deps.logger.info('Message handler error', { teamName, error: errMsg, durationMs });
     return { ok: false, error: errMsg, durationMs };
+  } finally {
+    await mcpCleanup?.();
   }
 }

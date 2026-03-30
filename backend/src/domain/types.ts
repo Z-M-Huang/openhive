@@ -71,10 +71,12 @@ export interface TriggerConfig {
 export interface ProviderProfile {
   readonly name: string;
   readonly type: 'api' | 'oauth';
+  readonly provider?: 'anthropic' | 'openai';
   readonly api_url?: string;
   readonly api_key?: string;
   readonly model?: string;
   readonly oauth_token_env?: string;
+  readonly context_window?: number;
 }
 
 // ── Runtime Types ──────────────────────────────────────────────────────────

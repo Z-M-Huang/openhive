@@ -70,7 +70,7 @@ export interface ToolDefinition {
 
 /** Runs a query against a child team's SDK session, returning its response. */
 export type TeamQueryRunner = (
-  query: string, team: string, callerId: string, ancestors: string[],
+  query: string, team: string, callerId: string, ancestors: string[], sourceChannelId?: string,
 ) => Promise<string | void>;
 
 export interface OrgMcpDeps {
@@ -150,7 +150,7 @@ export function buildToolDefs(deps: OrgMcpDeps): ToolDefinition[] {
       name: 'query_team',
       description: 'Synchronously query a child team and return its response',
       inputSchema: QueryTeamInputSchema,
-      handler: (input, callerId) => queryTeam(input as never, callerId, deps),
+      handler: (input, callerId, sourceChannelId) => queryTeam(input as never, callerId, deps, sourceChannelId),
     },
     {
       name: 'get_credential',

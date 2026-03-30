@@ -113,7 +113,7 @@ function buildOrgMcpDeps(
     log: (msg, meta) => opts.logger.info(msg, meta),
     get queryRunner() { return getQueryRunner(); },
     get triggerEngine() { return getTriggerEngine(); },
-    browserRelay: opts.browserRelay,
+    get browserRelay() { return opts.browserRelay; },
   };
 }
 
@@ -192,11 +192,11 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
 
   // Wire queryRunner: query_team → handleMessage for synchronous child queries
   if (handlerDeps) {
-    queryRunnerRef = async (query, team, callerId, ancestors) => {
+    queryRunnerRef = async (query, team, callerId, ancestors, sourceChannelId) => {
       const result = await handleMessage(
         { channelId: `query:${callerId}:${team}:${Date.now()}`, userId: callerId, content: query, timestamp: Date.now() },
         { ...handlerDeps, orgAncestors: ancestors },
-        { teamName: team },
+        { teamName: team, sourceChannelId },
       );
       if (!result.ok) throw new Error(result.error ?? 'unknown error');
       return result.content;
@@ -263,15 +263,8 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
         }
         return;
       }
-      // Fallback broadcast (no source channel — manual enqueue, MCP tools, etc.)
-      for (const chId of wsAdapter.getConnectedChannelIds()) {
-        await wsAdapter.sendResponse(chId, content);
-      }
-      for (const da of discordAdapters) {
-        for (const chId of da.getNotifyChannelIds()) {
-          try { await da.sendResponse(chId, content); } catch { /* channel gone */ }
-        }
-      }
+      // No source channel — this is a bug, every task should have a sourceChannelId
+      logger.error('Task notification has no sourceChannelId — cannot route', { contentLength: content.length });
     },
     getTeamConfig: (teamId: string) => safeLoadConfig(runDir, teamId),
     reportTriggerOutcome: (team, triggerName, success) => {

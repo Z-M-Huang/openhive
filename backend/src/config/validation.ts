@@ -37,10 +37,12 @@ export type TeamConfigOutput = z.output<typeof TeamConfigSchema>;
 
 const ProviderProfileSchema = z.object({
   type: z.enum(['api', 'oauth']),
+  provider: z.enum(['anthropic', 'openai']).optional(),
   api_url: z.string().optional(),
   api_key: z.string().optional(),
   model: z.string().optional(),
   oauth_token_env: z.string().optional(),
+  context_window: z.number().int().positive().optional(),
 });
 
 export const ProvidersSchema = z.object({

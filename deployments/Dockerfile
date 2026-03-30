@@ -39,14 +39,10 @@ RUN cd backend && ./node_modules/.bin/tsc
 FROM node:22-bookworm-slim
 
 # Runtime system dependencies:
-#   - Python 3 with pip + venv (for Claude Agent SDK / tool use)
 #   - curl (health checks, debugging)
-#   - Chromium runtime libs (for Playwright browse_web tool)
+#   - Chromium runtime libs (for Playwright browser tools)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        python3 \
-        python3-pip \
-        python3-venv \
         curl \
         libnss3 libatk-bridge2.0-0 libdrm2 libxcomposite1 \
         libxdamage1 libxrandr2 libgbm1 libasound2 libpango-1.0-0 \
@@ -55,14 +51,6 @@ RUN apt-get update && \
 
 # Install bun runtime
 RUN npm install -g bun@1.3.10
-
-# Install Claude Code CLI as non-root user.
-# Claude Code refuses --dangerously-skip-permissions when running as root.
-USER node
-RUN curl -fsSL https://claude.ai/install.sh | bash
-ENV PATH="/home/node/.local/bin:$PATH"
-
-USER root
 
 # Copy compiled backend
 COPY --from=builder /build/backend/dist/ /app/backend/dist/
@@ -98,7 +86,7 @@ RUN if [ "${DOCKER_GID}" = "0" ]; then \
       usermod -aG ${DOCKER_GID} node 2>/dev/null || true; \
     fi
 
-# Switch to non-root user (Claude Code requires non-root)
+# Switch to non-root user
 USER node
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
