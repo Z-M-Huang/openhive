@@ -119,6 +119,7 @@ export function createTables(raw: Database.Database): void {
     'ALTER TABLE task_queue ADD COLUMN source_channel_id TEXT',
     'ALTER TABLE log_entries ADD COLUMN duration_ms INTEGER',
     'ALTER TABLE trigger_configs ADD COLUMN source_channel_id TEXT',
+    "ALTER TABLE trigger_configs ADD COLUMN notify_policy TEXT NOT NULL DEFAULT 'always'",
   ];
   for (const sql of migrations) {
     try { raw.prepare(sql).run(); } catch { /* column already exists */ }

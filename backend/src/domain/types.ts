@@ -52,6 +52,8 @@ export interface TeamConfig {
 
 export type TriggerState = 'pending' | 'active' | 'disabled';
 
+export type NotifyPolicy = 'always' | 'on_error' | 'never';
+
 export interface TriggerConfig {
   readonly name: string;
   readonly type: 'schedule' | 'keyword' | 'message';
@@ -66,6 +68,8 @@ export interface TriggerConfig {
   readonly disabledReason?: string;
   /** Channel that created this trigger — used for notification routing when the trigger fires. */
   readonly sourceChannelId?: string;
+  /** Controls whether task results are posted to the channel. Default: 'always'. */
+  readonly notifyPolicy?: NotifyPolicy;
 }
 
 export interface ProviderProfile {

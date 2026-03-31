@@ -7,6 +7,7 @@
 import { tool } from 'ai';
 import { z } from 'zod';
 import { readFile, writeFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import {
   assertInsideBoundary,
   assertGovernanceAllowed,
@@ -33,10 +34,12 @@ export function createEditTool(
         .describe('Replace all occurrences (default: false, first only)'),
     }),
     execute: async ({ file_path, old_string, new_string, replace_all = false }) => {
-      assertInsideBoundary(file_path, cwd, additionalDirs);
-      assertGovernanceAllowed(file_path, teamName, governancePaths);
+      // Resolve relative paths against team cwd, not process.cwd()
+      const resolved = resolve(cwd, file_path);
+      assertInsideBoundary(resolved, cwd, additionalDirs);
+      assertGovernanceAllowed(resolved, teamName, governancePaths);
 
-      const content = await readFile(file_path, 'utf-8');
+      const content = await readFile(resolved, 'utf-8');
       if (!content.includes(old_string)) {
         throw new Error(
           `old_string not found in ${file_path}. Ensure the string matches exactly (including whitespace).`,
@@ -51,7 +54,7 @@ export function createEditTool(
       }
 
       const scrubbed = scrubCredentialsFromContent(updated, credentials);
-      await writeFile(file_path, scrubbed, 'utf-8');
+      await writeFile(resolved, scrubbed, 'utf-8');
 
       const count = replace_all
         ? content.split(old_string).length - 1

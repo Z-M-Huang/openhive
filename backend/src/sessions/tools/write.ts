@@ -7,7 +7,7 @@
 import { tool } from 'ai';
 import { z } from 'zod';
 import { writeFile, mkdir } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import {
   assertInsideBoundary,
   assertGovernanceAllowed,
@@ -28,11 +28,13 @@ export function createWriteTool(
       content: z.string().describe('Content to write'),
     }),
     execute: async ({ file_path, content }) => {
-      assertInsideBoundary(file_path, cwd, additionalDirs);
-      assertGovernanceAllowed(file_path, teamName, governancePaths);
+      // Resolve relative paths against team cwd, not process.cwd()
+      const resolved = resolve(cwd, file_path);
+      assertInsideBoundary(resolved, cwd, additionalDirs);
+      assertGovernanceAllowed(resolved, teamName, governancePaths);
       const scrubbed = scrubCredentialsFromContent(content, credentials);
-      await mkdir(dirname(file_path), { recursive: true });
-      await writeFile(file_path, scrubbed, 'utf-8');
+      await mkdir(dirname(resolved), { recursive: true });
+      await writeFile(resolved, scrubbed, 'utf-8');
       return `Wrote ${scrubbed.length} bytes to ${file_path}`;
     },
   });

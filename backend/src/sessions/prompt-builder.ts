@@ -3,20 +3,24 @@
  * Replaces the Claude Code preset approach with explicit prompt construction.
  */
 
+import type { InteractionRecord } from '../domain/interfaces.js';
+
 export interface PromptBuilderOpts {
   readonly teamName: string;
+  readonly cwd: string;
   readonly allowedTools: readonly string[];
   readonly credentialKeys: readonly string[];
   readonly ruleCascade: string;
   readonly skillsContent: string;
   readonly memorySection: string;
+  readonly conversationHistory?: string;
 }
 
 export function buildSystemPrompt(opts: PromptBuilderOpts): string {
   const sections: string[] = [];
 
-  // 1. Core identity and instructions
-  sections.push(buildCoreInstructions());
+  // 1. Core identity and instructions (includes workspace path)
+  sections.push(buildCoreInstructions(opts.cwd));
 
   // 2. Tool availability note
   sections.push(buildToolAvailabilityNote(opts.allowedTools));
@@ -41,13 +45,19 @@ export function buildSystemPrompt(opts: PromptBuilderOpts): string {
   // 8. Memory (MEMORY.md content)
   if (opts.memorySection) sections.push(opts.memorySection);
 
+  // 9. Recent channel conversation history
+  if (opts.conversationHistory) sections.push(opts.conversationHistory);
+
   return sections.filter(Boolean).join('\n\n');
 }
 
 // ── Section builders ─────────────────────────────────────────────────────────
 
-export function buildCoreInstructions(): string {
-  return `You are an AI agent team member in the OpenHive system. You operate within a team hierarchy managed by an Organization MCP Server. Follow your team's rules and use the tools available to you to complete tasks.`;
+export function buildCoreInstructions(cwd: string): string {
+  return `You are an AI agent team member in the OpenHive system. You operate within a team hierarchy managed by an Organization MCP Server. Follow your team's rules and use the tools available to you to complete tasks.
+
+## Workspace
+Your working directory is \`${cwd}\`. All file paths for Read, Write, Edit, Glob, and Grep tools MUST use paths relative to or under this directory. For example, to read your memory file use \`${cwd}/memory/MEMORY.md\`, not \`/workspace/memory/MEMORY.md\`.`;
 }
 
 /**
@@ -97,4 +107,25 @@ export function buildHttpRules(): string {
 - For wget: \`--timeout=60\`. For Python requests: \`timeout=60\`.
 - If a request fails due to authentication, do NOT retry more than twice. Report the error clearly.
 - Never retry indefinitely — 2 attempts max for auth failures, 3 for transient errors.`;
+}
+
+export function buildConversationHistorySection(interactions: InteractionRecord[]): string {
+  if (interactions.length === 0) return '';
+
+  const lines = [
+    '## Recent Channel Conversation',
+    'Below are the most recent messages on this channel. Use this context to understand follow-up questions and route them to the team that originally handled the topic.',
+    '',
+  ];
+
+  for (const msg of interactions) {
+    const time = msg.createdAt ?? 'unknown';
+    if (msg.direction === 'inbound') {
+      lines.push(`[${time}] User (${msg.userId ?? 'unknown'}): ${msg.contentSnippet ?? ''}`);
+    } else {
+      lines.push(`[${time}] [${msg.teamId ?? 'system'}] → ${msg.contentSnippet ?? ''}`);
+    }
+  }
+
+  return lines.join('\n');
 }

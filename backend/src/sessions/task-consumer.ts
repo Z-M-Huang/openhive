@@ -5,7 +5,7 @@
  * Reports trigger outcomes back for circuit breaker accounting.
  */
 
-import type { ITaskQueueStore } from '../domain/interfaces.js';
+import type { ITaskQueueStore, IInteractionStore } from '../domain/interfaces.js';
 import type { OrgTree } from '../domain/org-tree.js';
 import type { TeamConfig } from '../domain/types.js';
 import { TaskStatus } from '../domain/types.js';
@@ -24,6 +24,7 @@ export interface TaskConsumerOpts {
   readonly notifyChannel?: (content: string, sourceChannelId?: string | null) => Promise<void>;
   readonly getTeamConfig?: (teamId: string) => TeamConfig | undefined;
   readonly reportTriggerOutcome?: (team: string, triggerName: string, success: boolean) => void;
+  readonly interactionStore?: IInteractionStore;
 }
 
 export class TaskConsumer {
@@ -34,6 +35,7 @@ export class TaskConsumer {
   readonly #notifyChannel?: (content: string, sourceChannelId?: string | null) => Promise<void>;
   readonly #getTeamConfig?: (teamId: string) => TeamConfig | undefined;
   readonly #reportTriggerOutcome?: (team: string, triggerName: string, success: boolean) => void;
+  readonly #interactionStore?: IInteractionStore;
   #timer: ReturnType<typeof setInterval> | null = null;
   #processing = false;
 
@@ -45,6 +47,7 @@ export class TaskConsumer {
     this.#notifyChannel = opts.notifyChannel;
     this.#getTeamConfig = opts.getTeamConfig;
     this.#reportTriggerOutcome = opts.reportTriggerOutcome;
+    this.#interactionStore = opts.interactionStore;
   }
 
   start(): void {
@@ -140,10 +143,29 @@ export class TaskConsumer {
                 ? `[${task.teamId}] Team bootstrap failed — check logs for details.`
                 : `[${task.teamId}] Team bootstrapped and ready.`;
             } else if (safeResponse) {
-              notif = `[${task.teamId}] ${safeResponse}`;
+              // Check notifyPolicy from task options (propagated at enqueue time)
+              const notifyPolicy = (taskOpts['notify_policy'] as string) ?? 'always';
+              const shouldNotify = notifyPolicy === 'always' ||
+                (notifyPolicy === 'on_error' && isError);
+              if (shouldNotify) {
+                notif = `[${task.teamId}] ${safeResponse}`;
+              }
             }
             if (notif) {
               this.#notifyChannel(notif, dequeued.sourceChannelId).catch(() => {});
+
+              if (dequeued.sourceChannelId) {
+                try {
+                  this.#interactionStore?.log({
+                    direction: 'outbound',
+                    channelType: dequeued.sourceChannelId.startsWith('ws:') ? 'ws' : dequeued.sourceChannelId.startsWith('discord:') ? 'discord' : 'other',
+                    channelId: dequeued.sourceChannelId,
+                    teamId: task.teamId,
+                    contentSnippet: notif.slice(0, 2000),
+                    contentLength: notif.length,
+                  });
+                } catch { /* logging must not crash task processing */ }
+              }
             }
           }
         } catch (err) {

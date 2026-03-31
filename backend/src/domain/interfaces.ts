@@ -125,10 +125,13 @@ export interface InteractionRecord {
   readonly contentSnippet?: string;
   readonly contentLength?: number;
   readonly durationMs?: number;
+  readonly createdAt?: string;
 }
 
 export interface IInteractionStore {
   log(record: InteractionRecord): void;
+  getRecentByChannel(channelId: string, teamIds: string[], limit?: number): InteractionRecord[];
+  cleanOlderThan(cutoffIso: string): number;
 }
 
 // ── Config (used by L1+ layers) ────────────────────────────────────────────

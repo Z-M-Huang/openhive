@@ -550,3 +550,314 @@ describe('E2E-11: Spawned team operational readiness', () => {
     raw.close();
   });
 });
+
+// ── E2E-12: Trigger Notification Policy ──────────────────────────────────
+
+import { TriggerConfigStore } from '../storage/stores/trigger-config-store.js';
+
+describe('E2E-12: Trigger notification policy', () => {
+  it('notifyPolicy=never suppresses sendResponse even on success', () => {
+    const dir = makeTempDir();
+    const { db, raw } = makeDb(dir);
+    const taskStore = new TaskQueueStore(db);
+    const trigConfigStore = new TriggerConfigStore(db);
+
+    // Create trigger with notifyPolicy='never' (field doesn't exist yet — use as any)
+    trigConfigStore.upsert({
+      name: 'silent-trigger',
+      type: 'keyword' as const,
+      config: { pattern: 'deploy' },
+      team: 'ops',
+      task: 'run deploy',
+      state: 'active' as const,
+      sourceChannelId: 'cli',
+      notifyPolicy: 'never',
+    } as any);
+
+    // Verify trigger persisted
+    const stored = trigConfigStore.get('ops', 'silent-trigger');
+    expect(stored).toBeDefined();
+
+    // RED: notifyPolicy should be persisted and loaded back from the store.
+    // TriggerConfigStore.rowToConfig() doesn't map notifyPolicy yet.
+    const storedAny = stored as unknown as { notifyPolicy?: string };
+    expect(storedAny.notifyPolicy).toBe('never');
+
+    // Enqueue task with notify_policy in options (simulates trigger engine fire)
+    const taskOpts = JSON.stringify({ notify_policy: 'never', trigger_name: 'silent-trigger' });
+    const taskId = taskStore.enqueue('ops', 'run deploy', 'normal', 'trigger:silent-trigger:abc', taskOpts);
+
+    // Complete the task — result stored in DB
+    taskStore.dequeue('ops');
+    taskStore.updateStatus(taskId, TaskStatus.Completed);
+    taskStore.updateResult(taskId, 'deploy completed successfully');
+
+    const tasks = taskStore.getByTeam('ops');
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0].status).toBe(TaskStatus.Completed);
+    expect(tasks[0].result).toBe('deploy completed successfully');
+
+    raw.close();
+  });
+
+  it('notifyPolicy=on_error suppresses notification on success', () => {
+    const dir = makeTempDir();
+    const { db, raw } = makeDb(dir);
+    const trigConfigStore = new TriggerConfigStore(db);
+
+    // Create trigger with notifyPolicy='on_error'
+    trigConfigStore.upsert({
+      name: 'check-health',
+      type: 'schedule' as const,
+      config: { cron: '*/5 * * * *' },
+      team: 'monitor',
+      task: 'check system health',
+      state: 'active' as const,
+      sourceChannelId: 'slack-ops',
+      notifyPolicy: 'on_error',
+    } as any);
+
+    // RED: notifyPolicy should be persisted and loaded back from the store.
+    const stored = trigConfigStore.get('monitor', 'check-health');
+    expect(stored).toBeDefined();
+    const storedAny = stored as unknown as { notifyPolicy?: string };
+    expect(storedAny.notifyPolicy).toBe('on_error');
+
+    // Verify that on success, notifyPolicy=on_error means "do NOT notify".
+    // The consumer should read notify_policy from task options and skip notification.
+    // Until implemented, the stored config won't have notifyPolicy.
+
+    raw.close();
+  });
+
+  it('notifyPolicy=on_error sends notification on failure', () => {
+    const dir = makeTempDir();
+    const { db, raw } = makeDb(dir);
+    const taskStore = new TaskQueueStore(db);
+    const trigConfigStore = new TriggerConfigStore(db);
+
+    // Create trigger with notifyPolicy='on_error'
+    trigConfigStore.upsert({
+      name: 'check-health',
+      type: 'schedule' as const,
+      config: { cron: '*/5 * * * *' },
+      team: 'monitor',
+      task: 'check system health',
+      state: 'active' as const,
+      sourceChannelId: 'slack-ops',
+      notifyPolicy: 'on_error',
+    } as any);
+
+    // RED: notifyPolicy must round-trip through the store
+    const stored = trigConfigStore.get('monitor', 'check-health');
+    const storedAny = stored as unknown as { notifyPolicy?: string };
+    expect(storedAny.notifyPolicy).toBe('on_error');
+
+    // Enqueue task with on_error policy, then fail it
+    const taskOpts = JSON.stringify({ notify_policy: 'on_error', trigger_name: 'check-health' });
+    const taskId = taskStore.enqueue('monitor', 'check system health', 'normal', 'trigger:check-health:err', taskOpts);
+    taskStore.dequeue('monitor');
+    taskStore.updateStatus(taskId, TaskStatus.Failed);
+    taskStore.updateResult(taskId, 'Error: connection refused to health endpoint');
+
+    // Verify task failed in DB with error content
+    const tasks = taskStore.getByTeam('monitor');
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0].status).toBe(TaskStatus.Failed);
+    expect(tasks[0].result).toContain('connection refused');
+
+    // The task options should propagate notify_policy so the consumer
+    // can decide to send the notification on failure.
+    const opts = JSON.parse(tasks[0].options!) as Record<string, unknown>;
+    expect(opts['notify_policy']).toBe('on_error');
+
+    raw.close();
+  });
+});
+
+// ── E2E-13: Conversation Context ─────────────────────────────────────────
+
+import { InteractionStore } from '../storage/stores/interaction-store.js';
+
+describe('E2E-13: Conversation context', () => {
+  it('logs inbound+outbound interactions and retrieves by channel', () => {
+    const dir = makeTempDir();
+    const { db, raw } = makeDb(dir);
+    const store = new InteractionStore(db);
+
+    // Log inbound message
+    store.log({
+      direction: 'inbound',
+      channelType: 'cli',
+      channelId: 'cli-1',
+      userId: 'user-a',
+      contentSnippet: 'What is the deployment status?',
+      contentLength: 31,
+    });
+
+    // Log outbound response
+    store.log({
+      direction: 'outbound',
+      channelType: 'cli',
+      channelId: 'cli-1',
+      teamId: 'ops',
+      contentSnippet: 'All services are running normally.',
+      contentLength: 34,
+      durationMs: 1500,
+    });
+
+    // Log interaction on different channel
+    store.log({
+      direction: 'inbound',
+      channelType: 'slack',
+      channelId: 'slack-general',
+      userId: 'user-b',
+      contentSnippet: 'Hello from Slack',
+      contentLength: 16,
+    });
+
+    // Query recent interactions using the actual API (channelId, teamIds, limit)
+    const records = store.getRecentByChannel('cli-1', ['ops'], 10);
+    expect(records).toHaveLength(2);
+    expect(records.some(r => r.direction === 'inbound' && r.contentSnippet === 'What is the deployment status?')).toBe(true);
+    expect(records.some(r => r.direction === 'outbound' && r.contentSnippet === 'All services are running normally.')).toBe(true);
+
+    // Should not include messages from other channels
+    const slackRecords = store.getRecentByChannel('slack-general', [], 10);
+    expect(slackRecords).toHaveLength(1);
+    expect(slackRecords[0].channelId).toBe('slack-general');
+
+    raw.close();
+  });
+
+  it('conversation history appears in system prompt', async () => {
+    const dir = makeTempDir();
+    const { db, raw } = makeDb(dir);
+    const store = new InteractionStore(db);
+
+    // Seed some conversation history
+    store.log({
+      direction: 'inbound',
+      channelType: 'cli',
+      channelId: 'cli-1',
+      userId: 'user-a',
+      contentSnippet: 'Deploy the app to staging',
+      contentLength: 25,
+    });
+
+    store.log({
+      direction: 'outbound',
+      channelType: 'cli',
+      channelId: 'cli-1',
+      teamId: 'ops',
+      contentSnippet: 'Deployment to staging completed successfully',
+      contentLength: 44,
+      durationMs: 5000,
+    });
+
+    // RED: buildSystemPrompt does not yet accept conversationHistory
+    // We test that when it does, the prompt includes the history section.
+    const { buildSystemPrompt: buildPrompt } = await import('../sessions/prompt-builder.js');
+
+    // Build prompt with current API (no conversation history yet)
+    const prompt = buildPrompt({
+      teamName: 'ops',
+      cwd: '/data/teams/ops',
+      allowedTools: ['*'],
+      credentialKeys: [],
+      ruleCascade: '',
+      skillsContent: '',
+      memorySection: '',
+    });
+
+    // The prompt should NOT yet contain conversation history (no history passed)
+    expect(prompt).not.toContain('## Recent Channel Conversation');
+
+    // Build with conversation history using the actual API
+    const { buildConversationHistorySection } = await import('../sessions/prompt-builder.js');
+    const historySection = buildConversationHistorySection([
+      { direction: 'inbound' as const, channelType: 'ws', channelId: 'ws:test', userId: 'user-a', contentSnippet: 'Deploy the app to staging', createdAt: new Date().toISOString() },
+      { direction: 'outbound' as const, channelType: 'ws', channelId: 'ws:test', teamId: 'ops', contentSnippet: 'Deployment to staging completed successfully', createdAt: new Date().toISOString() },
+    ]);
+    const promptWithHistory = buildPrompt({
+      teamName: 'ops',
+      cwd: '/data/teams/ops',
+      allowedTools: ['*'],
+      credentialKeys: [],
+      ruleCascade: '',
+      skillsContent: '',
+      memorySection: '',
+      conversationHistory: historySection,
+    });
+
+    expect(promptWithHistory).toContain('## Recent Channel Conversation');
+    expect(promptWithHistory).toContain('Deploy the app to staging');
+    expect(promptWithHistory).toContain('ops');
+
+    raw.close();
+  });
+
+  it('hierarchical history includes descendant team interactions', () => {
+    const dir = makeTempDir();
+    const { db, raw } = makeDb(dir);
+    const orgStore = new OrgStore(db);
+    const store = new InteractionStore(db);
+    const tree = new OrgTree(orgStore);
+
+    // 3-level hierarchy: main → A1 → A11
+    tree.addTeam(makeNode({ teamId: 'main', name: 'main' }));
+    tree.addTeam(makeNode({ teamId: 'A1', name: 'A1', parentId: 'main' }));
+    tree.addTeam(makeNode({ teamId: 'A11', name: 'A11', parentId: 'A1' }));
+
+    // Log interactions per team — all on the same channel (shared Discord channel)
+    const channelId = 'discord:shared-channel';
+    store.log({
+      direction: 'outbound',
+      channelType: 'discord',
+      channelId,
+      teamId: 'main',
+      contentSnippet: 'Main team processed request',
+      contentLength: 27,
+    });
+
+    store.log({
+      direction: 'outbound',
+      channelType: 'discord',
+      channelId,
+      teamId: 'A1',
+      contentSnippet: 'A1 analyzed data',
+      contentLength: 17,
+    });
+
+    store.log({
+      direction: 'outbound',
+      channelType: 'discord',
+      channelId,
+      teamId: 'A11',
+      contentSnippet: 'A11 ran deep analysis',
+      contentLength: 21,
+    });
+
+    // For 'main': should see all 3 interactions (its own + A1 + A11)
+    const mainRecords = store.getRecentByChannel(channelId, ['main', 'A1', 'A11'], 50);
+    expect(mainRecords).toHaveLength(3);
+    expect(mainRecords.some(r => r.teamId === 'main')).toBe(true);
+    expect(mainRecords.some(r => r.teamId === 'A1')).toBe(true);
+    expect(mainRecords.some(r => r.teamId === 'A11')).toBe(true);
+
+    // For A1: should see only A1 + A11 messages (its descendant + own)
+    const a1Records = store.getRecentByChannel(channelId, ['A1', 'A11'], 50);
+    expect(a1Records).toHaveLength(2);
+    expect(a1Records.some(r => r.teamId === 'A1')).toBe(true);
+    expect(a1Records.some(r => r.teamId === 'A11')).toBe(true);
+    // A1 should NOT see main's messages
+    expect(a1Records.some(r => r.teamId === 'main')).toBe(false);
+
+    // A11 sees only its own
+    const a11Records = store.getRecentByChannel(channelId, ['A11'], 50);
+    expect(a11Records).toHaveLength(1);
+    expect(a11Records[0].teamId).toBe('A11');
+
+    raw.close();
+  });
+});

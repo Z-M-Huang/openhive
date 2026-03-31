@@ -7,7 +7,7 @@
  */
 
 import { z } from 'zod';
-import type { ToolDefinition, BrowserToolOrgDeps } from './registry.js';
+import type { ToolDefinition, BrowserToolOrgDeps } from './registry-types.js';
 import { validateBrowserUrl } from './url-validator.js';
 
 /** Narrowed deps — browser tools need getTeamConfig + browserRelay + optional logger. */

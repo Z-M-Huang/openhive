@@ -175,7 +175,8 @@ export function assertGovernanceAllowed(
   teamName: string,
   paths: GovernancePaths,
 ): void {
-  // Resolve symlinks to prevent bypass (e.g. memory/link -> config.yaml)
+  // filePath should already be absolute (callers resolve against cwd first).
+  // resolve() normalises any trailing dots/slashes but does not change base.
   const resolved = resolve(filePath);
   let real: string;
   try {

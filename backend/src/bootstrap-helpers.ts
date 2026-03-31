@@ -112,6 +112,7 @@ export function initTriggerEngine(
       if (triggerName) {
         const entry = triggerConfigStore.get(team, triggerName);
         if (entry?.maxTurns) opts.max_turns = entry.maxTurns;
+        if (entry?.notifyPolicy && entry.notifyPolicy !== 'always') opts.notify_policy = entry.notifyPolicy;
       }
       if (sourceChannelId) opts.sourceChannelId = sourceChannelId;
       const options = Object.keys(opts).length > 0 ? JSON.stringify(opts) : undefined;

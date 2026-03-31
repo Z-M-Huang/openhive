@@ -34,30 +34,8 @@ import { TestTriggerInputSchema, testTrigger } from './tools/test-trigger.js';
 import { ListTriggersInputSchema, listTriggers } from './tools/list-triggers.js';
 import { UpdateTeamInputSchema, updateTeam } from './tools/update-team.js';
 import { UpdateTriggerInputSchema, updateTrigger } from './tools/update-trigger.js';
-
-
-/** Wraps a task queue to auto-inject sourceChannelId into options JSON.
- *  Only enqueue() is overridden; all other methods pass through via prototype. */
-function scopeQueue(queue: ITaskQueueStore, channelId?: string): ITaskQueueStore {
-  if (!channelId) return queue;
-  const enqueue: ITaskQueueStore['enqueue'] = (teamId, task, priority, correlationId?, options?) => {
-    let parsed: Record<string, unknown>;
-    try {
-      parsed = options ? JSON.parse(options) as Record<string, unknown> : {};
-      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) parsed = {};
-    } catch { parsed = {}; }
-    parsed.sourceChannelId = channelId;
-    return queue.enqueue(teamId, task, priority, correlationId, JSON.stringify(parsed));
-  };
-  return Object.assign(Object.create(queue) as ITaskQueueStore, { enqueue });
-}
-
-export interface ToolDefinition {
-  readonly name: string;
-  readonly description: string;
-  readonly inputSchema: z.ZodType;
-  readonly handler: (input: unknown, callerId: string, sourceChannelId?: string) => Promise<unknown>;
-}
+import { scopeQueue } from './registry-types.js';
+import type { ToolDefinition } from './registry-types.js';
 
 /** Runs a query against a child team's SDK session, returning its response. */
 export type TeamQueryRunner = (
@@ -79,24 +57,6 @@ export interface OrgMcpDeps {
   readonly triggerConfigStore?: ITriggerConfigStore;
   readonly browserRelay?: BrowserRelay;
 }
-
-/* ── Narrowed dep types — compile-time enforcement that each tool
-      only receives the OrgMcpDeps fields it actually needs. ──────── */
-
-export type ShutdownTeamOrgDeps = Pick<OrgMcpDeps, 'orgTree' | 'sessionManager' | 'taskQueue'> & {
-  readonly triggerEngine?: OrgMcpDeps['triggerEngine'];
-};
-export type DelegateTaskOrgDeps = Pick<OrgMcpDeps, 'orgTree' | 'taskQueue' | 'log'>;
-export type EscalateOrgDeps = Pick<OrgMcpDeps, 'orgTree' | 'escalationStore' | 'taskQueue'>;
-export type SendMessageOrgDeps = Pick<OrgMcpDeps, 'orgTree' | 'log'>;
-export type GetStatusOrgDeps = Pick<OrgMcpDeps, 'orgTree' | 'taskQueue'>;
-export type ListTeamsOrgDeps = Pick<OrgMcpDeps, 'orgTree' | 'taskQueue' | 'getTeamConfig'>;
-export type QueryTeamOrgDeps = Pick<OrgMcpDeps, 'orgTree' | 'getTeamConfig' | 'log'> & {
-  readonly queryRunner?: OrgMcpDeps['queryRunner'];
-};
-export type BrowserToolOrgDeps = Pick<OrgMcpDeps, 'getTeamConfig'> & {
-  readonly browserRelay: BrowserRelay;
-};
 
 export interface OrgToolInvoker {
   readonly tools: ReadonlyMap<string, ToolDefinition>;

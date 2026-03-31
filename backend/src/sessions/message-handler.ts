@@ -16,7 +16,7 @@ import { withAudit } from './tools/tool-audit.js';
 import type { AuditWrapperOpts } from './tools/tool-audit.js';
 import { connectMcpServers, resolveActiveTools } from './mcp-bridge.js';
 import { buildSubagentTools } from './subagent-factory.js';
-import { buildSystemPrompt } from './prompt-builder.js';
+import { buildSystemPrompt, buildConversationHistorySection } from './prompt-builder.js';
 import { runSession } from './ai-engine.js';
 import type { ProgressCallback, ProgressUpdate } from './ai-engine.js';
 import { buildSessionContext } from './context-builder.js';
@@ -25,7 +25,7 @@ import { loadSubagents, loadSkillsContent } from './skill-loader.js';
 import { buildMemorySection } from './memory-loader.js';
 import { MemoryStore } from '../storage/stores/memory-store.js';
 import { scrubSecrets } from '../logging/credential-scrubber.js';
-import type { ChannelMessage } from '../domain/interfaces.js';
+import type { ChannelMessage, IInteractionStore } from '../domain/interfaces.js';
 import type { ProvidersOutput } from '../config/validation.js';
 import type { TeamConfig } from '../domain/types.js';
 
@@ -57,6 +57,10 @@ export interface MessageHandlerDeps {
   readonly logger: {
     info(msg: string, meta?: Record<string, unknown>): void;
     warn?(msg: string, meta?: Record<string, unknown>): void;
+  };
+  readonly interactionStore?: IInteractionStore;
+  readonly orgTree?: {
+    getChildren(parentId: string): { teamId: string }[];
   };
 }
 
@@ -136,11 +140,30 @@ async function assembleTools(
   return { allTools, activeTools, mcpCleanup: mcp.cleanup };
 }
 
+/** Recursively collect a team's ID and all descendant team IDs from the org tree via BFS. */
+function getTeamAndDescendantIds(
+  orgTree: MessageHandlerDeps['orgTree'],
+  teamId: string,
+): string[] {
+  if (!orgTree) return [teamId];
+  const ids: string[] = [teamId];
+  const queue = [teamId];
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    for (const child of orgTree.getChildren(current)) {
+      ids.push(child.teamId);
+      queue.push(child.teamId);
+    }
+  }
+  return ids;
+}
+
 /** Build the full system prompt from rule cascade, skills, and memory. */
 function assembleSystemPrompt(
   teamConfig: TeamConfig,
   teamName: string,
   deps: MessageHandlerDeps,
+  sourceChannelId?: string,
 ) {
   const cascadeLogger = {
     info: (m: string, meta?: Record<string, unknown>) => deps.logger.info(m, meta),
@@ -161,11 +184,23 @@ function assembleSystemPrompt(
     });
   }
 
+  // Build conversation history for this team (includes descendants)
+  let conversationHistory = '';
+  if (sourceChannelId && deps.interactionStore) {
+    const teamIds = getTeamAndDescendantIds(deps.orgTree, teamName);
+    const recent = deps.interactionStore.getRecentByChannel(sourceChannelId, teamIds, 10);
+    if (recent.length > 0) {
+      conversationHistory = buildConversationHistorySection(recent);
+    }
+  }
+
   return buildSystemPrompt({
     teamName,
+    cwd: join(deps.runDir, 'teams', teamName),
     allowedTools: teamConfig.allowed_tools,
     credentialKeys: Object.keys(teamConfig.credentials ?? {}),
     ruleCascade, skillsContent, memorySection,
+    conversationHistory,
   });
 }
 
@@ -206,7 +241,7 @@ export async function handleMessage(
     const tools = await assembleTools(teamConfig, teamName, deps, registry, profileName, modelId, ctx, providerSecrets, credValues, opts?.sourceChannelId);
     mcpCleanup = tools.mcpCleanup;
 
-    const system = assembleSystemPrompt(teamConfig, teamName, deps);
+    const system = assembleSystemPrompt(teamConfig, teamName, deps, opts?.sourceChannelId);
     const safeOnProgress = opts?.onProgress && credValues.length > 0
       ? (update: ProgressUpdate) => {
           opts.onProgress!({ ...update, content: scrubSecrets(update.content, [], credValues) });

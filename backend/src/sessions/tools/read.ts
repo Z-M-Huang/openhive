@@ -7,6 +7,7 @@
 import { tool } from 'ai';
 import { z } from 'zod';
 import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { assertInsideBoundary } from './tool-guards.js';
 
 export function createReadTool(cwd: string, additionalDirs: string[]) {
@@ -26,8 +27,10 @@ export function createReadTool(cwd: string, additionalDirs: string[]) {
         .describe('Number of lines to read'),
     }),
     execute: async ({ file_path, offset, limit }) => {
-      assertInsideBoundary(file_path, cwd, additionalDirs);
-      const content = await readFile(file_path, 'utf-8');
+      // Resolve relative paths against team cwd, not process.cwd()
+      const resolved = resolve(cwd, file_path);
+      assertInsideBoundary(resolved, cwd, additionalDirs);
+      const content = await readFile(resolved, 'utf-8');
       const lines = content.split('\n');
       const start = (offset ?? 1) - 1;
       const end = limit ? start + limit : lines.length;

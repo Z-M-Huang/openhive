@@ -136,6 +136,7 @@ export const triggerConfigs = sqliteTable(
     consecutiveFailures: integer('consecutive_failures').notNull().default(0),
     disabledReason: text('disabled_reason'),
     sourceChannelId: text('source_channel_id'),
+    notifyPolicy: text('notify_policy').notNull().default('always'),
     createdAt: text('created_at').notNull(),
     updatedAt: text('updated_at').notNull(),
   },

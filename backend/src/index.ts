@@ -23,7 +23,7 @@ import {
 } from './bootstrap-helpers.js';
 import type { TriggerEngine } from './triggers/engine.js';
 import type { ChannelMessage } from './domain/interfaces.js';
-import type { ProgressUpdate } from './sessions/ai-engine.js';
+import { createChannelHandler } from './channel-handler-factory.js';
 import type { ProvidersOutput } from './config/validation.js';
 import type { Readable, Writable } from 'node:stream';
 import type Database from 'better-sqlite3';
@@ -99,22 +99,6 @@ function buildOrgMcpDeps(
   };
 }
 
-/**
- * Factory that creates a channel message handler closing over shared deps.
- * Eliminates the 3 near-identical inline handlers (ChannelRouter, WsAdapter, DiscordAdapter).
- */
-function createChannelHandler(
-  handlerDeps: Parameters<typeof handleMessage>[1] | null,
-  triggerEngine: { onMessage(content: string, channelId: string): void },
-): (msg: ChannelMessage, onProgress?: (update: ProgressUpdate) => void) => Promise<string> {
-  return async (msg, onProgress?) => {
-    triggerEngine.onMessage(msg.content, msg.channelId);
-    if (!handlerDeps) return 'No providers configured.';
-    const result = await handleMessage(msg, handlerDeps, { onProgress, sourceChannelId: msg.channelId });
-    return result.ok ? (result.content ?? '') : `Error: ${result.error}`;
-  };
-}
-
 export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> {
   const dataDir = deps?.dataDir ?? '/data';
   const runDir = deps?.runDir ?? '/app/.run';
@@ -185,7 +169,7 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   );
 
   const handlerDeps = providersConfig
-    ? { providers: providersConfig, orgMcpPort, availableMcpServers: {}, runDir, dataDir, systemRulesDir, orgAncestors: [] as string[], logger }
+    ? { providers: providersConfig, orgMcpPort, availableMcpServers: {}, runDir, dataDir, systemRulesDir, orgAncestors: [] as string[], logger, interactionStore: stores.interactionStore, orgTree }
     : null;
 
   // Wire queryRunner: query_team → handleMessage for synchronous child queries
@@ -205,7 +189,7 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   // WsAdapter handles its own message flow with progress/ack support.
   const wsAdapter = new WsAdapter();
 
-  const channelHandler = createChannelHandler(handlerDeps, triggerEngine);
+  const channelHandler = createChannelHandler(handlerDeps, triggerEngine, stores.interactionStore);
 
   const channelRouter = new ChannelRouter([wsAdapter, ...adapters], async (msg: ChannelMessage) => {
     logger.info('Received message', { channelId: msg.channelId, userId: msg.userId });
@@ -234,6 +218,7 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
 
   const taskConsumer = handlerDeps ? new TaskConsumer({
     taskQueueStore, orgTree, handlerDeps,
+    interactionStore: stores.interactionStore,
     notifyChannel: async (content, sourceChannelId) => {
       if (sourceChannelId) {
         // Try router first (works for CLI and any adapter using ChannelRouter flow)
@@ -260,12 +245,19 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   }) : null;
   taskConsumer?.start(); triggerEngine.start(); await channelRouter.start();
 
+  // Periodic cleanup of old channel interactions (24-hour retention, every 6 hours)
+  const interactionCleanupInterval = setInterval(() => {
+    const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    try { stores.interactionStore.cleanOlderThan(cutoff); } catch { /* non-critical */ }
+  }, 6 * 60 * 60 * 1000);
+
   if (!deps?.skipListen) {
     await fastify.listen({ host: deps?.listenAddress ?? '0.0.0.0', port: deps?.listenPort ?? 8080 });
   }
   logger.info('OpenHive v3 started', { dataDir, runDir, systemRulesDir });
 
   const shutdown = async (): Promise<void> => {
+    clearInterval(interactionCleanupInterval);
     taskConsumer?.stop(); triggerEngine.stop();
     await channelRouter.stop(); sessionManager.stopAll();
     await browserRelayReady; await browserRelayRef?.close();

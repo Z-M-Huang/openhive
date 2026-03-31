@@ -18,6 +18,7 @@ import {
 function makeOpts(overrides?: Partial<PromptBuilderOpts>): PromptBuilderOpts {
   return {
     teamName: 'test-team',
+    cwd: '/data/teams/test-team',
     allowedTools: ['*'],
     credentialKeys: [],
     ruleCascade: '',

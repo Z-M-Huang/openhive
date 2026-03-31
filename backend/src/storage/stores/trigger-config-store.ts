@@ -7,7 +7,7 @@
 import { eq, and } from 'drizzle-orm';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import type { ITriggerConfigStore } from '../../domain/interfaces.js';
-import type { TriggerConfig, TriggerState } from '../../domain/types.js';
+import type { TriggerConfig, TriggerState, NotifyPolicy } from '../../domain/types.js';
 import { safeJsonParse } from '../../domain/safe-json.js';
 import * as schema from '../schema.js';
 
@@ -26,6 +26,7 @@ export class TriggerConfigStore implements ITriggerConfigStore {
           skill: config.skill ?? null,
           maxTurns: config.maxTurns ?? 100,
           failureThreshold: config.failureThreshold ?? 3,
+          notifyPolicy: config.notifyPolicy ?? 'always',
           updatedAt: now,
         })
         .where(and(
@@ -46,6 +47,7 @@ export class TriggerConfigStore implements ITriggerConfigStore {
         failureThreshold: config.failureThreshold ?? 3,
         consecutiveFailures: 0,
         sourceChannelId: config.sourceChannelId ?? null,
+        notifyPolicy: config.notifyPolicy ?? 'always',
         createdAt: now,
         updatedAt: now,
       }).run();
@@ -147,6 +149,7 @@ export class TriggerConfigStore implements ITriggerConfigStore {
       consecutiveFailures: row.consecutiveFailures,
       disabledReason: row.disabledReason ?? undefined,
       sourceChannelId: row.sourceChannelId ?? undefined,
+      notifyPolicy: (row.notifyPolicy as NotifyPolicy) ?? 'always',
     };
   }
 }
