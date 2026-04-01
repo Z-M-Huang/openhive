@@ -97,6 +97,9 @@ Reconnect any other named connections too.
 **Scenario 12 — Conversation Context & Routing:** Read and execute `.claude/docs/e2e/scenario-12-conversation-context.md`
 (Interaction logging, sub-team attribution, conversation history in system prompt, follow-up routing, 24-hour retention cleanup)
 
+**Scenario 13 — Team Deletion Cleanup:** Read and execute `.claude/docs/e2e/scenario-13-team-deletion.md`
+(Hierarchy creation main→A1→A11, cascade shutdown, all 6 tables cleaned, filesystem dirs removed, trigger_dedup/log_entries unaffected)
+
 **NOTE:** If smoke checks 21-22 (browser relay) failed, skip scenarios 7-10 entirely.
 
 ### Step 4: Cleanup
@@ -176,6 +179,14 @@ Phase B: Investigative Scenarios
     - Sub-team notifications logged correctly: [pass/fail]
     - Follow-up shows conversation awareness: [pass/fail]
     - Cleanup mechanism works: [pass/fail]
+  Scenario 13 (Team Deletion Cleanup):   [summary + evidence]
+    - Hierarchy created (main→A1→A11): [pass/fail]
+    - Data populated in all tables: [pass/fail]
+    - Cascade shutdown succeeded: [pass/fail]
+    - All 6 tables cleaned for A1 and A11: [pass/fail]
+    - Filesystem dirs removed: [pass/fail]
+    - trigger_dedup/log_entries unaffected: [pass/fail]
+    - Main still healthy post-deletion: [pass/fail]
   Scenarios 7-10 (Browser): Mark "skipped" if smoke checks 21-22 failed.
   Scenario 7 (Browser Gating):          [summary + evidence]
     - Pre-flight (@playwright/mcp installed): [pass/fail/skipped]

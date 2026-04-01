@@ -12,6 +12,7 @@ import type {
   ITaskQueueStore,
   IEscalationStore,
   ITriggerConfigStore,
+  IInteractionStore,
 } from '../domain/interfaces.js';
 import type { TeamConfig } from '../domain/types.js';
 import type { SpawnTeamConfigHints } from './tools/spawn-team.js';
@@ -55,6 +56,7 @@ export interface OrgMcpDeps {
   readonly queryRunner?: TeamQueryRunner;
   readonly triggerEngine?: TriggerEngine;
   readonly triggerConfigStore?: ITriggerConfigStore;
+  readonly interactionStore?: IInteractionStore;
   readonly browserRelay?: BrowserRelay;
 }
 
@@ -82,6 +84,10 @@ export function buildToolDefs(deps: OrgMcpDeps): ToolDefinition[] {
       handler: (input, callerId) => shutdownTeam(input as never, callerId, {
         orgTree: deps.orgTree, sessionManager: deps.sessionManager,
         taskQueue: deps.taskQueue, triggerEngine: deps.triggerEngine,
+        triggerConfigStore: deps.triggerConfigStore,
+        escalationStore: deps.escalationStore,
+        interactionStore: deps.interactionStore,
+        runDir: deps.runDir,
       }),
     },
     {

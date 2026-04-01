@@ -65,4 +65,10 @@ export class InteractionStore implements IInteractionStore {
       .run();
     return result.changes;
   }
+
+  removeByTeam(teamId: string): void {
+    this.db.delete(schema.channelInteractions)
+      .where(eq(schema.channelInteractions.teamId, teamId))
+      .run();
+  }
 }

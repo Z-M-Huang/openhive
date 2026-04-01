@@ -27,6 +27,7 @@ export class OrgStore implements IOrgStore {
 
   removeTeam(id: string): void {
     this.db.delete(schema.scopeKeywords).where(eq(schema.scopeKeywords.teamId, id)).run();
+    this.db.delete(schema.teamStatus).where(eq(schema.teamStatus.teamId, id)).run();
     this.db.delete(schema.orgTree).where(eq(schema.orgTree.id, id)).run();
   }
 

@@ -11,8 +11,11 @@ import type { ITaskQueueStore } from '../domain/interfaces.js';
 // ── Narrowed dep types — compile-time enforcement that each tool
 //    only receives the OrgMcpDeps fields it actually needs. ──────────
 
-export type ShutdownTeamOrgDeps = Pick<OrgMcpDeps, 'orgTree' | 'sessionManager' | 'taskQueue'> & {
+export type ShutdownTeamOrgDeps = Pick<OrgMcpDeps, 'orgTree' | 'sessionManager' | 'taskQueue' | 'runDir'> & {
   readonly triggerEngine?: OrgMcpDeps['triggerEngine'];
+  readonly triggerConfigStore?: OrgMcpDeps['triggerConfigStore'];
+  readonly escalationStore?: OrgMcpDeps['escalationStore'];
+  readonly interactionStore?: OrgMcpDeps['interactionStore'];
 };
 export type DelegateTaskOrgDeps = Pick<OrgMcpDeps, 'orgTree' | 'taskQueue' | 'log'>;
 export type EscalateOrgDeps = Pick<OrgMcpDeps, 'orgTree' | 'escalationStore' | 'taskQueue'>;

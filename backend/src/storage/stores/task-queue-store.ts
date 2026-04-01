@@ -150,6 +150,10 @@ export class TaskQueueStore implements ITaskQueueStore {
     return rows.map((r) => this.rowToEntry(r));
   }
 
+  removeByTeam(teamId: string): void {
+    this.db.delete(schema.taskQueue).where(eq(schema.taskQueue.teamId, teamId)).run();
+  }
+
   private rowToEntry(row: {
     id: string;
     teamId: string;

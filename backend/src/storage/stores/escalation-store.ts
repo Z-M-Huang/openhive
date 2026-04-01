@@ -2,7 +2,7 @@
  * Escalation store — SQLite-backed implementation of IEscalationStore.
  */
 
-import { eq } from 'drizzle-orm';
+import { eq, or } from 'drizzle-orm';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import type { IEscalationStore } from '../../domain/interfaces.js';
 import type { EscalationCorrelation } from '../../domain/types.js';
@@ -47,5 +47,14 @@ export class EscalationStore implements IEscalationStore {
       status: row.status,
       createdAt: row.createdAt,
     };
+  }
+
+  removeByTeam(teamId: string): void {
+    this.db.delete(schema.escalationCorrelations)
+      .where(or(
+        eq(schema.escalationCorrelations.sourceTeam, teamId),
+        eq(schema.escalationCorrelations.targetTeam, teamId),
+      ))
+      .run();
   }
 }

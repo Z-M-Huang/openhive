@@ -5,6 +5,9 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { mkdtempSync, mkdirSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { shutdownTeam } from './shutdown-team.js';
 import { OrgTree } from '../../domain/org-tree.js';
 import {
@@ -12,6 +15,7 @@ import {
   makeNode,
   createMemoryOrgStore,
   createMockTaskQueue,
+  createMockEscalationStore,
 } from '../__test-helpers.js';
 import type { ServerFixtures } from '../__test-helpers.js';
 
@@ -113,5 +117,178 @@ describe('shutdown_team cascade', () => {
 
     // Sessions terminated in correct order (grandchild first, then child, then parent)
     expect(terminateOrder).toEqual(['grandchild', 'child', 'parent']);
+  });
+});
+
+// ── shutdown_team cleanup ────────────────────────────────────────────────
+
+describe('shutdown_team cleanup', () => {
+  it('cleans up trigger configs on shutdown', async () => {
+    const store = createMemoryOrgStore();
+    const tree = new OrgTree(store);
+    tree.addTeam(makeNode({ teamId: 'root', name: 'root' }));
+    tree.addTeam(makeNode({ teamId: 'child', name: 'child', parentId: 'root' }));
+
+    const sessionManager = {
+      getSession: vi.fn().mockResolvedValue(null),
+      terminateSession: vi.fn().mockResolvedValue(undefined),
+    };
+    const taskQueue = createMockTaskQueue();
+    const triggerConfigStore = { removeByTeam: vi.fn() };
+
+    const result = await shutdownTeam(
+      { name: 'child', cascade: false },
+      'root',
+      { orgTree: tree, sessionManager, taskQueue, triggerConfigStore },
+    );
+
+    expect(result.success).toBe(true);
+    expect(triggerConfigStore.removeByTeam).toHaveBeenCalledWith('child');
+  });
+
+  it('cleans up task queue on shutdown', async () => {
+    const store = createMemoryOrgStore();
+    const tree = new OrgTree(store);
+    tree.addTeam(makeNode({ teamId: 'root', name: 'root' }));
+    tree.addTeam(makeNode({ teamId: 'child', name: 'child', parentId: 'root' }));
+
+    const sessionManager = {
+      getSession: vi.fn().mockResolvedValue(null),
+      terminateSession: vi.fn().mockResolvedValue(undefined),
+    };
+    const taskQueue = createMockTaskQueue();
+    vi.spyOn(taskQueue, 'removeByTeam');
+
+    const result = await shutdownTeam(
+      { name: 'child', cascade: false },
+      'root',
+      { orgTree: tree, sessionManager, taskQueue },
+    );
+
+    expect(result.success).toBe(true);
+    expect(taskQueue.removeByTeam).toHaveBeenCalledWith('child');
+  });
+
+  it('cleans up escalation correlations on shutdown', async () => {
+    const store = createMemoryOrgStore();
+    const tree = new OrgTree(store);
+    tree.addTeam(makeNode({ teamId: 'root', name: 'root' }));
+    tree.addTeam(makeNode({ teamId: 'child', name: 'child', parentId: 'root' }));
+
+    const sessionManager = {
+      getSession: vi.fn().mockResolvedValue(null),
+      terminateSession: vi.fn().mockResolvedValue(undefined),
+    };
+    const taskQueue = createMockTaskQueue();
+    const escalationStore = createMockEscalationStore();
+    vi.spyOn(escalationStore, 'removeByTeam');
+
+    const result = await shutdownTeam(
+      { name: 'child', cascade: false },
+      'root',
+      { orgTree: tree, sessionManager, taskQueue, escalationStore },
+    );
+
+    expect(result.success).toBe(true);
+    expect(escalationStore.removeByTeam).toHaveBeenCalledWith('child');
+  });
+
+  it('cleans up interactions on shutdown', async () => {
+    const store = createMemoryOrgStore();
+    const tree = new OrgTree(store);
+    tree.addTeam(makeNode({ teamId: 'root', name: 'root' }));
+    tree.addTeam(makeNode({ teamId: 'child', name: 'child', parentId: 'root' }));
+
+    const sessionManager = {
+      getSession: vi.fn().mockResolvedValue(null),
+      terminateSession: vi.fn().mockResolvedValue(undefined),
+    };
+    const taskQueue = createMockTaskQueue();
+    const interactionStore = { removeByTeam: vi.fn() };
+
+    const result = await shutdownTeam(
+      { name: 'child', cascade: false },
+      'root',
+      { orgTree: tree, sessionManager, taskQueue, interactionStore },
+    );
+
+    expect(result.success).toBe(true);
+    expect(interactionStore.removeByTeam).toHaveBeenCalledWith('child');
+  });
+
+  it('cleans up filesystem on shutdown', async () => {
+    const store = createMemoryOrgStore();
+    const tree = new OrgTree(store);
+    tree.addTeam(makeNode({ teamId: 'root', name: 'root' }));
+    tree.addTeam(makeNode({ teamId: 'child', name: 'child', parentId: 'root' }));
+
+    const sessionManager = {
+      getSession: vi.fn().mockResolvedValue(null),
+      terminateSession: vi.fn().mockResolvedValue(undefined),
+    };
+    const taskQueue = createMockTaskQueue();
+
+    const runDir = mkdtempSync(join(tmpdir(), 'openhive-test-'));
+    const teamDir = join(runDir, 'teams', 'child');
+    mkdirSync(teamDir, { recursive: true });
+    expect(existsSync(teamDir)).toBe(true);
+
+    const result = await shutdownTeam(
+      { name: 'child', cascade: false },
+      'root',
+      { orgTree: tree, sessionManager, taskQueue, runDir },
+    );
+
+    expect(result.success).toBe(true);
+    expect(existsSync(teamDir)).toBe(false);
+  });
+
+  it('optional deps missing does not throw', async () => {
+    const store = createMemoryOrgStore();
+    const tree = new OrgTree(store);
+    tree.addTeam(makeNode({ teamId: 'root', name: 'root' }));
+    tree.addTeam(makeNode({ teamId: 'child', name: 'child', parentId: 'root' }));
+
+    const sessionManager = {
+      getSession: vi.fn().mockResolvedValue(null),
+      terminateSession: vi.fn().mockResolvedValue(undefined),
+    };
+    const taskQueue = createMockTaskQueue();
+
+    const result = await shutdownTeam(
+      { name: 'child', cascade: false },
+      'root',
+      { orgTree: tree, sessionManager, taskQueue },
+    );
+
+    expect(result.success).toBe(true);
+  });
+
+  it('cascade cleans all descendants', async () => {
+    const store = createMemoryOrgStore();
+    const tree = new OrgTree(store);
+    tree.addTeam(makeNode({ teamId: 'root', name: 'root' }));
+    tree.addTeam(makeNode({ teamId: 'parent', name: 'parent', parentId: 'root' }));
+    tree.addTeam(makeNode({ teamId: 'child', name: 'child', parentId: 'parent' }));
+    tree.addTeam(makeNode({ teamId: 'grandchild', name: 'grandchild', parentId: 'child' }));
+
+    const sessionManager = {
+      getSession: vi.fn().mockResolvedValue(null),
+      terminateSession: vi.fn().mockResolvedValue(undefined),
+    };
+    const taskQueue = createMockTaskQueue();
+    const triggerConfigStore = { removeByTeam: vi.fn() };
+
+    const result = await shutdownTeam(
+      { name: 'parent', cascade: true },
+      'root',
+      { orgTree: tree, sessionManager, taskQueue, triggerConfigStore },
+    );
+
+    expect(result.success).toBe(true);
+    expect(triggerConfigStore.removeByTeam).toHaveBeenCalledTimes(3);
+    expect(triggerConfigStore.removeByTeam).toHaveBeenCalledWith('grandchild');
+    expect(triggerConfigStore.removeByTeam).toHaveBeenCalledWith('child');
+    expect(triggerConfigStore.removeByTeam).toHaveBeenCalledWith('parent');
   });
 });

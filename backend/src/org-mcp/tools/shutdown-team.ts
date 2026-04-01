@@ -8,6 +8,7 @@
 import { z } from 'zod';
 import type { OrgTree } from '../../domain/org-tree.js';
 import type { ISessionManager, ITaskQueueStore } from '../../domain/interfaces.js';
+import { cleanupTeamDirs } from './team-fs.js';
 
 export const ShutdownTeamInputSchema = z.object({
   name: z.string().min(1),
@@ -26,6 +27,10 @@ export interface ShutdownTeamDeps {
   readonly sessionManager: ISessionManager;
   readonly taskQueue: ITaskQueueStore;
   readonly triggerEngine?: { removeTeamTriggers(team: string): void };
+  readonly triggerConfigStore?: { removeByTeam(team: string): void };
+  readonly escalationStore?: { removeByTeam(teamId: string): void };
+  readonly interactionStore?: { removeByTeam(teamId: string): void };
+  readonly runDir?: string;
 }
 
 export async function shutdownTeam(
@@ -78,6 +83,13 @@ export async function shutdownTeam(
 
   // Stop session
   await deps.sessionManager.terminateSession(name);
+
+  deps.triggerConfigStore?.removeByTeam(name);
+  deps.taskQueue.removeByTeam(name);
+  deps.escalationStore?.removeByTeam(name);
+  deps.interactionStore?.removeByTeam(name);
+
+  if (deps.runDir) cleanupTeamDirs(deps.runDir, name);
 
   // Remove from org tree
   deps.orgTree.removeTeam(name);

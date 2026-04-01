@@ -276,6 +276,7 @@ describe('Layer 0: Interfaces exist', () => {
       updateResult: () => {},
       getPending: () => [],
       getByStatus: () => [],
+      removeByTeam: () => {},
     };
 
     expect(store.enqueue).toBeDefined();
@@ -307,6 +308,7 @@ describe('Layer 0: Interfaces exist', () => {
       create: () => {},
       updateStatus: () => {},
       getByCorrelationId: () => undefined,
+      removeByTeam: () => {},
     };
 
     expect(store.create).toBeDefined();

@@ -146,6 +146,10 @@ export function createMockTaskQueue(): ITaskQueueStore & { tasks: TaskEntry[] } 
     getByStatus(status: TaskStatus): TaskEntry[] {
       return tasks.filter((t) => t.status === status);
     },
+    removeByTeam(teamId: string): void {
+      const indices = tasks.reduce<number[]>((acc, t, i) => t.teamId === teamId ? [...acc, i] : acc, []);
+      for (const i of indices.reverse()) tasks.splice(i, 1);
+    },
   };
 }
 
@@ -164,6 +168,11 @@ export function createMockEscalationStore(): IEscalationStore & { records: Escal
     },
     getByCorrelationId(id: string): EscalationCorrelation | undefined {
       return records.find((r) => r.correlationId === id);
+    },
+    removeByTeam(teamId: string): void {
+      const filtered = records.filter(r => r.sourceTeam !== teamId && r.targetTeam !== teamId);
+      records.length = 0;
+      records.push(...filtered);
     },
   };
 }

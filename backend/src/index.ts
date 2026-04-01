@@ -72,6 +72,7 @@ function buildOrgMcpDeps(
     taskQueueStore: import('./domain/interfaces.js').ITaskQueueStore;
     escalationStore: import('./domain/interfaces.js').IEscalationStore;
     triggerConfigStore: import('./domain/interfaces.js').ITriggerConfigStore;
+    interactionStore: import('./domain/interfaces.js').IInteractionStore;
     runDir: string; logger: AppLogger;
     browserRelay?: import('./org-mcp/browser-proxy.js').BrowserRelay;
   },
@@ -88,6 +89,7 @@ function buildOrgMcpDeps(
     taskQueue: opts.taskQueueStore,
     escalationStore: opts.escalationStore,
     triggerConfigStore: opts.triggerConfigStore,
+    interactionStore: opts.interactionStore,
     runDir: opts.runDir,
     loadConfig: (name: string, cp?: string, hints?: { description?: string; scopeAccepts?: string[] }) =>
       getOrCreateTeamConfig(opts.runDir, name, cp, hints),
@@ -143,7 +145,8 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   const { triggerConfigStore } = stores;
 
   const orgMcpDeps = buildOrgMcpDeps(
-    { orgTree, sessionManager, taskQueueStore, escalationStore, triggerConfigStore, runDir, logger,
+    { orgTree, sessionManager, taskQueueStore, escalationStore, triggerConfigStore,
+      interactionStore: stores.interactionStore, runDir, logger,
       get browserRelay() { return browserRelayRef; } },
     () => queryRunnerRef,
     () => triggerEngineRef,

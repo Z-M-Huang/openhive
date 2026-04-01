@@ -861,3 +861,215 @@ describe('E2E-13: Conversation context', () => {
     raw.close();
   });
 });
+
+// ── E2E-14: Team deletion cleanup ──────────────────────────────────────────
+
+describe('E2E-14: Team deletion cleanup', () => {
+  it('single team shutdown cleans all tables + filesystem', async () => {
+    const dir = makeTempDir();
+    const { db, raw } = makeDb(dir);
+    const orgStore = new OrgStore(db);
+    const taskStore = new TaskQueueStore(db);
+    const escStore = new EscalationStore(db);
+    const triggerConfigStore = new TriggerConfigStore(db);
+    const interactionStore = new InteractionStore(db);
+    const tree = new OrgTree(orgStore);
+    const configs = new Map<string, TeamConfig>();
+
+    tree.addTeam(makeNode({ teamId: 'root', name: 'root' }));
+    tree.addTeam(makeNode({ teamId: 'ops', name: 'ops', parentId: 'root' }));
+
+    triggerConfigStore.upsert({
+      name: 'test-trigger',
+      type: 'schedule' as const,
+      config: { cron: '* * * * *' },
+      team: 'ops',
+      task: 'test',
+      state: 'active' as const,
+    });
+
+    taskStore.enqueue('ops', 'test task', 'normal');
+
+    escStore.create({
+      correlationId: 'esc-1',
+      sourceTeam: 'ops',
+      targetTeam: 'root',
+      taskId: null,
+      status: 'pending',
+      createdAt: new Date().toISOString(),
+    });
+
+    interactionStore.log({
+      direction: 'outbound',
+      channelType: 'ws',
+      channelId: 'ws:test',
+      teamId: 'ops',
+      contentSnippet: 'test',
+    });
+
+    mkdirSync(join(dir, 'teams', 'ops'), { recursive: true });
+
+    const deps: OrgMcpDeps = {
+      orgTree: tree,
+      taskQueue: taskStore,
+      escalationStore: escStore,
+      triggerConfigStore,
+      interactionStore,
+      spawner: { spawn: async () => 'sid' },
+      sessionManager: { getSession: async () => null, terminateSession: async () => {} },
+      loadConfig: (n) => { const c = configs.get(n); if (!c) throw new Error('no cfg'); return c; },
+      getTeamConfig: (id) => configs.get(id),
+      runDir: dir,
+      log: () => {},
+    };
+    const server = createToolInvoker(deps);
+
+    const shutRes = await server.invoke('shutdown_team', { name: 'ops' }, 'root') as { success: boolean };
+    expect(shutRes.success).toBe(true);
+
+    expect(triggerConfigStore.getByTeam('ops')).toEqual([]);
+    expect(taskStore.getByTeam('ops')).toEqual([]);
+
+    // Check escalation gone via raw SQL
+    const escRows = raw.prepare("SELECT * FROM escalation_correlations WHERE source_team='ops' OR target_team='ops'").all();
+    expect(escRows).toEqual([]);
+
+    // Check interactions gone via raw SQL
+    const intRows = raw.prepare("SELECT * FROM channel_interactions WHERE team_id='ops'").all();
+    expect(intRows).toEqual([]);
+
+    expect(existsSync(join(dir, 'teams', 'ops'))).toBe(false);
+    expect(tree.getTeam('root')).toBeDefined();
+
+    raw.close();
+  });
+
+  it('cascade shutdown cleans all descendants', async () => {
+    const dir = makeTempDir();
+    const { db, raw } = makeDb(dir);
+    const orgStore = new OrgStore(db);
+    const taskStore = new TaskQueueStore(db);
+    const escStore = new EscalationStore(db);
+    const triggerConfigStore = new TriggerConfigStore(db);
+    const interactionStore = new InteractionStore(db);
+    const tree = new OrgTree(orgStore);
+    const configs = new Map<string, TeamConfig>();
+
+    tree.addTeam(makeNode({ teamId: 'root', name: 'root' }));
+    tree.addTeam(makeNode({ teamId: 'A1', name: 'A1', parentId: 'root' }));
+    tree.addTeam(makeNode({ teamId: 'A11', name: 'A11', parentId: 'A1' }));
+
+    // Insert data for A1
+    triggerConfigStore.upsert({
+      name: 'trigger-a1',
+      type: 'schedule' as const,
+      config: { cron: '* * * * *' },
+      team: 'A1',
+      task: 'task-a1',
+      state: 'active' as const,
+    });
+    taskStore.enqueue('A1', 'task for A1', 'normal');
+    escStore.create({
+      correlationId: 'esc-a1',
+      sourceTeam: 'A1',
+      targetTeam: 'root',
+      taskId: null,
+      status: 'pending',
+      createdAt: new Date().toISOString(),
+    });
+    interactionStore.log({
+      direction: 'outbound',
+      channelType: 'ws',
+      channelId: 'ws:test',
+      teamId: 'A1',
+      contentSnippet: 'A1 msg',
+    });
+
+    // Insert data for A11
+    triggerConfigStore.upsert({
+      name: 'trigger-a11',
+      type: 'schedule' as const,
+      config: { cron: '*/5 * * * *' },
+      team: 'A11',
+      task: 'task-a11',
+      state: 'active' as const,
+    });
+    taskStore.enqueue('A11', 'task for A11', 'normal');
+    escStore.create({
+      correlationId: 'esc-a11',
+      sourceTeam: 'A11',
+      targetTeam: 'A1',
+      taskId: null,
+      status: 'pending',
+      createdAt: new Date().toISOString(),
+    });
+    interactionStore.log({
+      direction: 'outbound',
+      channelType: 'ws',
+      channelId: 'ws:test',
+      teamId: 'A11',
+      contentSnippet: 'A11 msg',
+    });
+
+    // Scaffold directories
+    mkdirSync(join(dir, 'teams', 'A1'), { recursive: true });
+    mkdirSync(join(dir, 'teams', 'A11'), { recursive: true });
+
+    // Insert trigger_dedup record (should survive shutdown)
+    raw.prepare("INSERT INTO trigger_dedup (event_id, source, created_at, ttl_seconds) VALUES ('evt-1', 'test', datetime('now'), 300)").run();
+
+    // Insert log_entries record (should survive shutdown)
+    raw.prepare("INSERT INTO log_entries (level, message, created_at) VALUES ('info', 'test', datetime('now'))").run();
+
+    const deps: OrgMcpDeps = {
+      orgTree: tree,
+      taskQueue: taskStore,
+      escalationStore: escStore,
+      triggerConfigStore,
+      interactionStore,
+      spawner: { spawn: async () => 'sid' },
+      sessionManager: { getSession: async () => null, terminateSession: async () => {} },
+      loadConfig: (n) => { const c = configs.get(n); if (!c) throw new Error('no cfg'); return c; },
+      getTeamConfig: (id) => configs.get(id),
+      runDir: dir,
+      log: () => {},
+    };
+    const server = createToolInvoker(deps);
+
+    const shutRes = await server.invoke('shutdown_team', { name: 'A1', cascade: true }, 'root') as { success: boolean };
+    expect(shutRes.success).toBe(true);
+
+    // All tables clean for A1
+    expect(triggerConfigStore.getByTeam('A1')).toEqual([]);
+    expect(taskStore.getByTeam('A1')).toEqual([]);
+    const escRowsA1 = raw.prepare("SELECT * FROM escalation_correlations WHERE source_team='A1' OR target_team='A1'").all();
+    expect(escRowsA1).toEqual([]);
+    const intRowsA1 = raw.prepare("SELECT * FROM channel_interactions WHERE team_id='A1'").all();
+    expect(intRowsA1).toEqual([]);
+
+    // All tables clean for A11
+    expect(triggerConfigStore.getByTeam('A11')).toEqual([]);
+    expect(taskStore.getByTeam('A11')).toEqual([]);
+    const escRowsA11 = raw.prepare("SELECT * FROM escalation_correlations WHERE source_team='A11' OR target_team='A11'").all();
+    expect(escRowsA11).toEqual([]);
+    const intRowsA11 = raw.prepare("SELECT * FROM channel_interactions WHERE team_id='A11'").all();
+    expect(intRowsA11).toEqual([]);
+
+    // Both directories removed
+    expect(existsSync(join(dir, 'teams', 'A1'))).toBe(false);
+    expect(existsSync(join(dir, 'teams', 'A11'))).toBe(false);
+
+    // trigger_dedup record still exists
+    const dedupRows = raw.prepare("SELECT * FROM trigger_dedup WHERE event_id='evt-1'").all();
+    expect(dedupRows).toHaveLength(1);
+
+    // log_entries record still exists
+    const logRows = raw.prepare("SELECT * FROM log_entries WHERE message='test'").all();
+    expect(logRows).toHaveLength(1);
+
+    // Root still exists
+    expect(tree.getTeam('root')).toBeDefined();
+
+    raw.close();
+  });
+});

@@ -14,7 +14,7 @@
  */
 
 import { z } from 'zod';
-import { mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { stringify as yamlStringify } from 'yaml';
 import type { OrgTree } from '../../domain/org-tree.js';
@@ -24,6 +24,7 @@ import type { TeamConfig } from '../../domain/types.js';
 import { scrubSecrets } from '../../logging/credential-scrubber.js';
 import { errorMessage } from '../../domain/errors.js';
 import { extractStringCredentials } from '../../domain/credential-utils.js';
+import { cleanupTeamDirs } from './team-fs.js';
 
 /** Team names must be lowercase slugs to prevent path traversal. */
 const TEAM_SLUG_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
@@ -73,14 +74,6 @@ function scaffoldTeamDirs(runDir: string, teamName: string): void {
   const teamDir = join(runDir, 'teams', teamName);
   for (const sub of TEAM_SUBDIRS) {
     mkdirSync(join(teamDir, sub), { recursive: true });
-  }
-}
-
-/** Remove scaffolded team dirs (best-effort cleanup on failure). */
-function cleanupTeamDirs(runDir: string, teamName: string): void {
-  const teamDir = join(runDir, 'teams', teamName);
-  if (existsSync(teamDir)) {
-    rmSync(teamDir, { recursive: true, force: true });
   }
 }
 

@@ -69,6 +69,7 @@ export interface ITaskQueueStore {
   updateDuration?(taskId: string, durationMs: number): void;
   getPending(): TaskEntry[];
   getByStatus(status: TaskStatus): TaskEntry[];
+  removeByTeam(teamId: string): void;
 }
 
 export interface ITriggerStore {
@@ -92,6 +93,7 @@ export interface IEscalationStore {
   create(correlation: EscalationCorrelation): void;
   updateStatus(correlationId: string, status: string): void;
   getByCorrelationId(id: string): EscalationCorrelation | undefined;
+  removeByTeam(teamId: string): void;
 }
 
 export interface IMemoryStore {
@@ -132,6 +134,7 @@ export interface IInteractionStore {
   log(record: InteractionRecord): void;
   getRecentByChannel(channelId: string, teamIds: string[], limit?: number): InteractionRecord[];
   cleanOlderThan(cutoffIso: string): number;
+  removeByTeam(teamId: string): void;
 }
 
 // ── Config (used by L1+ layers) ────────────────────────────────────────────
