@@ -15,7 +15,6 @@ export const CreateTriggerInputSchema = z.object({
   skill: z.string().optional(),
   max_turns: z.number().int().min(1).max(500).optional(),
   failure_threshold: z.number().int().min(1).max(100).optional(),
-  notify_policy: z.enum(['always', 'on_error', 'never']).optional(),
 });
 
 export interface CreateTriggerResult {
@@ -53,7 +52,6 @@ export function createTrigger(
     state: 'pending',
     maxTurns: input.max_turns ?? 100,
     failureThreshold: input.failure_threshold ?? 3,
-    notifyPolicy: input.notify_policy,
     sourceChannelId,
   });
 

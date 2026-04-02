@@ -26,7 +26,7 @@ export class TriggerConfigStore implements ITriggerConfigStore {
           skill: config.skill ?? null,
           maxTurns: config.maxTurns ?? 100,
           failureThreshold: config.failureThreshold ?? 3,
-          notifyPolicy: config.notifyPolicy ?? 'always',
+          notifyPolicy: 'always',
           updatedAt: now,
         })
         .where(and(
@@ -47,7 +47,7 @@ export class TriggerConfigStore implements ITriggerConfigStore {
         failureThreshold: config.failureThreshold ?? 3,
         consecutiveFailures: 0,
         sourceChannelId: config.sourceChannelId ?? null,
-        notifyPolicy: config.notifyPolicy ?? 'always',
+        notifyPolicy: 'always',
         createdAt: now,
         updatedAt: now,
       }).run();

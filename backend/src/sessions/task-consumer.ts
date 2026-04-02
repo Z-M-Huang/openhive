@@ -16,6 +16,60 @@ import { errorMessage } from '../domain/errors.js';
 import { extractStringCredentials } from '../domain/credential-utils.js';
 import { safeJsonParse } from '../domain/safe-json.js';
 
+// ── Notification decision parsing ──────────────────────────────────────────
+
+/** Regex to extract the notify JSON block (```json:notify ... ```) from LLM response. */
+const NOTIFY_BLOCK_RE = /```json:notify\s*(\{[^}]*"notify"\s*:\s*(?:true|false)[^}]*\})\s*```/s;
+
+/** Instruction appended to trigger-originated tasks so the LLM decides whether to notify. */
+export const TRIGGER_NOTIFY_INSTRUCTION = `
+---
+## Notification Decision
+This task was triggered automatically. After completing it, decide whether the user should be notified about this result.
+
+At the END of your response, include a JSON block with your decision:
+
+\`\`\`json:notify
+{"notify": true, "reason": "Brief reason for your decision"}
+\`\`\`
+
+Set \`notify\` to \`true\` if the result has new, important, or actionable information the user should see.
+Set \`notify\` to \`false\` if the result is routine, unchanged, or not worth interrupting the user.
+
+Ask yourself: Is there something genuinely new? Did something fail unexpectedly? Would the user want to act on this? When in doubt, notify.`;
+
+/**
+ * Parse the LLM's notification decision from a ```json:notify block.
+ * Fail-safe: returns { notify: true } if missing, malformed, or unparseable.
+ */
+export function parseLlmNotifyDecision(text: string | undefined): { notify: boolean; reason?: string } {
+  if (!text) return { notify: true };
+  const match = text.match(NOTIFY_BLOCK_RE);
+  if (!match) return { notify: true };
+  const parsed = safeJsonParse<{ notify: boolean; reason?: string }>(match[1], 'notify-decision');
+  if (!parsed || typeof parsed.notify !== 'boolean') return { notify: true };
+  return { notify: parsed.notify, reason: parsed.reason };
+}
+
+/**
+ * Strip the notify JSON block and any echoed instruction from displayed/stored content.
+ * Removes ```json:notify blocks and <notify_decision>...</notify_decision> tags.
+ */
+export function stripNotifyBlock(text: string): string {
+  // Strip <notify_decision>...</notify_decision> tags (may wrap the block)
+  let cleaned = text.replace(/<notify_decision>[\s\S]*?<\/notify_decision>/g, '');
+
+  // Try removing from the "---\n## Notification Decision" marker onward
+  const sectionStripped = cleaned.replace(/\n---\n## Notification Decision[\s\S]*$/, '').trim();
+  if (sectionStripped && sectionStripped !== cleaned.trim()) {
+    return sectionStripped;
+  }
+
+  // Fallback: just remove the json:notify block itself
+  cleaned = cleaned.replace(NOTIFY_BLOCK_RE, '').trim();
+  return cleaned;
+}
+
 export interface TaskConsumerOpts {
   readonly taskQueueStore: ITaskQueueStore;
   readonly orgTree: OrgTree;
@@ -76,10 +130,16 @@ export class TaskConsumer {
 
         try {
           // Replace [CREDENTIAL:xxx] placeholders with get_credential instructions
-          const taskContent = dequeued.task.replace(
+          let taskContent = dequeued.task.replace(
             /\[CREDENTIAL:(\w+)\]/g,
             (_, key: string) => `(use get_credential({ key: "${key}" }) to retrieve this value)`,
           );
+
+          // For trigger-originated tasks, inject notification decision instruction
+          const isTriggerTask = dequeued.correlationId?.startsWith('trigger:') ?? false;
+          if (isTriggerTask) {
+            taskContent += TRIGGER_NOTIFY_INSTRUCTION;
+          }
 
           // Parse max_turns from task options (snapshot at enqueue time)
           const taskOpts = dequeued.options ? safeJsonParse<Record<string, unknown>>(dequeued.options, 'task-options') ?? {} : {};
@@ -122,6 +182,17 @@ export class TaskConsumer {
             if (creds.length > 0) safeResponse = scrubSecrets(responseText, [], creds);
           }
 
+          // For trigger tasks, parse LLM notification decision and strip the block
+          let shouldNotify = true;
+          if (isTriggerTask && safeResponse) {
+            const decision = parseLlmNotifyDecision(safeResponse);
+            shouldNotify = decision.notify;
+            safeResponse = stripNotifyBlock(safeResponse);
+            this.#deps.logger.info('LLM notification decision', {
+              team: task.teamId, notify: decision.notify, reason: decision.reason,
+            });
+          }
+
           // Store scrubbed result (10KB cap)
           if (safeResponse) {
             this.#taskQueue.updateResult(dequeued.id, safeResponse.slice(0, 10_000));
@@ -142,14 +213,8 @@ export class TaskConsumer {
               notif = isError
                 ? `[${task.teamId}] Team bootstrap failed — check logs for details.`
                 : `[${task.teamId}] Team bootstrapped and ready.`;
-            } else if (safeResponse) {
-              // Check notifyPolicy from task options (propagated at enqueue time)
-              const notifyPolicy = (taskOpts['notify_policy'] as string) ?? 'always';
-              const shouldNotify = notifyPolicy === 'always' ||
-                (notifyPolicy === 'on_error' && isError);
-              if (shouldNotify) {
-                notif = `[${task.teamId}] ${safeResponse}`;
-              }
+            } else if (shouldNotify && safeResponse) {
+              notif = `[${task.teamId}] ${safeResponse}`;
             }
             if (notif) {
               this.#notifyChannel(notif, dequeued.sourceChannelId).catch(() => {});

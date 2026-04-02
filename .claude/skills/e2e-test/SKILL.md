@@ -91,8 +91,8 @@ Reconnect any other named connections too.
 **Scenario 10 — Browser Lifecycle:** Read and execute `.claude/docs/e2e/scenario-10-browser-lifecycle.md`
 (Idle TTL cleanup, on-demand re-spawn, restart persistence — continues from Scenario 9, NO clean restart)
 
-**Scenario 11 — Silent Triggers (notifyPolicy):** Read and execute `.claude/docs/e2e/scenario-11-silent-triggers.md`
-(Create trigger with notify_policy=never, verify task runs silently without channel notification, update to on_error, verify policy propagation)
+**Scenario 11 — LLM-Based Trigger Notification Decisions:** Read and execute `.claude/docs/e2e/scenario-11-silent-triggers.md`
+(Create trigger, verify task includes notification instruction, LLM notify=true delivers, notify=false suppresses, missing block triggers fail-safe)
 
 **Scenario 12 — Conversation Context & Routing:** Read and execute `.claude/docs/e2e/scenario-12-conversation-context.md`
 (Interaction logging, sub-team attribution, conversation history in system prompt, follow-up routing, 24-hour retention cleanup)
@@ -166,13 +166,12 @@ Phase B: Investigative Scenarios
     - Simple request protocol: [pass/fail]
     - Error messages follow protocol: [pass/fail]
     - JSON structure consistency: [pass/fail]
-  Scenario 11 (Silent Triggers):         [summary + evidence]
-    - Trigger created with notify_policy=never: [pass/fail]
-    - DB has correct notify_policy: [pass/fail]
-    - Task executed (result stored): [pass/fail]
-    - NO notification sent (silent): [pass/fail]
-    - Policy updatable via update_trigger: [pass/fail]
-    - Task options propagate notify_policy: [pass/fail]
+  Scenario 11 (LLM-Based Notification Decisions): [summary + evidence]
+    - Trigger task includes notification instruction: [pass/fail]
+    - LLM notify=true delivers notification: [pass/fail]
+    - LLM notify=false suppresses notification: [pass/fail]
+    - Missing block triggers fail-safe notification: [pass/fail]
+    - JSON block stripped from stored content: [pass/fail]
   Scenario 12 (Conversation Context):    [summary + evidence]
     - Inbound messages logged with userId: [pass/fail]
     - Outbound logged with teamId attribution: [pass/fail]

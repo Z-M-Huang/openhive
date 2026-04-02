@@ -15,11 +15,9 @@ export const UpdateTriggerInputSchema = z.object({
   task: z.string().min(1).optional(),
   max_turns: z.number().int().min(1).max(500).optional(),
   failure_threshold: z.number().int().min(1).max(100).optional(),
-  notify_policy: z.enum(['always', 'on_error', 'never']).optional(),
 }).refine(
   (data) => data.config !== undefined || data.task !== undefined ||
-            data.max_turns !== undefined || data.failure_threshold !== undefined ||
-            data.notify_policy !== undefined,
+            data.max_turns !== undefined || data.failure_threshold !== undefined,
   { message: 'at least one updatable field must be provided' },
 );
 
@@ -66,7 +64,6 @@ export function updateTrigger(
     failureThreshold: data.failure_threshold ?? existing.failureThreshold,
     consecutiveFailures: existing.consecutiveFailures,
     sourceChannelId: existing.sourceChannelId,
-    notifyPolicy: data.notify_policy ?? existing.notifyPolicy,
   };
 
   // Pre-validate config if trigger is active and config was changed

@@ -551,125 +551,57 @@ describe('E2E-11: Spawned team operational readiness', () => {
   });
 });
 
-// ── E2E-12: Trigger Notification Policy ──────────────────────────────────
+// ── E2E-12: LLM Notification Decision ─────────────────────────────────────
 
 import { TriggerConfigStore } from '../storage/stores/trigger-config-store.js';
+import { parseLlmNotifyDecision, stripNotifyBlock } from '../sessions/task-consumer.js';
 
-describe('E2E-12: Trigger notification policy', () => {
-  it('notifyPolicy=never suppresses sendResponse even on success', () => {
-    const dir = makeTempDir();
-    const { db, raw } = makeDb(dir);
-    const taskStore = new TaskQueueStore(db);
-    const trigConfigStore = new TriggerConfigStore(db);
-
-    // Create trigger with notifyPolicy='never' (field doesn't exist yet — use as any)
-    trigConfigStore.upsert({
-      name: 'silent-trigger',
-      type: 'keyword' as const,
-      config: { pattern: 'deploy' },
-      team: 'ops',
-      task: 'run deploy',
-      state: 'active' as const,
-      sourceChannelId: 'cli',
-      notifyPolicy: 'never',
-    } as any);
-
-    // Verify trigger persisted
-    const stored = trigConfigStore.get('ops', 'silent-trigger');
-    expect(stored).toBeDefined();
-
-    // RED: notifyPolicy should be persisted and loaded back from the store.
-    // TriggerConfigStore.rowToConfig() doesn't map notifyPolicy yet.
-    const storedAny = stored as unknown as { notifyPolicy?: string };
-    expect(storedAny.notifyPolicy).toBe('never');
-
-    // Enqueue task with notify_policy in options (simulates trigger engine fire)
-    const taskOpts = JSON.stringify({ notify_policy: 'never', trigger_name: 'silent-trigger' });
-    const taskId = taskStore.enqueue('ops', 'run deploy', 'normal', 'trigger:silent-trigger:abc', taskOpts);
-
-    // Complete the task — result stored in DB
-    taskStore.dequeue('ops');
-    taskStore.updateStatus(taskId, TaskStatus.Completed);
-    taskStore.updateResult(taskId, 'deploy completed successfully');
-
-    const tasks = taskStore.getByTeam('ops');
-    expect(tasks).toHaveLength(1);
-    expect(tasks[0].status).toBe(TaskStatus.Completed);
-    expect(tasks[0].result).toBe('deploy completed successfully');
-
-    raw.close();
+describe('E2E-12: LLM notification decision', () => {
+  it('parseLlmNotifyDecision extracts notify: true with reason', () => {
+    const response = `Analysis complete. Found 3 critical issues.\n\n\`\`\`json:notify\n{"notify": true, "reason": "critical issues found"}\n\`\`\``;
+    const decision = parseLlmNotifyDecision(response);
+    expect(decision.notify).toBe(true);
+    expect(decision.reason).toBe('critical issues found');
   });
 
-  it('notifyPolicy=on_error suppresses notification on success', () => {
-    const dir = makeTempDir();
-    const { db, raw } = makeDb(dir);
-    const trigConfigStore = new TriggerConfigStore(db);
-
-    // Create trigger with notifyPolicy='on_error'
-    trigConfigStore.upsert({
-      name: 'check-health',
-      type: 'schedule' as const,
-      config: { cron: '*/5 * * * *' },
-      team: 'monitor',
-      task: 'check system health',
-      state: 'active' as const,
-      sourceChannelId: 'slack-ops',
-      notifyPolicy: 'on_error',
-    } as any);
-
-    // RED: notifyPolicy should be persisted and loaded back from the store.
-    const stored = trigConfigStore.get('monitor', 'check-health');
-    expect(stored).toBeDefined();
-    const storedAny = stored as unknown as { notifyPolicy?: string };
-    expect(storedAny.notifyPolicy).toBe('on_error');
-
-    // Verify that on success, notifyPolicy=on_error means "do NOT notify".
-    // The consumer should read notify_policy from task options and skip notification.
-    // Until implemented, the stored config won't have notifyPolicy.
-
-    raw.close();
+  it('parseLlmNotifyDecision extracts notify: false (suppresses notification)', () => {
+    const response = `All systems healthy. No issues found.\n\n\`\`\`json:notify\n{"notify": false, "reason": "routine check, nothing new"}\n\`\`\``;
+    const decision = parseLlmNotifyDecision(response);
+    expect(decision.notify).toBe(false);
+    expect(decision.reason).toBe('routine check, nothing new');
   });
 
-  it('notifyPolicy=on_error sends notification on failure', () => {
+  it('parseLlmNotifyDecision returns fail-safe notify: true when block is missing', () => {
+    const response = 'Task completed with no issues. Everything looks good.';
+    const decision = parseLlmNotifyDecision(response);
+    expect(decision.notify).toBe(true);
+  });
+
+  it('stripNotifyBlock removes the notify block from stored content', () => {
+    const response = `Report: 5 deployments today.\n\n\`\`\`json:notify\n{"notify": true, "reason": "deploy count"}\n\`\`\``;
+    const stripped = stripNotifyBlock(response);
+    expect(stripped).toContain('Report: 5 deployments today');
+    expect(stripped).not.toContain('json:notify');
+    expect(stripped).not.toContain('"notify"');
+  });
+
+  it('trigger config store hardcodes notifyPolicy to always', () => {
     const dir = makeTempDir();
     const { db, raw } = makeDb(dir);
-    const taskStore = new TaskQueueStore(db);
     const trigConfigStore = new TriggerConfigStore(db);
 
-    // Create trigger with notifyPolicy='on_error'
     trigConfigStore.upsert({
-      name: 'check-health',
+      name: 'test-trigger',
       type: 'schedule' as const,
-      config: { cron: '*/5 * * * *' },
-      team: 'monitor',
-      task: 'check system health',
+      config: { cron: '* * * * *' },
+      team: 'test-team',
+      task: 'check health',
       state: 'active' as const,
-      sourceChannelId: 'slack-ops',
-      notifyPolicy: 'on_error',
-    } as any);
+    });
 
-    // RED: notifyPolicy must round-trip through the store
-    const stored = trigConfigStore.get('monitor', 'check-health');
-    const storedAny = stored as unknown as { notifyPolicy?: string };
-    expect(storedAny.notifyPolicy).toBe('on_error');
-
-    // Enqueue task with on_error policy, then fail it
-    const taskOpts = JSON.stringify({ notify_policy: 'on_error', trigger_name: 'check-health' });
-    const taskId = taskStore.enqueue('monitor', 'check system health', 'normal', 'trigger:check-health:err', taskOpts);
-    taskStore.dequeue('monitor');
-    taskStore.updateStatus(taskId, TaskStatus.Failed);
-    taskStore.updateResult(taskId, 'Error: connection refused to health endpoint');
-
-    // Verify task failed in DB with error content
-    const tasks = taskStore.getByTeam('monitor');
-    expect(tasks).toHaveLength(1);
-    expect(tasks[0].status).toBe(TaskStatus.Failed);
-    expect(tasks[0].result).toContain('connection refused');
-
-    // The task options should propagate notify_policy so the consumer
-    // can decide to send the notification on failure.
-    const opts = JSON.parse(tasks[0].options!) as Record<string, unknown>;
-    expect(opts['notify_policy']).toBe('on_error');
+    const stored = trigConfigStore.get('test-team', 'test-trigger');
+    expect(stored).toBeDefined();
+    expect(stored!.notifyPolicy).toBe('always');
 
     raw.close();
   });
