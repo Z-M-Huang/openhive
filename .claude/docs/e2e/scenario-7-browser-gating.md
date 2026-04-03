@@ -76,11 +76,9 @@
      - Read
      - Write
      - Bash
-     - mcp__org__delegate_task
-     - mcp__org__escalate
-     - mcp__org__get_credential
-   mcp_servers:
-     - org
+     - delegate_task
+     - escalate
+     - get_credential
    provider_profile: default
    maxTurns: 50
    browser:
@@ -92,7 +90,7 @@
    Register in org_tree and restart:
    ```bash
    node -e "
-   const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db');
+   const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db');
    D.prepare(\"INSERT OR IGNORE INTO org_tree (name, parent_id, status) VALUES ('restricted-team', 'main', 'active')\").run();
    D.close();
    "

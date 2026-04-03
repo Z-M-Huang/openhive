@@ -44,7 +44,7 @@ curl -s localhost:9876/connect -d '{"name":"main"}'
 5. VERIFY trigger exists in DB:
    ```bash
    node -e "
-   const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+   const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
    const r = D.prepare(\"SELECT name, state, task FROM trigger_configs WHERE team='health-checker' AND name='silent-check'\").get();
    console.log(JSON.stringify(r));
    D.close();
@@ -66,7 +66,7 @@ curl -s localhost:9876/connect -d '{"name":"main"}'
    FOUND=0
    for i in $(seq 1 30); do
      STATUS=$(node -e "
-       const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+       const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
        const r = D.prepare(\"SELECT status, result FROM task_queue WHERE team_id='health-checker' ORDER BY created_at DESC LIMIT 1\").get();
        console.log(JSON.stringify(r || {}));
        D.close();
@@ -81,7 +81,7 @@ curl -s localhost:9876/connect -d '{"name":"main"}'
 8. **CRITICAL VERIFICATION — Task includes notification instruction:**
    ```bash
    node -e "
-   const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+   const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
    const r = D.prepare(\"SELECT id, status, result FROM task_queue WHERE team_id='health-checker' ORDER BY created_at DESC LIMIT 1\").get();
    console.log('Task:', JSON.stringify(r, null, 2));
    D.close();
@@ -118,7 +118,7 @@ curl -s localhost:9876/connect -d '{"name":"main"}'
     FOUND=0
     for i in $(seq 1 30); do
       STATUS=$(node -e "
-        const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+        const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
         const r = D.prepare(\"SELECT id, status, result FROM task_queue WHERE team_id='health-checker' ORDER BY created_at DESC LIMIT 1\").get();
         console.log(JSON.stringify(r || {}));
         D.close();
@@ -133,7 +133,7 @@ curl -s localhost:9876/connect -d '{"name":"main"}'
 12. **VERIFY — LLM returned notify=false and notification was suppressed:**
     ```bash
     node -e "
-    const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+    const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
     const r = D.prepare(\"SELECT id, status, result FROM task_queue WHERE team_id='health-checker' ORDER BY created_at DESC LIMIT 1\").get();
     console.log('Task result:', r.result);
     D.close();
@@ -175,7 +175,7 @@ curl -s localhost:9876/connect -d '{"name":"main"}'
     FOUND=0
     for i in $(seq 1 30); do
       STATUS=$(node -e "
-        const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+        const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
         const r = D.prepare(\"SELECT id, status, result FROM task_queue WHERE team_id='health-checker' ORDER BY created_at DESC LIMIT 1\").get();
         console.log(JSON.stringify(r || {}));
         D.close();
@@ -190,7 +190,7 @@ curl -s localhost:9876/connect -d '{"name":"main"}'
 16. **VERIFY — LLM returned notify=true and notification was delivered:**
     ```bash
     node -e "
-    const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+    const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
     const r = D.prepare(\"SELECT id, status, result FROM task_queue WHERE team_id='health-checker' ORDER BY created_at DESC LIMIT 1\").get();
     console.log('Task result:', r.result);
     D.close();
@@ -212,7 +212,7 @@ curl -s localhost:9876/connect -d '{"name":"main"}'
     Review the completed tasks from Parts B and C:
     ```bash
     node -e "
-    const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+    const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
     const rows = D.prepare(\"SELECT id, status, result FROM task_queue WHERE team_id='health-checker' ORDER BY created_at DESC LIMIT 5\").all();
     rows.forEach(r => {
       const hasBlock = r.result && /\{[^}]*\"notify\"\s*:/.test(r.result);
@@ -228,7 +228,7 @@ curl -s localhost:9876/connect -d '{"name":"main"}'
 18. **VERIFY JSON block stripped from stored content:**
     ```bash
     node -e "
-    const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+    const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
     const rows = D.prepare(\"SELECT id, result FROM task_queue WHERE team_id='health-checker' ORDER BY created_at DESC LIMIT 5\").all();
     rows.forEach(r => {
       const hasBlock = r.result && /\{[^}]*\"notify\"\s*:/.test(r.result);

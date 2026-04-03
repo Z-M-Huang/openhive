@@ -37,7 +37,7 @@
    - VERIFY task completion in DB:
    ```bash
    node -e "
-   const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+   const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
    const r = D.prepare(\"SELECT status, substr(result,1,200) as r FROM task_queue WHERE team_id='browser-ops' ORDER BY created_at DESC LIMIT 1\").get();
    console.log(JSON.stringify(r));
    D.close();

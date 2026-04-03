@@ -10,11 +10,11 @@ Infrastructure:
  2. Health JSON has storage, sessions, triggers, channels fields
  3. Docker inspect health status = "healthy"
  4. .run/teams/, .run/shared/, .run/backups/ directories exist in container
- 5. Main team config.yaml has name=main, mcp_servers includes org
+ 5. Main team config.yaml has name=main, mcp_servers is [] (empty)
  6. Main team has all 5 subdirs: memory, org-rules, team-rules, skills, subagents
  7. /data/rules/escalation-policy.md exists and contains "escalation"
  8. /app/system-rules/ has .md files
- 9. Container logs contain "OpenHive v3 started"
+ 9. Container logs contain "OpenHive v4 started"
 
 Database:
 10. org_tree has "main" entry: SELECT name FROM org_tree WHERE name='main'

@@ -67,7 +67,7 @@
 8. VERIFY org tree survived:
    ```bash
    node -e "
-   const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+   const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
    console.log(JSON.stringify(D.prepare('SELECT name FROM org_tree').all()));
    D.close();
    "
@@ -96,7 +96,7 @@
 14. VERIFY both removed from org_tree:
     ```bash
     node -e "
-    const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+    const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
     console.log(JSON.stringify(D.prepare('SELECT name FROM org_tree').all()));
     D.close();
     "

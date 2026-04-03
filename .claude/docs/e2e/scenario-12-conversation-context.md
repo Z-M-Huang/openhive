@@ -21,7 +21,7 @@ curl -s localhost:9876/connect -d '{"name":"main"}'
 2. VERIFY inbound + outbound interactions logged to DB:
    ```bash
    node -e "
-   const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+   const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
    const rows = D.prepare(\"SELECT direction, channel_id, user_id, team_id, content_snippet FROM channel_interactions ORDER BY created_at DESC LIMIT 5\").all();
    for (const r of rows) console.log(JSON.stringify(r));
    D.close();
@@ -69,7 +69,7 @@ curl -s localhost:9876/connect -d '{"name":"main"}'
 8. VERIFY outbound interaction logged with research-team attribution:
    ```bash
    node -e "
-   const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+   const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
    const rows = D.prepare(\"SELECT direction, team_id, content_snippet FROM channel_interactions WHERE team_id='research-team' ORDER BY created_at DESC LIMIT 3\").all();
    for (const r of rows) console.log(JSON.stringify(r));
    D.close();
@@ -92,7 +92,7 @@ curl -s localhost:9876/connect -d '{"name":"main"}'
 10. VERIFY interaction count growing:
     ```bash
     node -e "
-    const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+    const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
     const count = D.prepare('SELECT COUNT(*) as c FROM channel_interactions').get();
     console.log('Total interactions:', count.c);
     const byDir = D.prepare('SELECT direction, COUNT(*) as c FROM channel_interactions GROUP BY direction').all();
@@ -111,7 +111,7 @@ curl -s localhost:9876/connect -d '{"name":"main"}'
 12. Manually verify cleanOlderThan works (insert old record, check deletion):
     ```bash
     node -e "
-    const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db');
+    const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db');
     // Insert a deliberately old record
     D.prepare(\"INSERT INTO channel_interactions (direction, channel_type, channel_id, content_snippet, created_at) VALUES ('inbound', 'test', 'test-cleanup', 'old message', '2020-01-01T00:00:00.000Z')\").run();
     const before = D.prepare('SELECT COUNT(*) as c FROM channel_interactions').get();

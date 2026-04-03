@@ -18,22 +18,22 @@ RUN npm install -g bun@1.3.10
 
 # Copy package files first (layer cache)
 COPY package.json bun.lock* ./
-COPY backend/package.json backend/
 
 # Install all dependencies
 RUN bun install
 
 # Install Playwright Chromium to a shared path
 ENV PLAYWRIGHT_BROWSERS_PATH=/app/browsers
-RUN cd backend && npx playwright install --with-deps chromium
+RUN npx playwright install --with-deps chromium
 
 # Copy source code
-COPY backend/src backend/src
-COPY backend/tsconfig.json backend/
-COPY common/ /build/common/
+COPY src/ ./src/
+COPY tsconfig.json ./
+COPY system-rules/ ./system-rules/
+COPY seed-rules/ ./seed-rules/
 
 # Compile TypeScript
-RUN cd backend && ./node_modules/.bin/tsc
+RUN ./node_modules/.bin/tsc
 
 # ── Production ──────────────────────────────────────────────────────────────
 FROM node:22-bookworm-slim
@@ -52,29 +52,27 @@ RUN apt-get update && \
 # Install bun runtime
 RUN npm install -g bun@1.3.10
 
-# Copy compiled backend
-COPY --from=builder /build/backend/dist/ /app/backend/dist/
-COPY --from=builder /build/backend/package.json /app/backend/
+# Copy compiled app
+COPY --from=builder /build/dist/ /app/dist/
 COPY --from=builder /build/package.json /app/
 COPY --from=builder /build/node_modules/ /app/node_modules/
-COPY --from=builder /build/backend/node_modules/ /app/backend/node_modules/
 
 # Copy Playwright browsers from builder
 ENV PLAYWRIGHT_BROWSERS_PATH=/app/browsers
 COPY --from=builder /app/browsers /app/browsers
 
 # Tier 1: System rules (baked in, immutable)
-COPY --from=builder /build/common/system-rules/ /app/system-rules/
+COPY --from=builder /build/system-rules/ /app/system-rules/
 
 # Seed rules (copied to /data/rules/ on first start if empty)
-COPY --from=builder /build/common/seed-rules/ /app/seed-rules/
+COPY --from=builder /build/seed-rules/ /app/seed-rules/
 
 # Create runtime directories
 RUN mkdir -p /app/.run /data/config /data/rules
 
 # Ensure non-root user owns app directories
 RUN chown -R node:node /app /data
-WORKDIR /app/backend
+WORKDIR /app
 
 # Docker GID for socket access (override with --build-arg DOCKER_GID=<gid>)
 ARG DOCKER_GID=0

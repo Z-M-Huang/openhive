@@ -28,7 +28,7 @@ cat /app/openhive/.run/teams/team-beta/config.yaml
 
 # SQLite (host-side, bind-mounted .run/)
 node -e "
-const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
 console.log('alpha:', JSON.stringify(D.prepare(\"SELECT name, parent_id FROM org_tree WHERE name='team-alpha'\").get()));
 console.log('beta:', JSON.stringify(D.prepare(\"SELECT name, parent_id FROM org_tree WHERE name='team-beta'\").get()));
 console.log('alpha_scope:', JSON.stringify(D.prepare(\"SELECT keyword FROM scope_keywords WHERE team_id='team-alpha'\").all()));
@@ -36,7 +36,7 @@ console.log('beta_scope:', JSON.stringify(D.prepare(\"SELECT keyword FROM scope_
 D.close();
 "
 ```
-- Both have parent_id=main, both configs have mcp_servers including org
+- Both have parent_id=main
 - Correct scope keywords for each
 
 #### Part B: list_teams & Routing
@@ -85,7 +85,7 @@ D.close();
 9. VERIFY hierarchy:
    ```bash
    node -e "
-   const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+   const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
    console.log(JSON.stringify(D.prepare(\"SELECT name, parent_id FROM org_tree WHERE name='alpha-child'\").get()));
    D.close();
    "

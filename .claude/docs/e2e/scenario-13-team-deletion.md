@@ -42,7 +42,7 @@ curl -s localhost:9876/connect -d '{"name":"main"}'
 5. VERIFY hierarchy exists:
    ```bash
    node -e "
-   const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+   const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
    console.log('org_tree:', JSON.stringify(D.prepare('SELECT name, parent_id FROM org_tree').all()));
    D.close();
    "
@@ -68,7 +68,7 @@ curl -s localhost:9876/connect -d '{"name":"main"}'
 8. VERIFY data exists in all tables:
    ```bash
    node -e "
-   const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+   const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
    console.log('org_tree:', JSON.stringify(D.prepare(\"SELECT name FROM org_tree WHERE name IN ('A1','A11')\").all()));
    console.log('scope_keywords:', JSON.stringify(D.prepare(\"SELECT * FROM scope_keywords WHERE team_id IN ('A1','A11')\").all()));
    console.log('trigger_configs:', JSON.stringify(D.prepare(\"SELECT team, name FROM trigger_configs WHERE team IN ('A1','A11')\").all()));
@@ -95,7 +95,7 @@ curl -s localhost:9876/connect -d '{"name":"main"}'
 11. VERIFY ALL tables cleaned for A1 and A11:
     ```bash
     node -e "
-    const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+    const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
     const checks = {
       org_tree: D.prepare(\"SELECT name FROM org_tree WHERE name IN ('A1','A11')\").all(),
       scope_keywords: D.prepare(\"SELECT * FROM scope_keywords WHERE team_id IN ('A1','A11')\").all(),

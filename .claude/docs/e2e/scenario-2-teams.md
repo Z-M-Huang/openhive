@@ -22,12 +22,12 @@ curl -s localhost:9876/connect -d '{"name":"main"}'
    cat /app/openhive/.run/teams/ops-team/config.yaml
    ```
    - All 5 subdirs (memory, org-rules, team-rules, skills, subagents)?
-   - config.yaml: name correct? description? mcp_servers has org? credentials section?
+   - config.yaml: name correct? description? credentials section?
 
    ```bash
    # SQLite (host-side, bind-mounted .run/)
    node -e "
-   const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+   const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
    console.log('org_tree:', JSON.stringify(D.prepare(\"SELECT name, parent_id FROM org_tree WHERE name='ops-team'\").get()));
    console.log('scope:', JSON.stringify(D.prepare(\"SELECT keyword FROM scope_keywords WHERE team_id='ops-team'\").all()));
    console.log('tasks:', JSON.stringify(D.prepare(\"SELECT task, priority, status FROM task_queue WHERE team_id='ops-team'\").all()));
@@ -68,7 +68,7 @@ curl -s localhost:9876/connect -d '{"name":"main"}'
    ```bash
    for i in $(seq 1 12); do
      RESULT=$(node -e "
-       const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+       const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
        const r = D.prepare(\"SELECT status, result FROM task_queue WHERE team_id='ops-team' AND task LIKE '%get_credential%' ORDER BY created_at DESC LIMIT 1\").get();
        console.log(JSON.stringify(r));
        D.close();
@@ -82,7 +82,7 @@ curl -s localhost:9876/connect -d '{"name":"main"}'
    - **CRITICAL**: Task result column should NOT contain "test-fake-key-value-12345" in cleartext (credential scrubbing)
    ```bash
    node -e "
-   const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+   const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
    const rows = D.prepare(\"SELECT result FROM task_queue WHERE team_id='ops-team' ORDER BY created_at DESC\").all();
    for (const r of rows) {
      if (r.result && r.result.includes('test-fake-key-value-12345')) {
@@ -177,7 +177,7 @@ curl -s localhost:9876/connect -d '{"name":"main"}'
     ```bash
     for i in $(seq 1 12); do
       RESULT=$(node -e "
-        const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+        const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
         const r = D.prepare(\"SELECT status, result FROM task_queue WHERE team_id='ops-team' ORDER BY created_at DESC LIMIT 1\").get();
         console.log(JSON.stringify(r));
         D.close();

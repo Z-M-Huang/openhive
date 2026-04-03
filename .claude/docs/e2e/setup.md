@@ -21,7 +21,7 @@ for i in $(seq 1 30); do curl -sf http://localhost:8080/health >/dev/null 2>&1 &
 
 Start the persistent WS test harness and open a default connection:
 ```bash
-node /app/openhive/backend/ws-harness.cjs &
+node /app/openhive/ws-harness.cjs &
 HARNESS_PID=$!
 sleep 1
 curl -sf http://localhost:9876/status && echo "Harness ready" || echo "Harness failed to start"
@@ -30,7 +30,7 @@ curl -s localhost:9876/connect -d '{"name":"main"}'
 
 If the harness crashes at any point, detect via `curl -sf http://localhost:9876/status` failure and restart:
 ```bash
-node /app/openhive/backend/ws-harness.cjs &
+node /app/openhive/ws-harness.cjs &
 HARNESS_PID=$!
 sleep 1
 curl -s localhost:9876/connect -d '{"name":"main"}'
@@ -118,7 +118,7 @@ curl -s localhost:9876/traffic -d '{"name":"main","type":"ack","direction":"recv
 ### 6. Database Queries — run from HOST (SQLite is in bind-mounted .run/):
 ```bash
 node -e "
-const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
 // YOUR QUERY HERE
 D.close();
 "
@@ -144,7 +144,7 @@ cd /app/openhive
 sudo docker compose -f deployments/docker-compose.yml down -v 2>&1 || true
 sudo rm -rf .run && mkdir -p .run
 rm -f data/rules/*.md
-cp common/seed-rules/* data/rules/ 2>/dev/null || true
+cp seed-rules/* data/rules/ 2>/dev/null || true
 sudo docker compose -f deployments/docker-compose.yml up -d 2>&1
 for i in $(seq 1 30); do curl -sf http://localhost:8080/health >/dev/null 2>&1 && echo "Ready" && break; sleep 3; done
 ```

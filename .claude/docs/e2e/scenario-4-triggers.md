@@ -21,11 +21,10 @@ curl -s localhost:9876/connect -d '{"name":"main"}'
    cat /app/openhive/.run/teams/loggly-monitor/config.yaml
    ```
    - Has credentials with subdomain and api_key?
-   - Has mcp_servers including org?
 
    ```bash
    node -e "
-   const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+   const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
    console.log('team:', JSON.stringify(D.prepare(\"SELECT name, parent_id FROM org_tree WHERE name='loggly-monitor'\").get()));
    console.log('scope:', JSON.stringify(D.prepare(\"SELECT keyword FROM scope_keywords WHERE team_id='loggly-monitor'\").all()));
    D.close();
@@ -58,7 +57,7 @@ curl -s localhost:9876/connect -d '{"name":"main"}'
    VERIFY trigger in DB:
    ```bash
    node -e "
-   const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+   const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
    console.log('trigger:', JSON.stringify(D.prepare(\"SELECT name, type, state, task FROM trigger_configs WHERE team='loggly-monitor'\").get()));
    D.close();
    "
@@ -88,7 +87,7 @@ curl -s localhost:9876/connect -d '{"name":"main"}'
    FOUND=0
    for i in $(seq 1 30); do
      COUNT=$(node -e "
-       const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+       const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
        const r = D.prepare(\"SELECT COUNT(*) as c FROM task_queue WHERE team_id='loggly-monitor' AND task LIKE '%Loggly%'\").get();
        console.log(r.c);
        D.close();
@@ -107,7 +106,7 @@ curl -s localhost:9876/connect -d '{"name":"main"}'
    ```bash
    for i in $(seq 1 12); do
      STATUS=$(node -e "
-       const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+       const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
        const r = D.prepare(\"SELECT status, result FROM task_queue WHERE team_id='loggly-monitor' ORDER BY created_at DESC LIMIT 1\").get();
        console.log(JSON.stringify(r));
        D.close();
@@ -121,7 +120,7 @@ curl -s localhost:9876/connect -d '{"name":"main"}'
 10. VERIFY TASK OUTCOME — agent must have ATTEMPTED the HTTP call:
     ```bash
     node -e "
-    const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+    const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
     const rows = D.prepare(\"SELECT id, status, result, task FROM task_queue WHERE team_id='loggly-monitor'\").all();
     console.log(JSON.stringify(rows, null, 2));
     D.close();
@@ -137,7 +136,7 @@ curl -s localhost:9876/connect -d '{"name":"main"}'
 10b. VERIFY LOG QUALITY — entries must contain metadata:
     ```bash
     node -e "
-    const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+    const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
     const rows = D.prepare(\"SELECT message, context FROM log_entries WHERE message IN ('PreToolUse','PostToolUse') ORDER BY created_at DESC LIMIT 5\").all();
     for (const r of rows) {
       const ctx = JSON.parse(r.context || '{}');
@@ -215,7 +214,7 @@ curl -s localhost:9876/connect -d '{"name":"main"}'
     Also verify the test-fired task has sourceChannelId in DB:
     ```bash
     node -e "
-    const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+    const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
     const r = D.prepare(\"SELECT id, source_channel_id, options FROM task_queue WHERE correlation_id LIKE 'test-trigger:%' ORDER BY created_at DESC LIMIT 1\").get();
     console.log(JSON.stringify(r, null, 2));
     D.close();
@@ -232,7 +231,7 @@ curl -s localhost:9876/connect -d '{"name":"main"}'
 11d. VERIFY TASK CONSUMER LOGS contain team context:
     ```bash
     node -e "
-    const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+    const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
     const rows = D.prepare(\"SELECT message, context FROM log_entries WHERE message LIKE '%Task%' ORDER BY created_at DESC LIMIT 3\").all();
     for (const r of rows) {
       const ctx = JSON.parse(r.context || '{}');
@@ -256,7 +255,7 @@ curl -s localhost:9876/connect -d '{"name":"main"}'
 13. Record current task count:
     ```bash
     BEFORE=$(node -e "
-      const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+      const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
       const r = D.prepare(\"SELECT COUNT(*) as c FROM task_queue WHERE team_id='loggly-monitor' AND task LIKE '%Loggly%'\").get();
       console.log(r.c);
       D.close();
@@ -287,7 +286,7 @@ curl -s localhost:9876/connect -d '{"name":"main"}'
     FOUND=0
     for i in $(seq 1 30); do
       AFTER=$(node -e "
-        const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+        const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
         const r = D.prepare(\"SELECT COUNT(*) as c FROM task_queue WHERE team_id='loggly-monitor' AND task LIKE '%Loggly%'\").get();
         console.log(r.c);
         D.close();
@@ -306,7 +305,7 @@ curl -s localhost:9876/connect -d '{"name":"main"}'
     ```bash
     for i in $(seq 1 12); do
       STATUS=$(node -e "
-        const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+        const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
         const r = D.prepare(\"SELECT status, result FROM task_queue WHERE team_id='loggly-monitor' ORDER BY created_at DESC LIMIT 1\").get();
         console.log(JSON.stringify(r));
         D.close();

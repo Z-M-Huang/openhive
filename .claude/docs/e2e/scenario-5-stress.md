@@ -90,7 +90,7 @@ curl -s localhost:9876/connect -d '{"name":"main"}'
    ```bash
    # org_tree still has teams
    node -e "
-   const D = require('/app/openhive/backend/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+   const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
    console.log(JSON.stringify(D.prepare('SELECT name FROM org_tree').all()));
    D.close();
    "
