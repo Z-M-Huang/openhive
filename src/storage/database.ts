@@ -19,7 +19,7 @@ export interface DatabaseInstance {
 
 export function createDatabase(dbPath: string): DatabaseInstance {
   const raw = new Database(dbPath);
-  raw.pragma('journal_mode = WAL');
+  raw.pragma('journal_mode = DELETE');
   raw.pragma('foreign_keys = ON');
 
   const db = drizzle(raw, { schema });
