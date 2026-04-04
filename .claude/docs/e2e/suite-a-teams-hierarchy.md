@@ -40,9 +40,9 @@ EOF
 **Verify:**
 - `.final` acknowledges saving
 - Run: `node src/e2e/verify-suite-teams-hierarchy.cjs --step after-memory-write`
-- Checks: MEMORY.md exists at `.run/teams/main/memory/MEMORY.md`, contains "Alice"
+- Checks: memories table has active entries for team 'main', content contains "Alice"
 
-If verify fails on MEMORY.md missing: check container logs for Write tool errors. If "Alice" not in MEMORY.md: agent didn't save correctly.
+If verify fails on memories missing: check container logs for memory_save tool errors. If "Alice" not in memories: agent didn't save correctly.
 
 ---
 
@@ -57,7 +57,13 @@ EOF
 Wait for bootstrap:
 ```bash
 for i in $(seq 1 20); do
-  test -f /app/openhive/.run/teams/ops-team/memory/.bootstrapped && echo "BOOTSTRAPPED" && break
+  node -e "
+    const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+    const r = D.prepare(\"SELECT bootstrapped FROM org_tree WHERE name='ops-team'\").get();
+    if (r && r.bootstrapped === 1) { console.log('BOOTSTRAPPED'); process.exit(0); }
+    D.close();
+    process.exit(1);
+  " 2>/dev/null && break
   sleep 3
 done
 ```
@@ -127,14 +133,20 @@ EOF
 Wait for alpha-child bootstrap:
 ```bash
 for i in $(seq 1 20); do
-  test -f /app/openhive/.run/teams/alpha-child/memory/.bootstrapped && echo "BOOTSTRAPPED" && break
+  node -e "
+    const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+    const r = D.prepare(\\"SELECT bootstrapped FROM org_tree WHERE name='alpha-child'\\").get();
+    if (r && r.bootstrapped === 1) { console.log('BOOTSTRAPPED'); process.exit(0); }
+    D.close();
+    process.exit(1);
+  " 2>/dev/null && break
   sleep 3
 done
 ```
 
 **Verify:**
 - Run: `node src/e2e/verify-suite-teams-hierarchy.cjs --step after-hierarchy`
-- Checks: alpha-child in org_tree with parent_id=team-alpha (NOT main), config.yaml exists, bootstrap marker present
+- Checks: alpha-child in org_tree with parent_id=team-alpha (NOT main), config.yaml exists, bootstrapped flag set
 
 ---
 
@@ -206,9 +218,9 @@ EOF
 ```
 
 **Verify:**
-- `.final` says "Alice" (cross-session persistence via MEMORY.md)
+- `.final` says "Alice" (cross-session persistence via SQLite memories)
 - Run: `node src/e2e/verify-suite-teams-hierarchy.cjs --step after-restart`
-- Checks: MEMORY.md still on disk, org_tree still has ops-team + team-alpha + team-beta + alpha-child, config.yaml files intact, health returns 200, container logs contain "Recovery" or "loaded" messages
+- Checks: memories table still has "Alice" for main, org_tree still has ops-team + team-alpha + team-beta + alpha-child, config.yaml files intact, health returns 200, container logs contain "Recovery" or "loaded" messages
 
 ---
 

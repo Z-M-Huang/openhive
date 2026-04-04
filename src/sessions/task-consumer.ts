@@ -128,6 +128,12 @@ export class TaskConsumer {
         const dequeued = this.#taskQueue.dequeue(task.teamId);
         if (!dequeued) continue;
 
+        // Skip bootstrap tasks for already-bootstrapped teams
+        if (dequeued.type === 'bootstrap' && this.#orgTree.isBootstrapped(dequeued.teamId)) {
+          this.#taskQueue.updateStatus(dequeued.id, TaskStatus.Completed);
+          continue;
+        }
+
         try {
           // Replace [CREDENTIAL:xxx] placeholders with get_credential instructions
           let taskContent = dequeued.task.replace(
@@ -161,6 +167,11 @@ export class TaskConsumer {
 
           const isError = !result.ok;
           this.#taskQueue.updateStatus(dequeued.id, isError ? TaskStatus.Failed : TaskStatus.Completed);
+
+          // Mark team as bootstrapped on successful bootstrap task completion
+          if (dequeued.type === 'bootstrap' && !isError) {
+            this.#orgTree.setBootstrapped(dequeued.teamId);
+          }
 
           // Record duration
           if (this.#taskQueue.updateDuration) {

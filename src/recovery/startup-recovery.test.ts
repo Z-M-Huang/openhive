@@ -185,20 +185,20 @@ describe('UT-22: Recovery reloads org tree, resets running tasks, detects orphan
 
 // ── Memory files persist after recovery ─────────────────────────────────
 
-describe('Memory files persist after recovery', () => {
-  it('memory store files survive recovery process', async () => {
+describe('Memory entries persist after recovery', () => {
+  it('memory store entries survive recovery process', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'openhive-mem-'));
-    const memoryBaseDir = join(dir, 'teams');
-    const memoryStore = new MemoryStore(memoryBaseDir);
 
-    // Write memory files
-    memoryStore.writeFile('test-team', 'context.md', '# Team Context\nSome important notes');
-    memoryStore.writeFile('test-team', 'history.md', '## History\nPrevious decisions');
-
-    // Simulate recovery (memory store is filesystem-based, so files survive)
     const dbPath = join(dir, 'test.db');
     const { db, raw } = createDatabase(dbPath);
     createTables(raw);
+
+    const memoryStore = new MemoryStore(db, raw);
+
+    // Write memory entries (now SQL-backed)
+    memoryStore.save('test-team', 'context', '# Team Context\nSome important notes', 'context');
+    memoryStore.save('test-team', 'history', '## History\nPrevious decisions', 'historical');
+
     const orgStore = new OrgStore(db);
     const taskQueueStore = new TaskQueueStore(db);
     const orgTree = new OrgTree(orgStore);
@@ -213,16 +213,12 @@ describe('Memory files persist after recovery', () => {
       logger: noopLogger,
     });
 
-    // Verify memory files still exist
-    const context = memoryStore.readFile('test-team', 'context.md');
-    expect(context).toBe('# Team Context\nSome important notes');
+    // Verify memory entries still exist (SQL-backed, so they survive recovery)
+    const context = memoryStore.getActive('test-team', 'context');
+    expect(context?.content).toBe('# Team Context\nSome important notes');
 
-    const history = memoryStore.readFile('test-team', 'history.md');
-    expect(history).toBe('## History\nPrevious decisions');
-
-    const files = memoryStore.listFiles('test-team');
-    expect(files).toContain('context.md');
-    expect(files).toContain('history.md');
+    const history = memoryStore.getActive('test-team', 'history');
+    expect(history?.content).toBe('## History\nPrevious decisions');
 
     raw.close();
   });

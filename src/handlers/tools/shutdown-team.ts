@@ -30,6 +30,7 @@ export interface ShutdownTeamDeps {
   readonly triggerConfigStore?: { removeByTeam(team: string): void };
   readonly escalationStore?: { removeByTeam(teamId: string): void };
   readonly interactionStore?: { removeByTeam(teamId: string): void };
+  readonly memoryStore?: { removeByTeam(teamName: string): void };
   readonly runDir?: string;
 }
 
@@ -88,6 +89,7 @@ export async function shutdownTeam(
   deps.taskQueue.removeByTeam(name);
   deps.escalationStore?.removeByTeam(name);
   deps.interactionStore?.removeByTeam(name);
+  deps.memoryStore?.removeByTeam(name);
 
   if (deps.runDir) cleanupTeamDirs(deps.runDir, name);
 

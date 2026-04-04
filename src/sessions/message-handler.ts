@@ -20,9 +20,8 @@ import { buildSessionContext } from './context-builder.js';
 import { buildRuleCascade } from '../rules/cascade.js';
 import { loadSkillsContent } from './skill-loader.js';
 import { buildMemorySection } from './memory-loader.js';
-import { MemoryStore } from '../storage/stores/memory-store.js';
 import { scrubSecrets } from '../logging/credential-scrubber.js';
-import type { ChannelMessage, IInteractionStore } from '../domain/interfaces.js';
+import type { ChannelMessage, IInteractionStore, IMemoryStore } from '../domain/interfaces.js';
 import type { ProvidersOutput } from '../config/validation.js';
 import type { TeamConfig } from '../domain/types.js';
 
@@ -72,6 +71,7 @@ export interface MessageHandlerDeps {
   readonly queryRunner?: TeamQueryRunner;
   readonly loadConfig?: (name: string) => TeamConfig;
   readonly getTeamConfigFn?: (name: string) => TeamConfig | undefined;
+  readonly memoryStore?: IMemoryStore;
 }
 
 /** Collect a team's ID and all descendant IDs from the org tree via BFS. */
@@ -111,8 +111,7 @@ function assembleSystemPrompt(
     logger: cascadeLogger,
   });
   const skillsContent = loadSkillsContent(deps.runDir, teamName);
-  const teamMemoryStore = new MemoryStore(join(deps.runDir, 'teams'));
-  const memorySection = buildMemorySection(teamMemoryStore, teamName);
+  const memorySection = buildMemorySection(deps.memoryStore, teamName);
 
   if (memorySection.length > 12000) {
     deps.logger.info('Team memory exceeds 12000 chars — consider summarizing', {

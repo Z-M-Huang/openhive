@@ -37,7 +37,13 @@ EOF
 **Step 2.** Wait for A1 bootstrap:
 ```bash
 for i in $(seq 1 20); do
-  test -f /app/openhive/.run/teams/A1/memory/.bootstrapped && echo "BOOTSTRAPPED" && break
+  node -e "
+    const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+    const r = D.prepare(\\"SELECT bootstrapped FROM org_tree WHERE name='A1'\\").get();
+    if (r && r.bootstrapped === 1) { console.log('BOOTSTRAPPED'); process.exit(0); }
+    D.close();
+    process.exit(1);
+  " 2>/dev/null && break
   sleep 3
 done
 ```
@@ -52,7 +58,13 @@ EOF
 **Step 4.** Wait for A11 bootstrap:
 ```bash
 for i in $(seq 1 20); do
-  test -f /app/openhive/.run/teams/A11/memory/.bootstrapped && echo "BOOTSTRAPPED" && break
+  node -e "
+    const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+    const r = D.prepare(\\"SELECT bootstrapped FROM org_tree WHERE name='A11'\\").get();
+    if (r && r.bootstrapped === 1) { console.log('BOOTSTRAPPED'); process.exit(0); }
+    D.close();
+    process.exit(1);
+  " 2>/dev/null && break
   sleep 3
 done
 ```

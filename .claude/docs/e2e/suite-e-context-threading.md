@@ -65,7 +65,13 @@ EOF
 **Step 5.** Wait for bootstrap:
 ```bash
 for i in $(seq 1 20); do
-  test -f /app/openhive/.run/teams/research-team/memory/.bootstrapped && echo "BOOTSTRAPPED" && break
+  node -e "
+    const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+    const r = D.prepare(\\"SELECT bootstrapped FROM org_tree WHERE name='research-team'\\").get();
+    if (r && r.bootstrapped === 1) { console.log('BOOTSTRAPPED'); process.exit(0); }
+    D.close();
+    process.exit(1);
+  " 2>/dev/null && break
   sleep 3
 done
 ```

@@ -11,7 +11,7 @@ Infrastructure:
  3. Docker inspect health status = "healthy"
  4. .run/teams/, .run/shared/, .run/backups/ directories exist in container
  5. Main team config.yaml has name=main, mcp_servers is [] (empty)
- 6. Main team has all 5 subdirs: memory, org-rules, team-rules, skills, subagents
+ 6. Main team has all 4 subdirs: org-rules, team-rules, skills, subagents
  7. /data/rules/escalation-policy.md exists and contains "escalation"
  8. /app/system-rules/ has .md files
  9. Container logs contain "OpenHive v4 started"
@@ -61,7 +61,7 @@ Enhanced (absorbed from scenarios 1+6 — core platform + protocol):
     → response mentions available skills (greeting, sig, or similar)
 25. Run verification script for enhanced checks:
     node src/e2e/verify-smoke.cjs --step enhanced
-    → all checks pass (skills dir has .md files, team-rules/org-rules dirs exist, MEMORY.md seeded)
+    → all checks pass (skills dir has .md files, team-rules/org-rules dirs exist, memories seeded in SQLite)
 
 Report: N/25 smoke checks passed.
 

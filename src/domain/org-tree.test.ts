@@ -59,6 +59,8 @@ function createMemoryOrgStore(): IOrgStore {
     removeScopeKeyword(): void {},
     getOwnScope(): string[] { return []; },
     getEffectiveScope(): string[] { return []; },
+    setBootstrapped(): void {},
+    isBootstrapped(): boolean { return false; },
   };
 }
 

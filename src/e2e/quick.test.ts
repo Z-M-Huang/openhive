@@ -43,7 +43,7 @@ describe('Quick E2E: Bootstrap wiring', () => {
   });
 
   it('.run/ main team has all subdirectories', () => {
-    for (const sub of ['memory', 'org-rules', 'team-rules', 'skills', 'subagents']) {
+    for (const sub of ['org-rules', 'team-rules', 'skills', 'subagents']) {
       expect(existsSync(join(dir, 'teams', 'main', sub))).toBe(true);
     }
   });

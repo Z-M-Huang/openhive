@@ -118,6 +118,17 @@ export class OrgStore implements IOrgStore {
     return rows.map(r => r.keyword);
   }
 
+  setBootstrapped(teamId: string): void {
+    const raw = (this.db as unknown as { $client: Database.Database }).$client;
+    raw.prepare('UPDATE org_tree SET bootstrapped = 1 WHERE id = ?').run(teamId);
+  }
+
+  isBootstrapped(teamId: string): boolean {
+    const raw = (this.db as unknown as { $client: Database.Database }).$client;
+    const row = raw.prepare('SELECT bootstrapped FROM org_tree WHERE id = ?').get(teamId) as { bootstrapped: number } | undefined;
+    return row?.bootstrapped === 1;
+  }
+
   private rowToNode(row: {
     id: string;
     name: string;

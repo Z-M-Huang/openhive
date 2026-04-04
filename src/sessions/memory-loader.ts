@@ -1,33 +1,66 @@
 /**
- * Memory loader — reads MEMORY.md and builds a prompt section.
+ * Memory loader — queries IMemoryStore for injectable entries
+ * and builds a structured prompt section grouped by type.
  *
- * Only MEMORY.md is auto-injected. No fallbacks.
- * Other memory files (context.md, decisions.md, etc.) are available
- * via Read tool on demand — they are not injected into the prompt.
+ * Output format:
+ * --- Memory ---
+ * [IDENTITY]
+ *   [key1]: content1
+ *   [key2]: content2
  *
- * Uses MemoryStore for path-validated reads (no raw readFileSync).
+ * [LESSON]
+ *   [key3]: content3
+ * ...
  */
 
 import type { IMemoryStore } from '../domain/interfaces.js';
+import type { MemoryEntry } from '../domain/types.js';
 
-const MEMORY_FILE = 'MEMORY.md';
+/** Type display order matching getInjectable's priority ordering. */
+const TYPE_ORDER: readonly string[] = ['identity', 'lesson', 'decision', 'context'];
 
 /**
  * Build the memory section for injection into systemPrompt.
  *
- * @param memoryStore  MemoryStore with baseDir pointing to .run/teams/
+ * @param memoryStore  SQL-backed IMemoryStore (or undefined if not wired yet)
  * @param teamName     Team slug
- * @returns            Formatted memory section string, or empty string if no MEMORY.md
+ * @returns            Formatted memory section string, or empty string
  */
-export function buildMemorySection(memoryStore: IMemoryStore, teamName: string): string {
-  try {
-    const content = memoryStore.readFile(teamName, MEMORY_FILE);
-    const trimmed = content?.trim();
-    if (!trimmed) return '';
-    return '--- Team Memory (persists across sessions — update after significant actions) ---\n'
-      + trimmed
-      + '\n\n**ACTION REQUIRED:** After completing this request, update memory/MEMORY.md if you created/modified/shut down a team, learned user preferences, or made decisions that affect future interactions. Read the file first, merge new info, then write back.';
-  } catch {
-    return ''; // Corrupt file — skip, don't crash
+export function buildMemorySection(memoryStore: IMemoryStore | undefined, teamName: string): string {
+  if (!memoryStore) return '';
+
+  const entries: MemoryEntry[] = memoryStore.getInjectable(teamName, 50);
+
+  if (entries.length === 0) return '';
+
+  if (entries.length >= 40) {
+    console.warn(`Warning: Team ${teamName} has ${entries.length} injected memories (80% of 50 cap)`);
   }
+
+  // Group entries by type
+  const groups = new Map<string, MemoryEntry[]>();
+  for (const entry of entries) {
+    const group = groups.get(entry.type);
+    if (group) {
+      group.push(entry);
+    } else {
+      groups.set(entry.type, [entry]);
+    }
+  }
+
+  // Build output following the canonical type order
+  let output = '--- Memory ---';
+
+  for (const type of TYPE_ORDER) {
+    const group = groups.get(type);
+    if (!group) continue;
+
+    output += `\n[${type.toUpperCase()}]`;
+    for (const entry of group) {
+      output += `\n  [${entry.key}]: ${entry.content}`;
+    }
+    output += '\n';
+  }
+
+  return output;
 }

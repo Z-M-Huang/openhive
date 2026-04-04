@@ -28,6 +28,9 @@ export const TeamConfigSchema = z.object({
     allowed_domains: z.array(z.string()).optional(),
     timeout_ms: z.number().int().positive().optional().default(30000),
   }).optional(),
+  memory: z.object({
+    embedding_provider_profile: z.string().optional(),
+  }).optional(),
 });
 
 export type TeamConfigInput = z.input<typeof TeamConfigSchema>;

@@ -37,8 +37,10 @@ runStep('triggers-notifications', {
     const dir = path.join(TEAMS_DIR, 'loggly-monitor');
     checks.push(check('loggly_dir_exists', fileExists(dir), 'directory exists', fileExists(dir) ? 'exists' : 'missing'));
 
-    const bootstrapped = path.join(dir, 'memory', '.bootstrapped');
-    checks.push(check('loggly_bootstrapped', fileExists(bootstrapped), '.bootstrapped exists', fileExists(bootstrapped) ? 'exists' : 'missing'));
+    // DB: bootstrapped flag
+    const bootstrapRow = db.prepare("SELECT bootstrapped FROM org_tree WHERE name='loggly-monitor'").get();
+    const isBootstrapped = bootstrapRow && bootstrapRow.bootstrapped === 1;
+    checks.push(check('loggly_bootstrapped', isBootstrapped, 'bootstrapped = 1', isBootstrapped ? 'bootstrapped' : 'not bootstrapped'));
 
     // Config has credentials
     const config = readConfig('loggly-monitor');

@@ -38,7 +38,11 @@ EOF
 ```
 
 ```bash
-echo "Stress test baseline" > /app/openhive/.run/teams/main/memory/MEMORY.md
+node -e "
+    const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db');
+    D.prepare(\"INSERT INTO memories (team_name, key, content, type, is_active, created_at, updated_at) VALUES ('main', 'stress-baseline', 'Stress test baseline', 'context', 1, datetime('now'), datetime('now'))\").run();
+    D.close();
+  "
 ```
 
 Verify stress-team exists:
@@ -140,7 +144,7 @@ curl -s localhost:9876/reconnect -d '{"name":"main"}'
 
 **Verify:**
 - Run: `node src/e2e/verify-suite-stress.cjs --step after-restart`
-- Checks: org_tree still has stress-team, MEMORY.md still exists with "Stress test baseline", config.yaml for stress-team intact, health returns 200, container logs contain "Recovery" messages
+- Checks: org_tree still has stress-team, memories table still has baseline entry for main, config.yaml for stress-team intact, health returns 200, container logs contain "Recovery" messages
 
 Post-restart sanity:
 ```bash
@@ -156,5 +160,5 @@ All verification steps pass (summary.failed === 0 for each). Key outcomes:
 - All 5 concurrent messages got valid responses
 - Health stable under concurrent load
 - Per-socket serialization rejects overlapping requests with "request in progress" error
-- All state (org_tree, MEMORY.md, config files) survived docker restart
+- All state (org_tree, memories, config files) survived docker restart
 - System functional after stress + restart sequence

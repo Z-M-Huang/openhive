@@ -61,7 +61,7 @@ export function buildSystemPrompt(opts: PromptBuilderOpts): SystemPromptParts {
   // 8. Skills content
   if (opts.skillsContent) dynamicSections.push(opts.skillsContent);
 
-  // 9. Memory (MEMORY.md content)
+  // 9. Memory (injectable entries from SQLite)
   if (opts.memorySection) dynamicSections.push(opts.memorySection);
 
   // 10. Topic context
@@ -83,7 +83,10 @@ export function buildCoreInstructions(cwd: string): string {
   return `You are an AI agent team member in the OpenHive system. You operate within a team hierarchy managed by an Organization MCP Server. Follow your team's rules and use the tools available to you to complete tasks.
 
 ## Workspace
-Your working directory is \`${cwd}\`. All file paths for Read, Write, Edit, Glob, and Grep tools MUST use paths relative to or under this directory. For example, to read your memory file use \`${cwd}/memory/MEMORY.md\`, not \`/workspace/memory/MEMORY.md\`.`;
+Your working directory is \`${cwd}\`. All file paths for Read, Write, Edit, Glob, and Grep tools MUST use paths relative to or under this directory.
+
+## Memory
+Your memory is managed via the memory_save, memory_search, memory_list, and memory_delete tools. Do NOT read or write memory files directly.`;
 }
 
 /**

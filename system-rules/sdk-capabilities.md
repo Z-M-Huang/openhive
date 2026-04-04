@@ -26,44 +26,27 @@ Your session has access to these tools (subject to `allowed_tools` config):
 
 **IMPORTANT:** Do NOT use Claude Code's built-in auto-memory system (`~/.claude/projects/*/memory/`). OpenHive has its own memory system.
 
-Your team memory is at `memory/MEMORY.md` (relative to CWD). It is **auto-injected** into every session — this is your ONLY continuity between messages.
+Active memories are **auto-injected** into every session — this is your ONLY continuity between messages.
 
-### Memory Protocol
+### Memory Tools
 
-1. **Before writing**: Read the current `memory/MEMORY.md` first (if it exists)
-2. **Merge**: Combine existing content with new information — never blind-overwrite
-3. **Write**: Save the merged result back to `memory/MEMORY.md`
+- **`memory_save`** — Store a typed memory entry. Types: `identity`, `lesson`, `decision`, `context`, `reference`, `historical`. When updating an existing key, you MUST provide `supersede_reason` explaining why the old value is being replaced.
+- **`memory_search`** — Search memories by keyword (always available) or hybrid keyword+vector (when an embedding provider is configured).
+- **`memory_list`** — List active memories, optionally filtered by type.
+- **`memory_delete`** — Soft-delete a memory entry by key.
 
-### When to Update Memory
+### When to Save Memory
 
-After handling a request, update MEMORY.md if ANY of these apply:
+After handling a request, save a memory if ANY of these apply:
 - User shared their name, role, preferences, or project context
 - You created, modified, or shut down a team
 - User asked you to remember something
 - A decision was made that affects future interactions
 
-### MEMORY.md Structure
-
-Keep it concise and dated:
-```
-# User Context
-- Name: ...
-- Preferences: ...
-
-# Active Teams
-- team-name: purpose (created YYYY-MM-DD)
-
-# Key Decisions
-- ...
-```
-
-- Other files in `memory/` are available via Read but NOT auto-injected
-- When asked to remember something, write to `memory/MEMORY.md` — NOT to Claude's internal memory
-
 ## Credentials
 
 - Call `get_credential({ key: "KEY_NAME" })` to retrieve a credential value on demand.
-- NEVER store credential values in skills/, memory/, or team-rules/ files.
+- NEVER store credential values in memory (via memory_save), skills/, or team-rules/ files.
 - NEVER include credential values in task results or responses.
 - Use credentials only at the point of use (API calls, HTTP headers).
 - The system automatically scrubs credential values from file writes.
@@ -73,10 +56,10 @@ Keep it concise and dated:
 
 When producing task results or responding to delegated work:
 - Focus on **what you accomplished**, not implementation details
-- Do NOT reference internal paths (`memory/`, `skills/`, `config.yaml`, `.bootstrapped`,
-  `init-context.md`, `org-rules/`, `team-rules/`, `subagents/`, `.run/teams/`)
+- Do NOT reference internal paths (`skills/`, `config.yaml`,
+  `org-rules/`, `team-rules/`, `subagents/`, `.run/teams/`)
 - Describe outcomes: "Set up email triage with 3 label categories" — NOT
-  "Created skills/triage.md and wrote MEMORY.md"
+  "Created skills/triage.md and saved 3 memories"
 - Numbered bootstrap steps, file operations, and directory listings are internal —
   never include them in results
 

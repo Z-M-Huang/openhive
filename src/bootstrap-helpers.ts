@@ -31,6 +31,7 @@ import type { DatabaseInstance } from './storage/database.js';
 import type { OrgTree } from './domain/org-tree.js';
 import { TeamStatus } from './domain/types.js';
 import type { AppLogger } from './logging/logger.js';
+import { migrateFilesystemMemory } from './storage/migration.js';
 
 export interface ChannelDeps {
   readonly dataDir: string;
@@ -85,13 +86,18 @@ export function initStorage(_dataDir: string, runDir: string): StorageResult {
   const triggerStore = new TriggerStore(db);
   const logStore = new LogStore(db);
   const escalationStore = new EscalationStore(db);
-  const memoryDir = join(runDir, 'teams');
-  const memoryStore = new MemoryStore(memoryDir);
+  const memoryStore = new MemoryStore(db, raw);
   const triggerConfigStore = new TriggerConfigStore(db);
   const interactionStore = new InteractionStore(db);
   const topicStore = new TopicStore(db);
 
   return { db, raw, orgStore, taskQueueStore, triggerStore, logStore, escalationStore, memoryStore, triggerConfigStore, interactionStore, topicStore };
+}
+
+/** Run one-time filesystem → SQLite migration for memory data. */
+export function runMemoryMigration(memoryStore: MemoryStore, orgTree: OrgTree, runDir: string, logger: AppLogger): void {
+  try { migrateFilesystemMemory(memoryStore, orgTree, runDir, (msg, meta) => logger.info(msg, meta)); }
+  catch (err) { logger.warn('Memory migration failed (non-fatal)', { error: errorMessage(err) }); }
 }
 
 export function initTriggerEngine(
@@ -169,15 +175,9 @@ export function ensureMainTeam(runDir: string, orgTree: OrgTree): void {
   const mainDir = join(runDir, 'teams', 'main');
   const configPath = join(mainDir, 'config.yaml');
 
-  const subdirs = ['memory', 'org-rules', 'team-rules', 'skills', 'subagents'];
+  const subdirs = ['org-rules', 'team-rules', 'skills', 'subagents'];
   for (const sub of subdirs) {
     mkdirSync(join(mainDir, sub), { recursive: true });
-  }
-
-  // Seed memory/MEMORY.md if it doesn't exist
-  const memoryPath = join(mainDir, 'memory', 'MEMORY.md');
-  if (!existsSync(memoryPath)) {
-    writeFileSync(memoryPath, '# Main Team Memory\n\n(No entries yet)\n', 'utf-8');
   }
 
   if (!existsSync(configPath)) {

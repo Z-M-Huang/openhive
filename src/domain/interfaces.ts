@@ -18,6 +18,8 @@ import type {
   TopicEntry,
   TopicState,
   EscalationCorrelation,
+  MemoryEntry,
+  MemorySearchResult,
 } from './types.js';
 
 // ── Session ────────────────────────────────────────────────────────────────
@@ -63,6 +65,8 @@ export interface IOrgStore {
   removeScopeKeyword(teamId: string, keyword: string): void;
   getOwnScope(teamId: string): string[];
   getEffectiveScope(teamId: string): string[];
+  setBootstrapped(teamId: string): void;
+  isBootstrapped(teamId: string): boolean;
 }
 
 export interface ITaskQueueStore {
@@ -102,9 +106,13 @@ export interface IEscalationStore {
 }
 
 export interface IMemoryStore {
-  readFile(teamName: string, filename: string): string | undefined;
-  writeFile(teamName: string, filename: string, content: string): void;
-  listFiles(teamName: string): string[];
+  save(teamName: string, key: string, content: string, type: string, supersedeReason?: string, updatedBy?: string): MemoryEntry;
+  delete(teamName: string, key: string): boolean;
+  search(teamName: string, query: string, maxResults?: number, embeddingFn?: (text: string) => Promise<number[]>): Promise<MemorySearchResult[]>;
+  list(teamName: string, type?: string): MemoryEntry[];
+  getActive(teamName: string, key: string): MemoryEntry | undefined;
+  getInjectable(teamName: string, limit?: number): MemoryEntry[];
+  removeByTeam(teamName: string): void;
 }
 
 // ── Trigger Config Store ──────────────────────────────────────────────────

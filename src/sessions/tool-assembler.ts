@@ -14,6 +14,7 @@ import { buildTriggerTools } from './tools/trigger-tools.js';
 import { buildBrowserTools } from './tools/browser-tools.js';
 import { buildWebFetchTool } from './tools/web-fetch-tool.js';
 import { buildSkillRepoTools } from './tools/skill-repo-tool.js';
+import { buildMemoryTools } from './tools/memory-tools.js';
 import type { OrgToolContext } from './tools/org-tool-context.js';
 import { buildSubagentTools } from './subagent-factory.js';
 import { loadSubagents } from './skill-loader.js';
@@ -68,6 +69,7 @@ export function assembleTools(
     triggerConfigStore: deps.triggerConfigStore,
     interactionStore: deps.interactionStore,
     browserRelay: deps.browserRelay,
+    memoryStore: deps.memoryStore,
   };
 
   // Inline tool partitions (alphabetical within each)
@@ -100,8 +102,15 @@ export function assembleTools(
     tools: filteredTools,
   });
 
-  const allTools = { ...baseTools, ...subagentTools };
-  const activeTools = [...allowedNames, ...Object.keys(subagentTools)];
+  // Memory tools bypass allowed_tools filter (always available when memoryStore is wired)
+  const memoryTools = buildMemoryTools(orgToolCtx);
+  for (const [name, t] of Object.entries(memoryTools)) {
+    const asTool = t as { execute?: (...args: unknown[]) => Promise<unknown> };
+    if (asTool.execute) memoryTools[name] = { ...t, execute: withAudit(name, asTool.execute, auditOpts) };
+  }
+
+  const allTools = { ...baseTools, ...subagentTools, ...memoryTools };
+  const activeTools = [...allowedNames, ...Object.keys(subagentTools), ...Object.keys(memoryTools)];
 
   return { allTools, activeTools };
 }

@@ -50,7 +50,13 @@ curl -s localhost:9876/send -d '{"name":"main","content":"Create a team called w
 - OBSERVE response, wait for bootstrap:
 ```bash
 for i in $(seq 1 20); do
-  test -f /app/openhive/.run/teams/web-team/memory/.bootstrapped && echo "BOOTSTRAPPED" && break
+  node -e "
+    const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+    const r = D.prepare(\\"SELECT bootstrapped FROM org_tree WHERE name='web-team'\\").get();
+    if (r && r.bootstrapped === 1) { console.log('BOOTSTRAPPED'); process.exit(0); }
+    D.close();
+    process.exit(1);
+  " 2>/dev/null && break
   sleep 3
 done
 ```
@@ -101,7 +107,13 @@ EOF
 - Wait for bootstrap, then verify no `browser:` in config:
 ```bash
 for i in $(seq 1 20); do
-  test -f /app/openhive/.run/teams/no-browser-team/memory/.bootstrapped && echo "BOOTSTRAPPED" && break
+  node -e "
+    const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+    const r = D.prepare(\\"SELECT bootstrapped FROM org_tree WHERE name='no-browser-team'\\").get();
+    if (r && r.bootstrapped === 1) { console.log('BOOTSTRAPPED'); process.exit(0); }
+    D.close();
+    process.exit(1);
+  " 2>/dev/null && break
   sleep 3
 done
 cat /app/openhive/.run/teams/no-browser-team/config.yaml
@@ -229,7 +241,13 @@ EOF
 **Step 16.** Wait for bootstrap, add unrestricted browser config, restart:
 ```bash
 for i in $(seq 1 20); do
-  test -f /app/openhive/.run/teams/browser-ops/memory/.bootstrapped && echo "BOOTSTRAPPED" && break
+  node -e "
+    const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+    const r = D.prepare(\\"SELECT bootstrapped FROM org_tree WHERE name='browser-ops'\\").get();
+    if (r && r.bootstrapped === 1) { console.log('BOOTSTRAPPED'); process.exit(0); }
+    D.close();
+    process.exit(1);
+  " 2>/dev/null && break
   sleep 3
 done
 cat >> /app/openhive/.run/teams/browser-ops/config.yaml << 'YAML'
@@ -345,7 +363,13 @@ EOF
 ```bash
 for team in scraper-alpha scraper-beta; do
   for i in $(seq 1 20); do
-    test -f /app/openhive/.run/teams/$team/memory/.bootstrapped && echo "$team BOOTSTRAPPED" && break
+    node -e "
+      const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
+      const r = D.prepare(\\"SELECT bootstrapped FROM org_tree WHERE name='$team'\\").get();
+      if (r && r.bootstrapped === 1) { console.log('$team BOOTSTRAPPED'); process.exit(0); }
+      D.close();
+      process.exit(1);
+    " 2>/dev/null && break
     sleep 3
   done
 done

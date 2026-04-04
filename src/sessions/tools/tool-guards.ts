@@ -81,7 +81,6 @@ export type FileClass =
   | 'own-team-rules'
   | 'own-skills'
   | 'own-subagents'
-  | 'own-memory'
   | 'own-config'
   | 'other';
 
@@ -91,7 +90,6 @@ const OWN_TEAM_PREFIXES: ReadonlyArray<[string, FileClass]> = [
   ['team-rules', 'own-team-rules'],
   ['skills', 'own-skills'],
   ['subagents', 'own-subagents'],
-  ['memory', 'own-memory'],
 ];
 
 /** Classify a sub-path within the owning team's directory. */

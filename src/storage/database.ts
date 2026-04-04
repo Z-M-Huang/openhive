@@ -19,7 +19,7 @@ export interface DatabaseInstance {
 
 export function createDatabase(dbPath: string): DatabaseInstance {
   const raw = new Database(dbPath);
-  raw.pragma('journal_mode = DELETE');
+  raw.pragma('journal_mode = WAL');
   raw.pragma('foreign_keys = ON');
 
   const db = drizzle(raw, { schema });
@@ -38,6 +38,9 @@ const allTables: SQLiteTable[] = [
   schema.triggerConfigs,
   schema.topics,
   schema.channelInteractions,
+  schema.memories,
+  schema.memoryChunks,
+  schema.embeddingCache,
 ];
 
 /**
@@ -110,6 +113,17 @@ export function createTables(raw: Database.Database): void {
   const ddl = allTables.map(tableToSQL).join('\n\n');
   raw.exec(ddl);
 
+  // FTS5 virtual table + partial indexes that Drizzle cannot express
+  const rawDDL = [
+    `CREATE VIRTUAL TABLE IF NOT EXISTS memory_chunks_fts USING fts5(chunk_content, content='memory_chunks', content_rowid='id')`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_active_memory ON memories(team_name, key) WHERE is_active = 1`,
+    `CREATE INDEX IF NOT EXISTS idx_memory_injection ON memories(team_name, type, is_active) WHERE is_active = 1`,
+    `CREATE INDEX IF NOT EXISTS idx_memory_history ON memories(team_name, key, created_at DESC)`,
+  ];
+  for (const sql of rawDDL) {
+    raw.exec(sql);
+  }
+
   // Safe migrations: add columns that may not exist yet (for existing DBs created
   // before these columns were added to the schema).
   const migrations = [
@@ -122,6 +136,7 @@ export function createTables(raw: Database.Database): void {
     'ALTER TABLE trigger_configs ADD COLUMN source_channel_id TEXT',
     'ALTER TABLE task_queue ADD COLUMN topic_id TEXT',
     'ALTER TABLE channel_interactions ADD COLUMN topic_id TEXT',
+    'ALTER TABLE org_tree ADD COLUMN bootstrapped INTEGER NOT NULL DEFAULT 0',
   ];
   for (const sql of migrations) {
     try { raw.prepare(sql).run(); } catch { /* column already exists */ }

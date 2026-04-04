@@ -13,7 +13,7 @@
 
 const path = require('path');
 const {
-  check, runStep, fileExists, fileContains, dirHasFiles,
+  check, runStep, fileExists, dirHasFiles,
   dockerLogsContain, RUN_DIR,
 } = require('./verify-helpers.cjs');
 
@@ -47,8 +47,8 @@ runStep('smoke', {
       checks.push(check('main_config_mcp_empty', content.includes('mcp_servers: []'), 'mcp_servers: []', content.includes('mcp_servers: []') ? 'yes' : 'no'));
     }
 
-    // 6. Main team subdirectories
-    for (const sub of ['memory', 'org-rules', 'team-rules', 'skills', 'subagents']) {
+    // 6. Main team subdirectories (memory/ removed per ADR-29)
+    for (const sub of ['org-rules', 'team-rules', 'skills', 'subagents']) {
       const p = path.join(TEAMS_DIR, 'main', sub);
       checks.push(check(
         `main_subdir_${sub}`,
@@ -118,14 +118,14 @@ runStep('smoke', {
   enhanced(db) {
     const checks = [];
 
-    // 25. Main team directories have content
+    // 25. Main team directories exist (skills populated by agent, not seeded)
     const skillsDir = path.join(TEAMS_DIR, 'main', 'skills');
-    const skills = dirHasFiles(skillsDir, '.md');
+    const skillsDirExists = fileExists(skillsDir);
     checks.push(check(
-      'main_skills_populated',
-      skills.length > 0,
-      'skills/ has .md files',
-      skills.length > 0 ? `${skills.length} files: ${skills.join(', ')}` : 'empty',
+      'main_skills_dir',
+      skillsDirExists,
+      'skills/ dir exists',
+      skillsDirExists ? 'exists' : 'missing',
     ));
 
     const teamRulesDir = path.join(TEAMS_DIR, 'main', 'team-rules');
@@ -146,15 +146,17 @@ runStep('smoke', {
       orgRulesExist ? 'exists' : 'missing',
     ));
 
-    // Memory directory exists (MEMORY.md seeded by ensureMainTeam)
-    const memoryDir = path.join(TEAMS_DIR, 'main', 'memory');
-    const memoryMd = path.join(memoryDir, 'MEMORY.md');
-    checks.push(check(
-      'main_memory_seeded',
-      fileExists(memoryMd),
-      'MEMORY.md exists',
-      fileExists(memoryMd) ? 'exists' : 'missing',
-    ));
+    // Memory table accessible (memories created by agents via memory_save, not pre-seeded)
+    if (db) {
+      try {
+        db.prepare('SELECT COUNT(*) as c FROM memories').get();
+        checks.push(check('memories_table_accessible', true, 'memories table exists', 'accessible'));
+      } catch (e) {
+        checks.push(check('memories_table_accessible', false, 'memories table exists', String(e.message)));
+      }
+    } else {
+      checks.push(check('memories_table_accessible', false, 'memories table exists', 'database not available'));
+    }
 
     return checks;
   },

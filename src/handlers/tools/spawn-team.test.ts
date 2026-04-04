@@ -109,9 +109,9 @@ describe('spawn_team filesystem and init', () => {
     };
   }
 
-  it('scaffolds all 5 subdirectories', async () => {
+  it('scaffolds all 4 subdirectories', async () => {
     await spawnTeam({ name: 'ops', scope_accepts: ['ops'] }, 'root', makeDeps());
-    for (const sub of ['memory', 'org-rules', 'team-rules', 'skills', 'subagents']) {
+    for (const sub of ['org-rules', 'team-rules', 'skills', 'subagents']) {
       expect(existsSync(join(dir, 'teams', 'ops', sub))).toBe(true);
     }
   });
@@ -159,9 +159,9 @@ describe('spawn_team filesystem and init', () => {
     expect(cfg.credentials).toBeUndefined();
   });
 
-  it('writes init-context.md when init_context provided', async () => {
+  it('writes team-context.md when init_context provided', async () => {
     await spawnTeam({ name: 'ops', scope_accepts: ['logs'], init_context: 'Monitor logs every 10 minutes' }, 'root', makeDeps());
-    const content = readFileSync(join(dir, 'teams', 'ops', 'memory', 'init-context.md'), 'utf-8');
+    const content = readFileSync(join(dir, 'teams', 'ops', 'team-rules', 'team-context.md'), 'utf-8');
     expect(content).toBe('Monitor logs every 10 minutes');
   });
 

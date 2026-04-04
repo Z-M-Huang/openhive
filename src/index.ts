@@ -18,7 +18,7 @@ import { recoverFromCrash } from './recovery/startup-recovery.js';
 import {
   ensureRunDir, seedOrgRules, initStorage,
   initTriggerEngine, initChannels, ensureMainTeam, migrateAllowedTools,
-  initBrowserRelay,
+  initBrowserRelay, runMemoryMigration,
 } from './bootstrap-helpers.js';
 import type { TriggerEngine } from './triggers/engine.js';
 import type { ChannelMessage } from './domain/interfaces.js';
@@ -73,6 +73,7 @@ function buildOrgToolDeps(
     escalationStore: import('./domain/interfaces.js').IEscalationStore;
     triggerConfigStore: import('./domain/interfaces.js').ITriggerConfigStore;
     interactionStore: import('./domain/interfaces.js').IInteractionStore;
+    memoryStore?: { removeByTeam(teamName: string): void };
     runDir: string; logger: AppLogger;
     browserRelay?: import('./sessions/tools/browser-proxy.js').BrowserRelay;
   },
@@ -90,6 +91,7 @@ function buildOrgToolDeps(
     escalationStore: opts.escalationStore,
     triggerConfigStore: opts.triggerConfigStore,
     interactionStore: opts.interactionStore,
+    memoryStore: opts.memoryStore,
     runDir: opts.runDir,
     loadConfig: (name: string, cp?: string, hints?: { description?: string; scopeAccepts?: string[] }) =>
       getOrCreateTeamConfig(opts.runDir, name, cp, hints),
@@ -132,6 +134,7 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   if (recovery.recovered > 0) logger.info('Recovery completed', { recovered: recovery.recovered });
 
   ensureMainTeam(runDir, orgTree);
+  runMemoryMigration(stores.memoryStore, orgTree, runDir, logger);
   migrateAllowedTools(runDir);
   const sessionManager = new TeamRegistry();
 
@@ -147,7 +150,8 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
 
   const orgToolDeps = buildOrgToolDeps(
     { orgTree, sessionManager, taskQueueStore, escalationStore, triggerConfigStore,
-      interactionStore: stores.interactionStore, runDir, logger,
+      interactionStore: stores.interactionStore, memoryStore: stores.memoryStore,
+      runDir, logger,
       get browserRelay() { return browserRelayRef; } },
     () => queryRunnerRef,
     () => triggerEngineRef,
@@ -185,6 +189,7 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
         get queryRunner() { return queryRunnerRef; },
         loadConfig: orgToolDeps.loadConfig,
         getTeamConfigFn: orgToolDeps.getTeamConfig,
+        memoryStore: stores.memoryStore,
       }
     : null;
 
@@ -277,7 +282,7 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   if (!deps?.skipListen) {
     await fastify.listen({ host: deps?.listenAddress ?? '0.0.0.0', port: deps?.listenPort ?? 8080 });
   }
-  logger.info('OpenHive v4 started', { dataDir, runDir, systemRulesDir });
+  logger.info('OpenHive v4 started — v4.2.1', { dataDir, runDir, systemRulesDir });
 
   const shutdown = async (): Promise<void> => {
     clearInterval(interactionCleanupInterval);

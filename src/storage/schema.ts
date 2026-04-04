@@ -9,6 +9,7 @@ import {
   sqliteTable,
   text,
   integer,
+  blob,
   index,
   primaryKey,
   unique,
@@ -22,6 +23,7 @@ export const orgTree = sqliteTable('org_tree', {
   parentId: text('parent_id'),
   status: text('status').notNull().default('idle'),
   createdAt: text('created_at').notNull(),
+  bootstrapped: integer('bootstrapped').notNull().default(0),
 });
 
 // ── scope_keywords ─────────────────────────────────────────────────────────
@@ -182,3 +184,48 @@ export const channelInteractions = sqliteTable(
     index('idx_interactions_created_at').on(table.createdAt),
   ],
 );
+
+// ── memories ─────────────────────────────────────────────────────────────────
+
+export const memories = sqliteTable('memories', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  teamName: text('team_name').notNull(),
+  key: text('key').notNull(),
+  content: text('content').notNull(),
+  type: text('type').notNull().default('context'),
+  isActive: integer('is_active').notNull().default(1),
+  supersedesId: integer('supersedes_id'),
+  supersedeReason: text('supersede_reason'),
+  updatedBy: text('updated_by'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+// ── memory_chunks ────────────────────────────────────────────────────────────
+
+export const memoryChunks = sqliteTable(
+  'memory_chunks',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    memoryId: integer('memory_id').notNull(),
+    teamName: text('team_name').notNull(),
+    chunkContent: text('chunk_content').notNull(),
+    chunkIndex: integer('chunk_index').notNull(),
+    contentHash: text('content_hash').notNull(),
+    createdAt: text('created_at').notNull(),
+  },
+  (table) => [
+    index('idx_chunks_by_memory').on(table.memoryId),
+    index('idx_chunks_by_team').on(table.teamName),
+    index('idx_chunks_by_hash').on(table.contentHash),
+  ],
+);
+
+// ── embedding_cache ──────────────────────────────────────────────────────────
+
+export const embeddingCache = sqliteTable('embedding_cache', {
+  contentHash: text('content_hash').primaryKey(),
+  embedding: blob('embedding').notNull(),
+  model: text('model').notNull(),
+  createdAt: text('created_at').notNull(),
+});

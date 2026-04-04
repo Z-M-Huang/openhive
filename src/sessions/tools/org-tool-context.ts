@@ -16,6 +16,7 @@ import type {
   IEscalationStore,
   ITriggerConfigStore,
   IInteractionStore,
+  IMemoryStore,
 } from '../../domain/interfaces.js';
 
 // ── Narrow interfaces for concrete deps not yet in domain/interfaces ─────
@@ -64,4 +65,5 @@ export interface OrgToolContext {
   readonly triggerConfigStore?: ITriggerConfigStore;
   readonly interactionStore?: IInteractionStore;
   readonly browserRelay?: IBrowserRelay;
+  readonly memoryStore?: IMemoryStore;
 }

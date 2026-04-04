@@ -49,6 +49,7 @@ export interface TeamConfig {
   readonly maxTurns: number;
   readonly credentials?: Readonly<Record<string, string>>;
   readonly browser?: BrowserConfig;
+  readonly memory?: { readonly embedding_provider_profile?: string };
 }
 
 export type TriggerState = 'pending' | 'active' | 'disabled';
@@ -137,4 +138,50 @@ export interface TopicEntry {
   readonly state: TopicState;
   readonly createdAt: string;
   readonly lastActivity: string;
+}
+
+// ── Memory Types ──────────────────────────────────────────────────────────
+
+export type MemoryType = 'identity' | 'lesson' | 'decision' | 'context' | 'reference' | 'historical';
+
+export const MEMORY_TYPE_ALIASES: Record<string, MemoryType> = {
+  warning: 'lesson',
+  insight: 'lesson',
+  learning: 'lesson',
+  core: 'identity',
+  self: 'identity',
+  commitment: 'decision',
+  choice: 'decision',
+  note: 'decision',
+  active: 'context',
+  background: 'context',
+  pointer: 'reference',
+  link: 'reference',
+  archive: 'historical',
+  past: 'historical',
+};
+
+export const INJECTED_TYPES = ['identity', 'lesson', 'decision', 'context'] as const;
+
+export interface MemoryEntry {
+  readonly id: number;
+  readonly team_name: string;
+  readonly key: string;
+  readonly content: string;
+  readonly type: MemoryType;
+  readonly is_active: boolean;
+  readonly supersedes_id: number | null;
+  readonly supersede_reason: string | null;
+  readonly updated_by: string | null;
+  readonly created_at: string;
+  readonly updated_at: string;
+}
+
+export interface MemorySearchResult {
+  readonly key: string;
+  readonly snippet: string;
+  readonly score: number;
+  readonly type: MemoryType;
+  readonly is_active: boolean;
+  readonly source: 'hybrid' | 'keyword';
 }

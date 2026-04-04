@@ -28,7 +28,7 @@ import { EscalationStore } from './stores/escalation-store.js';
 import { MemoryStore } from './stores/memory-store.js';
 import { TeamStatus, TaskStatus } from '../domain/types.js';
 import type { OrgTreeNode, LogEntry, EscalationCorrelation } from '../domain/types.js';
-import { ValidationError } from '../domain/errors.js';
+// ValidationError import removed — filesystem MemoryStore tests migrated to memory-store.test.ts
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -65,21 +65,24 @@ describe('UT-2: Schema and WAL mode', () => {
     if (existsSync(tmpDir)) rmSync(tmpDir, { recursive: true });
   });
 
-  it('journal mode is DELETE', () => {
+  it('journal mode is WAL', () => {
     const result = instance.raw.pragma('journal_mode') as Array<{ journal_mode: string }>;
-    expect(result[0]?.journal_mode).toBe('delete');
+    expect(result[0]?.journal_mode).toBe('wal');
   });
 
-  it('creates all 8 tables', () => {
+  it('creates all 12 tables', () => {
     const tables = instance.raw
-      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '%_fts%'")
       .all() as Array<{ name: string }>;
 
     const tableNames = tables.map((t) => t.name).sort();
     expect(tableNames).toEqual([
       'channel_interactions',
+      'embedding_cache',
       'escalation_correlations',
       'log_entries',
+      'memories',
+      'memory_chunks',
       'org_tree',
       'scope_keywords',
       'task_queue',
@@ -522,58 +525,10 @@ describe('Escalation Store', () => {
 
 });
 
-// ── UT-23: Memory Store ─────────────────────────────────────────────────────
+// ── UT-23: Memory Store (migrated to SQL — see memory-store.test.ts) ────────
 
-describe('UT-23: Memory Store', () => {
-  let tmpDir: string;
-  let store: MemoryStore;
-
-  beforeEach(() => {
-    tmpDir = makeTmpDir();
-    store = new MemoryStore(tmpDir);
-  });
-
-  afterEach(() => {
-    if (existsSync(tmpDir)) rmSync(tmpDir, { recursive: true });
-  });
-
-  it('writeFile + readFile round-trips content', () => {
-    store.writeFile('my-team', 'notes.md', '# Notes\nHello world');
-    const content = store.readFile('my-team', 'notes.md');
-    expect(content).toBe('# Notes\nHello world');
-  });
-
-  it('readFile returns undefined for nonexistent file', () => {
-    expect(store.readFile('my-team', 'nope.txt')).toBeUndefined();
-  });
-
-  it('listFiles returns filenames', () => {
-    store.writeFile('my-team', 'a.txt', 'aaa');
-    store.writeFile('my-team', 'b.txt', 'bbb');
-
-    const files = store.listFiles('my-team');
-    expect(files.sort()).toEqual(['a.txt', 'b.txt']);
-  });
-
-  it('listFiles returns empty for nonexistent team', () => {
-    expect(store.listFiles('ghost-team')).toEqual([]);
-  });
-
-  it('rejects path traversal in team name', () => {
-    expect(() => store.readFile('../etc', 'passwd')).toThrow(ValidationError);
-    expect(() => store.writeFile('../etc', 'passwd', 'bad')).toThrow(ValidationError);
-    expect(() => store.listFiles('../etc')).toThrow(ValidationError);
-  });
-
-  it('rejects path traversal in filename', () => {
-    expect(() => store.readFile('my-team', '../secret.txt')).toThrow(ValidationError);
-    expect(() => store.writeFile('my-team', '../../etc/passwd', 'bad')).toThrow(ValidationError);
-    expect(() => store.readFile('my-team', 'sub/file.txt')).toThrow(ValidationError);
-  });
-
-  it('rejects invalid team slug format', () => {
-    expect(() => store.readFile('UPPER', 'file.txt')).toThrow(ValidationError);
-    expect(() => store.readFile('has spaces', 'file.txt')).toThrow(ValidationError);
-    expect(() => store.readFile('', 'file.txt')).toThrow(ValidationError);
+describe('UT-23: Memory Store (SQL-backed)', () => {
+  it('MemoryStore class can be imported', () => {
+    expect(MemoryStore).toBeDefined();
   });
 });

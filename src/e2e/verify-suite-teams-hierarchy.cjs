@@ -3,7 +3,7 @@
  * Covers scenarios 1 (partial), 2, 3
  *
  * Steps:
- *   after-memory-write     — MEMORY.md contains the remembered fact
+ *   after-memory-write     — memories table contains the remembered fact
  *   after-team-create      — ops-team exists in DB + filesystem
  *   after-credentials      — credential scrubbing (not in logs/responses)
  *   after-hierarchy        — team-alpha, team-beta, alpha-child in org_tree with correct parent_ids
@@ -17,7 +17,7 @@
 
 const path = require('path');
 const {
-  check, runStep, fileExists, fileContains, readConfig,
+  check, runStep, fileExists, readConfig,
   dockerLogsAbsent, RUN_DIR,
 } = require('./verify-helpers.cjs');
 
@@ -26,13 +26,12 @@ const TEAMS_DIR = path.join(RUN_DIR, 'teams');
 runStep('teams-hierarchy', {
 
   'after-memory-write'(db) {
-    const memPath = path.join(TEAMS_DIR, 'main', 'memory', 'MEMORY.md');
-    const exists = fileExists(memPath);
-    const hasAlice = exists ? fileContains(memPath, 'Alice') : null;
+    const memories = db.prepare("SELECT * FROM memories WHERE team_name = 'main' AND is_active = 1").all();
+    const hasAlice = memories.some(m => m.content && m.content.includes('Alice'));
 
     return [
-      check('memory_file_exists', exists, 'MEMORY.md exists', exists ? 'exists' : 'missing'),
-      check('memory_contains_alice', !!hasAlice, 'contains "Alice"', hasAlice || 'not found'),
+      check('memory_exists', memories.length > 0, 'active memories exist', memories.length > 0 ? `${memories.length} memories` : 'none'),
+      check('memory_contains_alice', hasAlice, 'contains "Alice"', hasAlice ? 'found' : 'not found'),
     ];
   },
 
@@ -56,9 +55,10 @@ runStep('teams-hierarchy', {
     const config = readConfig('ops-team');
     checks.push(check('ops_team_config', !!config, 'config.yaml exists', config ? 'exists' : 'missing'));
 
-    // Filesystem: .bootstrapped marker
-    const bootstrapped = path.join(TEAMS_DIR, 'ops-team', 'memory', '.bootstrapped');
-    checks.push(check('ops_team_bootstrapped', fileExists(bootstrapped), '.bootstrapped exists', fileExists(bootstrapped) ? 'exists' : 'missing'));
+    // DB: bootstrapped flag
+    const bootstrapRow = db.prepare("SELECT bootstrapped FROM org_tree WHERE name='ops-team'").get();
+    const isBootstrapped = bootstrapRow && bootstrapRow.bootstrapped === 1;
+    checks.push(check('ops_team_bootstrapped', isBootstrapped, 'bootstrapped = 1', isBootstrapped ? 'bootstrapped' : 'not bootstrapped'));
 
     // Config contains credentials
     if (config) {
@@ -145,10 +145,10 @@ runStep('teams-hierarchy', {
       checks.push(check(`persist_${team}`, !!row, `${team} persists`, row ? 'exists' : 'missing'));
     }
 
-    // Memory persists
-    const memPath = path.join(TEAMS_DIR, 'main', 'memory', 'MEMORY.md');
-    const hasAlice = fileContains(memPath, 'Alice');
-    checks.push(check('persist_memory', !!hasAlice, 'MEMORY.md contains Alice', hasAlice || 'not found'));
+    // Memory persists in SQLite
+    const memories = db.prepare("SELECT * FROM memories WHERE team_name = 'main' AND is_active = 1").all();
+    const hasAlice = memories.some(m => m.content && m.content.includes('Alice'));
+    checks.push(check('persist_memory', hasAlice, 'memories contain Alice', hasAlice ? 'found' : 'not found'));
 
     // Team directories persist
     for (const team of ['ops-team', 'team-alpha']) {

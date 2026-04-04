@@ -81,6 +81,14 @@ export class OrgTree {
     return this.store.getEffectiveScope(teamId);
   }
 
+  setBootstrapped(teamId: string): void {
+    this.store.setBootstrapped(teamId);
+  }
+
+  isBootstrapped(teamId: string): boolean {
+    return this.store.isBootstrapped(teamId);
+  }
+
   isDescendant(teamId: string, ancestorId: string): boolean {
     let current = this.nodes.get(teamId);
 

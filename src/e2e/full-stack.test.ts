@@ -103,7 +103,7 @@ describe('E2E-2: All 6 stores end-to-end', () => {
     const trigStore = new TriggerStore(db);
     const logStore = new LogStore(db);
     const escStore = new EscalationStore(db);
-    const memStore = new MemoryStore(join(dir, 'memory'));
+    const memStore = new MemoryStore(db, raw);
 
     orgStore.addTeam(makeNode({ teamId: 't1', name: 'alpha' }));
     expect(orgStore.getTeam('t1')?.name).toBe('alpha');
@@ -121,8 +121,10 @@ describe('E2E-2: All 6 stores end-to-end', () => {
     escStore.create({ correlationId: 'c1', sourceTeam: 't1', targetTeam: 'root', taskId: null, status: 'open', createdAt: new Date().toISOString() });
     expect(escStore.getByCorrelationId('c1')?.status).toBe('open');
 
-    memStore.writeFile('alpha', 'notes.md', 'data');
-    expect(memStore.readFile('alpha', 'notes.md')).toBe('data');
+    // MemoryStore is now SQL-backed — test save/getActive instead of writeFile/readFile
+    const entry = memStore.save('alpha', 'notes', 'data', 'context');
+    expect(memStore.getActive('alpha', 'notes')?.content).toBe('data');
+    expect(entry.type).toBe('context');
 
     raw.close();
   });
@@ -486,7 +488,7 @@ describe('E2E-11: Spawned team operational readiness', () => {
     expect(result.success).toBe(true);
 
     // Verify all subdirs exist
-    for (const sub of ['memory', 'org-rules', 'team-rules', 'skills', 'subagents']) {
+    for (const sub of ['org-rules', 'team-rules', 'skills', 'subagents']) {
       expect(existsSync(join(dir, 'teams', 'ops', sub))).toBe(true);
     }
 
@@ -499,8 +501,8 @@ describe('E2E-11: Spawned team operational readiness', () => {
     const cfgWithCreds = yamlParse(cfgRaw) as { credentials: Record<string, string> };
     expect(cfgWithCreds.credentials['subdomain']).toBe('acme');
 
-    // Init context written to memory
-    const initContent = readFileSync(join(dir, 'teams', 'ops', 'memory', 'init-context.md'), 'utf-8');
+    // Init context written to team-rules
+    const initContent = readFileSync(join(dir, 'teams', 'ops', 'team-rules', 'team-context.md'), 'utf-8');
     expect(initContent).toBe('Monitor production logs');
 
     // Init task auto-queued

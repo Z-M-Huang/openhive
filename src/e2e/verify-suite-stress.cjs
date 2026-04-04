@@ -4,7 +4,7 @@
  *
  * Steps:
  *   after-concurrent  — 5 stress-team-N directories exist, org_tree has entries
- *   after-restart     — teams persist after docker restart, MEMORY.md for main still exists
+ *   after-restart     — teams persist after docker restart, memories for main still exist
  *
  * Usage: node src/e2e/verify-suite-stress.cjs --step <step>
  */
@@ -13,7 +13,7 @@
 
 const path = require('path');
 const {
-  check, runStep, fileExists, fileContains, RUN_DIR,
+  check, runStep, fileExists, RUN_DIR,
 } = require('./verify-helpers.cjs');
 
 const TEAMS_DIR = path.join(RUN_DIR, 'teams');
@@ -56,9 +56,9 @@ runStep('stress', {
     const main = db.prepare("SELECT name FROM org_tree WHERE name='main'").get();
     checks.push(check('persist_main', !!main, 'main persists', main ? 'exists' : 'missing'));
 
-    // MEMORY.md for main still exists
-    const memPath = path.join(TEAMS_DIR, 'main', 'memory', 'MEMORY.md');
-    checks.push(check('main_memory_exists', fileExists(memPath), 'MEMORY.md exists', fileExists(memPath) ? 'exists' : 'missing'));
+    // Memories for main still exist in SQLite
+    const memories = db.prepare("SELECT * FROM memories WHERE team_name = 'main' AND is_active = 1").all();
+    checks.push(check('main_memory_exists', memories.length > 0, 'active memories exist', memories.length > 0 ? `${memories.length} memories` : 'none'));
 
     // Team directories persist
     for (let i = 1; i <= 5; i++) {

@@ -90,6 +90,8 @@ export function createMemoryOrgStore(): IOrgStore {
       };
       return [...new Set(collect(teamId))];
     },
+    setBootstrapped(): void {},
+    isBootstrapped(): boolean { return false; },
   };
 }
 

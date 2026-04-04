@@ -68,6 +68,7 @@ export interface OrgToolDeps {
   readonly triggerConfigStore?: ITriggerConfigStore;
   readonly interactionStore?: IInteractionStore;
   readonly browserRelay?: { available: boolean };
+  readonly memoryStore?: { removeByTeam(teamName: string): void };
 }
 
 export interface OrgToolInvoker {
@@ -98,6 +99,7 @@ function buildToolDefs(deps: OrgToolDeps): ToolDefinition[] {
         triggerConfigStore: deps.triggerConfigStore,
         escalationStore: deps.escalationStore,
         interactionStore: deps.interactionStore,
+        memoryStore: deps.memoryStore,
         runDir: deps.runDir,
       }),
     },

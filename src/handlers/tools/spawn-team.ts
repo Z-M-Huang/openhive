@@ -66,7 +66,7 @@ export interface SpawnTeamDeps {
 
 /** Subdirectories to scaffold for each new team. */
 const TEAM_SUBDIRS = [
-  'memory', 'org-rules', 'team-rules', 'skills', 'subagents',
+  'org-rules', 'team-rules', 'skills', 'subagents',
 ] as const;
 
 /** Scaffold the team directory structure under .run/teams/{name}/. */
@@ -129,9 +129,9 @@ export async function spawnTeam(
     const cfgPath = join(deps.runDir, 'teams', name, 'config.yaml');
     writeFileSync(cfgPath, yamlStringify(config), 'utf-8');
 
-    // Write initialization context to memory/init-context.md (scrub credential values)
+    // Write initialization context to team-rules/team-context.md (scrub credential values)
     if (parsed.data.init_context) {
-      const initPath = join(deps.runDir, 'teams', name, 'memory', 'init-context.md');
+      const initPath = join(deps.runDir, 'teams', name, 'team-rules', 'team-context.md');
       let safeContext = parsed.data.init_context;
       if (parsed.data.credentials) {
         const credValues = extractStringCredentials(parsed.data.credentials);
@@ -191,17 +191,14 @@ function enqueueInitTask(
   if (!deps.taskQueue) return null;
 
   const initPayload = initContext
-    ? 'Bootstrap this team. Your setup context is in memory/init-context.md — read it first. ' +
+    ? 'Bootstrap this team. Your team context is already in your system prompt (from team-rules/team-context.md). ' +
       'Use the get_credential tool to access any credentials provided during team creation. ' +
-      'Steps: (1) Read your init context, ' +
-      '(2) Create skills in skills/ for your core tasks, ' +
-      '(3) Write memory/MEMORY.md with your identity, current state, and key references, ' +
-      '(4) If memory/.bootstrapped exists, skip — you are already initialized, ' +
-      '(5) Create memory/.bootstrapped when done, ' +
-      '(6) Respond with a brief, user-friendly summary of what capabilities you now have — do NOT list file paths or internal details.'
+      'Steps: (1) Create skills in skills/ for your core tasks, ' +
+      '(2) Use memory_save to record your identity, key decisions, and initial context, ' +
+      '(3) Respond with a brief, user-friendly summary of what capabilities you now have.'
     : 'Bootstrap this team. Your description and scope are in your system prompt. ' +
-      'Create initial skills in skills/ and write memory/MEMORY.md with your identity. ' +
-      'Create memory/.bootstrapped when done.';
+      'Create initial skills in skills/ and use memory_save to record your identity. ' +
+      'Respond with a summary of your capabilities.';
 
   try {
     deps.taskQueue.enqueue(name, initPayload, 'critical', 'bootstrap', sourceChannelId);

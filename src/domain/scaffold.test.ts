@@ -224,6 +224,8 @@ describe('Layer 0: Interfaces exist', () => {
       removeScopeKeyword: () => {},
       getOwnScope: () => [],
       getEffectiveScope: () => [],
+      setBootstrapped: () => {},
+      isBootstrapped: () => false,
     };
 
     expect(orgStore.getTeam).toBeDefined();
@@ -258,13 +260,17 @@ describe('Layer 0: Interfaces exist', () => {
 
   it('IMemoryStore shape is correct', () => {
     const store: IMemoryStore = {
-      readFile: () => undefined,
-      writeFile: () => {},
-      listFiles: () => [],
+      save: () => ({ id: 1, team_name: 't', key: 'k', content: 'c', type: 'context', is_active: true, supersedes_id: null, supersede_reason: null, updated_by: null, created_at: '', updated_at: '' }),
+      delete: () => false,
+      search: () => Promise.resolve([]),
+      list: () => [],
+      getActive: () => undefined,
+      getInjectable: () => [],
+      removeByTeam: () => {},
     };
 
-    expect(store.readFile).toBeDefined();
-    expect(store.writeFile).toBeDefined();
+    expect(store.save).toBeDefined();
+    expect(store.getActive).toBeDefined();
   });
 
   it('ITaskQueueStore shape is correct', () => {

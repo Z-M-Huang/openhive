@@ -52,7 +52,7 @@ A typical flow for a complex request: `ack` → `progress` → `progress` → `r
 A simple request may skip `ack`/`progress` and go straight to `response`.
 Clients MUST wait for `type: "response"` before considering the request complete.
 
-**Critical constraint:** Each WS message spawns a FRESH server-side session. The persistent connection is client-side convenience only — there is NO multi-turn state. "Memory" between messages works ONLY through MEMORY.md file persistence + system injection.
+**Critical constraint:** Each WS message spawns a FRESH server-side session. The persistent connection is client-side convenience only — there is NO multi-turn state. "Memory" between messages works ONLY through SQLite memories table persistence + system prompt injection.
 
 ### 5. Harness Usage Reference
 
