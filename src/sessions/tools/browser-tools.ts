@@ -94,25 +94,25 @@ export function buildBrowserTools(ctx: OrgToolContext): ToolSet {
     },
   });
 
-  // 3. browser_go_back
+  // 3. browser_go_back (Playwright MCP name: browser_navigate_back)
   tools['browser_go_back'] = tool({
     description: 'Navigate back in browser history.',
     inputSchema: EmptySchema,
     execute: async (input) => {
       const denied = denyIfGated(ctx, 'browser_go_back');
       if (denied) return denied;
-      return relay.callTool('browser_go_back', input);
+      return relay.callTool('browser_navigate_back', input);
     },
   });
 
-  // 4. browser_go_forward
+  // 4. browser_go_forward (Playwright MCP name: browser_navigate_forward)
   tools['browser_go_forward'] = tool({
     description: 'Navigate forward in browser history.',
     inputSchema: EmptySchema,
     execute: async (input) => {
       const denied = denyIfGated(ctx, 'browser_go_forward');
       if (denied) return denied;
-      return relay.callTool('browser_go_forward', input);
+      return relay.callTool('browser_navigate_forward', input);
     },
   });
 
@@ -135,14 +135,14 @@ export function buildBrowserTools(ctx: OrgToolContext): ToolSet {
     },
   });
 
-  // 6. browser_screenshot
+  // 6. browser_screenshot (Playwright MCP name: browser_take_screenshot)
   tools['browser_screenshot'] = tool({
     description: 'Take a visual screenshot of the current page.',
     inputSchema: EmptySchema,
     execute: async (input) => {
       const denied = denyIfGated(ctx, 'browser_screenshot');
       if (denied) return denied;
-      return relay.callTool('browser_screenshot', input);
+      return relay.callTool('browser_take_screenshot', input);
     },
   });
 

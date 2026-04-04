@@ -22,26 +22,29 @@ export class InteractionStore implements IInteractionStore {
       contentSnippet: record.contentSnippet?.slice(0, 2000) ?? null,
       contentLength: record.contentLength ?? null,
       durationMs: record.durationMs ?? null,
+      topicId: record.topicId ?? null,
       createdAt: new Date().toISOString(),
     }).run();
   }
 
-  getRecentByChannel(channelId: string, teamIds: string[], limit = 10): InteractionRecord[] {
-    const channelFilter = eq(schema.channelInteractions.channelId, channelId);
+  getRecentByChannel(channelId: string, teamIds: string[], limit = 10, topicId?: string): InteractionRecord[] {
+    const filters = [eq(schema.channelInteractions.channelId, channelId)];
 
-    const teamFilter = teamIds.length > 0
-      ? or(
+    if (teamIds.length > 0) {
+      filters.push(
+        or(
           inArray(schema.channelInteractions.teamId, teamIds),
           isNull(schema.channelInteractions.teamId),
-        )
-      : undefined;
+        )!,
+      );
+    }
 
-    const whereClause = teamFilter
-      ? and(channelFilter, teamFilter)
-      : channelFilter;
+    if (topicId) {
+      filters.push(eq(schema.channelInteractions.topicId, topicId));
+    }
 
     const rows = this.db.select().from(schema.channelInteractions)
-      .where(whereClause)
+      .where(and(...filters))
       .orderBy(desc(schema.channelInteractions.createdAt))
       .limit(limit)
       .all();
@@ -55,6 +58,7 @@ export class InteractionStore implements IInteractionStore {
       contentSnippet: r.contentSnippet ?? undefined,
       contentLength: r.contentLength ?? undefined,
       durationMs: r.durationMs ?? undefined,
+      topicId: r.topicId ?? undefined,
       createdAt: r.createdAt,
     }));
   }

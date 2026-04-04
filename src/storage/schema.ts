@@ -1,8 +1,8 @@
 /**
  * Drizzle ORM schema definitions for OpenHive v3.
  *
- * 8 tables: org_tree, scope_keywords, task_queue, trigger_dedup,
- * log_entries, escalation_correlations, trigger_configs, channel_interactions
+ * 9 tables: org_tree, scope_keywords, task_queue, trigger_dedup,
+ * log_entries, escalation_correlations, trigger_configs, channel_interactions, topics
  */
 
 import {
@@ -54,6 +54,7 @@ export const taskQueue = sqliteTable(
     durationMs: integer('duration_ms'),
     options: text('options'),
     sourceChannelId: text('source_channel_id'),
+    topicId: text('topic_id'),
   },
   (table) => [
     index('idx_task_queue_team_id').on(table.teamId),
@@ -140,6 +141,25 @@ export const triggerConfigs = sqliteTable(
   ],
 );
 
+// ── topics ────────────────────────────────────────────────────────────────
+
+export const topics = sqliteTable(
+  'topics',
+  {
+    id: text('id').primaryKey(),
+    channelId: text('channel_id').notNull(),
+    name: text('name').notNull(),
+    description: text('description'),
+    state: text('state').notNull().default('active'),
+    createdAt: text('created_at').notNull(),
+    lastActivity: text('last_activity').notNull(),
+  },
+  (table) => [
+    index('idx_topics_channel_id').on(table.channelId),
+    index('idx_topics_state').on(table.state),
+  ],
+);
+
 // ── channel_interactions ──────────────────────────────────────────────────
 
 export const channelInteractions = sqliteTable(
@@ -154,6 +174,7 @@ export const channelInteractions = sqliteTable(
     contentSnippet: text('content_snippet'),
     contentLength: integer('content_length'),
     durationMs: integer('duration_ms'),
+    topicId: text('topic_id'),
     createdAt: text('created_at').notNull(),
   },
   (table) => [

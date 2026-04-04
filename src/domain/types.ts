@@ -109,6 +109,7 @@ export interface TaskEntry {
   readonly durationMs: number | null;
   readonly options: TaskOptions | null;
   readonly sourceChannelId: string | null;
+  readonly topicId?: string | null;
 }
 
 export interface LogEntry {
@@ -127,4 +128,18 @@ export interface OrgTreeNode {
   readonly status: TeamStatus;
   readonly agents: readonly string[];
   readonly children: readonly OrgTreeNode[];
+}
+
+// ── Topic Types ───────────────────────────────────────────────────────────
+
+export type TopicState = 'active' | 'idle' | 'done';
+
+export interface TopicEntry {
+  readonly id: string;
+  readonly channelId: string;
+  readonly name: string;
+  readonly description: string;
+  readonly state: TopicState;
+  readonly createdAt: string;
+  readonly lastActivity: string;
 }

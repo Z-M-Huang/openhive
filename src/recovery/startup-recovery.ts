@@ -8,7 +8,7 @@
 
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import type { IOrgStore, ITaskQueueStore } from '../domain/interfaces.js';
+import type { IOrgStore, ITaskQueueStore, ITopicStore } from '../domain/interfaces.js';
 import { TaskStatus } from '../domain/types.js';
 import type { OrgTree } from '../domain/org-tree.js';
 
@@ -23,6 +23,7 @@ export interface RecoveryDeps {
   readonly orgTree: OrgTree;
   readonly runDir: string;
   readonly logger: RecoveryLogger;
+  readonly topicStore?: ITopicStore;
 }
 
 export interface RecoveryResult {
@@ -81,6 +82,12 @@ export function recoverFromCrash(deps: RecoveryDeps): RecoveryResult {
       orphaned.push(team.teamId);
       logger.warn('Recovery: orphaned team detected', { teamId: team.teamId, name: team.name });
     }
+  }
+
+  // 5. Mark all active topics as idle (clean slate after crash)
+  if (deps.topicStore) {
+    const idled = deps.topicStore.markAllIdle();
+    if (idled > 0) logger.info('Recovery: marked active topics as idle', { count: idled });
   }
 
   logger.info('Recovery complete', { recovered, orphaned: orphaned.length, teamsToReSpawn: teamsToReSpawn.length });

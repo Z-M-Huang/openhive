@@ -65,9 +65,9 @@ describe('UT-2: Schema and WAL mode', () => {
     if (existsSync(tmpDir)) rmSync(tmpDir, { recursive: true });
   });
 
-  it('WAL mode is enabled', () => {
+  it('journal mode is DELETE', () => {
     const result = instance.raw.pragma('journal_mode') as Array<{ journal_mode: string }>;
-    expect(result[0]?.journal_mode).toBe('wal');
+    expect(result[0]?.journal_mode).toBe('delete');
   });
 
   it('creates all 8 tables', () => {
@@ -83,6 +83,7 @@ describe('UT-2: Schema and WAL mode', () => {
       'org_tree',
       'scope_keywords',
       'task_queue',
+      'topics',
       'trigger_configs',
       'trigger_dedup',
     ]);

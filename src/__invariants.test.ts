@@ -248,14 +248,22 @@ describe('INV-9: All org-MCP tools have audit wrapping', () => {
     // when assembling sessions. The old http-server.ts MCP transport has been
     // removed — all tool invocation now goes through the inline AI SDK path.
 
-    const messageHandlerPath = join(SRC_ROOT, 'sessions', 'message-handler.ts');
-    expect(existsSync(messageHandlerPath), 'sessions/message-handler.ts must exist').toBe(true);
-    const mhContent = readFileSync(messageHandlerPath, 'utf-8');
-    const mhImportsAudit = /import.*withAudit/.test(mhContent) ||
-      /import.*tool-audit/.test(mhContent);
+    // Audit wrapping lives in tool-assembler.ts (imported by message-handler.ts).
+    const assemblerPath = join(SRC_ROOT, 'sessions', 'tool-assembler.ts');
+    expect(existsSync(assemblerPath), 'sessions/tool-assembler.ts must exist').toBe(true);
+    const asmContent = readFileSync(assemblerPath, 'utf-8');
+    const asmImportsAudit = /import.*withAudit/.test(asmContent) ||
+      /import.*tool-audit/.test(asmContent);
     expect(
-      mhImportsAudit,
-      'sessions/message-handler.ts does not import withAudit — MCP tools lack audit wrapping',
+      asmImportsAudit,
+      'sessions/tool-assembler.ts does not import withAudit — MCP tools lack audit wrapping',
+    ).toBe(true);
+    // Verify message-handler.ts delegates to tool-assembler.ts
+    const messageHandlerPath = join(SRC_ROOT, 'sessions', 'message-handler.ts');
+    const mhContent = readFileSync(messageHandlerPath, 'utf-8');
+    expect(
+      /import.*tool-assembler/.test(mhContent),
+      'sessions/message-handler.ts must import tool-assembler.ts',
     ).toBe(true);
   });
 });

@@ -23,6 +23,8 @@ import {
 import type { TriggerEngine } from './triggers/engine.js';
 import type { ChannelMessage } from './domain/interfaces.js';
 import { createChannelHandler } from './channel-handler-factory.js';
+import { TopicSessionManager } from './sessions/topic-session-manager.js';
+import { buildProviderRegistry, resolveModel } from './sessions/provider-registry.js';
 import type { ProvidersOutput } from './config/validation.js';
 import type { Readable, Writable } from 'node:stream';
 import type Database from 'better-sqlite3';
@@ -126,7 +128,7 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   const orgTree = new OrgTree(orgStore);
   orgTree.loadFromStore();
 
-  const recovery = recoverFromCrash({ orgStore, taskQueueStore, orgTree, runDir, logger });
+  const recovery = recoverFromCrash({ orgStore, taskQueueStore, orgTree, runDir, logger, topicStore: stores.topicStore });
   if (recovery.recovered > 0) logger.info('Recovery completed', { recovered: recovery.recovered });
 
   ensureMainTeam(runDir, orgTree);
@@ -203,22 +205,29 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   // WsAdapter handles its own message flow with progress/ack support.
   const wsAdapter = new WsAdapter();
 
-  const channelHandler = createChannelHandler(handlerDeps, triggerEngine, stores.interactionStore);
+  let classifierModel: import('ai').LanguageModel | undefined;
+  if (providersConfig) try {
+    const reg = buildProviderRegistry(providersConfig);
+    const dp = providersConfig.profiles['default'];
+    if (dp) classifierModel = resolveModel(reg, 'default', dp.model ?? 'claude-sonnet-4-20250514');
+  } catch { /* classifier is optional */ }
 
+  const channelHandler = createChannelHandler({
+    handlerDeps, triggerEngine, interactionStore: stores.interactionStore,
+    topicStore: stores.topicStore, classifierModel, topicSessionManager: new TopicSessionManager(),
+  });
   const channelRouter = new ChannelRouter([wsAdapter, ...adapters], async (msg: ChannelMessage) => {
     logger.info('Received message', { channelId: msg.channelId, userId: msg.userId });
-    return channelHandler(msg);
+    return (await channelHandler(msg)).response;
   });
-
-  // Set WS-specific handler with progress support (bypasses ChannelRouter for incoming messages)
+  // WS and Discord adapters get channelHandler directly (topic metadata in result)
   wsAdapter.setHandler(channelHandler);
-
-  // Wire Discord adapters with progress support (same pattern as WsAdapter)
-  for (const adapter of adapters) {
-    if (adapter instanceof DiscordAdapter) {
-      adapter.setHandler(channelHandler);
-    }
+  if (stores.topicStore) {
+    const ts = stores.topicStore;
+    wsAdapter.setTopicListCallback((chId) =>
+      ts.getByChannel(chId).map((t) => ({ id: t.id, name: t.name, state: t.state })));
   }
+  for (const a of adapters) { if (a instanceof DiscordAdapter) a.setHandler(channelHandler); }
 
   const fastify = Fastify({ logger: false });
   await fastify.register(import('@fastify/websocket'));

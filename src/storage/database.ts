@@ -36,6 +36,7 @@ const allTables: SQLiteTable[] = [
   schema.logEntries,
   schema.escalationCorrelations,
   schema.triggerConfigs,
+  schema.topics,
   schema.channelInteractions,
 ];
 
@@ -120,6 +121,8 @@ export function createTables(raw: Database.Database): void {
     'ALTER TABLE log_entries ADD COLUMN duration_ms INTEGER',
     'ALTER TABLE trigger_configs ADD COLUMN source_channel_id TEXT',
     "ALTER TABLE trigger_configs ADD COLUMN notify_policy TEXT NOT NULL DEFAULT 'always'",
+    'ALTER TABLE task_queue ADD COLUMN topic_id TEXT',
+    'ALTER TABLE channel_interactions ADD COLUMN topic_id TEXT',
   ];
   for (const sql of migrations) {
     try { raw.prepare(sql).run(); } catch { /* column already exists */ }

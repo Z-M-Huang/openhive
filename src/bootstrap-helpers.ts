@@ -16,6 +16,7 @@ import { EscalationStore } from './storage/stores/escalation-store.js';
 import { MemoryStore } from './storage/stores/memory-store.js';
 import { TriggerConfigStore } from './storage/stores/trigger-config-store.js';
 import { InteractionStore } from './storage/stores/interaction-store.js';
+import { TopicStore } from './storage/stores/topic-store.js';
 import { TriggerDedup } from './triggers/dedup.js';
 import { TriggerRateLimiter } from './triggers/rate-limiter.js';
 import { TriggerEngine } from './triggers/engine.js';
@@ -71,6 +72,7 @@ export interface StorageResult extends DatabaseInstance {
   readonly memoryStore: MemoryStore;
   readonly triggerConfigStore: TriggerConfigStore;
   readonly interactionStore: InteractionStore;
+  readonly topicStore: TopicStore;
 }
 
 export function initStorage(_dataDir: string, runDir: string): StorageResult {
@@ -87,8 +89,9 @@ export function initStorage(_dataDir: string, runDir: string): StorageResult {
   const memoryStore = new MemoryStore(memoryDir);
   const triggerConfigStore = new TriggerConfigStore(db);
   const interactionStore = new InteractionStore(db);
+  const topicStore = new TopicStore(db);
 
-  return { db, raw, orgStore, taskQueueStore, triggerStore, logStore, escalationStore, memoryStore, triggerConfigStore, interactionStore };
+  return { db, raw, orgStore, taskQueueStore, triggerStore, logStore, escalationStore, memoryStore, triggerConfigStore, interactionStore, topicStore };
 }
 
 export function initTriggerEngine(

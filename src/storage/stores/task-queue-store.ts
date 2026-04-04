@@ -24,6 +24,7 @@ export class TaskQueueStore implements ITaskQueueStore {
     sourceChannelId?: string,
     correlationId?: string,
     options?: TaskOptions,
+    topicId?: string,
   ): string {
     const id = `task-${randomBytes(8).toString('hex')}`;
 
@@ -38,6 +39,7 @@ export class TaskQueueStore implements ITaskQueueStore {
       correlationId: correlationId ?? null,
       options: options ? JSON.stringify(options) : null,
       sourceChannelId: sourceChannelId ?? null,
+      topicId: topicId ?? null,
     }).run();
     return id;
   }
@@ -166,6 +168,7 @@ export class TaskQueueStore implements ITaskQueueStore {
     durationMs: number | null;
     options: string | null;
     sourceChannelId: string | null;
+    topicId?: string | null;
   }): TaskEntry {
     return {
       id: row.id,
@@ -180,6 +183,7 @@ export class TaskQueueStore implements ITaskQueueStore {
       durationMs: row.durationMs,
       options: row.options ? safeJsonParse<TaskOptions>(row.options, 'task-queue-options') ?? null : null,
       sourceChannelId: row.sourceChannelId ?? null,
+      topicId: row.topicId ?? null,
     };
   }
 }

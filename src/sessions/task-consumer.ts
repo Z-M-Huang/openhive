@@ -155,6 +155,7 @@ export class TaskConsumer {
             {
               teamName: task.teamId, maxTurns,
               sourceChannelId: dequeued.sourceChannelId ?? undefined,
+              topicId: dequeued.topicId ?? undefined,
             },
           );
 

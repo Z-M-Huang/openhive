@@ -15,6 +15,7 @@ export interface PromptBuilderOpts {
   readonly skillsContent: string;
   readonly memorySection: string;
   readonly conversationHistory?: string;
+  readonly topicName?: string;
 }
 
 /** Two-part system prompt for cache-friendly Anthropic requests. */
@@ -63,7 +64,12 @@ export function buildSystemPrompt(opts: PromptBuilderOpts): SystemPromptParts {
   // 9. Memory (MEMORY.md content)
   if (opts.memorySection) dynamicSections.push(opts.memorySection);
 
-  // 10. Recent channel conversation history
+  // 10. Topic context
+  if (opts.topicName) {
+    dynamicSections.push(`## Current Topic\nYou are responding within the topic "${opts.topicName}". Stay focused on this topic.`);
+  }
+
+  // 11. Recent channel conversation history
   if (opts.conversationHistory) dynamicSections.push(opts.conversationHistory);
 
   const dynamicSuffix = dynamicSections.filter(Boolean).join('\n\n');

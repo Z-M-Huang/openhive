@@ -11,4 +11,6 @@ export type { ChannelMessage, IChannelAdapter } from '../domain/interfaces.js';
 export interface ChannelResponse {
   readonly channelId: string;
   readonly content: string;
+  readonly topicId?: string;
+  readonly topicName?: string;
 }

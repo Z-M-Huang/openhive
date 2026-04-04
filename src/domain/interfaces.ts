@@ -15,6 +15,8 @@ import type {
   TaskType,
   TaskPriority,
   TaskOptions,
+  TopicEntry,
+  TopicState,
   EscalationCorrelation,
 } from './types.js';
 
@@ -44,6 +46,7 @@ export interface ChannelMessage {
   readonly userId: string;
   readonly content: string;
   readonly timestamp: number;
+  readonly topicHint?: string;
 }
 
 // ── Stores ─────────────────────────────────────────────────────────────────
@@ -63,7 +66,7 @@ export interface IOrgStore {
 }
 
 export interface ITaskQueueStore {
-  enqueue(teamId: string, task: string, priority: TaskPriority, type: TaskType, sourceChannelId?: string, correlationId?: string, options?: TaskOptions): string;
+  enqueue(teamId: string, task: string, priority: TaskPriority, type: TaskType, sourceChannelId?: string, correlationId?: string, options?: TaskOptions, topicId?: string): string;
   dequeue(teamId: string): TaskEntry | undefined;
   peek(teamId: string): TaskEntry | undefined;
   getByTeam(teamId: string): TaskEntry[];
@@ -129,16 +132,30 @@ export interface InteractionRecord {
   readonly contentSnippet?: string;
   readonly contentLength?: number;
   readonly durationMs?: number;
+  readonly topicId?: string;
   readonly createdAt?: string;
 }
 
 export interface IInteractionStore {
   log(record: InteractionRecord): void;
-  getRecentByChannel(channelId: string, teamIds: string[], limit?: number): InteractionRecord[];
+  getRecentByChannel(channelId: string, teamIds: string[], limit?: number, topicId?: string): InteractionRecord[];
   cleanOlderThan(cutoffIso: string): number;
   removeByTeam(teamId: string): void;
 }
 
+// ── Topic Store ──────────────────────────────────────────────────────────
+
+export interface ITopicStore {
+  create(topic: TopicEntry): void;
+  getById(id: string): TopicEntry | undefined;
+  getByChannel(channelId: string): TopicEntry[];
+  getActiveByChannel(channelId: string): TopicEntry[];
+  getIdleByChannel(channelId: string): TopicEntry[];
+  updateState(topicId: string, state: TopicState): void;
+  touchActivity(topicId: string): void;
+  markAllIdle(channelId?: string): number;
+}
+
 // ── Config (used by L1+ layers) ────────────────────────────────────────────
 
-export type { TeamConfig, TriggerConfig, TriggerState };
+export type { TeamConfig, TriggerConfig, TriggerState, TopicEntry, TopicState };
