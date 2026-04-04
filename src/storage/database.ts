@@ -120,7 +120,6 @@ export function createTables(raw: Database.Database): void {
     "ALTER TABLE task_queue ADD COLUMN type TEXT NOT NULL DEFAULT 'delegate'",
     'ALTER TABLE log_entries ADD COLUMN duration_ms INTEGER',
     'ALTER TABLE trigger_configs ADD COLUMN source_channel_id TEXT',
-    "ALTER TABLE trigger_configs ADD COLUMN notify_policy TEXT NOT NULL DEFAULT 'always'",
     'ALTER TABLE task_queue ADD COLUMN topic_id TEXT',
     'ALTER TABLE channel_interactions ADD COLUMN topic_id TEXT',
   ];

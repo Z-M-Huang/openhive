@@ -53,9 +53,6 @@ export interface TeamConfig {
 
 export type TriggerState = 'pending' | 'active' | 'disabled';
 
-/** @deprecated LLM decides notification. DB column retained for backward compat. */
-export type NotifyPolicy = 'always' | 'on_error' | 'never';
-
 export interface TriggerConfig {
   readonly name: string;
   readonly type: 'schedule' | 'keyword' | 'message';
@@ -70,8 +67,6 @@ export interface TriggerConfig {
   readonly disabledReason?: string;
   /** Channel that created this trigger — used for notification routing when the trigger fires. */
   readonly sourceChannelId?: string;
-  /** @deprecated LLM decides notification. */
-  readonly notifyPolicy?: NotifyPolicy;
 }
 
 export interface ProviderProfile {

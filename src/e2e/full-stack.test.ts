@@ -585,26 +585,6 @@ describe('E2E-12: LLM notification decision', () => {
     expect(stripped).not.toContain('"notify"');
   });
 
-  it('trigger config store hardcodes notifyPolicy to always', () => {
-    const dir = makeTempDir();
-    const { db, raw } = makeDb(dir);
-    const trigConfigStore = new TriggerConfigStore(db);
-
-    trigConfigStore.upsert({
-      name: 'test-trigger',
-      type: 'schedule' as const,
-      config: { cron: '* * * * *' },
-      team: 'test-team',
-      task: 'check health',
-      state: 'active' as const,
-    });
-
-    const stored = trigConfigStore.get('test-team', 'test-trigger');
-    expect(stored).toBeDefined();
-    expect(stored!.notifyPolicy).toBe('always');
-
-    raw.close();
-  });
 });
 
 // ── E2E-13: Conversation Context ─────────────────────────────────────────
