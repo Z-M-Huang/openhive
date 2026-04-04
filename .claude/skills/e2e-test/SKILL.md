@@ -43,64 +43,53 @@ Read and execute `.claude/docs/e2e/smoke-checks.md` (22 deterministic checks).
 
 **STOP GATE:** All 22 must pass (or failures understood) before continuing. If browser checks 21-22 fail, browser scenarios 7-10 are skipped.
 
-### Step 3: Phase B — Investigative QA Scenarios
+### Step 3: Phase B — Investigative QA Suites
 
-For each scenario: SEND → READ RESPONSE → VERIFY INDEPENDENTLY → INVESTIGATE → REPORT.
+7 test suites, each consolidating related scenarios. For each suite: SEND → READ RESPONSE → RUN VERIFICATION SCRIPT → INVESTIGATE FAILURES → REPORT.
 
-After every AI response, independently check filesystem + database. Don't trust the AI's claims — verify them.
+After every AI response, run the suite's verification script. Don't trust the AI's claims — verify them with scripts.
 
-**Between scenarios:** Run the Clean Restart Helper, then reset the harness and reconnect:
+**Verification script pattern:**
+```bash
+node src/e2e/verify-suite-teams-hierarchy.cjs --step after-team-create
+```
+Returns JSON: `{ suite, step, checks: [{name, pass, expected, actual}], summary: {total, passed, failed} }`.
+If `summary.failed > 0`, investigate the failing checks. If all pass, proceed to next step.
+
+**Between suites:** Run the Clean Restart Helper, then reset the harness and reconnect:
 ```bash
 curl -s localhost:9876/reset
 curl -s localhost:9876/connect -d '{"name":"main"}'
 ```
 
-**After `docker restart openhive`** (mid-scenario restart, NOT clean restart):
+**After `docker restart openhive`** (mid-suite restart, NOT clean restart):
 ```bash
 curl -s localhost:9876/reconnect -d '{"name":"main"}'
 ```
 Reconnect any other named connections too.
 
-**Scenario 1 — Core Platform:** Read and execute `.claude/docs/e2e/scenario-1-core.md`
-(Identity, memory persistence, skill/rule/memory injection, recovery)
+**Suite A — Teams + Hierarchy + Memory:** Read and execute `.claude/docs/e2e/suite-a-teams-hierarchy.md`
+(Memory write/persist, team creation, credentials, get_credential, scrubbing, hierarchy, siblings, routing, delegation, restart recovery)
 
-**Scenario 2 — Team Lifecycle & Credentials:** Read and execute `.claude/docs/e2e/scenario-2-teams.md`
-(Team creation, credential security, get_credential, write scrubbing, tool availability, user journey, recovery, shutdown)
+**Suite B — Triggers + Notifications:** Read and execute `.claude/docs/e2e/suite-b-triggers-notifications.md`
+(Trigger creation/enable/fire, cron execution, task results, audit logging, credential protection, notification routing isolation, trigger persistence, LLM-based notify decisions)
 
-**Scenario 3 — Multi-Team & Hierarchy:** Read and execute `.claude/docs/e2e/scenario-3-hierarchy.md`
-(Sibling teams, list_teams routing, child team hierarchy, error handling, shutdown cascade)
+**Suite C — Stress & Recovery:** Read and execute `.claude/docs/e2e/suite-c-stress.md`
+(5 concurrent connections, per-socket serialization, restart recovery, system stability)
 
-**Scenario 4 — Scheduled Jobs & Notifications:** Read and execute `.claude/docs/e2e/scenario-4-triggers.md`
-(Trigger setup via create_trigger + enable_trigger MCP tools, cron firing, task result capture, WS notifications, credential protection, trigger persistence across restart)
+**Suite D — Browser:** Read and execute `.claude/docs/e2e/suite-d-browser.md`
+(MCP gating, allowed_tools, domain allowlist, navigation, screenshot, SSRF protection, cross-team isolation, idle TTL, lifecycle)
 
-**Scenario 5 — Stress & Recovery:** Read and execute `.claude/docs/e2e/scenario-5-stress.md`
-(5 concurrent messages, per-socket serialization, restart recovery, system stability)
+**Suite E — Conversation + Threading:** Read and execute `.claude/docs/e2e/suite-e-context-threading.md`
+(Interaction logging, sub-team attribution, conversation context, follow-up routing, topic creation, classification, parallel topics, lifecycle)
 
-**Scenario 6 — Progressive WS Responses:** Read and execute `.claude/docs/e2e/scenario-6-protocol.md`
-(Message types ack/progress/response, ordering, error protocol, JSON structure)
+**Suite F — Cascade Deletion:** Read and execute `.claude/docs/e2e/suite-f-cascade-deletion.md`
+(Hierarchy creation main→A1→A11, data population, cascade shutdown, 6-table cleanup, filesystem removal)
 
-**Scenario 7 — Browser Tool Gating:** Read and execute `.claude/docs/e2e/scenario-7-browser-gating.md`
-(Pre-flight, Gate 1 MCP registration, Gate 2 allowed_tools, domain allowlist, graceful degradation)
+**Suite G — Skill Repository:** Read and execute `.claude/docs/e2e/suite-g-skill-repo.md`
+(search_skill_repository tool, skill search/adoption, format validation, graceful degradation)
 
-**Scenario 8 — Browser Operations:** Read and execute `.claude/docs/e2e/scenario-8-browser-ops.md`
-(Navigation + snapshot, screenshot ImageContent, SSRF protection for metadata/localhost/RFC1918)
-
-**Scenario 9 — Browser Isolation:** Read and execute `.claude/docs/e2e/scenario-9-browser-isolation.md`
-(Two teams with different domain allowlists, cross-team domain isolation, delegation + file write)
-
-**Scenario 10 — Browser Lifecycle:** Read and execute `.claude/docs/e2e/scenario-10-browser-lifecycle.md`
-(Idle TTL cleanup, on-demand re-spawn, restart persistence — continues from Scenario 9, NO clean restart)
-
-**Scenario 11 — LLM-Based Trigger Notification Decisions:** Read and execute `.claude/docs/e2e/scenario-11-silent-triggers.md`
-(Create trigger, verify task includes notification instruction, LLM notify=true delivers, notify=false suppresses, missing block triggers fail-safe)
-
-**Scenario 12 — Conversation Context & Routing:** Read and execute `.claude/docs/e2e/scenario-12-conversation-context.md`
-(Interaction logging, sub-team attribution, conversation history in system prompt, follow-up routing, 24-hour retention cleanup)
-
-**Scenario 13 — Team Deletion Cleanup:** Read and execute `.claude/docs/e2e/scenario-13-team-deletion.md`
-(Hierarchy creation main→A1→A11, cascade shutdown, all 6 tables cleaned, filesystem dirs removed, trigger_dedup/log_entries unaffected)
-
-**NOTE:** If smoke checks 21-22 (browser relay) failed, skip scenarios 7-10 entirely.
+**NOTE:** If smoke checks 21-22 (browser relay) failed, skip Suite D entirely.
 
 ### Step 4: Cleanup
 
@@ -116,101 +105,50 @@ sudo docker compose -f deployments/docker-compose.yml down -v 2>&1
 === OpenHive QA Investigation Report ===
 
 Phase A: Smoke Checks
-  N/22 passed
+  N/25 passed (22 original + 3 enhanced)
   Failures: [list with evidence]
 
-Phase B: Investigative Scenarios
-  Scenario 1 (Core Platform):           [summary + evidence]
-    - Identity: [pass/fail]
-    - Tools listed (incl. get_credential): [pass/fail]
-    - Memory persistence: [pass/fail]
-    - Injection (skill/rule/memory): [pass/fail]
-    - Injection removal: [pass/fail]
-  Scenario 2 (Team Lifecycle & Credentials): [summary + evidence]
-    - Team creation artifacts: [pass/fail]
-    - Credential security (not in prompt/logs/WS responses): [pass/fail]
-    - get_credential tool works: [pass/fail]
-    - Write/Edit scrubbing ([CREDENTIAL:KEY] on disk): [pass/fail]
-    - Bash credential guard (file-write denied): [pass/fail]
-    - Runtime credential prompt check (agent sees NONE): [pass/fail]
-    - Tool availability runtime exercise (Bash works): [pass/fail]
-    - Bootstrap: [pass/fail]
-    - Task delegation + result capture: [pass/fail]
-    - Recovery: [pass/fail]
-    - Shutdown: [pass/fail]
-  Scenario 3 (Multi-Team & Routing):     [summary + evidence]
-    - Sibling creation: [pass/fail]
-    - list_teams + routing: [pass/fail]
-    - Hierarchy (child team): [pass/fail]
-    - Error handling: [pass/fail]
-    - Shutdown cascade: [pass/fail]
-  Scenario 4 (Scheduled Jobs & Notifications): [summary + evidence]
-    - Team + trigger setup: [pass/fail]
-    - Trigger firing: [pass/fail]
-    - Task result captured: [pass/fail]
-    - WS notification received: [pass/fail]
-    - Notification content correct: [pass/fail]
-    - Credential protection (logs + DB + notifications): [pass/fail]
-    - Notification routing isolation (sourceChannelId): [pass/fail]
-    - Trigger survives restart: [pass/fail]
-    - Post-restart trigger fires: [pass/fail]
-  Scenario 5 (Stress & Recovery):        [summary + evidence]
-    - Concurrent messages: [pass/fail]
-    - Per-socket request serialization: [pass/fail]
-    - Post-restart state: [pass/fail]
-    - System stability: [pass/fail]
-  Scenario 6 (Progressive WS Responses): [summary + evidence]
-    - Message types present (ack/progress/response): [pass/fail]
-    - Ack is AI-generated (not static): [pass/fail]
-    - Ack before response ordering: [pass/fail]
-    - Simple request protocol: [pass/fail]
-    - Error messages follow protocol: [pass/fail]
-    - JSON structure consistency: [pass/fail]
-  Scenario 11 (LLM-Based Notification Decisions): [summary + evidence]
-    - Trigger task includes notification instruction: [pass/fail]
-    - LLM notify=true delivers notification: [pass/fail]
-    - LLM notify=false suppresses notification: [pass/fail]
-    - Missing block triggers fail-safe notification: [pass/fail]
-    - JSON block stripped from stored content: [pass/fail]
-  Scenario 12 (Conversation Context):    [summary + evidence]
-    - Inbound messages logged with userId: [pass/fail]
-    - Outbound logged with teamId attribution: [pass/fail]
-    - Sub-team notifications logged correctly: [pass/fail]
-    - Follow-up shows conversation awareness: [pass/fail]
-    - Cleanup mechanism works: [pass/fail]
-  Scenario 13 (Team Deletion Cleanup):   [summary + evidence]
-    - Hierarchy created (main→A1→A11): [pass/fail]
-    - Data populated in all tables: [pass/fail]
-    - Cascade shutdown succeeded: [pass/fail]
-    - All 6 tables cleaned for A1 and A11: [pass/fail]
+Phase B: Investigative Suites
+  Suite A (Teams + Hierarchy + Memory):  [summary + verification script results]
+    - Memory write + persistence: [pass/fail]
+    - Team creation + credentials: [pass/fail]
+    - get_credential tool: [pass/fail]
+    - Credential scrubbing (logs/DB/responses): [pass/fail]
+    - Hierarchy (parent-child): [pass/fail]
+    - Routing + delegation: [pass/fail]
+    - Restart recovery (teams + memory): [pass/fail]
+  Suite B (Triggers + Notifications):    [summary + verification script results]
+    - Trigger setup + activation: [pass/fail]
+    - Cron firing + task result: [pass/fail]
+    - Audit logging (PreToolUse/PostToolUse): [pass/fail]
+    - Credential protection: [pass/fail]
+    - Notification routing isolation: [pass/fail]
+    - Trigger persistence across restart: [pass/fail]
+    - LLM-based notify decisions: [pass/fail]
+  Suite C (Stress & Recovery):           [summary + verification script results]
+    - Concurrent connections: [pass/fail]
+    - Per-socket serialization: [pass/fail]
+    - Restart recovery: [pass/fail]
+  Suite D (Browser): Mark "skipped" if smoke checks 21-22 failed.
+    - Gating (MCP, allowed_tools, domain allowlist): [pass/fail/skipped]
+    - Operations (navigate, screenshot, SSRF): [pass/fail/skipped]
+    - Isolation (cross-team, separate PIDs): [pass/fail/skipped]
+    - Lifecycle (idle TTL, re-spawn, restart): [pass/fail/skipped]
+  Suite E (Conversation + Threading):    [summary + verification script results]
+    - Interaction logging (inbound/outbound): [pass/fail]
+    - Conversation context in prompt: [pass/fail]
+    - Topic creation + classification: [pass/fail]
+    - Topic lifecycle + limits: [pass/fail]
+  Suite F (Cascade Deletion):            [summary + verification script results]
+    - Hierarchy created: [pass/fail]
+    - Data populated: [pass/fail]
+    - 6-table cascade cleanup: [pass/fail]
     - Filesystem dirs removed: [pass/fail]
-    - trigger_dedup/log_entries unaffected: [pass/fail]
-    - Main still healthy post-deletion: [pass/fail]
-  Scenarios 7-10 (Browser): Mark "skipped" if smoke checks 21-22 failed.
-  Scenario 7 (Browser Gating):          [summary + evidence]
-    - Pre-flight (@playwright/mcp installed): [pass/fail/skipped]
-    - Gate 1 (MCP registration — browser: config): [pass/fail/skipped]
-    - Gate 2 (allowed_tools restriction): [pass/fail/skipped]
-    - Domain allowlist (allowed vs blocked): [pass/fail/skipped]
-    - Graceful degradation: [pass/fail/skipped]
-  Scenario 8 (Browser Operations):      [summary + evidence]
-    - Navigation + accessibility snapshot: [pass/fail/skipped]
-    - Screenshot (ImageContent passthrough): [pass/fail/skipped]
-    - SSRF metadata endpoint (169.254.169.254): [pass/fail/skipped]
-    - SSRF localhost (127.0.0.1): [pass/fail/skipped]
-    - SSRF RFC1918 (10.0.0.1): [pass/fail/skipped]
-  Scenario 9 (Browser Isolation):       [summary + evidence]
-    - Two separate relay processes: [pass/fail/skipped]
-    - Domain isolation (cross-team blocked): [pass/fail/skipped]
-    - Process isolation (separate PIDs): [pass/fail/skipped]
-    - Delegation + browser + file write: [pass/fail/skipped]
-    - Main team without browser: [pass/fail/skipped]
-  Scenario 10 (Browser Lifecycle):      [summary + evidence]
-    - Idle TTL cleanup (processes killed): [pass/fail/skipped]
-    - On-demand re-spawn after cleanup: [pass/fail/skipped]
-    - Config survived restart: [pass/fail/skipped]
-    - Org tree survived restart: [pass/fail/skipped]
-    - Browser tools functional after restart: [pass/fail/skipped]
+    - Main still healthy: [pass/fail]
+  Suite G (Skill Repository):            [summary + verification script results]
+    - search_skill_repository tool: [pass/fail]
+    - Skill format + trust signals: [pass/fail]
+    - Graceful degradation: [pass/fail]
 
 Critical Findings:
   [List any bugs found with root cause analysis]

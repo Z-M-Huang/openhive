@@ -115,7 +115,41 @@ curl -s localhost:9876/traffic -d '{"name":"main","limit":50}'
 curl -s localhost:9876/traffic -d '{"name":"main","type":"ack","direction":"recv"}'
 ```
 
-### 6. Database Queries — run from HOST (SQLite is in bind-mounted .run/):
+### 6. Verification Scripts (PREFERRED over manual queries)
+
+After each WS message, run the suite's verification script instead of manual DB/filesystem checks:
+```bash
+node src/e2e/verify-suite-teams-hierarchy.cjs --step after-team-create
+```
+
+Returns structured JSON:
+```json
+{
+  "suite": "teams-hierarchy",
+  "step": "after-team-create",
+  "checks": [
+    { "name": "org_tree_ops_team", "pass": true, "expected": "ops-team in org_tree", "actual": "found, parent=main-id" },
+    { "name": "ops_team_dir", "pass": true, "expected": "directory exists", "actual": "exists" }
+  ],
+  "summary": { "total": 6, "passed": 6, "failed": 0 }
+}
+```
+
+**If `summary.failed > 0`:** Investigate the failing checks. Use the `expected` vs `actual` fields to understand what went wrong. Only then fall back to manual queries if needed.
+
+**If `summary.failed == 0`:** Proceed to the next step. No manual verification needed.
+
+Available scripts:
+- `src/e2e/verify-smoke.cjs` — Enhanced smoke checks
+- `src/e2e/verify-suite-teams-hierarchy.cjs` — Suite A
+- `src/e2e/verify-suite-triggers-notifications.cjs` — Suite B
+- `src/e2e/verify-suite-stress.cjs` — Suite C
+- `src/e2e/verify-suite-browser.cjs` — Suite D
+- `src/e2e/verify-suite-context-threading.cjs` — Suite E
+- `src/e2e/verify-suite-cascade-deletion.cjs` — Suite F
+- `src/e2e/verify-suite-skill-repo.cjs` — Suite G
+
+### 7. Database Queries — manual fallback (SQLite is in bind-mounted .run/):
 ```bash
 node -e "
 const D = require('/app/openhive/node_modules/better-sqlite3')('/app/openhive/.run/openhive.db', {readonly:true});
@@ -124,7 +158,7 @@ D.close();
 "
 ```
 
-### 7. Filesystem Checks — read from HOST via bind mount:
+### 8. Filesystem Checks — read from HOST via bind mount:
 ```bash
 # .run/ is volume-mounted — read directly from host, no docker exec needed
 cat /app/openhive/.run/teams/main/config.yaml
@@ -137,7 +171,7 @@ sudo docker exec openhive cat /data/rules/escalation-policy.md
 
 ### Clean Restart Helper
 
-Before **every scenario** (except continuations like Scenario 4 Part B/C), wipe runtime state and restart the container. **Do NOT rebuild** — the image was already built in Section 1.
+Before **every suite** (except continuations within a suite), wipe runtime state and restart the container. **Do NOT rebuild** — the image was already built in Section 1.
 
 ```bash
 cd /app/openhive

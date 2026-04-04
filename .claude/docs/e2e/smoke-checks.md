@@ -52,11 +52,22 @@ Browser Relay:
     — should show "Browser relay initialized" with tool count
     — OR "browser tools disabled" (graceful degradation — acceptable, browser scenarios skipped)
 
-Report: N/22 smoke checks passed.
+Enhanced (absorbed from scenarios 1+6 — core platform + protocol):
+23. Verify WS frame ordering using /traffic endpoint:
+    curl -s localhost:9876/traffic -d '{"name":"main","direction":"recv","limit":20}'
+    → frames have ascending seq numbers; if both ack and response present, ack.seq < response.seq
+24. Ask about skills:
+    curl -s localhost:9876/send -d '{"name":"main","content":"What skills did you load?","timeout":60000}'
+    → response mentions available skills (greeting, sig, or similar)
+25. Run verification script for enhanced checks:
+    node src/e2e/verify-smoke.cjs --step enhanced
+    → all checks pass (skills dir has .md files, team-rules/org-rules dirs exist, MEMORY.md seeded)
+
+Report: N/25 smoke checks passed.
 
 **STOP GATE:** If any smoke check fails, investigate container logs
 (`sudo docker logs openhive 2>&1`) and report root causes
-BEFORE proceeding to Phase B. Only proceed when all 22 pass or failures
-are understood and documented. If checks 21-22 fail, skip browser
-scenarios (7-10) but continue with scenarios 1-6.
+BEFORE proceeding to Phase B. Only proceed when all 25 pass or failures
+are understood and documented. If checks 21-22 fail, skip Suite D
+(browser) but continue with other suites.
 ```
