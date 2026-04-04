@@ -92,4 +92,12 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
 
 EXPOSE 8080
 
+ARG VERSION=0.0.0
+LABEL org.opencontainers.image.title="OpenHive" \
+      org.opencontainers.image.description="AI agent orchestration platform — team-based, tool-augmented, multi-model" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.source="https://github.com/Z-M-Huang/openhive" \
+      org.opencontainers.image.url="https://github.com/Z-M-Huang/openhive" \
+      org.opencontainers.image.licenses="GPL-3.0"
+
 CMD ["node", "dist/entrypoint.js"]
