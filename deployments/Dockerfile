@@ -43,7 +43,7 @@ FROM node:22-bookworm-slim
 #   - Chromium runtime libs (for Playwright browser tools)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        curl \
+        curl gosu \
         libnss3 libatk-bridge2.0-0 libdrm2 libxcomposite1 \
         libxdamage1 libxrandr2 libgbm1 libasound2 libpango-1.0-0 \
         libcairo2 libatspi2.0-0 libcups2 libxfixes3 libxkbcommon0 && \
@@ -84,8 +84,9 @@ RUN if [ "${DOCKER_GID}" = "0" ]; then \
       usermod -aG ${DOCKER_GID} node 2>/dev/null || true; \
     fi
 
-# Switch to non-root user
-USER node
+# Entrypoint: fix bind-mount ownership, then drop to node user via gosu
+COPY deployments/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
   CMD curl -f http://localhost:8080/health || exit 1
@@ -100,4 +101,4 @@ LABEL org.opencontainers.image.title="OpenHive" \
       org.opencontainers.image.url="https://github.com/Z-M-Huang/openhive" \
       org.opencontainers.image.licenses="GPL-3.0"
 
-CMD ["node", "dist/entrypoint.js"]
+ENTRYPOINT ["docker-entrypoint.sh"]

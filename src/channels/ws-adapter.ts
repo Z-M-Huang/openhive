@@ -33,10 +33,15 @@ export interface WsHandlerResult {
 
 export type WsProgressSender = (update: ProgressUpdate) => void;
 
+/** Multi-result handler shape (from channel-handler-factory). */
+export interface WsMultiHandlerResult {
+  readonly results: ReadonlyArray<{ readonly response: string; readonly topicId?: string; readonly topicName?: string }>;
+}
+
 export type WsMessageHandler = (
   msg: ChannelMessage,
   onProgress?: WsProgressSender,
-) => Promise<WsHandlerResult | string | void>;
+) => Promise<WsMultiHandlerResult | WsHandlerResult | string | void>;
 
 interface WebSocketLike {
   readyState: number;
@@ -191,23 +196,32 @@ export class WsAdapter implements IChannelAdapter {
           };
 
           try {
-            const result = await this.#directHandler?.(msg, sendProgress);
-            // Extract topic metadata from handler result
-            if (result && typeof result === 'object' && 'response' in result) {
-              topicId = result.topicId;
-              topicName = result.topicName;
-              if (socket.readyState === 1) {
-                socket.send(JSON.stringify({
-                  type: 'response', content: result.response,
-                  topic_id: topicId ?? null, topic_name: topicName ?? null,
-                }));
-              }
+            const raw = await this.#directHandler?.(msg, sendProgress);
+
+            // Normalize to array of results (multi-topic or single)
+            type ResultEntry = { response: string; topicId?: string; topicName?: string };
+            let results: ResultEntry[];
+            if (raw && typeof raw === 'object' && 'results' in raw) {
+              results = (raw as { results: ResultEntry[] }).results;
+            } else if (raw && typeof raw === 'object' && 'response' in raw) {
+              const single = raw as ResultEntry;
+              results = [single];
             } else {
-              // Plain string or void from legacy handler
+              results = [{ response: (typeof raw === 'string' ? raw : '') ?? '' }];
+            }
+
+            // Populate progress fields from first result
+            if (results.length > 0) {
+              topicId = results[0].topicId;
+              topicName = results[0].topicName;
+            }
+
+            // Send each result as a separate response frame
+            for (const r of results) {
               if (socket.readyState === 1) {
                 socket.send(JSON.stringify({
-                  type: 'response', content: (typeof result === 'string' ? result : '') ?? '',
-                  topic_id: topicId ?? null, topic_name: topicName ?? null,
+                  type: 'response', content: r.response,
+                  topic_id: r.topicId ?? null, topic_name: r.topicName ?? null,
                 }));
               }
             }

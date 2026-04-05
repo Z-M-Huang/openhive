@@ -6,6 +6,8 @@
  * 3. topicId passed through to handleMessage opts
  * 4. Interaction records include topicId
  * 5. 5 active topics + new message -> rejects with active topic list
+ * 6. Multi-topic: LLM returns 2 topicIds -> 2 results
+ * 7. Multi-topic: one topic errors, others succeed
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -20,14 +22,14 @@ vi.mock('./sessions/message-handler.js', () => ({
   handleMessage: (...args: unknown[]) => mockHandleMessage(...args),
 }));
 
-// ── Mock classifyTopic ────────────────────────────────────────────────────
+// ── Mock classifyTopics ─────────────────────────────────────────────────
 
-const mockClassifyTopic = vi.fn();
+const mockClassifyTopics = vi.fn();
 vi.mock('./sessions/topic-classifier.js', async (importOriginal) => {
   const orig = await importOriginal<typeof import('./sessions/topic-classifier.js')>();
   return {
     ...orig,
-    classifyTopic: (...args: unknown[]) => mockClassifyTopic(...args),
+    classifyTopics: (...args: unknown[]) => mockClassifyTopics(...args),
   };
 });
 
@@ -85,7 +87,7 @@ describe('createChannelHandler', () => {
     const created = (store.create as ReturnType<typeof vi.fn>).mock.calls[0][0] as TopicEntry;
     expect(created.id).toMatch(/^t-[0-9a-f]{16}$/);
     expect(created.state).toBe('active');
-    expect(result.topicId).toBe(created.id);
+    expect(result.results[0].topicId).toBe(created.id);
   });
 
   it('routes by topicHint without calling classifier', async () => {
@@ -101,9 +103,9 @@ describe('createChannelHandler', () => {
 
     const result = await handler(makeMsg({ topicHint: 'billing' }));
 
-    expect(result.topicId).toBe('t-abc');
-    expect(result.topicName).toBe('Billing');
-    expect(mockClassifyTopic).not.toHaveBeenCalled();
+    expect(result.results[0].topicId).toBe('t-abc');
+    expect(result.results[0].topicName).toBe('Billing');
+    expect(mockClassifyTopics).not.toHaveBeenCalled();
     expect(store.touchActivity).toHaveBeenCalledWith('t-abc');
   });
 
@@ -122,7 +124,7 @@ describe('createChannelHandler', () => {
     expect(opts.topicName).toBe('New topic');
   });
 
-  it('includes topicId in interaction records', async () => {
+  it('includes topicId in interaction records (per-topic)', async () => {
     const topicStore = makeTopicStore();
     const interactionStore = makeInteractionStore();
     const handler = createChannelHandler({
@@ -144,7 +146,7 @@ describe('createChannelHandler', () => {
       description: '', state: 'active' as const, createdAt: '', lastActivity: '',
     }));
     const store = makeTopicStore(active);
-    mockClassifyTopic.mockResolvedValue({ topicId: null, topicName: 'New', confidence: 0.8 });
+    mockClassifyTopics.mockResolvedValue({ matches: [{ topicId: null, topicName: 'New', confidence: 0.8 }] });
 
     const handler = createChannelHandler({
       handlerDeps: stubHandlerDeps, triggerEngine: stubTriggerEngine,
@@ -153,9 +155,58 @@ describe('createChannelHandler', () => {
 
     const result = await handler(makeMsg());
 
-    expect(result.response).toContain('Max 5 active topics');
-    expect(result.response).toContain('Topic 0');
-    expect(result.response).toContain('Topic 4');
+    expect(result.results[0].response).toContain('Max 5 active topics');
+    expect(result.results[0].response).toContain('Topic 0');
+    expect(result.results[0].response).toContain('Topic 4');
     expect(store.create).not.toHaveBeenCalled();
+  });
+
+  it('returns multiple results when classifier matches 2 topics', async () => {
+    const active: TopicEntry[] = [
+      { id: 't-1', channelId: 'ws:test', name: 'Auth', description: '', state: 'active', createdAt: '', lastActivity: '' },
+      { id: 't-2', channelId: 'ws:test', name: 'Deploy', description: '', state: 'active', createdAt: '', lastActivity: '' },
+    ];
+    const store = makeTopicStore(active);
+    mockClassifyTopics.mockResolvedValue({ matches: [{ topicId: 't-1', confidence: 0.9 }, { topicId: 't-2', confidence: 0.9 }] });
+    mockHandleMessage
+      .mockResolvedValueOnce({ ok: true, content: 'Auth reply' })
+      .mockResolvedValueOnce({ ok: true, content: 'Deploy reply' });
+
+    const handler = createChannelHandler({
+      handlerDeps: stubHandlerDeps, triggerEngine: stubTriggerEngine,
+      topicStore: store, classifierModel: {} as ChannelHandlerDeps['classifierModel'],
+    });
+
+    const result = await handler(makeMsg({ content: 'how does auth affect deploy?' }));
+
+    expect(result.results).toHaveLength(2);
+    expect(result.results[0].response).toBe('Auth reply');
+    expect(result.results[0].topicId).toBe('t-1');
+    expect(result.results[1].response).toBe('Deploy reply');
+    expect(result.results[1].topicId).toBe('t-2');
+    expect(mockHandleMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it('isolates failures — one topic error does not affect others', async () => {
+    const active: TopicEntry[] = [
+      { id: 't-1', channelId: 'ws:test', name: 'Auth', description: '', state: 'active', createdAt: '', lastActivity: '' },
+      { id: 't-2', channelId: 'ws:test', name: 'Deploy', description: '', state: 'active', createdAt: '', lastActivity: '' },
+    ];
+    const store = makeTopicStore(active);
+    mockClassifyTopics.mockResolvedValue({ matches: [{ topicId: 't-1', confidence: 0.9 }, { topicId: 't-2', confidence: 0.9 }] });
+    mockHandleMessage
+      .mockRejectedValueOnce(new Error('Auth service down'))
+      .mockResolvedValueOnce({ ok: true, content: 'Deploy reply' });
+
+    const handler = createChannelHandler({
+      handlerDeps: stubHandlerDeps, triggerEngine: stubTriggerEngine,
+      topicStore: store, classifierModel: {} as ChannelHandlerDeps['classifierModel'],
+    });
+
+    const result = await handler(makeMsg({ content: 'check both' }));
+
+    expect(result.results).toHaveLength(2);
+    expect(result.results[0].response).toContain('Auth service down');
+    expect(result.results[1].response).toBe('Deploy reply');
   });
 });

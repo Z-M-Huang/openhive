@@ -5,8 +5,7 @@
  * Filters messages to watched channels (if configured), ignores bots,
  * and shows typing indicators while processing.
  *
- * Topics map to native Discord threads: new topicId -> create thread,
- * messages from threads -> carry topicHint for routing.
+ * Topics are internal to OpenHive — the adapter sends flat channel messages.
  *
  * Uses narrow internal interfaces for the discord.js dependency to avoid
  * coupling to the complex discord.js type hierarchy.
@@ -26,8 +25,6 @@ export interface DiscordMessage {
   readonly content: string;
   readonly createdTimestamp: number;
   readonly channel: {
-    readonly id?: string;
-    isThread?: () => boolean;
     sendTyping?: () => Promise<void>;
     send?: (content: string) => Promise<unknown>;
   };
@@ -35,10 +32,6 @@ export interface DiscordMessage {
 
 export interface DiscordTextChannel {
   send(content: string): Promise<unknown>;
-}
-
-export interface DiscordThreadableChannel extends DiscordTextChannel {
-  threads: { create(opts: { name: string; autoArchiveDuration: number }): Promise<DiscordTextChannel & { id: string }> };
 }
 
 const DISCORD_MAX_LENGTH = 2000;
@@ -78,18 +71,23 @@ export interface DiscordAdapterOptions {
   readonly client?: DiscordClient;
 }
 
-/** Handler result with optional topic metadata for thread mapping. */
+/** Handler result with optional topic metadata. */
 export interface DiscordHandlerResult {
   readonly response: string;
   readonly topicId?: string;
   readonly topicName?: string;
 }
 
+/** Multi-result handler shape (from channel-handler-factory). */
+export interface DiscordMultiHandlerResult {
+  readonly results: ReadonlyArray<{ readonly response: string; readonly topicId?: string; readonly topicName?: string }>;
+}
+
 export type DiscordProgressSender = (update: ProgressUpdate) => void;
 export type DiscordMessageHandler = (
   msg: ChannelMessage,
   onProgress?: DiscordProgressSender,
-) => Promise<DiscordHandlerResult | string | void>;
+) => Promise<DiscordMultiHandlerResult | DiscordHandlerResult | string | void>;
 
 export class DiscordAdapter implements IChannelAdapter {
   readonly #token: SecretString;
@@ -99,8 +97,6 @@ export class DiscordAdapter implements IChannelAdapter {
   #lastActiveChannelId: string | null = null;
   #handler: ((msg: ChannelMessage) => Promise<void>) | null = null;
   #directHandler: DiscordMessageHandler | null = null;
-  readonly #topicThreadMap = new Map<string, string>(); // topicId -> threadId
-  readonly #threadTopicMap = new Map<string, string>(); // threadId -> topicId
 
   constructor(options: DiscordAdapterOptions) {
     this.#token = options.token;
@@ -176,17 +172,11 @@ export class DiscordAdapter implements IChannelAdapter {
       }, 8000);
     }
 
-    // If message is from a Discord thread, carry the known topicId
-    const threadTopicId = message.channel.isThread?.() && message.channel.id
-      ? this.#threadTopicMap.get(message.channel.id)
-      : undefined;
-
     const msg: ChannelMessage = {
       channelId: message.channelId,
       userId: message.author.id,
       content: message.content,
       timestamp: message.createdTimestamp,
-      ...(threadTopicId && { topicHint: threadTopicId }),
     };
 
     try {
@@ -207,18 +197,27 @@ export class DiscordAdapter implements IChannelAdapter {
         const raw = await this.#directHandler(msg, sendProgress);
         if (ackPromise) await ackPromise; // wait for ack outcome before dedup
 
-        // Normalize: handler may return string, void, or {response, topicId?, topicName?}
-        const result = typeof raw === 'object' && raw !== null && 'response' in raw
-          ? raw as DiscordHandlerResult
-          : { response: (raw as string) ?? '' };
+        // Normalize to array of results (multi-topic or single)
+        type ResultEntry = { response: string; topicId?: string; topicName?: string };
+        let results: ResultEntry[];
+        if (raw && typeof raw === 'object' && 'results' in raw) {
+          results = (raw as { results: ResultEntry[] }).results;
+        } else if (raw && typeof raw === 'object' && 'response' in raw) {
+          results = [raw as ResultEntry];
+        } else {
+          results = [{ response: (raw as string) ?? '' }];
+        }
 
-        if (result.response) {
-          let toSend = result.response;
-          if (ackContent && result.response.startsWith(ackContent)) {
-            toSend = result.response.slice(ackContent.length).trim();
+        for (let i = 0; i < results.length; i++) {
+          const r = results[i];
+          if (!r.response) continue;
+          let toSend = r.response;
+          // Dedup ack only for first result
+          if (i === 0 && ackContent && r.response.startsWith(ackContent)) {
+            toSend = r.response.slice(ackContent.length).trim();
           }
-          if (toSend) {
-            await this.#sendToThreadOrChannel(message, toSend, result.topicId, result.topicName);
+          if (toSend && this.#isTextChannel(message.channel)) {
+            await sendChunked(message.channel, toSend);
           }
         }
       } else if (this.#handler) {
@@ -227,49 +226,6 @@ export class DiscordAdapter implements IChannelAdapter {
     } finally {
       if (typingInterval) clearInterval(typingInterval);
     }
-  }
-
-  /** Route response to a thread (new or existing) when topicId is present, else main channel. */
-  async #sendToThreadOrChannel(
-    message: DiscordMessage, text: string, topicId?: string, topicName?: string,
-  ): Promise<void> {
-    if (!topicId || !this.#client) {
-      if (this.#isTextChannel(message.channel)) await sendChunked(message.channel, text);
-      return;
-    }
-    // Reuse existing thread for this topic
-    const existingThreadId = this.#topicThreadMap.get(topicId);
-    if (existingThreadId) {
-      try {
-        const thread = await this.#client.channels.fetch(existingThreadId);
-        if (this.#isTextChannel(thread)) { await sendChunked(thread, text); return; }
-      } catch { /* thread deleted — fall through to create */ }
-    }
-    // Create new thread on the parent channel
-    try {
-      const parent = await this.#client.channels.fetch(message.channelId);
-      if (this.#isThreadableChannel(parent)) {
-        const thread = await parent.threads.create({ name: topicName ?? 'Topic', autoArchiveDuration: 60 });
-        this.#topicThreadMap.set(topicId, thread.id);
-        this.#threadTopicMap.set(thread.id, topicId);
-        await sendChunked(thread, text);
-        return;
-      }
-    } catch {
-      // Fallback: send to main channel with topic prefix
-      if (this.#isTextChannel(message.channel)) {
-        await sendChunked(message.channel, `[${topicName ?? 'Topic'}] ${text}`);
-        return;
-      }
-    }
-    if (this.#isTextChannel(message.channel)) await sendChunked(message.channel, text);
-  }
-
-  #isThreadableChannel(ch: unknown): ch is DiscordThreadableChannel {
-    if (!this.#isTextChannel(ch)) return false;
-    const rec = ch as unknown as Record<string, unknown>;
-    return typeof rec['threads'] === 'object' && rec['threads'] !== null
-      && typeof (rec['threads'] as Record<string, unknown>)['create'] === 'function';
   }
 
   #isTextChannel(channel: unknown): channel is DiscordTextChannel {

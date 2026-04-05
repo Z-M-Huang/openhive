@@ -20,7 +20,7 @@ const { mockGenerateText } = vi.hoisted(() => {
 
 vi.mock('ai', () => ({ generateText: mockGenerateText }));
 
-import { classifyTopic, MAX_ACTIVE_TOPICS } from './topic-classifier.js';
+import { classifyTopic, classifyTopics, MAX_ACTIVE_TOPICS } from './topic-classifier.js';
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -87,6 +87,19 @@ describe('classifyTopic', () => {
     expect(result.topicName).toBeUndefined();
   });
 
+  it('parses LLM response wrapped in markdown code fences', async () => {
+    mockGenerateText.mockResolvedValue({ text: '```json\n{"topicId": "t-2"}\n```' });
+    const topics = [
+      makeTopic({ id: 't-1', name: 'Backend API' }),
+      makeTopic({ id: 't-2', name: 'Frontend UI' }),
+    ];
+    const result = await classifyTopic({
+      model: mockModel, activeTopics: topics, idleTopics: [], messageContent: 'fix button',
+    });
+    expect(result.topicId).toBe('t-2');
+    expect(result.confidence).toBe(0.9);
+  });
+
   it('matches an idle topic via LLM when no active topics exist', async () => {
     mockGenerateText.mockResolvedValue({ text: '{"topicId": "idle-1"}' });
     const idle = makeTopic({ id: 'idle-1', name: 'Old discussion', state: 'idle' });
@@ -96,5 +109,91 @@ describe('classifyTopic', () => {
     expect(result.topicId).toBe('idle-1');
     expect(result.confidence).toBe(0.9);
     expect(mockGenerateText).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── classifyTopics (multi-topic) ────────────────────────────────────────
+
+describe('classifyTopics', () => {
+  beforeEach(() => { vi.clearAllMocks(); });
+
+  it('returns single null match when 0 topics exist (no LLM)', async () => {
+    const result = await classifyTopics({
+      model: mockModel, activeTopics: [], idleTopics: [], messageContent: 'hello',
+    });
+    expect(result.matches).toEqual([{ topicId: null, confidence: 1.0 }]);
+    expect(mockGenerateText).not.toHaveBeenCalled();
+  });
+
+  it('returns single match when 1 active topic (no LLM)', async () => {
+    const topic = makeTopic({ id: 't-1', name: 'Bug fix' });
+    const result = await classifyTopics({
+      model: mockModel, activeTopics: [topic], idleTopics: [], messageContent: 'update',
+    });
+    expect(result.matches).toEqual([{ topicId: 't-1', confidence: 1.0 }]);
+    expect(mockGenerateText).not.toHaveBeenCalled();
+  });
+
+  it('returns multiple matches when LLM returns multiple topicIds', async () => {
+    mockGenerateText.mockResolvedValue({ text: '{"topicIds": ["t-1", "t-2"]}' });
+    const topics = [
+      makeTopic({ id: 't-1', name: 'Auth' }),
+      makeTopic({ id: 't-2', name: 'Deploy' }),
+    ];
+    const result = await classifyTopics({
+      model: mockModel, activeTopics: topics, idleTopics: [], messageContent: 'how does auth affect deploy?',
+    });
+    expect(result.matches).toHaveLength(2);
+    expect(result.matches[0].topicId).toBe('t-1');
+    expect(result.matches[1].topicId).toBe('t-2');
+  });
+
+  it('returns new topic when LLM says new', async () => {
+    mockGenerateText.mockResolvedValue({ text: '{"topicIds": ["new"], "topicName": "Billing"}' });
+    const topics = [makeTopic({ id: 't-1', name: 'Auth' })];
+    const result = await classifyTopics({
+      model: mockModel, activeTopics: topics, idleTopics: [makeTopic({ id: 't-2', name: 'Old' })],
+      messageContent: 'billing question',
+    });
+    expect(result.matches).toHaveLength(1);
+    expect(result.matches[0].topicId).toBeNull();
+    expect(result.matches[0].topicName).toBe('Billing');
+  });
+
+  it('rejects when at cap and all matches are new', async () => {
+    mockGenerateText.mockResolvedValue({ text: '{"topicIds": ["new"], "topicName": "Sixth"}' });
+    const topics = Array.from({ length: MAX_ACTIVE_TOPICS }, (_, i) =>
+      makeTopic({ id: `t-${i}`, name: `Topic ${i}` }),
+    );
+    const result = await classifyTopics({
+      model: mockModel, activeTopics: topics, idleTopics: [], messageContent: 'new thing',
+    });
+    expect(result.matches).toHaveLength(1);
+    expect(result.matches[0].confidence).toBe(0);
+  });
+
+  it('deduplicates repeated topicIds from LLM', async () => {
+    mockGenerateText.mockResolvedValue({ text: '{"topicIds": ["t-1", "t-1", "t-2"]}' });
+    const topics = [
+      makeTopic({ id: 't-1', name: 'Auth' }),
+      makeTopic({ id: 't-2', name: 'Deploy' }),
+    ];
+    const result = await classifyTopics({
+      model: mockModel, activeTopics: topics, idleTopics: [], messageContent: 'test',
+    });
+    expect(result.matches).toHaveLength(2);
+  });
+
+  it('parses multi-response wrapped in markdown fences', async () => {
+    mockGenerateText.mockResolvedValue({ text: '```json\n{"topicIds": ["t-1"]}\n```' });
+    const topics = [
+      makeTopic({ id: 't-1', name: 'Auth' }),
+      makeTopic({ id: 't-2', name: 'Deploy' }),
+    ];
+    const result = await classifyTopics({
+      model: mockModel, activeTopics: topics, idleTopics: [], messageContent: 'auth check',
+    });
+    expect(result.matches).toHaveLength(1);
+    expect(result.matches[0].topicId).toBe('t-1');
   });
 });

@@ -223,7 +223,7 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   });
   const channelRouter = new ChannelRouter([wsAdapter, ...adapters], async (msg: ChannelMessage) => {
     logger.info('Received message', { channelId: msg.channelId, userId: msg.userId });
-    return (await channelHandler(msg)).response;
+    return (await channelHandler(msg)).results.map((r) => r.response).filter(Boolean).join('\n---\n');
   });
   // WS and Discord adapters get channelHandler directly (topic metadata in result)
   wsAdapter.setHandler(channelHandler);
