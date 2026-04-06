@@ -4,27 +4,25 @@ import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 import Fastify from 'fastify';
 import { createLogger, type AppLogger } from './logging/logger.js';
-import { loadProviders, loadSystemConfig, getTeamConfig, getOrCreateTeamConfig } from './config/loader.js';
+import { loadProviders, loadSystemConfig, loadChannels, getTeamConfig, getOrCreateTeamConfig } from './config/loader.js';
+import type { TrustPolicy } from './config/trust-policy.js';
 import { OrgTree } from './domain/org-tree.js';
 import { createToolInvoker, type OrgToolDeps, type OrgToolInvoker } from './handlers/tool-invoker.js';
 import { TeamRegistry } from './sessions/team-registry.js';
 import { ChannelRouter } from './channels/router.js';
 import { registerHealthEndpoint } from './health.js';
+import { registerApiRoutes } from './api/register.js';
 import { WsAdapter } from './channels/ws-adapter.js';
 import { DiscordAdapter } from './channels/discord-adapter.js';
 import { handleMessage } from './sessions/message-handler.js';
 import { TaskConsumer } from './sessions/task-consumer.js';
 import { recoverFromCrash } from './recovery/startup-recovery.js';
-import {
-  ensureRunDir, seedOrgRules, initStorage,
-  initTriggerEngine, initChannels, ensureMainTeam, migrateAllowedTools,
-  initBrowserRelay, runMemoryMigration,
-} from './bootstrap-helpers.js';
-import type { TriggerEngine } from './triggers/engine.js';
-import type { ChannelMessage } from './domain/interfaces.js';
+import { ensureRunDir, seedOrgRules, initStorage, initTriggerEngine, initChannels, ensureMainTeam, migrateAllowedTools, initBrowserRelay, runMemoryMigration } from './bootstrap-helpers.js';
 import { createChannelHandler } from './channel-handler-factory.js';
 import { TopicSessionManager } from './sessions/topic-session-manager.js';
 import { buildProviderRegistry, resolveModel } from './sessions/provider-registry.js';
+import type { TriggerEngine } from './triggers/engine.js';
+import type { ChannelMessage } from './domain/interfaces.js';
 import type { ProvidersOutput } from './config/validation.js';
 import type { Readable, Writable } from 'node:stream';
 import type Database from 'better-sqlite3';
@@ -58,12 +56,18 @@ export interface BootstrapResult {
   shutdown(): Promise<void>;
 }
 
-
-
 function resolveLogLevel(dataDir: string): string {
   const path = join(dataDir, 'config', 'config.yaml');
   if (!existsSync(path)) return 'info';
   try { return loadSystemConfig(path).log_level; } catch { return 'info'; }
+}
+
+function resolveTrustPolicy(dataDir: string, warn: (msg: string) => void): TrustPolicy | undefined {
+  const noPolicy = 'No trust policy configured — all senders allowed';
+  const path = join(dataDir, 'config', 'channels.yaml');
+  if (!existsSync(path)) { warn(noPolicy); return undefined; }
+  try { const p = loadChannels(path).trust; if (!p) warn(noPolicy); return p; }
+  catch { warn(noPolicy); return undefined; }
 }
 
 function buildOrgToolDeps(
@@ -74,6 +78,7 @@ function buildOrgToolDeps(
     triggerConfigStore: import('./domain/interfaces.js').ITriggerConfigStore;
     interactionStore: import('./domain/interfaces.js').IInteractionStore;
     memoryStore?: { removeByTeam(teamName: string): void };
+    senderTrustStore?: import('./domain/interfaces.js').ISenderTrustStore;
     runDir: string; logger: AppLogger;
     browserRelay?: import('./sessions/tools/browser-proxy.js').BrowserRelay;
   },
@@ -92,6 +97,7 @@ function buildOrgToolDeps(
     triggerConfigStore: opts.triggerConfigStore,
     interactionStore: opts.interactionStore,
     memoryStore: opts.memoryStore,
+    senderTrustStore: opts.senderTrustStore,
     runDir: opts.runDir,
     loadConfig: (name: string, cp?: string, hints?: { description?: string; scopeAccepts?: string[] }) =>
       getOrCreateTeamConfig(opts.runDir, name, cp, hints),
@@ -111,7 +117,6 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
 
   ensureRunDir(runDir);
   seedOrgRules(dataDir, seedRulesDir);
-
   const stores = initStorage(dataDir, runDir);
   const { raw, orgStore, taskQueueStore, escalationStore } = stores;
 
@@ -127,51 +132,40 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
     logger.warn('No providers.yaml found');
   }
 
+  const trustPolicy = resolveTrustPolicy(dataDir, (m) => logger.warn(m));
+
   const orgTree = new OrgTree(orgStore);
   orgTree.loadFromStore();
-
   const recovery = recoverFromCrash({ orgStore, taskQueueStore, orgTree, runDir, logger, topicStore: stores.topicStore });
   if (recovery.recovered > 0) logger.info('Recovery completed', { recovered: recovery.recovered });
-
   ensureMainTeam(runDir, orgTree);
   runMemoryMigration(stores.memoryStore, orgTree, runDir, logger);
   migrateAllowedTools(runDir);
   const sessionManager = new TeamRegistry();
 
-  // Browser relay initializes in background — lazy getter defers until ready
+  // Browser relay initializes in background; lazy refs break circular deps
   let browserRelayRef: import('./sessions/tools/browser-proxy.js').BrowserRelay | undefined;
   const browserRelayReady = initBrowserRelay(logger).then(r => { browserRelayRef = r; });
-
-  // Lazy refs — break circular dependency between org tools and trigger engine / query runner
   let queryRunnerRef: import('./handlers/tool-invoker.js').TeamQueryRunner | undefined;
   let triggerEngineRef: TriggerEngine | undefined;
-
   const { triggerConfigStore } = stores;
 
   const orgToolDeps = buildOrgToolDeps(
     { orgTree, sessionManager, taskQueueStore, escalationStore, triggerConfigStore,
       interactionStore: stores.interactionStore, memoryStore: stores.memoryStore,
+      senderTrustStore: stores.senderTrustStore,
       runDir, logger,
       get browserRelay() { return browserRelayRef; } },
     () => queryRunnerRef,
     () => triggerEngineRef,
   );
-  // Synchronous invoker for tests and direct tool calls
   const orgToolInvoker = createToolInvoker(orgToolDeps);
-
-  // Notification helper for trigger deactivation
-  const notifyTriggerDeactivated = (team: string, triggerName: string, reason: string): void => {
-    logger.warn('Trigger auto-disabled', { team, trigger: triggerName, reason });
-  };
   const triggerEngine = initTriggerEngine(
-    stores.triggerStore, taskQueueStore, logger, triggerConfigStore, notifyTriggerDeactivated,
+    stores.triggerStore, taskQueueStore, logger, triggerConfigStore,
+    (team, triggerName, reason) => logger.warn('Trigger auto-disabled', { team, trigger: triggerName, reason }),
   );
   triggerEngineRef = triggerEngine;
-
-  const adapters = initChannels(
-    { dataDir, cliInput: deps?.cliInput, cliOutput: deps?.cliOutput, skipCli: deps?.skipCli },
-    logger,
-  );
+  const adapters = initChannels({ dataDir, cliInput: deps?.cliInput, cliOutput: deps?.cliOutput, skipCli: deps?.skipCli }, logger);
 
   const handlerDeps = providersConfig
     ? {
@@ -190,10 +184,10 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
         loadConfig: orgToolDeps.loadConfig,
         getTeamConfigFn: orgToolDeps.getTeamConfig,
         memoryStore: stores.memoryStore,
+        senderTrustStore: stores.senderTrustStore,
       }
     : null;
 
-  // Wire queryRunner: query_team → handleMessage for synchronous child queries
   if (handlerDeps) {
     queryRunnerRef = async (query, team, callerId, ancestors, sourceChannelId) => {
       const result = await handleMessage(
@@ -206,10 +200,7 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
     };
   }
 
-  // WsAdapter added to ChannelRouter for sendResponse (notifications), not for message routing.
-  // WsAdapter handles its own message flow with progress/ack support.
   const wsAdapter = new WsAdapter();
-
   let classifierModel: import('ai').LanguageModel | undefined;
   if (providersConfig) try {
     const reg = buildProviderRegistry(providersConfig);
@@ -220,12 +211,12 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   const channelHandler = createChannelHandler({
     handlerDeps, triggerEngine, interactionStore: stores.interactionStore,
     topicStore: stores.topicStore, classifierModel, topicSessionManager: new TopicSessionManager(),
+    trustPolicy, senderTrustStore: stores.senderTrustStore, trustAuditStore: stores.trustAuditStore,
   });
   const channelRouter = new ChannelRouter([wsAdapter, ...adapters], async (msg: ChannelMessage) => {
     logger.info('Received message', { channelId: msg.channelId, userId: msg.userId });
     return (await channelHandler(msg)).results.map((r) => r.response).filter(Boolean).join('\n---\n');
   });
-  // WS and Discord adapters get channelHandler directly (topic metadata in result)
   wsAdapter.setHandler(channelHandler);
   if (stores.topicStore) {
     const ts = stores.topicStore;
@@ -237,12 +228,11 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   const fastify = Fastify({ logger: false });
   await fastify.register(import('@fastify/websocket'));
   registerHealthEndpoint(fastify, { raw, sessionManager, triggerEngine, channelRouter });
+  registerApiRoutes(fastify, { raw, orgTree, taskQueueStore, triggerConfigStore });
   wsAdapter.registerRoute(fastify);
+  await fastify.register((await import('@fastify/static')).default, { root: join(process.cwd(), 'public'), prefix: '/' });
 
-  // Collect Discord adapters for notification routing
-  const discordAdapters = adapters.filter(
-    (a): a is DiscordAdapter => a instanceof DiscordAdapter,
-  );
+  const discordAdapters = adapters.filter((a): a is DiscordAdapter => a instanceof DiscordAdapter);
 
   const taskConsumer = handlerDeps ? new TaskConsumer({
     taskQueueStore, orgTree, handlerDeps,

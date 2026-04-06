@@ -19,7 +19,7 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { ChannelMessage, IChannelAdapter } from '../domain/interfaces.js';
 import type { ProgressUpdate } from '../sessions/ai-engine.js';
 import { errorMessage } from '../domain/errors.js';
@@ -117,7 +117,11 @@ export class WsAdapter implements IChannelAdapter {
 
   /** Register /ws route on Fastify. Called during bootstrap. */
   registerRoute(fastify: FastifyInstance): void {
-    fastify.get('/ws', { websocket: true }, (socket: WebSocketLike) => {
+    fastify.get('/ws', { websocket: true }, (socket: WebSocketLike, request: FastifyRequest) => {
+      const rawSenderId = request.headers['x-sender-id'];
+      const senderId = (typeof rawSenderId === 'string' && rawSenderId.trim().length > 0)
+        ? rawSenderId.trim()
+        : 'ws-client';
       const channelId = `ws:${randomBytes(4).toString('hex')}`;
       this.#sockets.set(channelId, socket);
       socket.on('close', () => {
@@ -163,7 +167,7 @@ export class WsAdapter implements IChannelAdapter {
 
           const msg: ChannelMessage = {
             channelId,
-            userId: 'ws-client',
+            userId: senderId,
             content,
             timestamp: Date.now(),
             ...(inboundTopicId !== DEFAULT_TOPIC ? { topicHint: inboundTopicId } : {}),

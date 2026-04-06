@@ -41,6 +41,8 @@ const allTables: SQLiteTable[] = [
   schema.memories,
   schema.memoryChunks,
   schema.embeddingCache,
+  schema.senderTrust,
+  schema.trustAuditLog,
 ];
 
 /**
@@ -137,6 +139,7 @@ export function createTables(raw: Database.Database): void {
     'ALTER TABLE task_queue ADD COLUMN topic_id TEXT',
     'ALTER TABLE channel_interactions ADD COLUMN topic_id TEXT',
     'ALTER TABLE org_tree ADD COLUMN bootstrapped INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE channel_interactions ADD COLUMN trust_decision TEXT',
   ];
   for (const sql of migrations) {
     try { raw.prepare(sql).run(); } catch { /* column already exists */ }

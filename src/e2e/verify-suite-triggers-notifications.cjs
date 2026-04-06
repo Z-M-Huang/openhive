@@ -89,14 +89,14 @@ runStep('triggers-notifications', {
   'after-audit-logs'(db) {
     const checks = [];
 
-    // log_entries has PreToolUse and PostToolUse
-    const preTool = db.prepare("SELECT message, context FROM log_entries WHERE message='PreToolUse' ORDER BY created_at DESC LIMIT 3").all();
-    checks.push(check('pre_tool_use_logged', preTool.length > 0, 'PreToolUse entries exist', `${preTool.length} entries`));
+    // log_entries has ToolCall:start and ToolCall:end audit entries
+    const preTool = db.prepare("SELECT message, context FROM log_entries WHERE message='ToolCall:start' ORDER BY created_at DESC LIMIT 3").all();
+    checks.push(check('pre_tool_use_logged', preTool.length > 0, 'ToolCall:start entries exist', `${preTool.length} entries`));
 
-    const postTool = db.prepare("SELECT message, context FROM log_entries WHERE message='PostToolUse' ORDER BY created_at DESC LIMIT 3").all();
-    checks.push(check('post_tool_use_logged', postTool.length > 0, 'PostToolUse entries exist', `${postTool.length} entries`));
+    const postTool = db.prepare("SELECT message, context FROM log_entries WHERE message='ToolCall:end' ORDER BY created_at DESC LIMIT 3").all();
+    checks.push(check('post_tool_use_logged', postTool.length > 0, 'ToolCall:end entries exist', `${postTool.length} entries`));
 
-    // PostToolUse should have durationMs in context
+    // ToolCall:end should have durationMs in context
     if (postTool.length > 0 && postTool[0].context) {
       const hasDuration = postTool[0].context.includes('durationMs');
       checks.push(check('audit_has_duration', hasDuration, 'context has durationMs', hasDuration ? 'present' : 'missing'));

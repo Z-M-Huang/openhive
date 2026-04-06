@@ -20,6 +20,9 @@ import { SendMessageInputSchema, sendMessage } from '../../handlers/tools/send-m
 import { ShutdownTeamInputSchema, shutdownTeam } from '../../handlers/tools/shutdown-team.js';
 import { SpawnTeamInputSchema, spawnTeam } from '../../handlers/tools/spawn-team.js';
 import { UpdateTeamInputSchema, updateTeam } from '../../handlers/tools/update-team.js';
+import { AddTrustedSenderInputSchema, addTrustedSender } from '../../handlers/tools/add-trusted-sender.js';
+import { RevokeSenderTrustInputSchema, revokeSenderTrust } from '../../handlers/tools/revoke-sender-trust.js';
+import { ListTrustedSendersInputSchema, listTrustedSenders } from '../../handlers/tools/list-trusted-senders.js';
 
 // ── Builder ─────────────────────────────────────────────────────────────────
 
@@ -159,6 +162,29 @@ export function buildOrgTools(ctx: OrgToolContext): ToolSet {
         log: ctx.log,
       }),
   });
+
+  // ── Trust tools (main agent only) ──────────────────────────────────────────
+  if (ctx.senderTrustStore && ctx.teamName === 'main') {
+    const trustDeps = { senderTrustStore: ctx.senderTrustStore };
+
+    tools['add_trusted_sender'] = tool({
+      description: 'Grant trust to a sender (stored in database)',
+      inputSchema: AddTrustedSenderInputSchema,
+      execute: async (input) => addTrustedSender(input, ctx.teamName, trustDeps),
+    });
+
+    tools['list_trusted_senders'] = tool({
+      description: 'List trusted senders, optionally filtered by channel type',
+      inputSchema: ListTrustedSendersInputSchema,
+      execute: async (input) => listTrustedSenders(input, ctx.teamName, trustDeps),
+    });
+
+    tools['revoke_sender_trust'] = tool({
+      description: 'Revoke a sender\'s trust (removes from database)',
+      inputSchema: RevokeSenderTrustInputSchema,
+      execute: async (input) => revokeSenderTrust(input, ctx.teamName, trustDeps),
+    });
+  }
 
   return tools;
 }

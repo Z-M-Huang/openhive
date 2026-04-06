@@ -1,7 +1,0 @@
-# E2E test providers — no real API keys needed for Tier 1 (infra) tests.
-# Tier 2 tests that need AI responses require ANTHROPIC_API_KEY env var.
-profiles:
-  default:
-    type: api
-    api_key: e2e-test-placeholder
-    model: claude-sonnet-4-20250514

@@ -9,3 +9,21 @@ cli:
 #   token: YOUR_DISCORD_BOT_TOKEN
 #   watched_channels:
 #     - general-channel-id # Channel ID!
+
+# Uncomment to enable TrustGate (ADR-30):
+# Without this section, all senders are allowed (backward compatible).
+# trust:
+#   default_policy: deny          # 'allow' or 'deny' for unknown senders
+#   channels:
+#     ws:
+#       policy: deny              # per-channel override
+#       sender_allowlist: []      # always allowed on this channel
+#       sender_denylist:          # always denied (silent drop)
+#         - spammer-id
+#       channel_overrides:        # per-channel-id overrides
+#         ws:abc123:
+#           policy: allow
+#     discord:
+#       policy: deny
+#       sender_allowlist:
+#         - "123456789012345678"  # Discord user ID

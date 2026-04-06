@@ -4,10 +4,12 @@ import { handleMessage } from './sessions/message-handler.js';
 import { classifyTopics, MAX_ACTIVE_TOPICS } from './sessions/topic-classifier.js';
 import type { TopicSessionManager } from './sessions/topic-session-manager.js';
 import { errorMessage } from './domain/errors.js';
-import type { ChannelMessage, IInteractionStore, ITopicStore } from './domain/interfaces.js';
+import type { ChannelMessage, IInteractionStore, ITopicStore, ISenderTrustStore, ITrustAuditStore } from './domain/interfaces.js';
 import type { TopicEntry } from './domain/types.js';
 import type { ProgressUpdate } from './sessions/ai-engine.js';
 import type { LanguageModel } from 'ai';
+import type { TrustPolicy } from './config/trust-policy.js';
+import { evaluateTrust } from './trust/trust-gate.js';
 
 export interface TopicResult { readonly response: string; readonly topicId?: string; readonly topicName?: string }
 export interface ChannelHandlerResult { readonly results: TopicResult[] }
@@ -18,6 +20,9 @@ export interface ChannelHandlerDeps {
   topicStore?: ITopicStore;
   classifierModel?: LanguageModel;
   topicSessionManager?: TopicSessionManager;
+  trustPolicy?: TrustPolicy;
+  senderTrustStore?: ISenderTrustStore;
+  trustAuditStore?: ITrustAuditStore;
 }
 type ChannelHandler = (msg: ChannelMessage, onProgress?: (u: ProgressUpdate) => void) => Promise<ChannelHandlerResult>;
 
@@ -33,7 +38,7 @@ function withChannelLock<T>(ch: string, fn: () => Promise<T>): Promise<T> {
 }
 
 function chType(id: string): string {
-  return id.startsWith('ws:') ? 'ws' : id.startsWith('discord:') ? 'discord' : 'other';
+  return id === 'cli' ? 'cli' : id.startsWith('ws:') ? 'ws' : id.startsWith('discord:') ? 'discord' : 'other';
 }
 function newTopic(s: ITopicStore, channelId: string, name?: string): { topicId: string; topicName: string } {
   const id = `t-${randomBytes(8).toString('hex')}`, topicName = name ?? 'New topic', now = new Date().toISOString();
@@ -85,6 +90,48 @@ async function resolveTopics(
 export function createChannelHandler(deps: ChannelHandlerDeps): ChannelHandler {
   const { handlerDeps, triggerEngine, interactionStore, topicStore, classifierModel, topicSessionManager } = deps;
   return async (msg, onProgress?) => {
+    const ct = chType(msg.channelId);
+
+    // ── TrustGate: evaluate before trigger engine (AC-11) ─────────────
+    const trustResult = evaluateTrust({
+      channelType: ct,
+      channelId: msg.channelId,
+      senderId: msg.userId,
+      trustPolicy: deps.trustPolicy,
+      senderTrustStore: deps.senderTrustStore,
+    });
+
+    if (trustResult.decision !== 'allow') {
+      const auditDecision = 'denied';
+      try {
+        deps.trustAuditStore?.log({
+          channelType: ct, channelId: msg.channelId, senderId: msg.userId,
+          decision: auditDecision, reason: trustResult.reason, createdAt: new Date().toISOString(),
+        });
+      } catch { /* must not crash */ }
+      try {
+        interactionStore?.log({
+          direction: 'inbound', channelType: ct, channelId: msg.channelId,
+          userId: msg.userId, contentSnippet: msg.content.slice(0, 2000),
+          contentLength: msg.content.length, trustDecision: auditDecision,
+        });
+      } catch { /* must not crash */ }
+
+      if (trustResult.decision === 'deny_silent') {
+        return { results: [] };
+      }
+      // deny_respond
+      return { results: [{ response: 'Not authorized.' }] };
+    }
+
+    // Trust allowed — log audit
+    try {
+      deps.trustAuditStore?.log({
+        channelType: ct, channelId: msg.channelId, senderId: msg.userId,
+        decision: 'allowed', reason: trustResult.reason, createdAt: new Date().toISOString(),
+      });
+    } catch { /* must not crash */ }
+
     triggerEngine.onMessage(msg.content, msg.channelId);
 
     let topics: Array<{ topicId: string; topicName: string }> = [];
@@ -100,8 +147,6 @@ export function createChannelHandler(deps: ChannelHandlerDeps): ChannelHandler {
       return { results: [{ response: 'No providers configured.', topicId: topics[0]?.topicId, topicName: topics[0]?.topicName }] };
     }
 
-    const ct = chType(msg.channelId);
-
     // Process each topic — same-topic serialized, different topics parallel via TopicSessionManager
     const work = (topics.length > 0 ? topics : [{ topicId: undefined as string | undefined, topicName: undefined as string | undefined }])
       .map(({ topicId, topicName }) => {
@@ -109,7 +154,7 @@ export function createChannelHandler(deps: ChannelHandlerDeps): ChannelHandler {
           // Log inbound per-topic so topic-scoped history includes the user message
           try {
             interactionStore?.log({ direction: 'inbound', channelType: ct, channelId: msg.channelId,
-              userId: msg.userId, contentSnippet: msg.content.slice(0, 2000), contentLength: msg.content.length, topicId });
+              userId: msg.userId, contentSnippet: msg.content.slice(0, 2000), contentLength: msg.content.length, topicId, trustDecision: 'allowed' });
           } catch { /* must not crash */ }
 
           const result = await handleMessage(msg, handlerDeps, { onProgress, sourceChannelId: msg.channelId, topicId, topicName });

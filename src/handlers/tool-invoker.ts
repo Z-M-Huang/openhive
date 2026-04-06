@@ -18,6 +18,7 @@ import type {
   IEscalationStore,
   ITriggerConfigStore,
   IInteractionStore,
+  ISenderTrustStore,
 } from '../domain/interfaces.js';
 import type { TeamConfig } from '../domain/types.js';
 import type { SpawnTeamConfigHints } from './tools/spawn-team.js';
@@ -69,6 +70,7 @@ export interface OrgToolDeps {
   readonly interactionStore?: IInteractionStore;
   readonly browserRelay?: { available: boolean };
   readonly memoryStore?: { removeByTeam(teamName: string): void };
+  readonly senderTrustStore?: ISenderTrustStore;
 }
 
 export interface OrgToolInvoker {

@@ -1,0 +1,702 @@
+/* ============================================================
+   OpenHive Dashboard — Dark Glassmorphism Theme
+   ============================================================ */
+
+/* ----------------------------------------------------------
+   1. CSS Custom Properties
+   ---------------------------------------------------------- */
+:root {
+  /* Backgrounds */
+  --bg-primary: #0a0e17;
+  --bg-surface: #111827;
+  --bg-card: rgba(17, 24, 39, 0.6);
+  --bg-card-hover: rgba(17, 24, 39, 0.8);
+  --bg-sidebar: rgba(10, 14, 23, 0.92);
+  --bg-input: rgba(17, 24, 39, 0.5);
+
+  /* Text */
+  --text-primary: #e5e7eb;
+  --text-secondary: #9ca3af;
+  --text-muted: #6b7280;
+  --text-heading: #f9fafb;
+
+  /* Accent / brand */
+  --accent-primary: #3b82f6;
+  --accent-glow: rgba(59, 130, 246, 0.35);
+  --accent-hover: #2563eb;
+
+  /* Status */
+  --status-active: #22c55e;
+  --status-active-glow: rgba(34, 197, 94, 0.4);
+  --status-error: #ef4444;
+  --status-error-glow: rgba(239, 68, 68, 0.4);
+  --status-warn: #f59e0b;
+  --status-warn-glow: rgba(245, 158, 11, 0.4);
+  --status-inactive: #6b7280;
+
+  /* Borders */
+  --border-subtle: rgba(255, 255, 255, 0.06);
+  --border-card: rgba(255, 255, 255, 0.08);
+  --border-focus: var(--accent-primary);
+
+  /* Typography */
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+
+  /* Spacing */
+  --space-xs: 0.25rem;
+  --space-sm: 0.5rem;
+  --space-md: 1rem;
+  --space-lg: 1.5rem;
+  --space-xl: 2rem;
+  --space-2xl: 3rem;
+
+  /* Radii */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+
+  /* Sidebar */
+  --sidebar-width: 220px;
+
+  /* Transitions */
+  --transition-fast: 150ms ease;
+  --transition-normal: 250ms ease;
+}
+
+/* ----------------------------------------------------------
+   2. Reset & Base
+   ---------------------------------------------------------- */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+h1, h2, h3, h4 {
+  color: var(--text-heading);
+  font-weight: 600;
+}
+
+h1 { font-size: 1.5rem; }
+h2 { font-size: 1.25rem; }
+h3 { font-size: 1.1rem; }
+
+a {
+  color: var(--accent-primary);
+  text-decoration: none;
+}
+
+a:hover {
+  color: var(--accent-hover);
+}
+
+/* ----------------------------------------------------------
+   3. Layout (sidebar + main)
+   ---------------------------------------------------------- */
+.layout {
+  display: flex;
+  min-height: 100vh;
+}
+
+.content {
+  flex: 1;
+  padding: var(--space-xl);
+  margin-left: var(--sidebar-width);
+  min-width: 0;               /* prevent flex children from overflowing */
+}
+
+/* ----------------------------------------------------------
+   4. Navigation Sidebar
+   ---------------------------------------------------------- */
+.sidebar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: var(--sidebar-width);
+  background: var(--bg-sidebar);
+  border-right: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-lg) 0;
+  z-index: 100;
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+
+.sidebar-header {
+  padding: 0 var(--space-lg) var(--space-lg);
+  font-size: 1.2rem;
+  font-weight: 700;
+  color: var(--text-heading);
+  letter-spacing: 0.02em;
+  border-bottom: 1px solid var(--border-subtle);
+  margin-bottom: var(--space-sm);
+}
+
+.nav-list {
+  list-style: none;
+  padding: var(--space-sm) 0;
+}
+
+.nav-list li {
+  margin: 2px 0;
+}
+
+.nav-list a {
+  display: block;
+  padding: var(--space-sm) var(--space-lg);
+  color: var(--text-secondary);
+  border-left: 3px solid transparent;
+  transition: color var(--transition-fast), background var(--transition-fast), border-color var(--transition-fast);
+  font-size: 0.875rem;
+}
+
+.nav-list a:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.nav-list a.active {
+  color: var(--accent-primary);
+  border-left-color: var(--accent-primary);
+  background: rgba(59, 130, 246, 0.08);
+}
+
+/* ----------------------------------------------------------
+   5. Cards — Glassmorphism
+   ---------------------------------------------------------- */
+.card {
+  background: var(--bg-card);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--border-card);
+  border-radius: var(--radius-md);
+  padding: var(--space-lg);
+  margin-bottom: var(--space-lg);
+  transition: background var(--transition-normal), box-shadow var(--transition-normal);
+}
+
+.card:hover {
+  background: var(--bg-card-hover);
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--space-md);
+}
+
+.card-header h2,
+.card-header h3 {
+  margin: 0;
+}
+
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: var(--space-lg);
+}
+
+/* ----------------------------------------------------------
+   6. Tables
+   ---------------------------------------------------------- */
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+}
+
+.table th,
+.table td {
+  padding: var(--space-sm) var(--space-md);
+  text-align: left;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.table th {
+  color: var(--text-muted);
+  font-weight: 500;
+  text-transform: uppercase;
+  font-size: 0.75rem;
+  letter-spacing: 0.05em;
+  position: sticky;
+  top: 0;
+  background: var(--bg-surface);
+  cursor: default;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.table th.sortable {
+  cursor: pointer;
+}
+
+.table th.sortable::after {
+  content: '\2195';            /* up-down arrow */
+  margin-left: var(--space-xs);
+  opacity: 0.3;
+}
+
+.table th.sort-asc::after {
+  content: '\25B2';            /* up triangle */
+  opacity: 0.7;
+}
+
+.table th.sort-desc::after {
+  content: '\25BC';            /* down triangle */
+  opacity: 0.7;
+}
+
+.table tbody tr {
+  transition: background var(--transition-fast);
+}
+
+.table tbody tr:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+/* ----------------------------------------------------------
+   7. Status Indicators
+   ---------------------------------------------------------- */
+.status-indicator {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  vertical-align: middle;
+  margin-right: var(--space-xs);
+}
+
+.status-active {
+  background: var(--status-active);
+  box-shadow: 0 0 6px var(--status-active-glow), 0 0 12px var(--status-active-glow);
+}
+
+.status-error {
+  background: var(--status-error);
+  box-shadow: 0 0 6px var(--status-error-glow), 0 0 12px var(--status-error-glow);
+}
+
+.status-warn {
+  background: var(--status-warn);
+  box-shadow: 0 0 6px var(--status-warn-glow), 0 0 12px var(--status-warn-glow);
+}
+
+.status-inactive {
+  background: var(--status-inactive);
+}
+
+/* Inline text label variant */
+.status-label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  font-size: 0.8rem;
+  font-weight: 500;
+}
+
+/* ----------------------------------------------------------
+   8. View Container Transitions
+   ---------------------------------------------------------- */
+.view-container {
+  opacity: 1;
+  transform: translateY(0);
+  transition: opacity var(--transition-normal), transform var(--transition-normal);
+}
+
+.view-container.entering {
+  opacity: 0;
+  transform: translateY(8px);
+}
+
+#app {
+  min-height: 60vh;
+}
+
+/* ----------------------------------------------------------
+   9. Filter Bar
+   ---------------------------------------------------------- */
+.filter-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  margin-bottom: var(--space-lg);
+  flex-wrap: wrap;
+}
+
+.filter-bar input,
+.filter-bar select {
+  font-family: var(--font-sans);
+  font-size: 0.875rem;
+  padding: var(--space-sm) var(--space-md);
+  background: var(--bg-input);
+  border: 1px solid var(--border-card);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  outline: none;
+  transition: border-color var(--transition-fast);
+}
+
+.filter-bar input:focus,
+.filter-bar select:focus {
+  border-color: var(--border-focus);
+}
+
+.filter-bar input::placeholder {
+  color: var(--text-muted);
+}
+
+/* ----------------------------------------------------------
+   10. Metrics / Data Display (monospace)
+   ---------------------------------------------------------- */
+.metric {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+}
+
+.data-value {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  color: var(--text-heading);
+}
+
+.metric-large {
+  font-family: var(--font-mono);
+  font-size: 1.75rem;
+  font-weight: 700;
+  color: var(--text-heading);
+  line-height: 1.2;
+}
+
+.metric-label {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-top: var(--space-xs);
+}
+
+/* ----------------------------------------------------------
+   11. Buttons
+   ---------------------------------------------------------- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  font-family: var(--font-sans);
+  font-size: 0.875rem;
+  font-weight: 500;
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--border-card);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  background: var(--bg-card);
+  color: var(--text-primary);
+  transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+
+.btn:hover {
+  background: var(--bg-card-hover);
+}
+
+.btn-primary {
+  background: var(--accent-primary);
+  border-color: var(--accent-primary);
+  color: #fff;
+}
+
+.btn-primary:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.btn-danger {
+  background: transparent;
+  border-color: var(--status-error);
+  color: var(--status-error);
+}
+
+.btn-danger:hover {
+  background: rgba(239, 68, 68, 0.12);
+}
+
+.btn-sm {
+  font-size: 0.75rem;
+  padding: var(--space-xs) var(--space-sm);
+}
+
+/* ----------------------------------------------------------
+   12. Badges / Tags
+   ---------------------------------------------------------- */
+.badge {
+  display: inline-block;
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.badge-type {
+  background: rgba(59, 130, 246, 0.15);
+  color: var(--accent-primary);
+}
+
+.badge-active {
+  background: rgba(34, 197, 94, 0.15);
+  color: var(--status-active);
+}
+
+.badge-error {
+  background: rgba(239, 68, 68, 0.15);
+  color: var(--status-error);
+}
+
+.badge-warn {
+  background: rgba(245, 158, 11, 0.15);
+  color: var(--status-warn);
+}
+
+.badge-inactive {
+  background: rgba(107, 114, 128, 0.15);
+  color: var(--status-inactive);
+}
+
+/* ----------------------------------------------------------
+   13. Tree View (org hierarchy)
+   ---------------------------------------------------------- */
+.tree {
+  list-style: none;
+  padding-left: 0;
+}
+
+.tree .tree {
+  padding-left: var(--space-lg);
+  border-left: 1px solid var(--border-subtle);
+  margin-left: var(--space-sm);
+}
+
+.tree-node {
+  padding: var(--space-sm) var(--space-sm);
+  border-radius: var(--radius-sm);
+  cursor: default;
+  transition: background var(--transition-fast);
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.tree-node:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.tree-toggle {
+  width: 18px;
+  text-align: center;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.tree-label {
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.tree-meta {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-left: auto;
+}
+
+/* ----------------------------------------------------------
+   14. Toast Notifications
+   ---------------------------------------------------------- */
+.toast-container {
+  position: fixed;
+  top: var(--space-lg);
+  right: var(--space-lg);
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  pointer-events: none;
+}
+
+.toast {
+  pointer-events: auto;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-card);
+  border-radius: var(--radius-sm);
+  padding: var(--space-sm) var(--space-md);
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  opacity: 0;
+  transform: translateX(20px);
+  animation: toast-in 250ms ease forwards;
+}
+
+.toast.toast-out {
+  animation: toast-out 200ms ease forwards;
+}
+
+.toast-success { border-left: 3px solid var(--status-active); }
+.toast-error   { border-left: 3px solid var(--status-error); }
+.toast-warn    { border-left: 3px solid var(--status-warn); }
+
+@keyframes toast-in {
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes toast-out {
+  to { opacity: 0; transform: translateX(20px); }
+}
+
+/* ----------------------------------------------------------
+   15. Pagination
+   ---------------------------------------------------------- */
+.pagination {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  margin-top: var(--space-lg);
+}
+
+.pagination button {
+  font-family: var(--font-sans);
+  font-size: 0.8rem;
+  padding: var(--space-xs) var(--space-sm);
+  background: var(--bg-card);
+  border: 1px solid var(--border-card);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.pagination button:hover {
+  background: var(--bg-card-hover);
+  color: var(--text-primary);
+}
+
+.pagination button.active {
+  background: var(--accent-primary);
+  border-color: var(--accent-primary);
+  color: #fff;
+}
+
+.pagination button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.pagination .page-info {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin: 0 var(--space-sm);
+}
+
+/* ----------------------------------------------------------
+   16. Responsive — Tablet & Below
+   ---------------------------------------------------------- */
+@media (max-width: 768px) {
+  :root {
+    --sidebar-width: 0px;
+  }
+
+  .sidebar {
+    position: fixed;
+    left: -260px;
+    width: 260px;
+    transition: left var(--transition-normal);
+  }
+
+  .sidebar.open {
+    left: 0;
+  }
+
+  .content {
+    margin-left: 0;
+    padding: var(--space-md);
+  }
+
+  .card-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .filter-bar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .table {
+    font-size: 0.8rem;
+  }
+
+  .table th,
+  .table td {
+    padding: var(--space-xs) var(--space-sm);
+  }
+
+  .toast-container {
+    left: var(--space-md);
+    right: var(--space-md);
+  }
+}
+
+/* ----------------------------------------------------------
+   Utility Helpers
+   ---------------------------------------------------------- */
+.text-muted   { color: var(--text-muted); }
+.text-mono    { font-family: var(--font-mono); }
+.mt-sm        { margin-top: var(--space-sm); }
+.mt-md        { margin-top: var(--space-md); }
+.mt-lg        { margin-top: var(--space-lg); }
+.mb-sm        { margin-bottom: var(--space-sm); }
+.mb-md        { margin-bottom: var(--space-md); }
+.mb-lg        { margin-bottom: var(--space-lg); }
+.flex         { display: flex; }
+.flex-between { display: flex; justify-content: space-between; align-items: center; }
+.gap-sm       { gap: var(--space-sm); }
+.gap-md       { gap: var(--space-md); }
+.hidden       { display: none !important; }
+
+/* Scrollbar styling for Webkit browsers */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+}

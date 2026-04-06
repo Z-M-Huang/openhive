@@ -141,6 +141,7 @@ export interface InteractionRecord {
   readonly contentLength?: number;
   readonly durationMs?: number;
   readonly topicId?: string;
+  readonly trustDecision?: string;
   readonly createdAt?: string;
 }
 
@@ -162,6 +163,40 @@ export interface ITopicStore {
   updateState(topicId: string, state: TopicState): void;
   touchActivity(topicId: string): void;
   markAllIdle(channelId?: string): number;
+}
+
+// ── Sender Trust Store ──────────────────────────────────────────────────
+
+export interface SenderTrustRecord {
+  readonly channelType: string;
+  readonly channelId?: string;
+  readonly senderId: string;
+  readonly trustLevel: string;
+  readonly grantedBy: string;
+  readonly createdAt: string;
+}
+
+export interface ISenderTrustStore {
+  add(record: SenderTrustRecord): void;
+  remove(channelType: string, senderId: string, channelId?: string): void;
+  get(channelType: string, senderId: string, channelId?: string): SenderTrustRecord | undefined;
+  list(channelType?: string, trustLevel?: string): SenderTrustRecord[];
+}
+
+// ── Trust Audit Store ───────────────────────────────────────────────────
+
+export interface TrustAuditEntry {
+  readonly channelType: string;
+  readonly channelId: string;
+  readonly senderId: string;
+  readonly decision: string;
+  readonly reason: string;
+  readonly createdAt: string;
+}
+
+export interface ITrustAuditStore {
+  log(entry: TrustAuditEntry): void;
+  query(opts: { since?: string; decision?: string; senderId?: string; limit?: number }): TrustAuditEntry[];
 }
 
 // ── Config (used by L1+ layers) ────────────────────────────────────────────

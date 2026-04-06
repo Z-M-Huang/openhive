@@ -23,6 +23,7 @@ export class InteractionStore implements IInteractionStore {
       contentLength: record.contentLength ?? null,
       durationMs: record.durationMs ?? null,
       topicId: record.topicId ?? null,
+      trustDecision: record.trustDecision ?? null,
       createdAt: new Date().toISOString(),
     }).run();
   }
@@ -59,6 +60,7 @@ export class InteractionStore implements IInteractionStore {
       contentLength: r.contentLength ?? undefined,
       durationMs: r.durationMs ?? undefined,
       topicId: r.topicId ?? undefined,
+      trustDecision: r.trustDecision ?? undefined,
       createdAt: r.createdAt,
     }));
   }

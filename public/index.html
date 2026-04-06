@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpenHive Dashboard</title>
+  <link rel="stylesheet" href="/css/dashboard.css">
+</head>
+<body>
+  <div class="layout">
+    <nav class="sidebar">
+      <div class="sidebar-header">OpenHive</div>
+      <ul class="nav-list">
+        <li><a href="#/health" data-route="/health">Health</a></li>
+        <li><a href="#/org-tree" data-route="/org-tree">Org Tree</a></li>
+        <li><a href="#/tasks" data-route="/tasks">Tasks</a></li>
+        <li><a href="#/logs" data-route="/logs">Logs</a></li>
+        <li><a href="#/memories" data-route="/memories">Memories</a></li>
+        <li><a href="#/triggers" data-route="/triggers">Triggers</a></li>
+        <li><a href="#/conversations" data-route="/conversations">Conversations</a></li>
+      </ul>
+    </nav>
+    <main class="content">
+      <div id="app"></div>
+    </main>
+  </div>
+  <script type="module" src="/js/app.js"></script>
+</body>
+</html>

@@ -1,8 +1,0 @@
-# E2E test triggers
-triggers:
-  - name: e2e-keyword
-    type: keyword
-    config:
-      pattern: "e2e-test-trigger"
-    team: test-team
-    task: handle e2e trigger

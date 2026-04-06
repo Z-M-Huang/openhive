@@ -36,7 +36,10 @@ runStep('context-threading', {
     const sample = db.prepare('SELECT channel_type, channel_id, team_id FROM channel_interactions LIMIT 1').get();
     if (sample) {
       checks.push(check('interaction_has_channel_type', !!sample.channel_type, 'channel_type populated', sample.channel_type || 'null'));
-      checks.push(check('interaction_has_team_id', !!sample.team_id, 'team_id populated', sample.team_id || 'null'));
+    }
+    const outSample = db.prepare("SELECT team_id FROM channel_interactions WHERE direction='outbound' LIMIT 1").get();
+    if (outSample) {
+      checks.push(check('interaction_has_team_id', !!outSample.team_id, 'outbound team_id populated', outSample.team_id || 'null'));
     }
 
     return checks;

@@ -70,7 +70,7 @@ describe('UT-2: Schema and WAL mode', () => {
     expect(result[0]?.journal_mode).toBe('wal');
   });
 
-  it('creates all 12 tables', () => {
+  it('creates all 14 tables', () => {
     const tables = instance.raw
       .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '%_fts%'")
       .all() as Array<{ name: string }>;
@@ -85,10 +85,12 @@ describe('UT-2: Schema and WAL mode', () => {
       'memory_chunks',
       'org_tree',
       'scope_keywords',
+      'sender_trust',
       'task_queue',
       'topics',
       'trigger_configs',
       'trigger_dedup',
+      'trust_audit_log',
     ]);
   });
 

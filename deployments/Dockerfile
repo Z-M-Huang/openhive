@@ -35,6 +35,9 @@ COPY seed-rules/ ./seed-rules/
 # Compile TypeScript
 RUN ./node_modules/.bin/tsc
 
+# Prune devDependencies — only production deps get copied to final image
+RUN bun install --production
+
 # ── Production ──────────────────────────────────────────────────────────────
 FROM node:22-bookworm-slim
 
@@ -60,6 +63,9 @@ COPY --from=builder /build/node_modules/ /app/node_modules/
 # Copy Playwright browsers from builder
 ENV PLAYWRIGHT_BROWSERS_PATH=/app/browsers
 COPY --from=builder /app/browsers /app/browsers
+
+# Dashboard static assets (plain HTML/CSS/JS — no build step needed)
+COPY public/ /app/public/
 
 # Tier 1: System rules (baked in, immutable)
 COPY --from=builder /build/system-rules/ /app/system-rules/

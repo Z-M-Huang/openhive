@@ -12,14 +12,22 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createChannelHandler, type ChannelHandlerDeps } from './channel-handler-factory.js';
-import type { ChannelMessage, IInteractionStore, ITopicStore, InteractionRecord } from './domain/interfaces.js';
+import type { ChannelMessage, IInteractionStore, ITopicStore, InteractionRecord, ITrustAuditStore, TrustAuditEntry } from './domain/interfaces.js';
 import type { TopicEntry } from './domain/types.js';
+import type { TrustEvalResult } from './trust/trust-gate.js';
 
 // ── Mock handleMessage ────────────────────────────────────────────────────
 
 const mockHandleMessage = vi.fn().mockResolvedValue({ ok: true, content: 'Hello' });
 vi.mock('./sessions/message-handler.js', () => ({
   handleMessage: (...args: unknown[]) => mockHandleMessage(...args),
+}));
+
+// ── Mock evaluateTrust ──────────────────────────────────────────────────
+
+const mockEvaluateTrust = vi.fn().mockReturnValue({ decision: 'allow', reason: 'no_trust_config' } satisfies TrustEvalResult);
+vi.mock('./trust/trust-gate.js', () => ({
+  evaluateTrust: (...args: unknown[]) => mockEvaluateTrust(...(args as [])),
 }));
 
 // ── Mock classifyTopics ─────────────────────────────────────────────────
@@ -60,6 +68,15 @@ function makeInteractionStore(): IInteractionStore & { logged: InteractionRecord
     getRecentByChannel: vi.fn().mockReturnValue([]),
     cleanOlderThan: vi.fn().mockReturnValue(0),
     removeByTeam: vi.fn(),
+  };
+}
+
+function makeTrustAuditStore(): ITrustAuditStore & { logged: TrustAuditEntry[] } {
+  const logged: TrustAuditEntry[] = [];
+  return {
+    logged,
+    log: vi.fn((e: TrustAuditEntry) => logged.push(e)),
+    query: vi.fn().mockReturnValue([]),
   };
 }
 
@@ -208,5 +225,113 @@ describe('createChannelHandler', () => {
     expect(result.results).toHaveLength(2);
     expect(result.results[0].response).toContain('Auth service down');
     expect(result.results[1].response).toBe('Deploy reply');
+  });
+
+  // ── TrustGate integration tests ─────────────────────────────────────────
+
+  describe('TrustGate integration', () => {
+    it('deny_silent returns empty results and skips trigger engine', async () => {
+      mockEvaluateTrust.mockReturnValue({ decision: 'deny_silent', reason: 'sender_denylist' });
+      const auditStore = makeTrustAuditStore();
+      const interactionStore = makeInteractionStore();
+
+      const handler = createChannelHandler({
+        handlerDeps: stubHandlerDeps, triggerEngine: stubTriggerEngine,
+        trustPolicy: { default_policy: 'deny' }, trustAuditStore: auditStore,
+        interactionStore,
+      });
+
+      const result = await handler(makeMsg());
+
+      expect(result.results).toHaveLength(0);
+      expect(stubTriggerEngine.onMessage).not.toHaveBeenCalled();
+      expect(mockHandleMessage).not.toHaveBeenCalled();
+    });
+
+    it('deny_respond returns "Not authorized." and skips trigger engine', async () => {
+      mockEvaluateTrust.mockReturnValue({ decision: 'deny_respond', reason: 'default_policy_deny' });
+      const auditStore = makeTrustAuditStore();
+      const interactionStore = makeInteractionStore();
+
+      const handler = createChannelHandler({
+        handlerDeps: stubHandlerDeps, triggerEngine: stubTriggerEngine,
+        trustPolicy: { default_policy: 'deny' }, trustAuditStore: auditStore,
+        interactionStore,
+      });
+
+      const result = await handler(makeMsg());
+
+      expect(result.results).toHaveLength(1);
+      expect(result.results[0].response).toBe('Not authorized.');
+      expect(stubTriggerEngine.onMessage).not.toHaveBeenCalled();
+      expect(mockHandleMessage).not.toHaveBeenCalled();
+    });
+
+    it('logs to trustAuditStore on deny', async () => {
+      mockEvaluateTrust.mockReturnValue({ decision: 'deny_silent', reason: 'sender_denylist' });
+      const auditStore = makeTrustAuditStore();
+
+      const handler = createChannelHandler({
+        handlerDeps: stubHandlerDeps, triggerEngine: stubTriggerEngine,
+        trustPolicy: { default_policy: 'deny' }, trustAuditStore: auditStore,
+      });
+
+      await handler(makeMsg({ channelId: 'ws:ch1', userId: 'bad-user' }));
+
+      expect(auditStore.logged).toHaveLength(1);
+      expect(auditStore.logged[0].decision).toBe('denied');
+      expect(auditStore.logged[0].reason).toBe('sender_denylist');
+      expect(auditStore.logged[0].senderId).toBe('bad-user');
+      expect(auditStore.logged[0].channelType).toBe('ws');
+    });
+
+    it('logs to interactionStore with trustDecision on deny', async () => {
+      mockEvaluateTrust.mockReturnValue({ decision: 'deny_respond', reason: 'default_policy_deny' });
+      const interactionStore = makeInteractionStore();
+
+      const handler = createChannelHandler({
+        handlerDeps: stubHandlerDeps, triggerEngine: stubTriggerEngine,
+        trustPolicy: { default_policy: 'deny' }, interactionStore,
+      });
+
+      await handler(makeMsg());
+
+      expect(interactionStore.logged).toHaveLength(1);
+      expect(interactionStore.logged[0].direction).toBe('inbound');
+      expect(interactionStore.logged[0].trustDecision).toBe('denied');
+    });
+
+    it('logs to trustAuditStore on allow', async () => {
+      mockEvaluateTrust.mockReturnValue({ decision: 'allow', reason: 'sender_allowlist' });
+      const auditStore = makeTrustAuditStore();
+
+      const handler = createChannelHandler({
+        handlerDeps: stubHandlerDeps, triggerEngine: stubTriggerEngine,
+        trustPolicy: { default_policy: 'allow' }, trustAuditStore: auditStore,
+      });
+
+      await handler(makeMsg());
+
+      expect(auditStore.logged).toHaveLength(1);
+      expect(auditStore.logged[0].decision).toBe('allowed');
+      expect(auditStore.logged[0].reason).toBe('sender_allowlist');
+    });
+
+    it('proceeds normally when no trustPolicy is configured (backward compat)', async () => {
+      mockEvaluateTrust.mockReturnValue({ decision: 'allow', reason: 'no_trust_config' });
+      const store = makeTopicStore();
+
+      const handler = createChannelHandler({
+        handlerDeps: stubHandlerDeps, triggerEngine: stubTriggerEngine,
+        topicStore: store,
+        // no trustPolicy, no senderTrustStore, no trustAuditStore
+      });
+
+      const result = await handler(makeMsg());
+
+      expect(stubTriggerEngine.onMessage).toHaveBeenCalledOnce();
+      expect(mockHandleMessage).toHaveBeenCalledOnce();
+      expect(result.results[0].response).toBe('Hello');
+    });
   });
 });

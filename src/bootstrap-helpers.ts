@@ -17,6 +17,8 @@ import { MemoryStore } from './storage/stores/memory-store.js';
 import { TriggerConfigStore } from './storage/stores/trigger-config-store.js';
 import { InteractionStore } from './storage/stores/interaction-store.js';
 import { TopicStore } from './storage/stores/topic-store.js';
+import { SenderTrustStore } from './storage/stores/sender-trust-store.js';
+import { TrustAuditStore } from './storage/stores/trust-audit-store.js';
 import { TriggerDedup } from './triggers/dedup.js';
 import { TriggerRateLimiter } from './triggers/rate-limiter.js';
 import { TriggerEngine } from './triggers/engine.js';
@@ -74,6 +76,8 @@ export interface StorageResult extends DatabaseInstance {
   readonly triggerConfigStore: TriggerConfigStore;
   readonly interactionStore: InteractionStore;
   readonly topicStore: TopicStore;
+  readonly senderTrustStore: SenderTrustStore;
+  readonly trustAuditStore: TrustAuditStore;
 }
 
 export function initStorage(_dataDir: string, runDir: string): StorageResult {
@@ -90,8 +94,10 @@ export function initStorage(_dataDir: string, runDir: string): StorageResult {
   const triggerConfigStore = new TriggerConfigStore(db);
   const interactionStore = new InteractionStore(db);
   const topicStore = new TopicStore(db);
+  const senderTrustStore = new SenderTrustStore(db);
+  const trustAuditStore = new TrustAuditStore(db);
 
-  return { db, raw, orgStore, taskQueueStore, triggerStore, logStore, escalationStore, memoryStore, triggerConfigStore, interactionStore, topicStore };
+  return { db, raw, orgStore, taskQueueStore, triggerStore, logStore, escalationStore, memoryStore, triggerConfigStore, interactionStore, topicStore, senderTrustStore, trustAuditStore };
 }
 
 /** Run one-time filesystem → SQLite migration for memory data. */
@@ -139,15 +145,12 @@ export function initChannels(
   if (!channelDeps) return [];
   const adapters: IChannelAdapter[] = [];
 
-  // Load channels config
   let channelsConfig: ChannelsOutput | null = null;
   const channelsPath = join(channelDeps.dataDir, 'config', 'channels.yaml');
   if (existsSync(channelsPath)) {
     try { channelsConfig = loadChannels(channelsPath); }
     catch (err) { logger.warn('Failed to load channels.yaml', { err }); }
   }
-
-  // CLI adapter
   const cliEnabled = channelsConfig?.cli?.enabled ?? true;
   if (cliEnabled && !channelDeps.skipCli) {
     adapters.push(new CLIAdapter({

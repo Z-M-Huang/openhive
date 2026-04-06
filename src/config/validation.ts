@@ -6,6 +6,7 @@
  */
 
 import { z } from 'zod';
+import { TrustPolicySchema } from './trust-policy.js';
 
 // ── Team Config ─────────────────────────────────────────────────────────────
 
@@ -87,6 +88,7 @@ const CliChannelSchema = z.object({
 export const ChannelsSchema = z.object({
   discord: DiscordChannelSchema.optional(),
   cli: CliChannelSchema.default({ enabled: true }),
+  trust: TrustPolicySchema.optional(),
 });
 
 export type ChannelsInput = z.input<typeof ChannelsSchema>;

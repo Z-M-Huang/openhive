@@ -176,6 +176,7 @@ export const channelInteractions = sqliteTable(
     contentLength: integer('content_length'),
     durationMs: integer('duration_ms'),
     topicId: text('topic_id'),
+    trustDecision: text('trust_decision'),
     createdAt: text('created_at').notNull(),
   },
   (table) => [
@@ -229,3 +230,40 @@ export const embeddingCache = sqliteTable('embedding_cache', {
   model: text('model').notNull(),
   createdAt: text('created_at').notNull(),
 });
+
+// ── sender_trust ────────────────────────────────────────────────────────────
+
+export const senderTrust = sqliteTable(
+  'sender_trust',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    channelType: text('channel_type').notNull(),
+    channelId: text('channel_id'),
+    senderId: text('sender_id').notNull(),
+    trustLevel: text('trust_level').notNull(),
+    grantedBy: text('granted_by').notNull(),
+    createdAt: text('created_at').notNull(),
+  },
+  (table) => [
+    index('idx_sender_trust_lookup').on(table.channelType, table.senderId),
+  ],
+);
+
+// ── trust_audit_log ─────────────────────────────────────────────────────────
+
+export const trustAuditLog = sqliteTable(
+  'trust_audit_log',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    channelType: text('channel_type').notNull(),
+    channelId: text('channel_id').notNull(),
+    senderId: text('sender_id').notNull(),
+    decision: text('decision').notNull(),
+    reason: text('reason').notNull(),
+    createdAt: text('created_at').notNull(),
+  },
+  (table) => [
+    index('idx_trust_audit_created_at').on(table.createdAt),
+    index('idx_trust_audit_sender').on(table.senderId),
+  ],
+);
