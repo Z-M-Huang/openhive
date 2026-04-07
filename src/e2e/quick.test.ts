@@ -26,7 +26,7 @@ describe('Quick E2E: Bootstrap wiring', () => {
   it('bootstraps and health returns 200', { timeout: 15_000 }, async () => {
     result = await bootstrap({
       runDir: dir, dataDir: join(dir, 'data'),
-      skipListen: true, skipCli: true,
+      skipListen: true,
     });
 
     const resp = await result.fastify.inject({ method: 'GET', url: '/health' });
@@ -66,7 +66,7 @@ describe('Quick E2E: Bootstrap wiring', () => {
     await result.shutdown();
     result = await bootstrap({
       runDir: dir, dataDir: join(dir, 'data'),
-      skipListen: true, skipCli: true,
+      skipListen: true,
     });
 
     const resp = await result.fastify.inject({ method: 'GET', url: '/health' });

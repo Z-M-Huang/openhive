@@ -6,13 +6,9 @@ Every inbound message passes through the Trust Gate before reaching your LLM ses
 The Trust Gate evaluates the sender against the trust policy configured in `channels.yaml`
 and decides whether to allow or deny the message. You never see denied messages.
 
-## CLI Bypass
-
-Messages from the CLI adapter are always trusted and skip all evaluation steps.
-
 ## Evaluation Steps
 
-For non-CLI messages, the Trust Gate evaluates in this strict order (first match wins):
+The Trust Gate evaluates in this strict order (first match wins):
 
 1. **Sender denylist** — If the sender is on the channel's `sender_denylist`, silently deny.
 2. **Database lookup** — If the sender exists in the `sender_trust` table, use that trust level.

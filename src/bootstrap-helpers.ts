@@ -22,13 +22,11 @@ import { TrustAuditStore } from './storage/stores/trust-audit-store.js';
 import { TriggerDedup } from './triggers/dedup.js';
 import { TriggerRateLimiter } from './triggers/rate-limiter.js';
 import { TriggerEngine } from './triggers/engine.js';
-import { CLIAdapter } from './channels/cli-adapter.js';
 import { DiscordAdapter } from './channels/discord-adapter.js';
 import { SecretString } from './secrets/secret-string.js';
 import type { IChannelAdapter } from './domain/interfaces.js';
 // TriggerConfig import removed — trigger configs now managed via SQLite/TriggerConfigStore
 import type { ChannelsOutput } from './config/validation.js';
-import type { Readable, Writable } from 'node:stream';
 import type { DatabaseInstance } from './storage/database.js';
 import type { OrgTree } from './domain/org-tree.js';
 import { TeamStatus } from './domain/types.js';
@@ -37,9 +35,6 @@ import { migrateFilesystemMemory } from './storage/migration.js';
 
 export interface ChannelDeps {
   readonly dataDir: string;
-  readonly cliInput?: Readable;
-  readonly cliOutput?: Writable;
-  readonly skipCli?: boolean;
 }
 
 /** Ensure .run/ directory structure exists. */
@@ -141,8 +136,8 @@ export function initTriggerEngine(
 export function initChannels(
   channelDeps: ChannelDeps | undefined,
   logger: AppLogger,
-): IChannelAdapter[] {
-  if (!channelDeps) return [];
+): { adapters: IChannelAdapter[]; wsEnabled: boolean } {
+  if (!channelDeps) return { adapters: [], wsEnabled: false };
   const adapters: IChannelAdapter[] = [];
 
   let channelsConfig: ChannelsOutput | null = null;
@@ -150,13 +145,6 @@ export function initChannels(
   if (existsSync(channelsPath)) {
     try { channelsConfig = loadChannels(channelsPath); }
     catch (err) { logger.warn('Failed to load channels.yaml', { err }); }
-  }
-  const cliEnabled = channelsConfig?.cli?.enabled ?? true;
-  if (cliEnabled && !channelDeps.skipCli) {
-    adapters.push(new CLIAdapter({
-      input: channelDeps.cliInput,
-      output: channelDeps.cliOutput,
-    }));
   }
 
   // Discord adapter (from channels.yaml or env var fallback)
@@ -170,7 +158,8 @@ export function initChannels(
     }));
   }
 
-  return adapters;
+  const wsEnabled = channelsConfig?.ws?.enabled ?? false;
+  return { adapters, wsEnabled };
 }
 
 /** Scaffold the main team on first start. */

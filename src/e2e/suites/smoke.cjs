@@ -22,6 +22,12 @@ module.exports = async function suiteSmoke() {
     if (status !== 200) throw new Error(`Health returned ${status}`);
     return { ok: true };
   });
+  await h.runStep(r, 'dashboard-index', async () => {
+    const { status, body } = await h.httpGet('http://localhost:8080/', 5000);
+    if (status !== 200) throw new Error(`GET / returned ${status}: ${body?.substring(0, 200)}`);
+    if (!body.includes('<!DOCTYPE html>')) throw new Error('GET / did not return HTML');
+    return { ok: true, status };
+  });
 
   // Progressive protocol (18-19)
   await h.runStep(r, 'ws-progressive', async () => {

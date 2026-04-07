@@ -81,13 +81,13 @@ const DiscordChannelSchema = z.object({
   watched_channels: z.array(z.string()).default([]),
 });
 
-const CliChannelSchema = z.object({
-  enabled: z.boolean().default(true),
+const WsChannelSchema = z.object({
+  enabled: z.boolean().default(false),
 });
 
 export const ChannelsSchema = z.object({
   discord: DiscordChannelSchema.optional(),
-  cli: CliChannelSchema.default({ enabled: true }),
+  ws: WsChannelSchema.default({ enabled: false }),
   trust: TrustPolicySchema.optional(),
 });
 

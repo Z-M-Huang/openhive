@@ -8,18 +8,11 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { PassThrough } from 'node:stream';
 
-import { CLIAdapter } from './cli-adapter.js';
 import { ChannelRouter } from './router.js';
 import type { ChannelMessage, IChannelAdapter } from '../domain/interfaces.js';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
-
-/** Wait for the event loop to flush micro/macrotasks. */
-function flush(ms = 20): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 /** Create a minimal mock IChannelAdapter for router tests. */
 function createMockAdapter(name: string): IChannelAdapter & {
@@ -178,39 +171,31 @@ describe('UT-21: Channel Router', () => {
 // ── E2E-8: Full Flow ──────────────────────────────────────────────────────
 
 describe('E2E-8: Full message flow', () => {
-  it('message in -> router -> callback -> response out (CLI)', async () => {
-    const input = new PassThrough();
-    const output = new PassThrough();
-    const cliAdapter = new CLIAdapter({ input, output });
-
-    const responses: string[] = [];
-    output.on('data', (chunk: Buffer) => responses.push(chunk.toString()));
-
+  it('message in -> router -> callback -> response out', async () => {
+    const adapter = createMockAdapter('test');
     const callback = vi.fn().mockImplementation(async (msg: ChannelMessage) => {
       return `Echo: ${msg.content}`;
     });
 
-    const router = new ChannelRouter([cliAdapter], callback);
+    const router = new ChannelRouter([adapter], callback);
     await router.start();
 
-    input.write('ping\n');
-    await flush(50);
+    await adapter._handler!({
+      channelId: 'test-chan',
+      userId: 'user-1',
+      content: 'ping',
+      timestamp: Date.now(),
+    });
 
     expect(callback).toHaveBeenCalledTimes(1);
-    expect(callback).toHaveBeenCalledWith(
-      expect.objectContaining({
-        channelId: 'cli',
-        userId: 'local',
-        content: 'ping',
-      }),
-    );
-    expect(responses.join('')).toContain('Echo: ping');
+    expect(adapter._sent).toHaveLength(1);
+    expect(adapter._sent[0].content).toBe('Echo: ping');
 
     await router.stop();
   });
 
   it('multi-adapter flow: each adapter receives its own responses', async () => {
-    const a1 = createMockAdapter('cli');
+    const a1 = createMockAdapter('ws');
     const a2 = createMockAdapter('discord');
 
     const callback = vi.fn().mockImplementation(async (msg: ChannelMessage) => {
@@ -222,9 +207,9 @@ describe('E2E-8: Full message flow', () => {
 
     // Simulate message from adapter 1
     await a1._handler!({
-      channelId: 'cli',
-      userId: 'local',
-      content: 'from cli',
+      channelId: 'ws:abc',
+      userId: 'ws-client',
+      content: 'from ws',
       timestamp: Date.now(),
     });
 
@@ -238,7 +223,7 @@ describe('E2E-8: Full message flow', () => {
 
     expect(callback).toHaveBeenCalledTimes(2);
     expect(a1._sent).toHaveLength(1);
-    expect(a1._sent[0].content).toBe('Reply to from cli');
+    expect(a1._sent[0].content).toBe('Reply to from ws');
     expect(a2._sent).toHaveLength(1);
     expect(a2._sent[0].content).toBe('Reply to from discord');
 

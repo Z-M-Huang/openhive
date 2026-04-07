@@ -1,8 +1,8 @@
 # OpenHive channel configuration
 # Copy to channels.yaml and configure.
 
-cli:
-  enabled: true
+# ws:
+#   enabled: true    # Enable WebSocket interface (for testing/dashboard)
 
 # Uncomment to enable Discord:
 # discord:

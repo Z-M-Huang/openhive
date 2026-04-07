@@ -9,7 +9,6 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { tmpdir } from 'node:os';
 import { mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
-import { PassThrough } from 'node:stream';
 
 import { bootstrap } from '../index.js';
 import type { BootstrapResult } from '../index.js';
@@ -28,16 +27,11 @@ describe('Bootstrap creates all components', () => {
 
   it('creates logger, db, session manager, trigger engine, channel router, fastify', { timeout: 15_000 }, async () => {
     const dir = mkdtempSync(join(tmpdir(), 'openhive-bootstrap-'));
-    const input = new PassThrough();
-    const output = new PassThrough();
 
     result = await bootstrap({
       runDir: dir,
       dataDir: join(dir, 'data'),
       skipListen: true,
-      skipCli: true,
-      cliInput: input,
-      cliOutput: output,
     });
 
     expect(result.logger).toBeDefined();
@@ -51,8 +45,6 @@ describe('Bootstrap creates all components', () => {
     // Verify health endpoint works through bootstrap
     const response = await result.fastify.inject({ method: 'GET', url: '/health' });
     expect(response.statusCode).toBe(200);
-
-    input.end();
   });
 });
 
@@ -66,7 +58,6 @@ describe('Graceful shutdown stops all components', () => {
       runDir: dir,
       dataDir: join(dir, 'data'),
       skipListen: true,
-      skipCli: true,
     });
 
     // Spawn a session so we can verify stopAll is called

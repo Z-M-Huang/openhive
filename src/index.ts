@@ -24,7 +24,7 @@ import { buildProviderRegistry, resolveModel } from './sessions/provider-registr
 import type { TriggerEngine } from './triggers/engine.js';
 import type { ChannelMessage } from './domain/interfaces.js';
 import type { ProvidersOutput } from './config/validation.js';
-import type { Readable, Writable } from 'node:stream';
+import { fileURLToPath } from 'node:url';
 import type Database from 'better-sqlite3';
 import type { FastifyInstance } from 'fastify';
 export interface BootstrapDeps {
@@ -34,9 +34,6 @@ export interface BootstrapDeps {
   readonly seedRulesDir?: string;
   readonly listenAddress?: string;
   readonly listenPort?: number;
-  readonly cliInput?: Readable;
-  readonly cliOutput?: Writable;
-  readonly skipCli?: boolean;
   readonly skipListen?: boolean;
 }
 
@@ -165,7 +162,7 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
     (team, triggerName, reason) => logger.warn('Trigger auto-disabled', { team, trigger: triggerName, reason }),
   );
   triggerEngineRef = triggerEngine;
-  const adapters = initChannels({ dataDir, cliInput: deps?.cliInput, cliOutput: deps?.cliOutput, skipCli: deps?.skipCli }, logger);
+  const { adapters, wsEnabled } = initChannels({ dataDir }, logger);
 
   const handlerDeps = providersConfig
     ? {
@@ -200,7 +197,7 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
     };
   }
 
-  const wsAdapter = new WsAdapter();
+  const wsAdapter = wsEnabled ? new WsAdapter() : undefined;
   let classifierModel: import('ai').LanguageModel | undefined;
   if (providersConfig) try {
     const reg = buildProviderRegistry(providersConfig);
@@ -213,12 +210,12 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
     topicStore: stores.topicStore, classifierModel, topicSessionManager: new TopicSessionManager(),
     trustPolicy, senderTrustStore: stores.senderTrustStore, trustAuditStore: stores.trustAuditStore,
   });
-  const channelRouter = new ChannelRouter([wsAdapter, ...adapters], async (msg: ChannelMessage) => {
+  const channelRouter = new ChannelRouter([...(wsAdapter ? [wsAdapter] : []), ...adapters], async (msg: ChannelMessage) => {
     logger.info('Received message', { channelId: msg.channelId, userId: msg.userId });
     return (await channelHandler(msg)).results.map((r) => r.response).filter(Boolean).join('\n---\n');
   });
-  wsAdapter.setHandler(channelHandler);
-  if (stores.topicStore) {
+  wsAdapter?.setHandler(channelHandler);
+  if (wsAdapter && stores.topicStore) {
     const ts = stores.topicStore;
     wsAdapter.setTopicListCallback((chId) =>
       ts.getByChannel(chId).map((t) => ({ id: t.id, name: t.name, state: t.state })));
@@ -229,8 +226,12 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   await fastify.register(import('@fastify/websocket'));
   registerHealthEndpoint(fastify, { raw, sessionManager, triggerEngine, channelRouter });
   registerApiRoutes(fastify, { raw, orgTree, taskQueueStore, triggerConfigStore });
-  wsAdapter.registerRoute(fastify);
-  await fastify.register((await import('@fastify/static')).default, { root: join(process.cwd(), 'public'), prefix: '/' });
+  wsAdapter?.registerRoute(fastify);
+  const publicDir = fileURLToPath(new URL('../public', import.meta.url));
+  await fastify.register((await import('@fastify/static')).default, {
+    root: publicDir,
+    prefix: '/',
+  });
 
   const discordAdapters = adapters.filter((a): a is DiscordAdapter => a instanceof DiscordAdapter);
 
@@ -239,13 +240,13 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
     interactionStore: stores.interactionStore,
     notifyChannel: async (content, sourceChannelId) => {
       if (sourceChannelId) {
-        // Try router first (works for CLI and any adapter using ChannelRouter flow)
+        // Try router first (works for any adapter using ChannelRouter flow)
         const sent = await channelRouter.sendResponse(sourceChannelId, content);
         if (sent) return;
         // Router didn't know this channel — route directly to bypass adapters
         // (WS/Discord use setHandler(), so their IDs are never in #channelOwners)
         if (sourceChannelId.startsWith('ws:')) {
-          await wsAdapter.sendResponse(sourceChannelId, content);
+          if (wsAdapter) await wsAdapter.sendResponse(sourceChannelId, content);
         } else {
           for (const da of discordAdapters) {
             try { await da.sendResponse(sourceChannelId, content); } catch { /* channel gone */ }
@@ -272,7 +273,7 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   if (!deps?.skipListen) {
     await fastify.listen({ host: deps?.listenAddress ?? '0.0.0.0', port: deps?.listenPort ?? 8080 });
   }
-  logger.info('OpenHive v4 started — v4.2.1', { dataDir, runDir, systemRulesDir });
+  logger.info('OpenHive v4 started — v4.3.0', { dataDir, runDir, systemRulesDir });
 
   const shutdown = async (): Promise<void> => {
     clearInterval(interactionCleanupInterval);

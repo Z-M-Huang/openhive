@@ -227,6 +227,16 @@ async function cleanRestart() {
   run('mkdir', ['-p', RUN_DIR]);
   shell('rm -f "' + PROJECT_ROOT + '/data/rules/"*.md');
   shell('cp "' + PROJECT_ROOT + '/seed-rules/"* "' + PROJECT_ROOT + '/data/rules/" 2>/dev/null || true');
+  // Ensure WS is enabled for e2e test harness
+  const channelsYaml = PROJECT_ROOT + '/data/config/channels.yaml';
+  if (fs.existsSync(channelsYaml)) {
+    let content = fs.readFileSync(channelsYaml, 'utf8');
+    if (!content.includes('ws:')) {
+      content += '\nws:\n  enabled: true\n';
+      fs.writeFileSync(channelsYaml, content);
+      log('Injected ws: { enabled: true } into channels.yaml');
+    }
+  }
   shell('sudo docker compose -f "' + COMPOSE_FILE + '" up -d 2>&1', { timeout: 60000 });
   await waitHealth(90000, 3000);
   log('Clean restart complete, server healthy');

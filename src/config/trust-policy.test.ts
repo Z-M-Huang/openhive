@@ -92,7 +92,7 @@ describe('ChannelsSchema trust integration', () => {
   it('accepts channels config without trust section (backward compat)', () => {
     const result = ChannelsSchema.parse({});
     expect(result.trust).toBeUndefined();
-    expect(result.cli.enabled).toBe(true);
+    expect(result.ws.enabled).toBe(false);
   });
 
   it('accepts channels config with trust section', () => {

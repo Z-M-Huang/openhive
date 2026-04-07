@@ -81,7 +81,7 @@ describe('E2E-1: Bootstrap + Health', () => {
 
   it('bootstrap creates all components and health returns 200', { timeout: 15_000 }, async () => {
     const dir = makeTempDir();
-    result = await bootstrap({ runDir: dir, dataDir: join(dir, 'data'), skipListen: true, skipCli: true });
+    result = await bootstrap({ runDir: dir, dataDir: join(dir, 'data'), skipListen: true });
     expect(result.logger).toBeDefined();
     expect(result.raw).toBeDefined();
     expect(result.orgTree).toBeDefined();

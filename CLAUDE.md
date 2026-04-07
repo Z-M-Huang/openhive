@@ -29,7 +29,7 @@ src/
       guards.ts         -- assertCallerIsParent(), assertBrowserEnabled()
       tool-audit.ts     -- withAudit() three-tier logging
       tool-guards.ts    -- Governance: classifyPath, OWN_TEAM_PREFIXES
-  channels/             -- WebSocket, Discord, CLI adapters + router
+  channels/             -- WebSocket, Discord adapters + router
   triggers/             -- TriggerEngine, dedup, rate-limiter
   rules/                -- cascade.ts (Tier 1-4 rule loading)
   handlers/tools/       -- 17 handler functions (business logic, interface-first deps)
