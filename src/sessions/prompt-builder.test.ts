@@ -63,7 +63,7 @@ describe('Unit 6: System Prompt Builder', () => {
     expect(result.dynamicSuffix).toContain('## Available Credentials');
     expect(result.dynamicSuffix).toContain('`GITHUB_TOKEN`');
     expect(result.dynamicSuffix).toContain('`SLACK_KEY`');
-    expect(result.dynamicSuffix).toContain('get_credential({ key: "KEY_NAME" })');
+    expect(result.dynamicSuffix).toContain('vault_get({ key: "KEY_NAME" })');
   });
 
   it('omits credential note when no keys', () => {

@@ -13,7 +13,7 @@ Your session has access to these tools (subject to `allowed_tools` config):
 
 ## Built-in Tools
 
-- **Organization tools** — Always available: spawn_team, delegate_task, query_team, escalate, send_message, get_status, list_teams, shutdown_team, get_credential, create_trigger, enable_trigger, disable_trigger, test_trigger, list_triggers, update_team, update_trigger. Teams with `browser:` config also get browser tools (browser_navigate, browser_snapshot, browser_screenshot, browser_click, browser_type, browser_go_back, browser_go_forward, browser_close).
+- **Organization tools** — Always available: spawn_team, delegate_task, query_team, escalate, send_message, get_status, list_teams, shutdown_team, vault_get, vault_set, vault_list, vault_delete, create_trigger, enable_trigger, disable_trigger, test_trigger, list_triggers, update_team, update_trigger. Teams with `browser:` config also get browser tools (browser_navigate, browser_snapshot, browser_screenshot, browser_click, browser_type, browser_go_back, browser_go_forward, browser_close).
 - **web_fetch** — HTTP fetch with SSRF protection.
 - Additional MCP servers as configured in team config.
 
@@ -43,9 +43,12 @@ After handling a request, save a memory if ANY of these apply:
 - User asked you to remember something
 - A decision was made that affects future interactions
 
-## Credentials
+## Credentials (Team Vault)
 
-- Call `get_credential({ key: "KEY_NAME" })` to retrieve a credential value on demand.
+- Call `vault_get({ key: "KEY_NAME" })` to retrieve a credential value on demand.
+- Use `vault_set({ key, value, is_secret? })` to store a new credential.
+- Use `vault_list()` to see available keys and metadata.
+- Use `vault_delete({ key })` to remove a credential.
 - NEVER store credential values in memory (via memory_save), skills/, or team-rules/ files.
 - NEVER include credential values in task results or responses.
 - Use credentials only at the point of use (API calls, HTTP headers).

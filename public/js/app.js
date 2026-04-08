@@ -8,6 +8,8 @@ const routes = {
   '/memories':      () => loadView('memories'),
   '/triggers':      () => loadView('triggers'),
   '/conversations': () => loadView('conversations'),
+  '/vault':         () => loadView('vault'),
+  '/learning':      () => loadView('triggers', { initialFilters: { name: 'learning-cycle' } }),
 };
 
 const container = document.getElementById('app');
@@ -17,7 +19,7 @@ const container = document.getElementById('app');
  * Each view module must export a render(container) function.
  * Falls back to a placeholder if the module does not exist yet.
  */
-async function loadView(name) {
+async function loadView(name, opts) {
   container.textContent = '';
   const wrapper = document.createElement('div');
   wrapper.setAttribute('data-view', name);
@@ -25,7 +27,7 @@ async function loadView(name) {
   try {
     const mod = await import(`/js/views/${name}.js`);
     if (typeof mod.render === 'function') {
-      mod.render(wrapper);
+      mod.render(wrapper, opts);
     } else {
       renderPlaceholder(name, wrapper);
     }

@@ -127,7 +127,7 @@ Use these tools to read, modify, and explore the filesystem within your workspac
 }
 
 export function buildCredentialNote(keys: readonly string[]): string {
-  return `\n## Available Credentials\nThis team has credentials configured: ${keys.map(k => `\`${k}\``).join(', ')}. Use \`get_credential({ key: "KEY_NAME" })\` to retrieve each value at point of use. Never hardcode or store credential values.\n`;
+  return `\n## Available Credentials\nThis team has credentials configured: ${keys.map(k => `\`${k}\``).join(', ')}. Use \`vault_get({ key: "KEY_NAME" })\` to retrieve each value at point of use. Never hardcode or store credential values.\n`;
 }
 
 export function buildHttpRules(): string {

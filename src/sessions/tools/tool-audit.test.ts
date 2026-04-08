@@ -210,6 +210,52 @@ describe('withAudit', () => {
     expect(summary).not.toContain(dynamicSecret);
   });
 
+  it('dynamically extracts input.value as a secret for vault-style tools', async () => {
+    const vaultSecret = randomCred();
+    const execute = vi.fn().mockResolvedValue({ success: true });
+    const wrapped = withAudit('vault_set', execute, { logger });
+
+    await wrapped({ key: 'API_KEY', value: vaultSecret });
+
+    // Trace request: value should be scrubbed
+    const traceCall = findCall(logger, 'ToolCall:request');
+    const params = (traceCall![1] as Record<string, unknown>).params as Record<string, unknown>;
+    expect(params.value).toBe('[REDACTED]');
+    expect(params.key).toBe('API_KEY');
+  });
+
+  it('does not scrub short input.value (< 8 chars)', async () => {
+    const execute = vi.fn().mockResolvedValue({ success: true });
+    const wrapped = withAudit('vault_set', execute, { logger });
+
+    await wrapped({ key: 'FLAG', value: 'short' });
+
+    const traceCall = findCall(logger, 'ToolCall:request');
+    const params = (traceCall![1] as Record<string, unknown>).params as Record<string, unknown>;
+    expect(params.value).toBe('short');
+  });
+
+  it('scrubs both input.credentials and input.value when both present', async () => {
+    const credSecret = randomCred();
+    const valSecret = randomCred();
+    const execute = vi.fn().mockResolvedValue({ c: credSecret, v: valSecret });
+    const wrapped = withAudit('combo_vault', execute, { logger });
+
+    await wrapped({ credentials: { TOK: credSecret }, value: valSecret });
+
+    // Trace request: both scrubbed
+    const traceCall = findCall(logger, 'ToolCall:request');
+    const params = (traceCall![1] as Record<string, unknown>).params as Record<string, unknown>;
+    expect((params.credentials as Record<string, unknown>).TOK).toBe('[REDACTED]');
+    expect(params.value).toBe('[REDACTED]');
+
+    // Response: both scrubbed
+    const respCall = findCall(logger, 'ToolCall:response');
+    const respStr = (respCall![1] as Record<string, unknown>).response as string;
+    expect(respStr).not.toContain(credSecret);
+    expect(respStr).not.toContain(valSecret);
+  });
+
   it('logs ToolCall:error and re-throws when execute fails', async () => {
     const error = new Error('boom');
     const execute = vi.fn().mockRejectedValue(error);

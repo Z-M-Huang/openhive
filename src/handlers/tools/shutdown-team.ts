@@ -31,6 +31,7 @@ export interface ShutdownTeamDeps {
   readonly escalationStore?: { removeByTeam(teamId: string): void };
   readonly interactionStore?: { removeByTeam(teamId: string): void };
   readonly memoryStore?: { removeByTeam(teamName: string): void };
+  readonly vaultStore?: { removeByTeam(teamName: string): void };
   readonly runDir?: string;
 }
 
@@ -90,6 +91,7 @@ export async function shutdownTeam(
   deps.escalationStore?.removeByTeam(name);
   deps.interactionStore?.removeByTeam(name);
   deps.memoryStore?.removeByTeam(name);
+  deps.vaultStore?.removeByTeam(name);
 
   if (deps.runDir) cleanupTeamDirs(deps.runDir, name);
 

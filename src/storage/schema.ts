@@ -267,3 +267,23 @@ export const trustAuditLog = sqliteTable(
     index('idx_trust_audit_sender').on(table.senderId),
   ],
 );
+
+// ── team_vault ─────────────────────────────────────────────────────────────
+
+export const teamVault = sqliteTable(
+  'team_vault',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    teamName: text('team_name').notNull(),
+    key: text('key').notNull(),
+    value: text('value').notNull(),
+    isSecret: integer('is_secret').notNull().default(0),
+    updatedBy: text('updated_by'),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => [
+    index('idx_team_vault_team_name').on(table.teamName),
+    unique('uq_team_vault_team_key').on(table.teamName, table.key),
+  ],
+);

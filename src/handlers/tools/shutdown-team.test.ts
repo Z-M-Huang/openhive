@@ -216,6 +216,29 @@ describe('shutdown_team cleanup', () => {
     expect(interactionStore.removeByTeam).toHaveBeenCalledWith('child');
   });
 
+  it('cleans up vault secrets on shutdown', async () => {
+    const store = createMemoryOrgStore();
+    const tree = new OrgTree(store);
+    tree.addTeam(makeNode({ teamId: 'root', name: 'root' }));
+    tree.addTeam(makeNode({ teamId: 'child', name: 'child', parentId: 'root' }));
+
+    const sessionManager = {
+      getSession: vi.fn().mockResolvedValue(null),
+      terminateSession: vi.fn().mockResolvedValue(undefined),
+    };
+    const taskQueue = createMockTaskQueue();
+    const vaultStore = { removeByTeam: vi.fn() };
+
+    const result = await shutdownTeam(
+      { name: 'child', cascade: false },
+      'root',
+      { orgTree: tree, sessionManager, taskQueue, vaultStore },
+    );
+
+    expect(result.success).toBe(true);
+    expect(vaultStore.removeByTeam).toHaveBeenCalledWith('child');
+  });
+
   it('cleans up filesystem on shutdown', async () => {
     const store = createMemoryOrgStore();
     const tree = new OrgTree(store);

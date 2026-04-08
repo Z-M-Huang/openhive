@@ -14,11 +14,11 @@
  */
 
 import { z } from 'zod';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, existsSync, cpSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { stringify as yamlStringify } from 'yaml';
 import type { OrgTree } from '../../domain/org-tree.js';
-import type { ISessionSpawner, ITaskQueueStore } from '../../domain/interfaces.js';
+import type { ISessionSpawner, ITaskQueueStore, ITriggerConfigStore } from '../../domain/interfaces.js';
 import { TeamStatus } from '../../domain/types.js';
 import type { TeamConfig } from '../../domain/types.js';
 import { scrubSecrets } from '../../logging/credential-scrubber.js';
@@ -62,6 +62,11 @@ export interface SpawnTeamDeps {
   readonly runDir: string;
   readonly loadConfig: (name: string, configPath?: string, hints?: SpawnTeamConfigHints) => TeamConfig;
   readonly taskQueue?: ITaskQueueStore;
+  readonly vaultStore?: {
+    set(teamName: string, key: string, value: string, isSecret: boolean, updatedBy?: string): unknown;
+    removeByTeam(teamName: string): void;
+  };
+  readonly triggerConfigStore?: ITriggerConfigStore;
 }
 
 /** Subdirectories to scaffold for each new team. */
@@ -74,6 +79,12 @@ function scaffoldTeamDirs(runDir: string, teamName: string): void {
   const teamDir = join(runDir, 'teams', teamName);
   for (const sub of TEAM_SUBDIRS) {
     mkdirSync(join(teamDir, sub), { recursive: true });
+  }
+
+  // Copy seed skills into the new team's skills/ directory
+  const seedDir = join(resolve(runDir, '..'), 'seed-skills');
+  if (existsSync(seedDir)) {
+    cpSync(seedDir, join(teamDir, 'skills'), { recursive: true });
   }
 }
 
@@ -118,8 +129,15 @@ export async function spawnTeam(
     return { success: false, error: `config error: ${msg}` };
   }
 
-  // Merge credentials into config (stored in config.yaml, injected by system)
-  if (parsed.data.credentials && Object.keys(parsed.data.credentials).length > 0) {
+  // Store credentials: vault (preferred) or config.yaml (backward compat)
+  const hasCredentials = parsed.data.credentials && Object.keys(parsed.data.credentials).length > 0;
+  if (hasCredentials && deps.vaultStore) {
+    // Write each credential to vault with is_secret=1
+    for (const [key, value] of Object.entries(parsed.data.credentials!)) {
+      deps.vaultStore.set(name, key, value, true, callerId);
+    }
+  } else if (hasCredentials) {
+    // Backward compat: merge credentials into config.yaml
     config = { ...config, credentials: parsed.data.credentials };
   }
 
@@ -140,6 +158,7 @@ export async function spawnTeam(
       writeFileSync(initPath, safeContext, 'utf-8');
     }
   } catch (err) {
+    deps.vaultStore?.removeByTeam(name);
     cleanupTeamDirs(deps.runDir, name);
     const msg = errorMessage(err);
     return { success: false, error: `scaffold error: ${msg}` };
@@ -169,6 +188,7 @@ export async function spawnTeam(
     await deps.spawner.spawn(name, name);
   } catch (err) {
     deps.orgTree.removeTeam(name);
+    deps.vaultStore?.removeByTeam(name);
     cleanupTeamDirs(deps.runDir, name);
     const msg = errorMessage(err);
     return { success: false, error: `spawn failed: ${msg}` };
@@ -177,6 +197,9 @@ export async function spawnTeam(
   // Auto-queue initialization task so the team self-bootstraps
   const initError = enqueueInitTask(name, parsed.data.init_context, deps, sourceChannelId);
   if (initError) return initError;
+
+  // Seed a disabled learning-cycle trigger (skip if one already exists)
+  seedLearningTrigger(name, deps.triggerConfigStore);
 
   return {
     success: true, team: name,
@@ -190,9 +213,10 @@ function enqueueInitTask(
 ): SpawnTeamResult | null {
   if (!deps.taskQueue) return null;
 
+  const credToolName = deps.vaultStore ? 'vault_get' : 'get_credential';
   const initPayload = initContext
     ? 'Bootstrap this team. Your team context is already in your system prompt (from team-rules/team-context.md). ' +
-      'Use the get_credential tool to access any credentials provided during team creation. ' +
+      `Use the ${credToolName} tool to access any credentials provided during team creation. ` +
       'Steps: (1) Create skills in skills/ for your core tasks, ' +
       '(2) Use memory_save to record your identity, key decisions, and initial context, ' +
       '(3) Respond with a brief, user-friendly summary of what capabilities you now have.'
@@ -204,11 +228,35 @@ function enqueueInitTask(
     deps.taskQueue.enqueue(name, initPayload, 'critical', 'bootstrap', sourceChannelId);
     return null;
   } catch (err) {
-    // Roll back everything: session + org tree + dirs
+    // Roll back everything: session + org tree + vault + dirs
     try { deps.spawner.stop?.(name); } catch { /* best effort */ }
     deps.orgTree.removeTeam(name);
+    deps.vaultStore?.removeByTeam(name);
     cleanupTeamDirs(deps.runDir, name);
     const msg = errorMessage(err);
     return { success: false, error: `init enqueue failed: ${msg}` };
   }
+}
+
+/** Deterministic jittered cron from team name hash: runs daily at 3:{minute}. */
+export function jitteredCron(teamName: string): string {
+  const hash = Buffer.from(teamName).reduce((a, b) => a + b, 0);
+  const minute = hash % 60;
+  return `${minute} 3 * * *`;
+}
+
+/** Create a disabled learning-cycle trigger for a team (idempotent — skips if exists). */
+export function seedLearningTrigger(teamName: string, store?: ITriggerConfigStore): void {
+  if (!store) return;
+  const existing = store.get(teamName, 'learning-cycle');
+  if (existing) return;
+  store.upsert({
+    name: 'learning-cycle',
+    type: 'schedule',
+    config: { cron: jitteredCron(teamName) },
+    team: teamName,
+    task: 'Run a learning cycle: review recent interactions, extract patterns, and update memory.',
+    skill: 'learning-cycle',
+    state: 'disabled',
+  });
 }

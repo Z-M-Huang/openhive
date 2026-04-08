@@ -21,7 +21,7 @@ import { buildRuleCascade } from '../rules/cascade.js';
 import { loadSkillsContent } from './skill-loader.js';
 import { buildMemorySection } from './memory-loader.js';
 import { scrubSecrets } from '../logging/credential-scrubber.js';
-import type { ChannelMessage, IInteractionStore, IMemoryStore } from '../domain/interfaces.js';
+import type { ChannelMessage, IInteractionStore, IMemoryStore, IVaultStore, ISenderTrustStore } from '../domain/interfaces.js';
 import type { ProvidersOutput } from '../config/validation.js';
 import type { TeamConfig } from '../domain/types.js';
 
@@ -72,6 +72,8 @@ export interface MessageHandlerDeps {
   readonly loadConfig?: (name: string) => TeamConfig;
   readonly getTeamConfigFn?: (name: string) => TeamConfig | undefined;
   readonly memoryStore?: IMemoryStore;
+  readonly vaultStore?: IVaultStore;
+  readonly senderTrustStore?: ISenderTrustStore;
 }
 
 /** Collect a team's ID and all descendant IDs from the org tree via BFS. */
@@ -169,7 +171,14 @@ export async function handleMessage(
     const contextWindow = getContextWindow(deps.providers, profileName);
     const ctx = buildSessionContext(teamName, deps.runDir);
 
-    const teamCreds = teamConfig.credentials ?? {};
+    // Merge config credentials with vault secrets (vault wins on duplicates)
+    const configCreds = teamConfig.credentials ?? {};
+    const vaultSecrets = deps.vaultStore?.getSecrets(teamName) ?? [];
+    const vaultRecord: Record<string, string> = {};
+    for (const entry of vaultSecrets) {
+      vaultRecord[entry.key] = entry.value;
+    }
+    const teamCreds = { ...configCreds, ...vaultRecord };
     const credValues = extractStringCredentials(teamCreds);
 
     const tools = assembleTools(teamConfig, teamName, deps, registry, profileName, modelId, ctx, providerSecrets, credValues, opts?.sourceChannelId);

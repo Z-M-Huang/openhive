@@ -18,6 +18,7 @@ import type {
   IInteractionStore,
   IMemoryStore,
   ISenderTrustStore,
+  IVaultStore,
 } from '../../domain/interfaces.js';
 
 // ── Narrow interfaces for concrete deps not yet in domain/interfaces ─────
@@ -68,4 +69,5 @@ export interface OrgToolContext {
   readonly browserRelay?: IBrowserRelay;
   readonly memoryStore?: IMemoryStore;
   readonly senderTrustStore?: ISenderTrustStore;
+  readonly vaultStore?: IVaultStore;
 }

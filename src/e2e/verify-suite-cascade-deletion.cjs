@@ -98,6 +98,10 @@ runStep('cascade-deletion', {
     const interRows = db.prepare("SELECT COUNT(*) AS cnt FROM channel_interactions WHERE team_id IN ('A1','A11')").get();
     checks.push(check('channel_interactions_cleaned', interRows.cnt === 0, '0 channel_interactions rows', `${interRows.cnt} rows`));
 
+    // 7. team_vault: ZERO rows for A1/A11
+    const vaultRows = db.prepare("SELECT COUNT(*) AS cnt FROM team_vault WHERE team_name IN ('A1','A11')").get();
+    checks.push(check('team_vault_cleaned', vaultRows.cnt === 0, '0 team_vault rows', `${vaultRows.cnt} rows`));
+
     // 7. trigger_dedup NOT affected (still has rows)
     const dedupRows = db.prepare('SELECT COUNT(*) AS cnt FROM trigger_dedup').get();
     checks.push(check('trigger_dedup_untouched', dedupRows.cnt > 0, 'trigger_dedup has rows', `${dedupRows.cnt} rows`));

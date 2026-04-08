@@ -10,7 +10,9 @@ import { tmpdir } from 'node:os';
 import { mkdtempSync, existsSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse as yamlParse } from 'yaml';
-import { spawnTeam } from './spawn-team.js';
+import { spawnTeam, jitteredCron, seedLearningTrigger } from './spawn-team.js';
+import type { ITriggerConfigStore } from '../../domain/interfaces.js';
+import type { TriggerConfig, TriggerState } from '../../domain/types.js';
 import { OrgTree } from '../../domain/org-tree.js';
 import {
   setupServer,
@@ -143,7 +145,7 @@ describe('spawn_team filesystem and init', () => {
     expect(cfg.mcp_servers).toContain('analytics');
   });
 
-  it('writes credentials to config.yaml', async () => {
+  it('writes credentials to config.yaml when no vaultStore (backward compat)', async () => {
     const testToken = 'test-fake-token-value-1234567890';
     await spawnTeam({ name: 'ops', scope_accepts: ['ops'], credentials: { api_key: testToken, subdomain: 'acme' } }, 'root', makeDeps());
     const raw = readFileSync(join(dir, 'teams', 'ops', 'config.yaml'), 'utf-8');
@@ -342,5 +344,275 @@ describe('spawn_team credential note', () => {
     );
     expect(result.success).toBe(true);
     expect(result.note).toBeUndefined();
+  });
+});
+
+// ── spawn_team vault integration ─────────────────────────────────────────
+
+describe('spawn_team vault integration', () => {
+  let dir: string;
+  let tree: OrgTree;
+  let mockSpawner: { spawn: ReturnType<typeof vi.fn>; stop: ReturnType<typeof vi.fn> };
+  let mockTaskQueue: ReturnType<typeof createMockTaskQueue>;
+  let mockVaultStore: { set: ReturnType<typeof vi.fn>; removeByTeam: ReturnType<typeof vi.fn> };
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'openhive-vault-spawn-'));
+    mkdirSync(join(dir, 'teams'), { recursive: true });
+    const store = createMemoryOrgStore();
+    tree = new OrgTree(store);
+    tree.addTeam(makeNode({ teamId: 'root', name: 'root' }));
+    mockSpawner = { spawn: vi.fn().mockResolvedValue('sid'), stop: vi.fn() };
+    mockTaskQueue = createMockTaskQueue();
+    mockVaultStore = { set: vi.fn(), removeByTeam: vi.fn() };
+  });
+
+  function makeDeps(overrides?: Partial<Parameters<typeof spawnTeam>[2]>) {
+    return {
+      orgTree: tree,
+      spawner: mockSpawner,
+      runDir: dir,
+      loadConfig: (_name: string, _cp?: string, hints?: { description?: string; scopeAccepts?: string[] }) => ({
+        name: _name, parent: null, description: hints?.description ?? '',
+        scope: { accepts: hints?.scopeAccepts ?? [], rejects: [] },
+        allowed_tools: ['*'], mcp_servers: [] as string[], provider_profile: 'default', maxTurns: 100,
+      }),
+      taskQueue: mockTaskQueue,
+      vaultStore: mockVaultStore,
+      ...overrides,
+    };
+  }
+
+  it('writes credentials to vault with is_secret=true when vaultStore present', async () => {
+    const testToken = 'test-fake-token-value-1234567890';
+    await spawnTeam(
+      { name: 'vault-team', scope_accepts: ['ops'], credentials: { api_key: testToken, subdomain: 'acme' } },
+      'root', makeDeps(),
+    );
+    expect(mockVaultStore.set).toHaveBeenCalledWith('vault-team', 'api_key', testToken, true, 'root');
+    expect(mockVaultStore.set).toHaveBeenCalledWith('vault-team', 'subdomain', 'acme', true, 'root');
+    // Credentials should NOT be in config.yaml
+    const raw = readFileSync(join(dir, 'teams', 'vault-team', 'config.yaml'), 'utf-8');
+    const cfg = yamlParse(raw) as { credentials?: Record<string, string> };
+    expect(cfg.credentials).toBeUndefined();
+  });
+
+  it('does not write to vault when no credentials provided', async () => {
+    await spawnTeam(
+      { name: 'no-cred-vault', scope_accepts: ['ops'] },
+      'root', makeDeps(),
+    );
+    expect(mockVaultStore.set).not.toHaveBeenCalled();
+  });
+
+  it('cleans vault on spawn failure', async () => {
+    mockSpawner.spawn.mockRejectedValueOnce(new Error('docker down'));
+    const result = await spawnTeam(
+      { name: 'fail-vault', scope_accepts: ['test'], credentials: { key: 'test-fake-secret-value-12345' } },
+      'root', makeDeps(),
+    );
+    expect(result.success).toBe(false);
+    expect(mockVaultStore.removeByTeam).toHaveBeenCalledWith('fail-vault');
+  });
+
+  it('cleans vault on enqueue failure', async () => {
+    const failQueue = {
+      ...mockTaskQueue,
+      enqueue: () => { throw new Error('queue full'); },
+    };
+    const result = await spawnTeam(
+      { name: 'fail-enqueue', scope_accepts: ['test'], credentials: { key: 'test-fake-secret-value-12345' } },
+      'root', makeDeps({ taskQueue: failQueue }),
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('init enqueue failed');
+    expect(mockVaultStore.removeByTeam).toHaveBeenCalledWith('fail-enqueue');
+  });
+
+  it('init task mentions vault_get when vaultStore present', async () => {
+    await spawnTeam(
+      { name: 'vault-init', scope_accepts: ['ops'], init_context: 'Setup with vault' },
+      'root', makeDeps(),
+    );
+    const initTask = mockTaskQueue.tasks.find(t => t.teamId === 'vault-init');
+    expect(initTask?.task).toContain('vault_get');
+    expect(initTask?.task).not.toContain('get_credential');
+  });
+
+  it('init task mentions get_credential when no vaultStore', async () => {
+    await spawnTeam(
+      { name: 'legacy-init', scope_accepts: ['ops'], init_context: 'Setup without vault' },
+      'root', makeDeps({ vaultStore: undefined }),
+    );
+    const initTask = mockTaskQueue.tasks.find(t => t.teamId === 'legacy-init');
+    expect(initTask?.task).toContain('get_credential');
+    expect(initTask?.task).not.toContain('vault_get');
+  });
+});
+
+// ── Learning-cycle trigger seeding ──────────────────────────────────────
+
+function createMockTriggerConfigStore(): ITriggerConfigStore & { configs: TriggerConfig[] } {
+  const configs: TriggerConfig[] = [];
+  return {
+    configs,
+    upsert(config: TriggerConfig): void {
+      const idx = configs.findIndex(c => c.team === config.team && c.name === config.name);
+      if (idx >= 0) configs[idx] = config;
+      else configs.push(config);
+    },
+    remove(_team: string, _name: string): void {
+      const idx = configs.findIndex(c => c.team === _team && c.name === _name);
+      if (idx >= 0) configs.splice(idx, 1);
+    },
+    removeByTeam(team: string): void {
+      for (let i = configs.length - 1; i >= 0; i--) {
+        if (configs[i].team === team) configs.splice(i, 1);
+      }
+    },
+    getByTeam(team: string): TriggerConfig[] {
+      return configs.filter(c => c.team === team);
+    },
+    getAll(): TriggerConfig[] {
+      return [...configs];
+    },
+    setState(team: string, name: string, state: TriggerState): void {
+      const c = configs.find(x => x.team === team && x.name === name);
+      if (c) (c as { state: TriggerState }).state = state;
+    },
+    incrementFailures(): number { return 0; },
+    resetFailures(): void { /* no-op */ },
+    get(team: string, name: string): TriggerConfig | undefined {
+      return configs.find(c => c.team === team && c.name === name);
+    },
+  };
+}
+
+describe('jitteredCron', () => {
+  it('returns a valid cron with minute 0-59 at hour 3', () => {
+    const cron = jitteredCron('test-team');
+    const match = /^(\d{1,2}) 3 \* \* \*$/.exec(cron);
+    expect(match).not.toBeNull();
+    const minute = Number(match![1]);
+    expect(minute).toBeGreaterThanOrEqual(0);
+    expect(minute).toBeLessThan(60);
+  });
+
+  it('is deterministic — same name produces same cron', () => {
+    expect(jitteredCron('analytics')).toBe(jitteredCron('analytics'));
+  });
+
+  it('different names produce different minutes (with high probability)', () => {
+    const a = jitteredCron('alpha');
+    const b = jitteredCron('beta');
+    // Not guaranteed to differ but overwhelmingly likely for distinct names
+    expect(a !== b || a === b).toBe(true); // always true — real check is the set below
+    const minutes = new Set(['alpha', 'beta', 'gamma', 'delta', 'epsilon'].map(n => jitteredCron(n)));
+    expect(minutes.size).toBeGreaterThan(1);
+  });
+});
+
+describe('seedLearningTrigger', () => {
+  it('creates disabled learning-cycle trigger', () => {
+    const store = createMockTriggerConfigStore();
+    seedLearningTrigger('ops', store);
+    expect(store.configs).toHaveLength(1);
+    const trigger = store.configs[0];
+    expect(trigger.name).toBe('learning-cycle');
+    expect(trigger.team).toBe('ops');
+    expect(trigger.state).toBe('disabled');
+    expect(trigger.type).toBe('schedule');
+    expect(trigger.skill).toBe('learning-cycle');
+  });
+
+  it('does not overwrite existing trigger (get-guard)', () => {
+    const store = createMockTriggerConfigStore();
+    // Pre-populate with an enabled trigger
+    store.upsert({
+      name: 'learning-cycle', type: 'schedule', team: 'ops',
+      config: { cron: '0 3 * * *' }, task: 'custom task', state: 'active',
+    });
+    seedLearningTrigger('ops', store);
+    expect(store.configs).toHaveLength(1);
+    expect(store.configs[0].state).toBe('active');
+    expect(store.configs[0].task).toBe('custom task');
+  });
+
+  it('is a no-op when store is undefined', () => {
+    // Should not throw
+    seedLearningTrigger('ops', undefined);
+  });
+
+  it('uses jittered cron schedule', () => {
+    const store = createMockTriggerConfigStore();
+    seedLearningTrigger('my-team', store);
+    const cfg = store.configs[0].config as { cron: string };
+    expect(cfg.cron).toBe(jitteredCron('my-team'));
+  });
+});
+
+describe('spawn_team learning trigger integration', () => {
+  let dir: string;
+  let tree: OrgTree;
+  let mockSpawner: { spawn: ReturnType<typeof vi.fn>; stop: ReturnType<typeof vi.fn> };
+  let mockTaskQueue: ReturnType<typeof createMockTaskQueue>;
+  let mockTriggerStore: ReturnType<typeof createMockTriggerConfigStore>;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'openhive-trigger-seed-'));
+    mkdirSync(join(dir, 'teams'), { recursive: true });
+    const store = createMemoryOrgStore();
+    tree = new OrgTree(store);
+    tree.addTeam(makeNode({ teamId: 'root', name: 'root' }));
+    mockSpawner = { spawn: vi.fn().mockResolvedValue('sid'), stop: vi.fn() };
+    mockTaskQueue = createMockTaskQueue();
+    mockTriggerStore = createMockTriggerConfigStore();
+  });
+
+  function makeDeps(overrides?: Partial<Parameters<typeof spawnTeam>[2]>) {
+    return {
+      orgTree: tree,
+      spawner: mockSpawner,
+      runDir: dir,
+      loadConfig: (_name: string, _cp?: string, hints?: { description?: string; scopeAccepts?: string[] }) => ({
+        name: _name, parent: null, description: hints?.description ?? '',
+        scope: { accepts: hints?.scopeAccepts ?? [], rejects: [] },
+        allowed_tools: ['*'], mcp_servers: [] as string[], provider_profile: 'default', maxTurns: 100,
+      }),
+      taskQueue: mockTaskQueue,
+      triggerConfigStore: mockTriggerStore,
+      ...overrides,
+    };
+  }
+
+  it('seeds disabled learning-cycle trigger after successful spawn', async () => {
+    const result = await spawnTeam({ name: 'analytics', scope_accepts: ['data'] }, 'root', makeDeps());
+    expect(result.success).toBe(true);
+    expect(mockTriggerStore.configs).toHaveLength(1);
+    const trigger = mockTriggerStore.configs[0];
+    expect(trigger.name).toBe('learning-cycle');
+    expect(trigger.team).toBe('analytics');
+    expect(trigger.state).toBe('disabled');
+  });
+
+  it('does not seed trigger when triggerConfigStore is absent', async () => {
+    const result = await spawnTeam(
+      { name: 'no-trigger', scope_accepts: ['test'] }, 'root',
+      makeDeps({ triggerConfigStore: undefined }),
+    );
+    expect(result.success).toBe(true);
+    expect(mockTriggerStore.configs).toHaveLength(0);
+  });
+
+  it('does not overwrite existing learning-cycle trigger on re-spawn attempt', async () => {
+    // Pre-seed an active trigger
+    mockTriggerStore.upsert({
+      name: 'learning-cycle', type: 'schedule', team: 'reuse',
+      config: { cron: '0 3 * * *' }, task: 'custom', state: 'active',
+    });
+    // Spawn will fail because team already exists if registered, but seed guard is tested via unit fn
+    seedLearningTrigger('reuse', mockTriggerStore);
+    expect(mockTriggerStore.configs).toHaveLength(1);
+    expect(mockTriggerStore.configs[0].state).toBe('active');
   });
 });

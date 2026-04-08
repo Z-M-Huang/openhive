@@ -20,6 +20,7 @@ import type {
   EscalationCorrelation,
   MemoryEntry,
   MemorySearchResult,
+  VaultEntry,
 } from './types.js';
 
 // ── Session ────────────────────────────────────────────────────────────────
@@ -199,6 +200,17 @@ export interface ITrustAuditStore {
   query(opts: { since?: string; decision?: string; senderId?: string; limit?: number }): TrustAuditEntry[];
 }
 
+// ── Vault Store ────────────────────────────────────────────────────────────
+
+export interface IVaultStore {
+  set(teamName: string, key: string, value: string, isSecret: boolean, updatedBy?: string): VaultEntry;
+  get(teamName: string, key: string): VaultEntry | undefined;
+  list(teamName: string): VaultEntry[];
+  delete(teamName: string, key: string): boolean;
+  getSecrets(teamName: string): VaultEntry[];
+  removeByTeam(teamName: string): void;
+}
+
 // ── Config (used by L1+ layers) ────────────────────────────────────────────
 
-export type { TeamConfig, TriggerConfig, TriggerState, TopicEntry, TopicState };
+export type { TeamConfig, TriggerConfig, TriggerState, TopicEntry, TopicState, VaultEntry };

@@ -17,7 +17,7 @@ import { DiscordAdapter } from './channels/discord-adapter.js';
 import { handleMessage } from './sessions/message-handler.js';
 import { TaskConsumer } from './sessions/task-consumer.js';
 import { recoverFromCrash } from './recovery/startup-recovery.js';
-import { ensureRunDir, seedOrgRules, initStorage, initTriggerEngine, initChannels, ensureMainTeam, migrateAllowedTools, initBrowserRelay, runMemoryMigration } from './bootstrap-helpers.js';
+import { ensureRunDir, seedOrgRules, seedTeamSkills, initStorage, initTriggerEngine, initChannels, ensureMainTeam, migrateAllowedTools, initBrowserRelay, runMemoryMigration, runVaultMigration, seedLearningTriggers } from './bootstrap-helpers.js';
 import { createChannelHandler } from './channel-handler-factory.js';
 import { TopicSessionManager } from './sessions/topic-session-manager.js';
 import { buildProviderRegistry, resolveModel } from './sessions/provider-registry.js';
@@ -32,6 +32,7 @@ export interface BootstrapDeps {
   readonly runDir?: string;
   readonly systemRulesDir?: string;
   readonly seedRulesDir?: string;
+  readonly seedSkillsDir?: string;
   readonly listenAddress?: string;
   readonly listenPort?: number;
   readonly skipListen?: boolean;
@@ -76,6 +77,7 @@ function buildOrgToolDeps(
     interactionStore: import('./domain/interfaces.js').IInteractionStore;
     memoryStore?: { removeByTeam(teamName: string): void };
     senderTrustStore?: import('./domain/interfaces.js').ISenderTrustStore;
+    vaultStore?: import('./domain/interfaces.js').IVaultStore;
     runDir: string; logger: AppLogger;
     browserRelay?: import('./sessions/tools/browser-proxy.js').BrowserRelay;
   },
@@ -95,6 +97,7 @@ function buildOrgToolDeps(
     interactionStore: opts.interactionStore,
     memoryStore: opts.memoryStore,
     senderTrustStore: opts.senderTrustStore,
+    vaultStore: opts.vaultStore,
     runDir: opts.runDir,
     loadConfig: (name: string, cp?: string, hints?: { description?: string; scopeAccepts?: string[] }) =>
       getOrCreateTeamConfig(opts.runDir, name, cp, hints),
@@ -111,6 +114,7 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   const runDir = deps?.runDir ?? '/app/.run';
   const systemRulesDir = deps?.systemRulesDir ?? '/app/system-rules';
   const seedRulesDir = deps?.seedRulesDir ?? '/app/seed-rules';
+  const seedSkillsDir = deps?.seedSkillsDir ?? '/app/seed-skills';
 
   ensureRunDir(runDir);
   seedOrgRules(dataDir, seedRulesDir);
@@ -136,8 +140,11 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   const recovery = recoverFromCrash({ orgStore, taskQueueStore, orgTree, runDir, logger, topicStore: stores.topicStore });
   if (recovery.recovered > 0) logger.info('Recovery completed', { recovered: recovery.recovered });
   ensureMainTeam(runDir, orgTree);
+  seedTeamSkills(runDir, seedSkillsDir);
   runMemoryMigration(stores.memoryStore, orgTree, runDir, logger);
+  runVaultMigration(stores.vaultStore, runDir, logger);
   migrateAllowedTools(runDir);
+  seedLearningTriggers(runDir, stores.triggerConfigStore);
   const sessionManager = new TeamRegistry();
 
   // Browser relay initializes in background; lazy refs break circular deps
@@ -151,6 +158,7 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
     { orgTree, sessionManager, taskQueueStore, escalationStore, triggerConfigStore,
       interactionStore: stores.interactionStore, memoryStore: stores.memoryStore,
       senderTrustStore: stores.senderTrustStore,
+      vaultStore: stores.vaultStore,
       runDir, logger,
       get browserRelay() { return browserRelayRef; } },
     () => queryRunnerRef,
@@ -182,6 +190,7 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
         getTeamConfigFn: orgToolDeps.getTeamConfig,
         memoryStore: stores.memoryStore,
         senderTrustStore: stores.senderTrustStore,
+        vaultStore: stores.vaultStore,
       }
     : null;
 
@@ -273,7 +282,7 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   if (!deps?.skipListen) {
     await fastify.listen({ host: deps?.listenAddress ?? '0.0.0.0', port: deps?.listenPort ?? 8080 });
   }
-  logger.info('OpenHive v4 started — v4.3.0', { dataDir, runDir, systemRulesDir });
+  logger.info('OpenHive v4 started — v4.4.0', { dataDir, runDir, systemRulesDir });
 
   const shutdown = async (): Promise<void> => {
     clearInterval(interactionCleanupInterval);

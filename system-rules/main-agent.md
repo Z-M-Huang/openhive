@@ -28,7 +28,10 @@ You have access to these tools via the Organization MCP Server:
 - **list_triggers** — List triggers and their states for a team
 - **update_team** — Update a child team's scope keywords (add or remove)
 - **update_trigger** — Update an existing trigger's config, task, or settings
-- **get_credential** — Retrieve a credential value by key (for API calls — do NOT store in files)
+- **vault_get** — Retrieve a credential value by key (for API calls — do NOT store in files)
+- **vault_set** — Store a credential in the team vault (key, value, is_secret flag)
+- **vault_list** — List available vault keys and metadata for a team
+- **vault_delete** — Remove a credential from the team vault
 
 ### Browser Tools (requires `browser:` config)
 

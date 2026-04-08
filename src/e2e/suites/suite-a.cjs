@@ -24,14 +24,44 @@ module.exports = async function suiteA() {
   // 3: Credential retrieval
   if (opsTeamOk) {
     const credResp = await h.runStep(r, 'credential-retrieval', () =>
-      h.wsSend('main', 'Ask ops-team to use the get_credential tool to retrieve the api_key credential, and tell me what tool it used.'));
+      h.wsSend('main', 'Ask ops-team to use the vault_get tool to retrieve the api_key credential, and tell me what tool it used.'));
     if (credResp) {
-      await h.runStep(r, 'wait-credential-task', () => h.waitTaskComplete('ops-team', '%get_credential%'));
-      h.flagSemanticCheck('A', 'credential-retrieval', 'Does the response mention get_credential was used? Does the raw credential (test-fake-key-value-12345) appear?', credResp.final);
+      h.flagSemanticCheck('A', 'credential-retrieval', 'Does the response mention vault_get was used? Does the raw credential (test-fake-key-value-12345) appear?', credResp.final);
     }
   }
 
-  // 4: Create team-alpha and team-beta
+  // 4: Vault CRUD — set, get, list, delete-reject, delete-ok
+  // Note: main uses query_team (inline) for these, not delegate_task, so no task_queue polling needed.
+  if (opsTeamOk) {
+    const setResp = await h.runStep(r, 'vault-set', () =>
+      h.wsSend('main', 'Ask ops-team to use the vault_set tool to store a key called my_setting with value test-non-secret-value'));
+    if (setResp) h.flagSemanticCheck('A', 'vault-set', 'Does the response acknowledge saving my_setting?', setResp.final);
+
+    const getResp = await h.runStep(r, 'vault-get', () =>
+      h.wsSend('main', 'Ask ops-team to use vault_get to retrieve my_setting'));
+    if (getResp) h.flagSemanticCheck('A', 'vault-get', 'Does the response contain test-non-secret-value?', getResp.final);
+
+    const listResp = await h.runStep(r, 'vault-list', () =>
+      h.wsSend('main', 'Ask ops-team to list all vault entries'));
+    if (listResp) h.flagSemanticCheck('A', 'vault-list', 'Does the response list api_key, region, my_setting? Are secret values hidden?', listResp.final);
+
+    const deleteRejectResp = await h.runStep(r, 'vault-delete-reject', () =>
+      h.wsSend('main', 'Ask ops-team to delete the api_key from vault'));
+    if (deleteRejectResp) h.flagSemanticCheck('A', 'vault-delete-reject', 'Does the response indicate rejection because api_key is a secret?', deleteRejectResp.final);
+
+    const deleteOkResp = await h.runStep(r, 'vault-delete-ok', () =>
+      h.wsSend('main', 'Ask ops-team to delete my_setting from vault'));
+    if (deleteOkResp) {
+      h.flagSemanticCheck('A', 'vault-delete-ok', 'Does the response confirm my_setting was deleted?', deleteOkResp.final);
+      // AI may delegate (async) instead of query (inline) — wait for any pending ops-team tasks
+      await h.runStep(r, 'wait-vault-delete-settle', async () => {
+        try { await h.waitTaskComplete('ops-team', '%vault%', 30000); } catch { /* inline path: no task to find */ }
+      });
+    }
+  }
+  await h.runStep(r, 'verify-after-vault-ops', () => h.runVerify('verify-suite-teams-hierarchy.cjs', 'after-vault-ops'));
+
+  // 5: Create team-alpha and team-beta
   const alphaResp = await h.runStep(r, 'create-team-alpha', () =>
     h.wsSend('main', 'Create a team called team-alpha for API development. Accept keywords: api, development, coding'));
   if (alphaResp && alphaResp.ok) alphaOk = true;

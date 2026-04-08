@@ -14,7 +14,7 @@ src/
   bootstrap-helpers.ts  -- ensureMainTeam(), migrateAllowedTools()
   domain/               -- Types, interfaces, errors, safe-json, credential-utils, org-tree
   storage/              -- SQLite via Drizzle ORM (schema.ts = source of truth)
-    stores/             -- 8 store implementations (task-queue, credentials, triggers, etc.)
+    stores/             -- 9 store implementations (task-queue, credentials, triggers, vault, etc.)
   sessions/
     message-handler.ts  -- Single entry point: handleMessage() -> assembleTools() -> runSession()
     ai-engine.ts        -- Vercel AI SDK streamText() with tool loop
@@ -24,6 +24,7 @@ src/
       org-tools.ts      -- 10 org management tools (delegate, escalate, spawn, etc.)
       trigger-tools.ts  -- 6 trigger management tools
       browser-tools.ts  -- 8 browser automation tools
+      vault-tools.ts    -- 4 vault tools (vault_set, vault_get, vault_list, vault_delete)
       web-fetch-tool.ts -- HTTP fetch with SSRF protection
       active-tools.ts   -- resolveActiveTools() deny-by-default filter
       guards.ts         -- assertCallerIsParent(), assertBrowserEnabled()
@@ -32,7 +33,8 @@ src/
   channels/             -- WebSocket, Discord adapters + router
   triggers/             -- TriggerEngine, dedup, rate-limiter
   rules/                -- cascade.ts (Tier 1-4 rule loading)
-  handlers/tools/       -- 17 handler functions (business logic, interface-first deps)
+  handlers/tools/       -- 17 handler functions + vault handlers (business logic, interface-first deps)
+  api/                  -- Dashboard REST endpoints (vault.ts, overview, teams, etc.)
   config/               -- loader.ts (team config YAML)
 system-rules/           -- Tier 1 immutable rules (baked into Docker)
 seed-rules/             -- Default org-rules copied on first start

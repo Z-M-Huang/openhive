@@ -134,6 +134,8 @@ export function buildOrgTools(ctx: OrgToolContext): ToolSet {
         triggerConfigStore: ctx.triggerConfigStore,
         escalationStore: ctx.escalationStore,
         interactionStore: ctx.interactionStore,
+        memoryStore: ctx.memoryStore,
+        vaultStore: ctx.vaultStore,
         runDir: ctx.runDir,
       }),
   });
@@ -149,6 +151,8 @@ export function buildOrgTools(ctx: OrgToolContext): ToolSet {
         runDir: ctx.runDir,
         loadConfig: ctx.loadConfig,
         taskQueue: ctx.taskQueue,
+        vaultStore: ctx.vaultStore,
+        triggerConfigStore: ctx.triggerConfigStore,
       }, ctx.sourceChannelId),
   });
 

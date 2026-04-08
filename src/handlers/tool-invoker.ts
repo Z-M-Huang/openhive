@@ -19,6 +19,7 @@ import type {
   ITriggerConfigStore,
   IInteractionStore,
   ISenderTrustStore,
+  IVaultStore,
 } from '../domain/interfaces.js';
 import type { TeamConfig } from '../domain/types.js';
 import type { SpawnTeamConfigHints } from './tools/spawn-team.js';
@@ -71,6 +72,7 @@ export interface OrgToolDeps {
   readonly browserRelay?: { available: boolean };
   readonly memoryStore?: { removeByTeam(teamName: string): void };
   readonly senderTrustStore?: ISenderTrustStore;
+  readonly vaultStore?: IVaultStore;
 }
 
 export interface OrgToolInvoker {
@@ -89,6 +91,8 @@ function buildToolDefs(deps: OrgToolDeps): ToolDefinition[] {
       handler: (input, callerId, sourceChannelId) => spawnTeam(input as never, callerId, {
         orgTree: deps.orgTree, spawner: deps.spawner, runDir: deps.runDir,
         loadConfig: deps.loadConfig, taskQueue: deps.taskQueue,
+        vaultStore: deps.vaultStore,
+        triggerConfigStore: deps.triggerConfigStore,
       }, sourceChannelId),
     },
     {
@@ -102,6 +106,7 @@ function buildToolDefs(deps: OrgToolDeps): ToolDefinition[] {
         escalationStore: deps.escalationStore,
         interactionStore: deps.interactionStore,
         memoryStore: deps.memoryStore,
+        vaultStore: deps.vaultStore,
         runDir: deps.runDir,
       }),
     },

@@ -185,3 +185,16 @@ export interface MemorySearchResult {
   readonly is_active: boolean;
   readonly source: 'hybrid' | 'keyword';
 }
+
+// ── Vault Types ──────────────────────────────────────────────────────────
+
+export interface VaultEntry {
+  readonly id: number;
+  readonly teamName: string;
+  readonly key: string;
+  readonly value: string;
+  readonly isSecret: boolean;
+  readonly updatedBy: string | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}

@@ -31,6 +31,7 @@ COPY src/ ./src/
 COPY tsconfig.json ./
 COPY system-rules/ ./system-rules/
 COPY seed-rules/ ./seed-rules/
+COPY seed-skills/ ./seed-skills/
 
 # Compile TypeScript
 RUN ./node_modules/.bin/tsc
@@ -72,6 +73,9 @@ COPY --from=builder /build/system-rules/ /app/system-rules/
 
 # Seed rules (copied to /data/rules/ on first start if empty)
 COPY --from=builder /build/seed-rules/ /app/seed-rules/
+
+# Seed skills (learning-cycle.md etc., copied to teams' skills/ on spawn)
+COPY --from=builder /build/seed-skills/ /app/seed-skills/
 
 # Create runtime directories
 RUN mkdir -p /app/.run /data/config /data/rules

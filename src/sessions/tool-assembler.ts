@@ -15,6 +15,7 @@ import { buildBrowserTools } from './tools/browser-tools.js';
 import { buildWebFetchTool } from './tools/web-fetch-tool.js';
 import { buildSkillRepoTools } from './tools/skill-repo-tool.js';
 import { buildMemoryTools } from './tools/memory-tools.js';
+import { buildVaultTools } from './tools/vault-tools.js';
 import type { OrgToolContext } from './tools/org-tool-context.js';
 import { buildSubagentTools } from './subagent-factory.js';
 import { loadSubagents } from './skill-loader.js';
@@ -70,6 +71,8 @@ export function assembleTools(
     interactionStore: deps.interactionStore,
     browserRelay: deps.browserRelay,
     memoryStore: deps.memoryStore,
+    senderTrustStore: deps.senderTrustStore,
+    vaultStore: deps.vaultStore,
   };
 
   // Inline tool partitions (alphabetical within each)
@@ -109,8 +112,15 @@ export function assembleTools(
     if (asTool.execute) memoryTools[name] = { ...t, execute: withAudit(name, asTool.execute, auditOpts) };
   }
 
-  const allTools = { ...baseTools, ...subagentTools, ...memoryTools };
-  const activeTools = [...allowedNames, ...Object.keys(subagentTools), ...Object.keys(memoryTools)];
+  // Vault tools bypass allowed_tools filter (always available when vaultStore is wired)
+  const vaultTools = buildVaultTools(orgToolCtx);
+  for (const [name, t] of Object.entries(vaultTools)) {
+    const asTool = t as { execute?: (...args: unknown[]) => Promise<unknown> };
+    if (asTool.execute) vaultTools[name] = { ...t, execute: withAudit(name, asTool.execute, auditOpts) };
+  }
+
+  const allTools = { ...baseTools, ...subagentTools, ...memoryTools, ...vaultTools };
+  const activeTools = [...allowedNames, ...Object.keys(subagentTools), ...Object.keys(memoryTools), ...Object.keys(vaultTools)];
 
   return { allTools, activeTools };
 }

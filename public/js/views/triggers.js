@@ -73,6 +73,7 @@ const columns = [
 
 const filterDefs = [
   { key: 'team', label: 'Team', type: 'text', placeholder: 'Filter by team...' },
+  { key: 'name', label: 'Name', type: 'text', placeholder: 'Filter by name...' },
   { key: 'state', label: 'State', type: 'select', options: [
     { value: 'active', label: 'Active' },
     { value: 'disabled', label: 'Disabled' },
@@ -85,6 +86,7 @@ async function fetchTriggers(params) {
   qs.set('limit', String(params.limit));
   qs.set('offset', String(params.offset));
   if (params.team) qs.set('team', params.team);
+  if (params.name) qs.set('name', params.name);
   if (params.state) qs.set('state', params.state);
   const res = await fetch(`/api/v1/triggers?${qs}`);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -115,10 +117,10 @@ function renderPagination(container, { offset, total, onPage }) {
   container.append(prevBtn, info, nextBtn);
 }
 
-export async function render(container) {
+export async function render(container, { initialFilters = {} } = {}) {
   container.textContent = '';
   let currentOffset = 0;
-  let currentFilters = {};
+  let currentFilters = { ...initialFilters };
   let tableRef = null;
 
   const heading = document.createElement('h2');

@@ -17,6 +17,7 @@ import { registerMemoriesRoutes } from './memories.js';
 import { registerTriggersRoutes } from './triggers.js';
 import { registerTopicsRoutes } from './topics.js';
 import { registerInteractionsRoutes } from './interactions.js';
+import { registerVaultRoutes } from './vault.js';
 
 export interface DashboardDeps {
   readonly raw: Database.Database;
@@ -40,4 +41,5 @@ export function registerApiRoutes(fastify: FastifyInstance, deps: DashboardDeps)
   registerTriggersRoutes(fastify, { raw: deps.raw, triggerConfigStore: deps.triggerConfigStore });
   registerTopicsRoutes(fastify, { raw: deps.raw });
   registerInteractionsRoutes(fastify, { raw: deps.raw });
+  registerVaultRoutes(fastify, { raw: deps.raw });
 }

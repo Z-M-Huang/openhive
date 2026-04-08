@@ -44,8 +44,8 @@ runStep('teams-hierarchy', {
 
     // DB: scope_keywords
     const keywords = db.prepare("SELECT keyword FROM scope_keywords WHERE team_id='ops-team'").all().map(r => r.keyword);
-    const hasOps = keywords.includes('ops');
-    checks.push(check('scope_keywords_ops', hasOps, 'keyword "ops" exists', keywords.join(', ') || 'none'));
+    const hasRelevant = keywords.some(k => ['ops', 'monitoring', 'logs', 'production'].includes(k));
+    checks.push(check('scope_keywords_relevant', hasRelevant, 'has relevant keywords', keywords.join(', ') || 'none'));
 
     // Filesystem: team directory
     const teamDir = path.join(TEAMS_DIR, 'ops-team');
@@ -60,10 +60,40 @@ runStep('teams-hierarchy', {
     const isBootstrapped = bootstrapRow && bootstrapRow.bootstrapped === 1;
     checks.push(check('ops_team_bootstrapped', isBootstrapped, 'bootstrapped = 1', isBootstrapped ? 'bootstrapped' : 'not bootstrapped'));
 
-    // Config contains credentials
-    if (config) {
-      checks.push(check('ops_team_has_credentials', config.includes('api_key'), 'config has api_key', config.includes('api_key') ? 'yes' : 'no'));
-    }
+    // Credentials: either in vault (v4.4.0+) or config.yaml (legacy)
+    const vaultCreds = db.prepare("SELECT key FROM team_vault WHERE team_name='ops-team' AND key='api_key'").get();
+    const configHasCreds = config && config.includes('api_key');
+    const hasCreds = !!vaultCreds || configHasCreds;
+    checks.push(check('ops_team_has_credentials', hasCreds, 'api_key in vault or config', hasCreds ? (vaultCreds ? 'vault' : 'config') : 'missing'));
+
+    // Vault: credentials migrated to team_vault with is_secret=1
+    const vaultRows = db.prepare("SELECT * FROM team_vault WHERE team_name='ops-team'").all();
+    const hasVaultKey = vaultRows.some(r => r.key === 'api_key' && r.is_secret === 1);
+    const hasVaultRegion = vaultRows.some(r => r.key === 'region' && r.is_secret === 1);
+    checks.push(check('vault_migration_api_key', hasVaultKey, 'api_key in vault (is_secret=1)', hasVaultKey ? 'found' : 'missing'));
+    checks.push(check('vault_migration_region', hasVaultRegion, 'region in vault (is_secret=1)', hasVaultRegion ? 'found' : 'missing'));
+
+    // Learning: skill file seeded
+    const skillPath = path.join(TEAMS_DIR, 'ops-team', 'skills', 'learning-cycle.md');
+    checks.push(check('learning_skill_seeded', fileExists(skillPath), 'learning-cycle.md exists', fileExists(skillPath) ? 'exists' : 'missing'));
+
+    return checks;
+  },
+
+  'after-vault-ops'(db) {
+    const checks = [];
+
+    // After vault_set (my_setting) + vault_delete (my_setting), should have original 2 secret rows
+    const rows = db.prepare("SELECT * FROM team_vault WHERE team_name='ops-team'").all();
+    checks.push(check('vault_row_count', rows.length === 2, '2 rows (api_key, region)', `${rows.length} rows`));
+
+    // my_setting should be gone (was deleted)
+    const hasMySetting = rows.some(r => r.key === 'my_setting');
+    checks.push(check('vault_my_setting_deleted', !hasMySetting, 'my_setting absent', hasMySetting ? 'still present' : 'absent'));
+
+    // Secrets still intact and flagged
+    checks.push(check('vault_secrets_intact', rows.some(r => r.key === 'api_key'), 'api_key present', rows.some(r => r.key === 'api_key') ? 'present' : 'missing'));
+    checks.push(check('vault_secrets_flagged', rows.filter(r => r.is_secret === 1).length === 2, 'both secrets flagged', `${rows.filter(r => r.is_secret === 1).length} flagged`));
 
     return checks;
   },

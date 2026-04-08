@@ -42,14 +42,28 @@ export interface AuditWrapperOpts {
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 /**
- * Extract string values >= 8 chars from a `credentials` object on the
- * tool input, matching the dynamic extraction logic in the old audit hooks.
+ * Extract string values >= 8 chars from a `credentials` object or a `value`
+ * field on the tool input.  The `credentials` path matches the original
+ * audit-hook logic; the `value` path covers vault_set-style inputs.
  */
 function extractDynamicSecrets(input: unknown): readonly string[] {
-  if (input == null || typeof input !== 'object') return [];
-  const creds = (input as Record<string, unknown>).credentials;
-  if (creds == null || typeof creds !== 'object' || Array.isArray(creds)) return [];
-  return extractStringCredentials(creds as Record<string, unknown>);
+  if (input === null || input === undefined || typeof input !== 'object') return [];
+  const rec = input as Record<string, unknown>;
+  const secrets: string[] = [];
+
+  // Existing: extract from input.credentials
+  const creds = rec.credentials;
+  if (creds !== null && creds !== undefined && typeof creds === 'object' && !Array.isArray(creds)) {
+    secrets.push(...extractStringCredentials(creds as Record<string, unknown>));
+  }
+
+  // Vault: extract from input.value (string >= 8 chars)
+  const val = rec.value;
+  if (typeof val === 'string' && val.length >= 8) {
+    secrets.push(val);
+  }
+
+  return secrets;
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────

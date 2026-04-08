@@ -109,14 +109,14 @@ export function registerTriggersRoutes(fastify: FastifyInstance, deps: TriggersD
     }
   });
 
-  // GET /api/v1/triggers — paginated, filterable by team and state
+  // GET /api/v1/triggers — paginated, filterable by team, state, and name
   fastify.get<{
-    Querystring: { limit?: string; offset?: string; team?: string; state?: string };
+    Querystring: { limit?: string; offset?: string; team?: string; state?: string; name?: string };
   }>('/api/v1/triggers', async (request, reply) => {
     try {
       const limit = clampLimit(request.query.limit);
       const offset = clampOffset(request.query.offset);
-      const { team, state } = request.query;
+      const { team, state, name } = request.query;
 
       const conditions: string[] = [];
       const params: unknown[] = [];
@@ -128,6 +128,10 @@ export function registerTriggersRoutes(fastify: FastifyInstance, deps: TriggersD
       if (state) {
         conditions.push('state = ?');
         params.push(state);
+      }
+      if (name) {
+        conditions.push('name = ?');
+        params.push(name);
       }
 
       const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';

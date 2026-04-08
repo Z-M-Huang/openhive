@@ -19,19 +19,22 @@ import { InteractionStore } from './storage/stores/interaction-store.js';
 import { TopicStore } from './storage/stores/topic-store.js';
 import { SenderTrustStore } from './storage/stores/sender-trust-store.js';
 import { TrustAuditStore } from './storage/stores/trust-audit-store.js';
+import { VaultStore } from './storage/stores/vault-store.js';
 import { TriggerDedup } from './triggers/dedup.js';
 import { TriggerRateLimiter } from './triggers/rate-limiter.js';
 import { TriggerEngine } from './triggers/engine.js';
 import { DiscordAdapter } from './channels/discord-adapter.js';
 import { SecretString } from './secrets/secret-string.js';
 import type { IChannelAdapter } from './domain/interfaces.js';
-// TriggerConfig import removed — trigger configs now managed via SQLite/TriggerConfigStore
 import type { ChannelsOutput } from './config/validation.js';
 import type { DatabaseInstance } from './storage/database.js';
 import type { OrgTree } from './domain/org-tree.js';
 import { TeamStatus } from './domain/types.js';
 import type { AppLogger } from './logging/logger.js';
 import { migrateFilesystemMemory } from './storage/migration.js';
+import { migrateCredentialsToVault } from './storage/migration-vault.js';
+import { seedLearningTrigger } from './handlers/tools/spawn-team.js';
+import type { ITriggerConfigStore } from './domain/interfaces.js';
 
 export interface ChannelDeps {
   readonly dataDir: string;
@@ -61,6 +64,25 @@ export function seedOrgRules(dataDir: string, seedRulesDir: string): void {
   cpSync(seedRulesDir, rulesDir, { recursive: true });
 }
 
+/** Seed skill .md files into every existing team's skills/ dir (idempotent, skip-if-present). */
+export function seedTeamSkills(runDir: string, seedSkillsDir: string): void {
+  if (!existsSync(seedSkillsDir)) return;
+  const seedFiles = readdirSync(seedSkillsDir).filter(f => f.endsWith('.md'));
+  if (seedFiles.length === 0) return;
+  const teamsDir = join(runDir, 'teams');
+  if (!existsSync(teamsDir)) return;
+  let teamDirs: string[];
+  try { teamDirs = readdirSync(teamsDir); } catch { return; }
+  for (const teamName of teamDirs) {
+    const skillsDir = join(teamsDir, teamName, 'skills');
+    mkdirSync(skillsDir, { recursive: true });
+    for (const file of seedFiles) {
+      const dest = join(skillsDir, file);
+      if (!existsSync(dest)) cpSync(join(seedSkillsDir, file), dest);
+    }
+  }
+}
+
 export interface StorageResult extends DatabaseInstance {
   readonly orgStore: OrgStore;
   readonly taskQueueStore: TaskQueueStore;
@@ -73,6 +95,7 @@ export interface StorageResult extends DatabaseInstance {
   readonly topicStore: TopicStore;
   readonly senderTrustStore: SenderTrustStore;
   readonly trustAuditStore: TrustAuditStore;
+  readonly vaultStore: VaultStore;
 }
 
 export function initStorage(_dataDir: string, runDir: string): StorageResult {
@@ -91,14 +114,21 @@ export function initStorage(_dataDir: string, runDir: string): StorageResult {
   const topicStore = new TopicStore(db);
   const senderTrustStore = new SenderTrustStore(db);
   const trustAuditStore = new TrustAuditStore(db);
+  const vaultStore = new VaultStore(db);
 
-  return { db, raw, orgStore, taskQueueStore, triggerStore, logStore, escalationStore, memoryStore, triggerConfigStore, interactionStore, topicStore, senderTrustStore, trustAuditStore };
+  return { db, raw, orgStore, taskQueueStore, triggerStore, logStore, escalationStore, memoryStore, triggerConfigStore, interactionStore, topicStore, senderTrustStore, trustAuditStore, vaultStore };
 }
 
 /** Run one-time filesystem → SQLite migration for memory data. */
 export function runMemoryMigration(memoryStore: MemoryStore, orgTree: OrgTree, runDir: string, logger: AppLogger): void {
   try { migrateFilesystemMemory(memoryStore, orgTree, runDir, (msg, meta) => logger.info(msg, meta)); }
   catch (err) { logger.warn('Memory migration failed (non-fatal)', { error: errorMessage(err) }); }
+}
+
+/** Migrate config.yaml credentials into the vault (additive, idempotent). */
+export function runVaultMigration(vaultStore: VaultStore, runDir: string, logger: AppLogger): void {
+  try { migrateCredentialsToVault(vaultStore, runDir, (msg, meta) => logger.info(msg, meta)); }
+  catch (err) { logger.warn('Vault credential migration failed (non-fatal)', { error: errorMessage(err) }); }
 }
 
 export function initTriggerEngine(
@@ -189,82 +219,53 @@ export function ensureMainTeam(runDir: string, orgTree: OrgTree): void {
   }
 }
 
-/**
- * Migrate legacy `mcp__org__*` patterns in allowed_tools to bare tool names.
- *
- * Scans all team config files under `{runDir}/teams/` and rewrites any
- * `allowed_tools` entries that use the `mcp__org__` prefix (which referred to
- * the now-removed org MCP transport) to bare names.
- *
- * Examples:
- *   - `mcp__org__spawn_team` → `spawn_team`
- *   - `mcp__org__*` → `*`
- *
- * External MCP patterns like `mcp__loggly-mcp__*` are left untouched.
- */
+/** Seed disabled learning-cycle triggers for all existing teams (idempotent). */
+export function seedLearningTriggers(runDir: string, triggerConfigStore: ITriggerConfigStore): void {
+  const teamsDir = join(runDir, 'teams');
+  if (!existsSync(teamsDir)) return;
+  let teamDirs: string[];
+  try { teamDirs = readdirSync(teamsDir); } catch { return; }
+  for (const teamName of teamDirs) {
+    seedLearningTrigger(teamName, triggerConfigStore);
+  }
+}
+
+/** Migrate legacy `mcp__org__*` allowed_tools patterns to bare tool names. */
 export function migrateAllowedTools(runDir: string): void {
   const teamsDir = join(runDir, 'teams');
   if (!existsSync(teamsDir)) return;
-
   let teamDirs: string[];
-  try {
-    teamDirs = readdirSync(teamsDir);
-  } catch {
-    return;
-  }
+  try { teamDirs = readdirSync(teamsDir); } catch { return; }
 
   for (const teamName of teamDirs) {
     const configPath = join(teamsDir, teamName, 'config.yaml');
     if (!existsSync(configPath)) continue;
-
     let raw: string;
-    try {
-      raw = readFileSync(configPath, 'utf-8');
-    } catch {
-      continue;
-    }
-
+    try { raw = readFileSync(configPath, 'utf-8'); } catch { continue; }
     let parsed: Record<string, unknown>;
-    try {
-      parsed = yamlParse(raw) as Record<string, unknown>;
-    } catch {
-      continue;
-    }
+    try { parsed = yamlParse(raw) as Record<string, unknown>; } catch { continue; }
 
     const allowedTools = parsed['allowed_tools'];
     if (!Array.isArray(allowedTools)) continue;
-
     let changed = false;
     const migrated = allowedTools.map((tool: unknown) => {
       if (typeof tool !== 'string') return tool;
       if (!tool.startsWith('mcp__org__')) return tool;
       changed = true;
-      // mcp__org__* (glob) → * (all tools)
       if (tool === 'mcp__org__*') return '*';
-      // mcp__org__spawn_team → spawn_team
       return tool.slice('mcp__org__'.length);
     });
-
     if (!changed) continue;
 
-    // Deduplicate (e.g. if both '*' and 'mcp__org__*' existed)
     const deduped = [...new Set(migrated as string[])];
     parsed['allowed_tools'] = deduped;
-
     // Also strip 'org' from mcp_servers if present
     const mcpServers = parsed['mcp_servers'];
     if (Array.isArray(mcpServers)) {
       const filtered = mcpServers.filter((s: unknown) => s !== 'org');
-      if (filtered.length !== mcpServers.length) {
-        parsed['mcp_servers'] = filtered;
-      }
+      if (filtered.length !== mcpServers.length) parsed['mcp_servers'] = filtered;
     }
-
-    try {
-      writeFileSync(configPath, yamlStringify(parsed), 'utf-8');
-    } catch {
-      // Best effort — don't crash on write failure
-    }
+    try { writeFileSync(configPath, yamlStringify(parsed), 'utf-8'); } catch { /* best effort */ }
   }
 }
 

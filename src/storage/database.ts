@@ -43,6 +43,7 @@ const allTables: SQLiteTable[] = [
   schema.embeddingCache,
   schema.senderTrust,
   schema.trustAuditLog,
+  schema.teamVault,
 ];
 
 /**
