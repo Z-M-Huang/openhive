@@ -18,15 +18,17 @@ import { buildMemoryTools } from './tools/memory-tools.js';
 import { buildVaultTools } from './tools/vault-tools.js';
 import type { OrgToolContext } from './tools/org-tool-context.js';
 import { buildSubagentTools } from './subagent-factory.js';
-import { loadSubagents } from './skill-loader.js';
+import { loadSubagents, resolveActiveSkill, parseRequiredTools } from './skill-loader.js';
+import { loadPluginTools } from './tools/plugin-loader.js';
 import type { buildSessionContext } from './context-builder.js';
 import type { buildProviderRegistry } from './provider-registry.js';
 import type { SecretString } from '../secrets/secret-string.js';
 import type { TeamConfig } from '../domain/types.js';
+import type { IPluginToolStore } from '../domain/interfaces.js';
 import type { MessageHandlerDeps } from './message-handler.js';
 
-/** Build all tools (builtin + inline org/trigger/browser/web_fetch + subagent). */
-export function assembleTools(
+/** Build all tools (builtin + inline org/trigger/browser/web_fetch + subagent + plugin). */
+export async function assembleTools(
   teamConfig: TeamConfig,
   teamName: string,
   deps: MessageHandlerDeps,
@@ -37,6 +39,8 @@ export function assembleTools(
   providerSecrets: readonly SecretString[],
   credValues: readonly string[],
   sourceChannelId?: string,
+  pluginToolStore?: IPluginToolStore,
+  skillName?: string,
 ) {
   const teamCreds = teamConfig.credentials ?? {};
   const builtinTools = buildBuiltinTools({
@@ -82,15 +86,17 @@ export function assembleTools(
   const webFetchTools = buildWebFetchTool(orgToolCtx);
   const skillRepoTools = buildSkillRepoTools(orgToolCtx);
 
-  // Wrap inline tools with audit logging, then merge all tools
   const auditOpts: AuditWrapperOpts = {
     logger: deps.logger, knownSecrets: providerSecrets, rawSecrets: credValues, callerId: teamName,
   };
+  const wrapAudit = (set: Record<string, unknown>) => {
+    for (const [n, t] of Object.entries(set)) {
+      const a = t as Record<string, unknown> & { execute?: (...args: unknown[]) => Promise<unknown> };
+      if (a.execute) set[n] = { ...a, execute: withAudit(n, a.execute, auditOpts) };
+    }
+  };
   const inlineTools = { ...orgTools, ...triggerTools, ...browserTools, ...webFetchTools, ...skillRepoTools };
-  for (const [name, t] of Object.entries(inlineTools)) {
-    const asTool = t as { execute?: (...args: unknown[]) => Promise<unknown> };
-    if (asTool.execute) inlineTools[name] = { ...t, execute: withAudit(name, asTool.execute, auditOpts) };
-  }
+  wrapAudit(inlineTools);
   const baseTools = { ...builtinTools, ...inlineTools };
   const allowedNames = resolveActiveTools(Object.keys(baseTools), teamConfig.allowed_tools);
   const allowedSet = new Set(allowedNames);
@@ -98,29 +104,22 @@ export function assembleTools(
   for (const [k, v] of Object.entries(baseTools)) {
     if (allowedSet.has(k)) (filteredTools as Record<string, unknown>)[k] = v;
   }
-
-  const subagentDefs = loadSubagents(deps.runDir, teamName);
   const subagentTools = buildSubagentTools({
-    registry, profileName, modelId, subagentDefs,
-    tools: filteredTools,
+    registry, profileName, modelId, subagentDefs: loadSubagents(deps.runDir, teamName), tools: filteredTools,
   });
-
-  // Memory tools bypass allowed_tools filter (always available when memoryStore is wired)
   const memoryTools = buildMemoryTools(orgToolCtx);
-  for (const [name, t] of Object.entries(memoryTools)) {
-    const asTool = t as { execute?: (...args: unknown[]) => Promise<unknown> };
-    if (asTool.execute) memoryTools[name] = { ...t, execute: withAudit(name, asTool.execute, auditOpts) };
-  }
-
-  // Vault tools bypass allowed_tools filter (always available when vaultStore is wired)
+  wrapAudit(memoryTools);
   const vaultTools = buildVaultTools(orgToolCtx);
-  for (const [name, t] of Object.entries(vaultTools)) {
-    const asTool = t as { execute?: (...args: unknown[]) => Promise<unknown> };
-    if (asTool.execute) vaultTools[name] = { ...t, execute: withAudit(name, asTool.execute, auditOpts) };
+  wrapAudit(vaultTools);
+
+  // Plugin tools from active skill's Required Tools section
+  let pluginToolSet: Record<string, unknown> = {};
+  if (pluginToolStore) {
+    const activeSkill = resolveActiveSkill(deps.runDir, teamName, skillName, deps.systemRulesDir);
+    const required = activeSkill ? parseRequiredTools(activeSkill.content) : [];
+    if (required.length > 0) pluginToolSet = await loadPluginTools(teamName, required, teamConfig.allowed_tools, pluginToolStore, deps.runDir);
   }
-
-  const allTools = { ...baseTools, ...subagentTools, ...memoryTools, ...vaultTools };
-  const activeTools = [...allowedNames, ...Object.keys(subagentTools), ...Object.keys(memoryTools), ...Object.keys(vaultTools)];
-
+  const allTools = { ...baseTools, ...subagentTools, ...memoryTools, ...vaultTools, ...pluginToolSet };
+  const activeTools = [...allowedNames, ...Object.keys(subagentTools), ...Object.keys(memoryTools), ...Object.keys(vaultTools), ...Object.keys(pluginToolSet)];
   return { allTools, activeTools };
 }

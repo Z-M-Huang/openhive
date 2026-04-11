@@ -59,8 +59,8 @@ describe('buildOrgTools', () => {
     const expected = [
       'delegate_task',
       'escalate',
-      'get_credential',
       'get_status',
+      'list_completed_tasks',
       'list_teams',
       'query_team',
       'send_message',

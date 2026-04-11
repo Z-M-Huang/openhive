@@ -48,7 +48,7 @@ module.exports = async function suiteD(ctx) {
     fs.writeFileSync(path.join(teamDir, 'config.yaml'), [
       'name: restricted-team', 'description: Team with browser config but restricted tool access',
       'parent: main', 'allowed_tools:', '  - Read', '  - Write', '  - Bash',
-      '  - delegate_task', '  - escalate', '  - get_credential',
+      '  - delegate_task', '  - escalate', '  - vault_get',
       'provider_profile: default', 'maxTurns: 50',
       'browser:', '  allowed_domains:', '    - "*.example.com"', '  timeout_ms: 30000', '',
     ].join('\n'));

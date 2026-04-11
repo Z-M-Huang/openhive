@@ -50,7 +50,7 @@ function createMinimalTriggerEngine(): TriggerEngine {
     triggers: [],
     dedup,
     rateLimiter,
-    delegateTask: async () => {},
+    delegateTask: async () => { return ''; },
     logger: { info: () => {}, warn: () => {} },
   });
 }

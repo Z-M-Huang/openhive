@@ -2,14 +2,14 @@
 import { randomBytes } from 'crypto';
 import { handleMessage } from './sessions/message-handler.js';
 import { classifyTopics, MAX_ACTIVE_TOPICS } from './sessions/topic-classifier.js';
-import type { TopicSessionManager } from './sessions/topic-session-manager.js';
+import type { TopicSessionManager } from './sessions/topic-registry.js';
 import { errorMessage } from './domain/errors.js';
 import type { ChannelMessage, IInteractionStore, ITopicStore, ISenderTrustStore, ITrustAuditStore } from './domain/interfaces.js';
 import type { TopicEntry } from './domain/types.js';
 import type { ProgressUpdate } from './sessions/ai-engine.js';
 import type { LanguageModel } from 'ai';
 import type { TrustPolicy } from './config/trust-policy.js';
-import { evaluateTrust } from './trust/trust-gate.js';
+import { evaluateTrust } from './channels/trust-gate.js';
 
 export interface TopicResult { readonly response: string; readonly topicId?: string; readonly topicName?: string }
 export interface ChannelHandlerResult { readonly results: TopicResult[] }

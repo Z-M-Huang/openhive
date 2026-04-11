@@ -53,12 +53,14 @@ export function buildVaultTools(
 
   // 3. vault_list
   tools['vault_list'] = tool({
-    description: 'List all vault entries for this team',
-    inputSchema: z.object({}),
-    execute: async () =>
+    description: 'List all vault entries for this team. Optionally filter by key prefix.',
+    inputSchema: z.object({
+      prefix: z.string().optional().describe('Filter keys starting with this prefix'),
+    }),
+    execute: async (input) =>
       vaultList(ctx.teamName, {
         vaultStore: store,
-      }),
+      }, input.prefix),
   });
 
   // 4. vault_delete

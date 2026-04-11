@@ -48,16 +48,21 @@ describe('escalate', () => {
     expect(f.taskQueue.tasks[0].task).toContain('Need help');
   });
 
-  it('fails when caller has no parent', async () => {
+  it('escalates to user via channel when caller has no parent (root team)', async () => {
     const result = await f.server.invoke(
       'escalate',
       { message: 'Help' },
       'root',
     );
 
-    const typed = result as { success: boolean; error: string };
-    expect(typed.success).toBe(false);
-    expect(typed.error).toContain('no parent');
+    const typed = result as { success: boolean; correlation_id: string };
+    expect(typed.success).toBe(true);
+    expect(typed.correlation_id).toMatch(/^escalation:root:/);
+    // Task queued for root team itself (user delivery)
+    expect(f.taskQueue.tasks).toHaveLength(1);
+    expect(f.taskQueue.tasks[0].teamId).toBe('root');
+    expect(f.taskQueue.tasks[0].priority).toBe('high');
+    expect(f.taskQueue.tasks[0].type).toBe('escalation');
   });
 
   it('threads sourceChannelId when provided', async () => {

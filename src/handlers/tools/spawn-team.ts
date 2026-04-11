@@ -14,7 +14,7 @@
  */
 
 import { z } from 'zod';
-import { mkdirSync, writeFileSync, existsSync, cpSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { stringify as yamlStringify } from 'yaml';
 import type { OrgTree } from '../../domain/org-tree.js';
@@ -71,7 +71,7 @@ export interface SpawnTeamDeps {
 
 /** Subdirectories to scaffold for each new team. */
 const TEAM_SUBDIRS = [
-  'org-rules', 'team-rules', 'skills', 'subagents',
+  'org-rules', 'team-rules', 'skills', 'subagents', 'plugins',
 ] as const;
 
 /** Scaffold the team directory structure under .run/teams/{name}/. */
@@ -81,11 +81,6 @@ function scaffoldTeamDirs(runDir: string, teamName: string): void {
     mkdirSync(join(teamDir, sub), { recursive: true });
   }
 
-  // Copy seed skills into the new team's skills/ directory
-  const seedDir = join(resolve(runDir, '..'), 'seed-skills');
-  if (existsSync(seedDir)) {
-    cpSync(seedDir, join(teamDir, 'skills'), { recursive: true });
-  }
 }
 
 export async function spawnTeam(
@@ -201,6 +196,9 @@ export async function spawnTeam(
   // Seed a disabled learning-cycle trigger (skip if one already exists)
   seedLearningTrigger(name, deps.triggerConfigStore);
 
+  // Seed an active reflection-cycle trigger (skip if one already exists)
+  seedReflectionTrigger(name, deps.triggerConfigStore);
+
   return {
     success: true, team: name,
     ...(parsed.data.credentials ? { note: 'Credentials stored securely. Do NOT echo credential values.' } : {}),
@@ -213,10 +211,9 @@ function enqueueInitTask(
 ): SpawnTeamResult | null {
   if (!deps.taskQueue) return null;
 
-  const credToolName = deps.vaultStore ? 'vault_get' : 'get_credential';
   const initPayload = initContext
     ? 'Bootstrap this team. Your team context is already in your system prompt (from team-rules/team-context.md). ' +
-      `Use the ${credToolName} tool to access any credentials provided during team creation. ` +
+      'Use the vault_get tool to access any credentials provided during team creation. ' +
       'Steps: (1) Create skills in skills/ for your core tasks, ' +
       '(2) Use memory_save to record your identity, key decisions, and initial context, ' +
       '(3) Respond with a brief, user-friendly summary of what capabilities you now have.'
@@ -238,14 +235,14 @@ function enqueueInitTask(
   }
 }
 
-/** Deterministic jittered cron from team name hash: runs daily at 3:{minute}. */
+/** Deterministic jittered cron from team name hash: runs daily at 2:{minute}. */
 export function jitteredCron(teamName: string): string {
   const hash = Buffer.from(teamName).reduce((a, b) => a + b, 0);
-  const minute = hash % 60;
-  return `${minute} 3 * * *`;
+  const minute = hash % 31;
+  return `${minute} 2 * * *`;
 }
 
-/** Create a disabled learning-cycle trigger for a team (idempotent — skips if exists). */
+/** Create an active learning-cycle trigger for a team (idempotent — skips if exists). */
 export function seedLearningTrigger(teamName: string, store?: ITriggerConfigStore): void {
   if (!store) return;
   const existing = store.get(teamName, 'learning-cycle');
@@ -257,6 +254,32 @@ export function seedLearningTrigger(teamName: string, store?: ITriggerConfigStor
     team: teamName,
     task: 'Run a learning cycle: review recent interactions, extract patterns, and update memory.',
     skill: 'learning-cycle',
-    state: 'disabled',
+    state: 'active',
+    overlapPolicy: 'always-skip',
+  });
+}
+
+/** Deterministic jittered cron for reflection: runs daily at 3:{minute} (offset from learning at 2:xx). */
+export function reflectionJitteredCron(teamName: string): string {
+  const hash = Buffer.from(teamName).reduce((a, b) => a + b, 0);
+  const minute = hash % 31;
+  return `${minute} 3 * * *`;
+}
+
+/** Create an active reflection-cycle trigger for a team (idempotent — skips if exists). */
+export function seedReflectionTrigger(teamName: string, store?: ITriggerConfigStore): void {
+  if (!store) return;
+  const existing = store.get(teamName, 'reflection-cycle');
+  if (existing) return;
+  store.upsert({
+    name: 'reflection-cycle',
+    type: 'schedule',
+    config: { cron: reflectionJitteredCron(teamName) },
+    team: teamName,
+    task: 'Run a reflection cycle: review task outcomes and improve.',
+    skill: 'reflection-cycle',
+    state: 'active',
+    overlapPolicy: 'always-skip',
+    maxTurns: 30,
   });
 }

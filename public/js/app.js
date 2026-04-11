@@ -9,7 +9,8 @@ const routes = {
   '/triggers':      () => loadView('triggers'),
   '/conversations': () => loadView('conversations'),
   '/vault':         () => loadView('vault'),
-  '/learning':      () => loadView('triggers', { initialFilters: { name: 'learning-cycle' } }),
+  '/plugin-tools':  () => loadView('plugin-tools'),
+  '/learning':      () => loadView('learning'),
 };
 
 const container = document.getElementById('app');

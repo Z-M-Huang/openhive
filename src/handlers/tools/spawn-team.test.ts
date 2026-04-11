@@ -439,14 +439,14 @@ describe('spawn_team vault integration', () => {
     expect(initTask?.task).not.toContain('get_credential');
   });
 
-  it('init task mentions get_credential when no vaultStore', async () => {
+  it('init task always mentions vault_get even without vaultStore', async () => {
     await spawnTeam(
       { name: 'legacy-init', scope_accepts: ['ops'], init_context: 'Setup without vault' },
       'root', makeDeps({ vaultStore: undefined }),
     );
     const initTask = mockTaskQueue.tasks.find(t => t.teamId === 'legacy-init');
-    expect(initTask?.task).toContain('get_credential');
-    expect(initTask?.task).not.toContain('vault_get');
+    expect(initTask?.task).toContain('vault_get');
+    expect(initTask?.task).not.toContain('get_credential');
   });
 });
 
@@ -485,17 +485,21 @@ function createMockTriggerConfigStore(): ITriggerConfigStore & { configs: Trigge
     get(team: string, name: string): TriggerConfig | undefined {
       return configs.find(c => c.team === team && c.name === name);
     },
+    setActiveTask(): void { /* no-op */ },
+    clearActiveTask(): void { /* no-op */ },
+    setOverlapCount(): void { /* no-op */ },
+    resetOverlapState(): void { /* no-op */ },
   };
 }
 
 describe('jitteredCron', () => {
-  it('returns a valid cron with minute 0-59 at hour 3', () => {
+  it('returns a valid cron with minute 0-30 at hour 2', () => {
     const cron = jitteredCron('test-team');
-    const match = /^(\d{1,2}) 3 \* \* \*$/.exec(cron);
+    const match = /^(\d{1,2}) 2 \* \* \*$/.exec(cron);
     expect(match).not.toBeNull();
     const minute = Number(match![1]);
     expect(minute).toBeGreaterThanOrEqual(0);
-    expect(minute).toBeLessThan(60);
+    expect(minute).toBeLessThan(31);
   });
 
   it('is deterministic — same name produces same cron', () => {
@@ -513,16 +517,17 @@ describe('jitteredCron', () => {
 });
 
 describe('seedLearningTrigger', () => {
-  it('creates disabled learning-cycle trigger', () => {
+  it('creates active learning-cycle trigger with always-skip overlap', () => {
     const store = createMockTriggerConfigStore();
     seedLearningTrigger('ops', store);
     expect(store.configs).toHaveLength(1);
     const trigger = store.configs[0];
     expect(trigger.name).toBe('learning-cycle');
     expect(trigger.team).toBe('ops');
-    expect(trigger.state).toBe('disabled');
+    expect(trigger.state).toBe('active');
     expect(trigger.type).toBe('schedule');
     expect(trigger.skill).toBe('learning-cycle');
+    expect(trigger.overlapPolicy).toBe('always-skip');
   });
 
   it('does not overwrite existing trigger (get-guard)', () => {
@@ -585,14 +590,21 @@ describe('spawn_team learning trigger integration', () => {
     };
   }
 
-  it('seeds disabled learning-cycle trigger after successful spawn', async () => {
+  it('seeds active learning-cycle and reflection-cycle triggers after successful spawn', async () => {
     const result = await spawnTeam({ name: 'analytics', scope_accepts: ['data'] }, 'root', makeDeps());
     expect(result.success).toBe(true);
-    expect(mockTriggerStore.configs).toHaveLength(1);
-    const trigger = mockTriggerStore.configs[0];
-    expect(trigger.name).toBe('learning-cycle');
-    expect(trigger.team).toBe('analytics');
-    expect(trigger.state).toBe('disabled');
+    expect(mockTriggerStore.configs).toHaveLength(2);
+    const learning = mockTriggerStore.configs.find((c: { name: string }) => c.name === 'learning-cycle');
+    const reflection = mockTriggerStore.configs.find((c: { name: string }) => c.name === 'reflection-cycle');
+    expect(learning).toBeDefined();
+    expect(learning!.team).toBe('analytics');
+    expect(learning!.state).toBe('active');
+    expect(learning!.overlapPolicy).toBe('always-skip');
+    expect(reflection).toBeDefined();
+    expect(reflection!.team).toBe('analytics');
+    expect(reflection!.state).toBe('active');
+    expect(reflection!.overlapPolicy).toBe('always-skip');
+    expect(reflection!.maxTurns).toBe(30);
   });
 
   it('does not seed trigger when triggerConfigStore is absent', async () => {

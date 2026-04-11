@@ -22,6 +22,10 @@ function createTriggerServer(f: ServerFixtures, triggers: Map<string, TriggerCon
     incrementFailures: vi.fn(),
     resetFailures: vi.fn(),
     get: vi.fn((team: string, name: string) => triggers.get(`${team}:${name}`)),
+    setActiveTask: vi.fn(),
+    clearActiveTask: vi.fn(),
+    setOverlapCount: vi.fn(),
+    resetOverlapState: vi.fn(),
   };
 
   const mockTriggerEngine = {

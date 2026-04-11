@@ -8,7 +8,7 @@
 import type { FastifyInstance } from 'fastify';
 import type Database from 'better-sqlite3';
 import type { OrgTree } from '../domain/org-tree.js';
-import type { ITaskQueueStore, ITriggerConfigStore } from '../domain/interfaces.js';
+import type { ITaskQueueStore, ITriggerConfigStore, IPluginToolStore } from '../domain/interfaces.js';
 import { registerOverviewRoute } from './overview.js';
 import { registerTeamsRoutes } from './teams.js';
 import { registerTasksRoutes } from './tasks.js';
@@ -18,12 +18,16 @@ import { registerTriggersRoutes } from './triggers.js';
 import { registerTopicsRoutes } from './topics.js';
 import { registerInteractionsRoutes } from './interactions.js';
 import { registerVaultRoutes } from './vault.js';
+import { registerToolRoutes } from './tools.js';
+import { registerTrustRoutes } from './trust.js';
+import { registerLearningRoutes } from './learning.js';
 
 export interface DashboardDeps {
   readonly raw: Database.Database;
   readonly orgTree: OrgTree;
   readonly taskQueueStore: ITaskQueueStore;
   readonly triggerConfigStore: ITriggerConfigStore;
+  readonly pluginToolStore?: IPluginToolStore;
 }
 
 /**
@@ -42,4 +46,9 @@ export function registerApiRoutes(fastify: FastifyInstance, deps: DashboardDeps)
   registerTopicsRoutes(fastify, { raw: deps.raw });
   registerInteractionsRoutes(fastify, { raw: deps.raw });
   registerVaultRoutes(fastify, { raw: deps.raw });
+  registerTrustRoutes(fastify, { raw: deps.raw });
+  registerLearningRoutes(fastify, { raw: deps.raw });
+  if (deps.pluginToolStore) {
+    registerToolRoutes(fastify, deps.pluginToolStore);
+  }
 }

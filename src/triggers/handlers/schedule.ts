@@ -12,12 +12,16 @@ export class ScheduleHandler {
   constructor(
     private readonly expression: string,
     private readonly callback: () => void,
+    private readonly timezone?: string,
   ) {}
 
   start(): void {
     this.task = schedule(this.expression, () => {
       this.callback();
-    }, { scheduled: true });
+    }, {
+      scheduled: true,
+      timezone: this.timezone ?? process.env['TZ'] ?? 'America/New_York',
+    });
   }
 
   stop(): void {

@@ -59,16 +59,16 @@ runStep('triggers-notifications', {
     const regLines = dockerLogsContain('Registered schedule');
     checks.push(check('trigger_registered_log', regLines.length > 0, 'logs show registration', regLines.length > 0 ? `${regLines.length} line(s)` : 'not found'));
 
-    // Learning trigger: auto-seeded in disabled state
+    // Learning trigger: auto-seeded in active state
     const learningTrigger = db.prepare("SELECT name, state FROM trigger_configs WHERE team='loggly-monitor' AND name='learning-cycle'").get();
     checks.push(check('learning_trigger_exists', !!learningTrigger, 'learning-cycle trigger exists', learningTrigger ? `state=${learningTrigger.state}` : 'not found'));
     if (learningTrigger) {
-      checks.push(check('learning_trigger_disabled', learningTrigger.state === 'disabled', 'state=disabled', `state=${learningTrigger.state}`));
+      checks.push(check('learning_trigger_active', learningTrigger.state === 'active', 'state=active', `state=${learningTrigger.state}`));
     }
 
-    // Learning skill file seeded
-    const skillPath = path.join(TEAMS_DIR, 'loggly-monitor', 'skills', 'learning-cycle.md');
-    checks.push(check('learning_skill_exists', fileExists(skillPath), 'learning-cycle.md exists', fileExists(skillPath) ? 'exists' : 'missing'));
+    // Learning: skill loaded from system-rules/skills/ (no longer seeded per-team)
+    const systemSkillPath = path.resolve(__dirname, '..', '..', 'system-rules', 'skills', 'learning-cycle.md');
+    checks.push(check('learning_skill_system', fileExists(systemSkillPath), 'learning-cycle.md in system-rules', fileExists(systemSkillPath) ? 'exists' : 'missing'));
 
     return checks;
   },
@@ -82,7 +82,7 @@ runStep('triggers-notifications', {
 
     if (task) {
       // Task should be completed
-      checks.push(check('trigger_task_completed', task.status === 'completed', 'status=completed', `status=${task.status}`));
+      checks.push(check('trigger_task_completed', task.status === 'done', 'status=done', `status=${task.status}`));
 
       // Result should contain evidence of API call attempt
       const result = task.result || '';

@@ -77,7 +77,7 @@ export interface TaskConsumerOpts {
   readonly pollIntervalMs?: number;
   readonly notifyChannel?: (content: string, sourceChannelId?: string | null) => Promise<void>;
   readonly getTeamConfig?: (teamId: string) => TeamConfig | undefined;
-  readonly reportTriggerOutcome?: (team: string, triggerName: string, success: boolean) => void;
+  readonly reportTriggerOutcome?: (team: string, triggerName: string, success: boolean, taskId?: string) => void;
   readonly interactionStore?: IInteractionStore;
 }
 
@@ -88,7 +88,7 @@ export class TaskConsumer {
   readonly #pollMs: number;
   readonly #notifyChannel?: (content: string, sourceChannelId?: string | null) => Promise<void>;
   readonly #getTeamConfig?: (teamId: string) => TeamConfig | undefined;
-  readonly #reportTriggerOutcome?: (team: string, triggerName: string, success: boolean) => void;
+  readonly #reportTriggerOutcome?: (team: string, triggerName: string, success: boolean, taskId?: string) => void;
   readonly #interactionStore?: IInteractionStore;
   #timer: ReturnType<typeof setInterval> | null = null;
   #processing = false;
@@ -123,23 +123,17 @@ export class TaskConsumer {
     try {
       const pending = this.#taskQueue.getPending();
       for (const task of pending) {
-        if (task.teamId === 'main') continue;
-
         const dequeued = this.#taskQueue.dequeue(task.teamId);
         if (!dequeued) continue;
 
         // Skip bootstrap tasks for already-bootstrapped teams
         if (dequeued.type === 'bootstrap' && this.#orgTree.isBootstrapped(dequeued.teamId)) {
-          this.#taskQueue.updateStatus(dequeued.id, TaskStatus.Completed);
+          this.#taskQueue.updateStatus(dequeued.id, TaskStatus.Done);
           continue;
         }
 
         try {
-          // Replace [CREDENTIAL:xxx] placeholders with get_credential instructions
-          let taskContent = dequeued.task.replace(
-            /\[CREDENTIAL:(\w+)\]/g,
-            (_, key: string) => `(use get_credential({ key: "${key}" }) to retrieve this value)`,
-          );
+          let taskContent = dequeued.task;
 
           // For trigger-originated tasks, inject notification decision instruction
           const isTriggerTask = dequeued.type === 'trigger';
@@ -162,11 +156,19 @@ export class TaskConsumer {
               teamName: task.teamId, maxTurns,
               sourceChannelId: dequeued.sourceChannelId ?? undefined,
               topicId: dequeued.topicId ?? undefined,
+              skill: dequeued.options?.skill,
             },
           );
 
+          // Stale outcome guard — task may have been cancelled by overlap policy during execution
+          const currentTask = this.#taskQueue.getById(dequeued.id);
+          if (currentTask?.status === TaskStatus.Cancelled) {
+            // Task cancelled by overlap policy — don't overwrite, don't notify
+            continue;
+          }
+
           const isError = !result.ok;
-          this.#taskQueue.updateStatus(dequeued.id, isError ? TaskStatus.Failed : TaskStatus.Completed);
+          this.#taskQueue.updateStatus(dequeued.id, isError ? TaskStatus.Failed : TaskStatus.Done);
 
           // Mark team as bootstrapped on successful bootstrap task completion
           if (dequeued.type === 'bootstrap' && !isError) {
@@ -181,7 +183,7 @@ export class TaskConsumer {
           // Report trigger outcome for circuit breaker
           const triggerMatch = dequeued.correlationId?.match(/^trigger:([^:]+):/);
           if (triggerMatch) {
-            this.#reportTriggerOutcome?.(task.teamId, triggerMatch[1], !isError);
+            this.#reportTriggerOutcome?.(task.teamId, triggerMatch[1], !isError, dequeued.id);
           }
 
           // Build safe response text
@@ -256,7 +258,7 @@ export class TaskConsumer {
           // Report trigger failure for circuit breaker
           const triggerMatch = dequeued.correlationId?.match(/^trigger:([^:]+):/);
           if (triggerMatch) {
-            this.#reportTriggerOutcome?.(task.teamId, triggerMatch[1], false);
+            this.#reportTriggerOutcome?.(task.teamId, triggerMatch[1], false, dequeued.id);
           }
         }
       }

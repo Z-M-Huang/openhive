@@ -39,6 +39,7 @@ export function enableTrigger(
 
   deps.configStore.setState(input.team, input.trigger_name, 'active');
   deps.configStore.resetFailures(input.team, input.trigger_name);
+  deps.configStore.resetOverlapState(input.team, input.trigger_name);
 
   // Re-register all active triggers for this team
   const active = deps.configStore.getByTeam(input.team).filter(t => t.state === 'active');

@@ -183,6 +183,84 @@ describe('UT-22: Recovery reloads org tree, resets running tasks, detects orphan
   });
 });
 
+// ── Recovery: overlap state reset ──────────────────────────────────────
+
+describe('Recovery resets trigger overlap state', () => {
+  it('resets overlapCount and activeTaskId for all triggers', () => {
+    const { raw, orgStore, taskQueueStore, orgTree, runDir } = createTempEnv();
+
+    const resetCalls: Array<{ team: string; name: string }> = [];
+    const mockTriggerConfigStore = {
+      getAll: () => [
+        { team: 'alpha', name: 'trig-1', type: 'schedule' as const, config: {}, task: 'x' },
+        { team: 'beta', name: 'trig-2', type: 'keyword' as const, config: {}, task: 'y' },
+      ],
+      resetOverlapState: (team: string, name: string) => { resetCalls.push({ team, name }); },
+    };
+
+    recoverFromCrash({
+      orgStore,
+      taskQueueStore,
+      orgTree,
+      runDir,
+      logger: noopLogger,
+      triggerConfigStore: mockTriggerConfigStore as never,
+    });
+
+    expect(resetCalls).toHaveLength(2);
+    expect(resetCalls).toContainEqual({ team: 'alpha', name: 'trig-1' });
+    expect(resetCalls).toContainEqual({ team: 'beta', name: 'trig-2' });
+
+    raw.close();
+  });
+
+  it('skips overlap reset when triggerConfigStore is not provided', () => {
+    const { raw, orgStore, taskQueueStore, orgTree, runDir } = createTempEnv();
+
+    // Should not throw
+    const result = recoverFromCrash({
+      orgStore,
+      taskQueueStore,
+      orgTree,
+      runDir,
+      logger: noopLogger,
+    });
+
+    expect(result.recovered).toBe(0);
+    raw.close();
+  });
+});
+
+// ── Recovery: cancelled tasks are NOT reset ──────────────────────────────
+
+describe('Recovery does not reset cancelled tasks', () => {
+  it('cancelled tasks remain cancelled after recovery', () => {
+    const { raw, orgStore, taskQueueStore, orgTree, runDir } = createTempEnv();
+
+    // Enqueue, dequeue (sets to running), then cancel
+    const taskId = taskQueueStore.enqueue('team-1', 'do something', 'normal', 'delegate');
+    taskQueueStore.dequeue('team-1'); // sets to running
+    taskQueueStore.updateStatus(taskId, TaskStatus.Cancelled);
+
+    const result = recoverFromCrash({
+      orgStore,
+      taskQueueStore,
+      orgTree,
+      runDir,
+      logger: noopLogger,
+    });
+
+    // No running tasks were reset (it was cancelled, not running)
+    expect(result.recovered).toBe(0);
+
+    // Verify the task is still cancelled
+    const task = taskQueueStore.getById(taskId);
+    expect(task?.status).toBe(TaskStatus.Cancelled);
+
+    raw.close();
+  });
+});
+
 // ── Memory files persist after recovery ─────────────────────────────────
 
 describe('Memory entries persist after recovery', () => {

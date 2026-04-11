@@ -222,6 +222,6 @@ export function assertBashSafe(
     .filter(([, v]) => command.includes(v))
     .map(([k]) => k);
   throw new Error(
-    `Credential guard: Bash command writes credential value(s) [${matchedKeys.join(', ')}] to file. Use get_credential at point of use instead.`,
+    `Credential guard: Bash command writes credential value(s) [${matchedKeys.join(', ')}] to file. Use vault_get at point of use instead.`,
   );
 }

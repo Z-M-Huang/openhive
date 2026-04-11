@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { TopicSessionManager } from './topic-session-manager.js';
+import { TopicSessionManager } from './topic-registry.js';
 
 describe('TopicSessionManager', () => {
   it('serializes work for the same topicId', async () => {

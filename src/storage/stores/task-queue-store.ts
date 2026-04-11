@@ -155,6 +155,12 @@ export class TaskQueueStore implements ITaskQueueStore {
     this.db.delete(schema.taskQueue).where(eq(schema.taskQueue.teamId, teamId)).run();
   }
 
+  getById(taskId: string): TaskEntry | undefined {
+    const row = this.db.select().from(schema.taskQueue)
+      .where(eq(schema.taskQueue.id, taskId)).get();
+    return row ? this.rowToEntry(row) : undefined;
+  }
+
   private rowToEntry(row: {
     id: string;
     teamId: string;

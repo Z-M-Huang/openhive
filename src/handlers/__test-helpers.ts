@@ -27,7 +27,6 @@ import { sendMessage, SendMessageInputSchema } from './tools/send-message.js';
 import { getStatus, GetStatusInputSchema } from './tools/get-status.js';
 import { queryTeam, QueryTeamInputSchema } from './tools/query-team.js';
 import { listTeams, ListTeamsInputSchema } from './tools/list-teams.js';
-import { getCredential, GetCredentialInputSchema } from './tools/get-credential.js';
 import { updateTeam, UpdateTeamInputSchema } from './tools/update-team.js';
 
 // ── Factory: OrgTreeNode ──────────────────────────────────────────────────
@@ -157,6 +156,9 @@ export function createMockTaskQueue(): ITaskQueueStore & { tasks: TaskEntry[] } 
       const indices = tasks.reduce<number[]>((acc, t, i) => t.teamId === teamId ? [...acc, i] : acc, []);
       for (const i of indices.reverse()) tasks.splice(i, 1);
     },
+    getById(taskId: string): TaskEntry | undefined {
+      return tasks.find((t) => t.id === taskId);
+    },
   };
 }
 
@@ -234,7 +236,6 @@ export function setupServer(): ServerFixtures {
     ['get_status', { name: 'get_status', description: 'Get status of child teams including queue depth', inputSchema: GetStatusInputSchema }],
     ['list_teams', { name: 'list_teams', description: 'List child teams with descriptions, scope keywords, and status for routing decisions', inputSchema: ListTeamsInputSchema }],
     ['query_team', { name: 'query_team', description: 'Synchronously query a child team and return its response', inputSchema: QueryTeamInputSchema }],
-    ['get_credential', { name: 'get_credential', description: 'Retrieve a credential value by key', inputSchema: GetCredentialInputSchema }],
     ['update_team', { name: 'update_team', description: 'Update a child team scope keywords', inputSchema: UpdateTeamInputSchema }],
   ]);
 
@@ -256,8 +257,6 @@ export function setupServer(): ServerFixtures {
       Promise.resolve(listTeams(input as never, callerId, { orgTree, taskQueue, getTeamConfig }))],
     ['query_team', (input, callerId, sourceChannelId) =>
       queryTeam(input as never, callerId, { orgTree, getTeamConfig, log }, sourceChannelId)],
-    ['get_credential', (input, callerId) =>
-      Promise.resolve(getCredential(input as never, callerId, { getTeamConfig, log }))],
     ['update_team', (input, callerId) =>
       Promise.resolve(updateTeam(input as never, callerId, { orgTree, log }))],
   ]);

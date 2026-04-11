@@ -14,7 +14,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createChannelHandler, type ChannelHandlerDeps } from './channel-handler-factory.js';
 import type { ChannelMessage, IInteractionStore, ITopicStore, InteractionRecord, ITrustAuditStore, TrustAuditEntry } from './domain/interfaces.js';
 import type { TopicEntry } from './domain/types.js';
-import type { TrustEvalResult } from './trust/trust-gate.js';
+import type { TrustEvalResult } from './channels/trust-gate.js';
 
 // ── Mock handleMessage ────────────────────────────────────────────────────
 
@@ -26,7 +26,7 @@ vi.mock('./sessions/message-handler.js', () => ({
 // ── Mock evaluateTrust ──────────────────────────────────────────────────
 
 const mockEvaluateTrust = vi.fn().mockReturnValue({ decision: 'allow', reason: 'no_trust_config' } satisfies TrustEvalResult);
-vi.mock('./trust/trust-gate.js', () => ({
+vi.mock('./channels/trust-gate.js', () => ({
   evaluateTrust: (...args: unknown[]) => mockEvaluateTrust(...(args as [])),
 }));
 

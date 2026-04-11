@@ -8,7 +8,7 @@
 
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import type { IOrgStore, ITaskQueueStore, ITopicStore } from '../domain/interfaces.js';
+import type { IOrgStore, ITaskQueueStore, ITopicStore, ITriggerConfigStore } from '../domain/interfaces.js';
 import { TaskStatus } from '../domain/types.js';
 import type { OrgTree } from '../domain/org-tree.js';
 
@@ -24,6 +24,7 @@ export interface RecoveryDeps {
   readonly runDir: string;
   readonly logger: RecoveryLogger;
   readonly topicStore?: ITopicStore;
+  readonly triggerConfigStore?: ITriggerConfigStore;
 }
 
 export interface RecoveryResult {
@@ -48,6 +49,16 @@ export function recoverFromCrash(deps: RecoveryDeps): RecoveryResult {
   let recovered = runningTasks.length;
   if (recovered > 0) {
     logger.info('Recovery: reset running tasks to pending', { count: recovered });
+  }
+
+  // Note: cancelled tasks are terminal — getByStatus(Running) excludes them by design.
+
+  // 2a. Reset overlap state for all triggers (stale activeTaskId / overlapCount from crash)
+  if (deps.triggerConfigStore) {
+    for (const t of deps.triggerConfigStore.getAll()) {
+      deps.triggerConfigStore.resetOverlapState(t.team, t.name);
+    }
+    logger.info('Recovery: reset trigger overlap state');
   }
 
   // 2b. Reset failed bootstrap tasks to pending (so teams can retry initialization)

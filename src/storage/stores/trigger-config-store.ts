@@ -46,6 +46,7 @@ export class TriggerConfigStore implements ITriggerConfigStore {
         failureThreshold: config.failureThreshold ?? 3,
         consecutiveFailures: 0,
         sourceChannelId: config.sourceChannelId ?? null,
+        overlapPolicy: config.overlapPolicy ?? 'skip-then-replace',
         createdAt: now,
         updatedAt: now,
       }).run();
@@ -123,6 +124,59 @@ export class TriggerConfigStore implements ITriggerConfigStore {
       .run();
   }
 
+  setActiveTask(team: string, name: string, taskId: string): void {
+    this.db.update(schema.triggerConfigs)
+      .set({
+        activeTaskId: taskId,
+        updatedAt: new Date().toISOString(),
+      })
+      .where(and(
+        eq(schema.triggerConfigs.team, team),
+        eq(schema.triggerConfigs.name, name),
+      ))
+      .run();
+  }
+
+  clearActiveTask(team: string, name: string): void {
+    this.db.update(schema.triggerConfigs)
+      .set({
+        activeTaskId: null,
+        updatedAt: new Date().toISOString(),
+      })
+      .where(and(
+        eq(schema.triggerConfigs.team, team),
+        eq(schema.triggerConfigs.name, name),
+      ))
+      .run();
+  }
+
+  setOverlapCount(team: string, name: string, count: number): void {
+    this.db.update(schema.triggerConfigs)
+      .set({
+        overlapCount: count,
+        updatedAt: new Date().toISOString(),
+      })
+      .where(and(
+        eq(schema.triggerConfigs.team, team),
+        eq(schema.triggerConfigs.name, name),
+      ))
+      .run();
+  }
+
+  resetOverlapState(team: string, name: string): void {
+    this.db.update(schema.triggerConfigs)
+      .set({
+        overlapCount: 0,
+        activeTaskId: null,
+        updatedAt: new Date().toISOString(),
+      })
+      .where(and(
+        eq(schema.triggerConfigs.team, team),
+        eq(schema.triggerConfigs.name, name),
+      ))
+      .run();
+  }
+
   get(team: string, name: string): TriggerConfig | undefined {
     const row = this.db.select().from(schema.triggerConfigs)
       .where(and(
@@ -147,6 +201,9 @@ export class TriggerConfigStore implements ITriggerConfigStore {
       consecutiveFailures: row.consecutiveFailures,
       disabledReason: row.disabledReason ?? undefined,
       sourceChannelId: row.sourceChannelId ?? undefined,
+      overlapPolicy: (row.overlapPolicy as TriggerConfig['overlapPolicy']) ?? 'skip-then-replace',
+      overlapCount: row.overlapCount ?? 0,
+      activeTaskId: row.activeTaskId ?? null,
     };
   }
 }

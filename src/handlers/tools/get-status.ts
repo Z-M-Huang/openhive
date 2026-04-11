@@ -74,7 +74,7 @@ function buildStatusInfo(teamId: string, deps: GetStatusDeps): TeamStatusInfo {
 
   const runningTask = tasks.find((t) => t.status === TaskStatus.Running);
   const pendingTasks = tasks.filter((t) => t.status === TaskStatus.Pending);
-  const completed = tasks.filter((t) => t.status === TaskStatus.Completed || t.status === TaskStatus.Failed);
+  const completed = tasks.filter((t) => t.status === TaskStatus.Done || t.status === TaskStatus.Failed);
   const latest = completed.sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
 
   // Redact bootstrap tasks — hide implementation details from parent agents
@@ -85,7 +85,7 @@ function buildStatusInfo(teamId: string, deps: GetStatusDeps): TeamStatusInfo {
   let latestResult: string | null = null;
   if (latest) {
     if (latest.type === 'bootstrap') {
-      latestResult = latest.status === TaskStatus.Completed
+      latestResult = latest.status === TaskStatus.Done
         ? 'Bootstrapped successfully'
         : 'Bootstrap failed';
     } else {

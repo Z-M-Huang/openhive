@@ -26,6 +26,10 @@ function createMockTriggerConfigStore(): ITriggerConfigStore {
     setState: vi.fn(),
     incrementFailures: vi.fn().mockReturnValue(0),
     resetFailures: vi.fn(),
+    setActiveTask: vi.fn(),
+    clearActiveTask: vi.fn(),
+    setOverlapCount: vi.fn(),
+    resetOverlapState: vi.fn(),
   };
 }
 

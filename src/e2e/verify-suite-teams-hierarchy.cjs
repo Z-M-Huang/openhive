@@ -73,9 +73,9 @@ runStep('teams-hierarchy', {
     checks.push(check('vault_migration_api_key', hasVaultKey, 'api_key in vault (is_secret=1)', hasVaultKey ? 'found' : 'missing'));
     checks.push(check('vault_migration_region', hasVaultRegion, 'region in vault (is_secret=1)', hasVaultRegion ? 'found' : 'missing'));
 
-    // Learning: skill file seeded
-    const skillPath = path.join(TEAMS_DIR, 'ops-team', 'skills', 'learning-cycle.md');
-    checks.push(check('learning_skill_seeded', fileExists(skillPath), 'learning-cycle.md exists', fileExists(skillPath) ? 'exists' : 'missing'));
+    // Learning: skill loaded from system-rules/skills/ (no longer seeded per-team)
+    const systemSkillPath = path.resolve(__dirname, '..', '..', 'system-rules', 'skills', 'learning-cycle.md');
+    checks.push(check('learning_skill_system', fileExists(systemSkillPath), 'learning-cycle.md in system-rules', fileExists(systemSkillPath) ? 'exists' : 'missing'));
 
     return checks;
   },

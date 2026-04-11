@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 
-import { loadSkillsContent, loadSubagents } from './skill-loader.js';
+import { loadSkillsContent, loadSubagents, resolveActiveSkill } from './skill-loader.js';
 
 // ── Skill and Subagent Loader ────────────────────────────────────────────
 
@@ -38,6 +38,44 @@ describe('Skill and Subagent Loader', () => {
   it('returns empty record when subagents/ is empty', () => {
     expect(Object.keys(loadSubagents(dir, 'test-team'))).toHaveLength(0);
   });
+
+  // ── resolveActiveSkill system fallback ───────────────────────────────────
+
+  it('resolveActiveSkill returns null when no skillName', () => {
+    expect(resolveActiveSkill(dir, 'test-team')).toBeNull();
+  });
+
+  it('resolveActiveSkill resolves from team path first', () => {
+    writeFileSync(join(dir, 'teams', 'test-team', 'skills', 'deploy.md'), '# Team Deploy');
+    const result = resolveActiveSkill(dir, 'test-team', 'deploy');
+    expect(result).toEqual({ name: 'deploy', content: '# Team Deploy' });
+  });
+
+  it('resolveActiveSkill falls back to systemRulesDir when team skill missing', () => {
+    const sysDir = mkdtempSync(join(tmpdir(), 'openhive-sysrules-'));
+    mkdirSync(join(sysDir, 'skills'), { recursive: true });
+    writeFileSync(join(sysDir, 'skills', 'learning-cycle.md'), '# System Learning');
+    const result = resolveActiveSkill(dir, 'test-team', 'learning-cycle', sysDir);
+    expect(result).toEqual({ name: 'learning-cycle', content: '# System Learning' });
+  });
+
+  it('resolveActiveSkill team skill overrides system skill', () => {
+    const sysDir = mkdtempSync(join(tmpdir(), 'openhive-sysrules-'));
+    mkdirSync(join(sysDir, 'skills'), { recursive: true });
+    writeFileSync(join(sysDir, 'skills', 'deploy.md'), '# System Deploy');
+    writeFileSync(join(dir, 'teams', 'test-team', 'skills', 'deploy.md'), '# Team Deploy');
+    const result = resolveActiveSkill(dir, 'test-team', 'deploy', sysDir);
+    expect(result).toEqual({ name: 'deploy', content: '# Team Deploy' });
+  });
+
+  it('resolveActiveSkill returns null when skill not found anywhere', () => {
+    const sysDir = mkdtempSync(join(tmpdir(), 'openhive-sysrules-'));
+    mkdirSync(join(sysDir, 'skills'), { recursive: true });
+    const result = resolveActiveSkill(dir, 'test-team', 'nonexistent', sysDir);
+    expect(result).toBeNull();
+  });
+
+  // ── Subagent parsing ─────────────────────────────────────────────────────
 
   it('parses subagent .md format', () => {
     const content = '# Agent: Devops\n## Role\nHandles deployments\n## Skills\n- deploy — run deploys\n- rollback — undo deploys\n';

@@ -1,7 +1,7 @@
 /**
  * GET /api/v1/vault — paginated vault list with optional team filter.
  *
- * Secret values (is_secret = 1) are redacted to "[REDACTED]".
+ * Secret entries (is_secret = 1) omit the value key entirely.
  */
 
 import type { FastifyInstance } from 'fastify';
@@ -38,7 +38,7 @@ function mapVaultRow(row: VaultRow) {
     id: row.id,
     teamName: row.team_name,
     key: row.key,
-    value: row.is_secret === 1 ? '[REDACTED]' : row.value,
+    ...(row.is_secret === 1 ? {} : { value: row.value }),
     isSecret: row.is_secret === 1,
     updatedBy: row.updated_by,
     createdAt: row.created_at,
@@ -75,6 +75,25 @@ export function registerVaultRoutes(fastify: FastifyInstance, deps: VaultDeps): 
       ).all(...params, limit, offset) as VaultRow[];
 
       await reply.code(200).send({ data: rows.map(mapVaultRow), total: countRow.total });
+    } catch (err) {
+      await reply.code(500).send({ error: errorMessage(err) });
+    }
+  });
+
+  // GET /api/v1/vault/:team/:key — single vault entry detail
+  fastify.get<{
+    Params: { team: string; key: string };
+  }>('/api/v1/vault/:team/:key', async (request, reply) => {
+    try {
+      const { team, key } = request.params;
+      const row = deps.raw.prepare(
+        'SELECT * FROM team_vault WHERE team_name = ? AND key = ?',
+      ).get(team, key) as VaultRow | undefined;
+      if (!row) {
+        await reply.code(404).send({ error: `Vault entry '${key}' not found for team '${team}'` });
+        return;
+      }
+      await reply.code(200).send({ data: mapVaultRow(row) });
     } catch (err) {
       await reply.code(500).send({ error: errorMessage(err) });
     }

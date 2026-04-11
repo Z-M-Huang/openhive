@@ -44,6 +44,7 @@ const allTables: SQLiteTable[] = [
   schema.senderTrust,
   schema.trustAuditLog,
   schema.teamVault,
+  schema.pluginTools,
 ];
 
 /**
@@ -141,6 +142,10 @@ export function createTables(raw: Database.Database): void {
     'ALTER TABLE channel_interactions ADD COLUMN topic_id TEXT',
     'ALTER TABLE org_tree ADD COLUMN bootstrapped INTEGER NOT NULL DEFAULT 0',
     'ALTER TABLE channel_interactions ADD COLUMN trust_decision TEXT',
+    "UPDATE task_queue SET status = 'done' WHERE status = 'completed'",
+    "ALTER TABLE trigger_configs ADD COLUMN overlap_policy TEXT NOT NULL DEFAULT 'skip-then-replace'",
+    'ALTER TABLE trigger_configs ADD COLUMN overlap_count INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE trigger_configs ADD COLUMN active_task_id TEXT',
   ];
   for (const sql of migrations) {
     try { raw.prepare(sql).run(); } catch { /* column already exists */ }

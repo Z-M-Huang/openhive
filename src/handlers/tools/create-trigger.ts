@@ -15,6 +15,7 @@ export const CreateTriggerInputSchema = z.object({
   skill: z.string().optional(),
   max_turns: z.number().int().min(1).max(500).optional(),
   failure_threshold: z.number().int().min(1).max(100).optional(),
+  overlap_policy: z.enum(['skip-then-replace', 'always-skip', 'always-replace', 'allow']).default('skip-then-replace').optional(),
 });
 
 export interface CreateTriggerResult {
@@ -53,6 +54,7 @@ export function createTrigger(
     maxTurns: input.max_turns ?? 100,
     failureThreshold: input.failure_threshold ?? 3,
     sourceChannelId,
+    overlapPolicy: input.overlap_policy,
   });
 
   deps.log('Created trigger', { team: input.team, trigger: input.name, state: 'pending' });

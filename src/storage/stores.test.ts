@@ -70,7 +70,7 @@ describe('UT-2: Schema and WAL mode', () => {
     expect(result[0]?.journal_mode).toBe('wal');
   });
 
-  it('creates all 15 tables', () => {
+  it('creates all 16 tables', () => {
     const tables = instance.raw
       .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '%_fts%'")
       .all() as Array<{ name: string }>;
@@ -84,6 +84,7 @@ describe('UT-2: Schema and WAL mode', () => {
       'memories',
       'memory_chunks',
       'org_tree',
+      'plugin_tools',
       'scope_keywords',
       'sender_trust',
       'task_queue',
@@ -276,10 +277,10 @@ describe('Task Queue Store', () => {
 
   it('updateStatus changes task status', () => {
     const id = store.enqueue('team-1', 'will complete', 'normal', 'delegate');
-    store.updateStatus(id, TaskStatus.Completed);
+    store.updateStatus(id, TaskStatus.Done);
 
     const tasks = store.getByTeam('team-1');
-    expect(tasks[0]?.status).toBe(TaskStatus.Completed);
+    expect(tasks[0]?.status).toBe(TaskStatus.Done);
   });
 
   it('getPending returns all pending tasks across teams', () => {

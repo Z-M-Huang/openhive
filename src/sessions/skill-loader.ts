@@ -9,6 +9,7 @@
  */
 
 import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
 import { loadRulesFromDirectory } from '../rules/loader.js';
 
 /**
@@ -87,4 +88,66 @@ export function loadSkillsContent(runDir: string, teamName: string): string {
     parts.push(file.content);
   }
   return parts.join('\n');
+}
+
+/**
+ * Resolve which skill is active for this task session.
+ * Returns the skill file content if a matching skill file exists.
+ */
+export function resolveActiveSkill(
+  runDir: string,
+  teamName: string,
+  skillName?: string,
+  systemRulesDir?: string,
+): { name: string; content: string } | null {
+  if (!skillName) return null;
+
+  // 1. Try team-level skill first
+  const teamPath = join(runDir, 'teams', teamName, 'skills', `${skillName}.md`);
+  try {
+    const content = readFileSync(teamPath, 'utf-8');
+    return { name: skillName, content };
+  } catch { /* not found at team level */ }
+
+  // 2. Fall back to system-rules/skills/
+  if (systemRulesDir) {
+    const systemPath = join(systemRulesDir, 'skills', `${skillName}.md`);
+    try {
+      const content = readFileSync(systemPath, 'utf-8');
+      return { name: skillName, content };
+    } catch { /* not found at system level */ }
+  }
+
+  return null;
+}
+
+/**
+ * Parse the ## Required Tools section from a skill's markdown.
+ * Returns an array of tool names.
+ */
+export function parseRequiredTools(skillContent: string): string[] {
+  const match = skillContent.match(/## Required Tools\s*\n([\s\S]*?)(?=\n##|\n$|$)/);
+  if (!match) return [];
+  const lines = match[1].split('\n');
+  const tools: string[] = [];
+  for (const line of lines) {
+    const m = line.match(/^-\s+(\S+)/);
+    if (m) tools.push(m[1]);
+  }
+  return tools;
+}
+
+/**
+ * Load only the active skill's content for the prompt.
+ * Falls back to loadSkillsContent() if no specific skill is active.
+ */
+export function loadActiveSkillContent(
+  runDir: string,
+  teamName: string,
+  activeSkill: { name: string; content: string } | null,
+): string {
+  if (activeSkill) {
+    return `--- Skills ---\n${activeSkill.content}`;
+  }
+  return loadSkillsContent(runDir, teamName);
 }

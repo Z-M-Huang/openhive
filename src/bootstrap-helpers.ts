@@ -20,25 +20,23 @@ import { TopicStore } from './storage/stores/topic-store.js';
 import { SenderTrustStore } from './storage/stores/sender-trust-store.js';
 import { TrustAuditStore } from './storage/stores/trust-audit-store.js';
 import { VaultStore } from './storage/stores/vault-store.js';
+import { PluginToolStore } from './storage/stores/plugin-tool-store.js';
 import { TriggerDedup } from './triggers/dedup.js';
 import { TriggerRateLimiter } from './triggers/rate-limiter.js';
 import { TriggerEngine } from './triggers/engine.js';
 import { DiscordAdapter } from './channels/discord-adapter.js';
 import { SecretString } from './secrets/secret-string.js';
-import type { IChannelAdapter } from './domain/interfaces.js';
+import type { IChannelAdapter, ITriggerConfigStore } from './domain/interfaces.js';
 import type { ChannelsOutput } from './config/validation.js';
 import type { DatabaseInstance } from './storage/database.js';
 import type { OrgTree } from './domain/org-tree.js';
-import { TeamStatus } from './domain/types.js';
+import { TaskStatus, TeamStatus } from './domain/types.js';
 import type { AppLogger } from './logging/logger.js';
 import { migrateFilesystemMemory } from './storage/migration.js';
 import { migrateCredentialsToVault } from './storage/migration-vault.js';
-import { seedLearningTrigger } from './handlers/tools/spawn-team.js';
-import type { ITriggerConfigStore } from './domain/interfaces.js';
+import { seedLearningTrigger, seedReflectionTrigger } from './handlers/tools/spawn-team.js';
 
-export interface ChannelDeps {
-  readonly dataDir: string;
-}
+export interface ChannelDeps { readonly dataDir: string }
 
 /** Ensure .run/ directory structure exists. */
 export function ensureRunDir(runDir: string): void {
@@ -52,35 +50,15 @@ export function ensureRunDir(runDir: string): void {
 export function seedOrgRules(dataDir: string, seedRulesDir: string): void {
   const rulesDir = join(dataDir, 'rules');
   mkdirSync(rulesDir, { recursive: true });
-
   if (!existsSync(seedRulesDir)) return;
-
   // Only seed if rules dir is empty (no .md files)
-  const existing = existsSync(rulesDir)
-    ? readdirSync(rulesDir).filter(f => f.endsWith('.md'))
-    : [];
-  if (existing.length > 0) return;
-
+  if (readdirSync(rulesDir).some(f => f.endsWith('.md'))) return;
   cpSync(seedRulesDir, rulesDir, { recursive: true });
 }
 
-/** Seed skill .md files into every existing team's skills/ dir (idempotent, skip-if-present). */
-export function seedTeamSkills(runDir: string, seedSkillsDir: string): void {
-  if (!existsSync(seedSkillsDir)) return;
-  const seedFiles = readdirSync(seedSkillsDir).filter(f => f.endsWith('.md'));
-  if (seedFiles.length === 0) return;
-  const teamsDir = join(runDir, 'teams');
-  if (!existsSync(teamsDir)) return;
-  let teamDirs: string[];
-  try { teamDirs = readdirSync(teamsDir); } catch { return; }
-  for (const teamName of teamDirs) {
-    const skillsDir = join(teamsDir, teamName, 'skills');
-    mkdirSync(skillsDir, { recursive: true });
-    for (const file of seedFiles) {
-      const dest = join(skillsDir, file);
-      if (!existsSync(dest)) cpSync(join(seedSkillsDir, file), dest);
-    }
-  }
+/** @deprecated Skills now loaded from system-rules/skills/ via resolveActiveSkill() fallback. */
+export function seedTeamSkills(_runDir: string, _seedSkillsDir: string): void {
+  return;
 }
 
 export interface StorageResult extends DatabaseInstance {
@@ -96,13 +74,13 @@ export interface StorageResult extends DatabaseInstance {
   readonly senderTrustStore: SenderTrustStore;
   readonly trustAuditStore: TrustAuditStore;
   readonly vaultStore: VaultStore;
+  readonly pluginToolStore: PluginToolStore;
 }
 
 export function initStorage(_dataDir: string, runDir: string): StorageResult {
   const dbPath = join(runDir, 'openhive.db');
   const { db, raw } = createDatabase(dbPath);
   createTables(raw);
-
   const orgStore = new OrgStore(db);
   const taskQueueStore = new TaskQueueStore(db);
   const triggerStore = new TriggerStore(db);
@@ -115,8 +93,8 @@ export function initStorage(_dataDir: string, runDir: string): StorageResult {
   const senderTrustStore = new SenderTrustStore(db);
   const trustAuditStore = new TrustAuditStore(db);
   const vaultStore = new VaultStore(db);
-
-  return { db, raw, orgStore, taskQueueStore, triggerStore, logStore, escalationStore, memoryStore, triggerConfigStore, interactionStore, topicStore, senderTrustStore, trustAuditStore, vaultStore };
+  const pluginToolStore = new PluginToolStore(db);
+  return { db, raw, orgStore, taskQueueStore, triggerStore, logStore, escalationStore, memoryStore, triggerConfigStore, interactionStore, topicStore, senderTrustStore, trustAuditStore, vaultStore, pluginToolStore };
 }
 
 /** Run one-time filesystem → SQLite migration for memory data. */
@@ -144,17 +122,24 @@ export function initTriggerEngine(
     dedup,
     rateLimiter,
     configStore: triggerConfigStore,
+    taskQueueStore,
     delegateTask: (team, task, priority, triggerName, sourceChannelId) => {
       // Unique correlationId per task: trigger:{name}:{timestamp}
       const correlationId = triggerName ? `trigger:${triggerName}:${Date.now()}` : undefined;
-      // Snapshot max_turns from trigger config
+      // Snapshot max_turns and skill from trigger config
       let options: import('./domain/types.js').TaskOptions | undefined;
       if (triggerName) {
         const entry = triggerConfigStore.get(team, triggerName);
-        if (entry?.maxTurns) options = { maxTurns: entry.maxTurns };
+        if (entry?.maxTurns || entry?.skill) options = { maxTurns: entry?.maxTurns, skill: entry?.skill };
       }
-      taskQueueStore.enqueue(team, task, (priority ?? 'normal') as import('./domain/types.js').TaskPriority, 'trigger', sourceChannelId, correlationId, options);
-      return Promise.resolve();
+      const taskId = taskQueueStore.enqueue(team, task, (priority ?? 'normal') as import('./domain/types.js').TaskPriority, 'trigger', sourceChannelId, correlationId, options);
+      return Promise.resolve(taskId);
+    },
+    abortSession: (teamId, taskId) => {
+      try { taskQueueStore.updateStatus(taskId, TaskStatus.Cancelled); } catch { /* best-effort */ }
+    },
+    onOverlapAlert: (team, triggerName, action, details) => {
+      logger.warn(`Trigger overlap: ${action}`, { team, triggerName, oldTaskId: details.oldTaskId });
     },
     logger,
     onTriggerDeactivated,
@@ -219,7 +204,7 @@ export function ensureMainTeam(runDir: string, orgTree: OrgTree): void {
   }
 }
 
-/** Seed disabled learning-cycle triggers for all existing teams (idempotent). */
+/** Seed learning-cycle + reflection-cycle triggers for all existing teams (idempotent). */
 export function seedLearningTriggers(runDir: string, triggerConfigStore: ITriggerConfigStore): void {
   const teamsDir = join(runDir, 'teams');
   if (!existsSync(teamsDir)) return;
@@ -227,8 +212,10 @@ export function seedLearningTriggers(runDir: string, triggerConfigStore: ITrigge
   try { teamDirs = readdirSync(teamsDir); } catch { return; }
   for (const teamName of teamDirs) {
     seedLearningTrigger(teamName, triggerConfigStore);
+    seedReflectionTrigger(teamName, triggerConfigStore);
   }
 }
+
 
 /** Migrate legacy `mcp__org__*` allowed_tools patterns to bare tool names. */
 export function migrateAllowedTools(runDir: string): void {
@@ -236,7 +223,6 @@ export function migrateAllowedTools(runDir: string): void {
   if (!existsSync(teamsDir)) return;
   let teamDirs: string[];
   try { teamDirs = readdirSync(teamsDir); } catch { return; }
-
   for (const teamName of teamDirs) {
     const configPath = join(teamsDir, teamName, 'config.yaml');
     if (!existsSync(configPath)) continue;
@@ -244,7 +230,6 @@ export function migrateAllowedTools(runDir: string): void {
     try { raw = readFileSync(configPath, 'utf-8'); } catch { continue; }
     let parsed: Record<string, unknown>;
     try { parsed = yamlParse(raw) as Record<string, unknown>; } catch { continue; }
-
     const allowedTools = parsed['allowed_tools'];
     if (!Array.isArray(allowedTools)) continue;
     let changed = false;
@@ -256,9 +241,7 @@ export function migrateAllowedTools(runDir: string): void {
       return tool.slice('mcp__org__'.length);
     });
     if (!changed) continue;
-
-    const deduped = [...new Set(migrated as string[])];
-    parsed['allowed_tools'] = deduped;
+    parsed['allowed_tools'] = [...new Set(migrated as string[])];
     // Also strip 'org' from mcp_servers if present
     const mcpServers = parsed['mcp_servers'];
     if (Array.isArray(mcpServers)) {
@@ -269,9 +252,7 @@ export function migrateAllowedTools(runDir: string): void {
   }
 }
 
-export async function initBrowserRelay(
-  logger: AppLogger,
-): Promise<import('./sessions/tools/browser-proxy.js').BrowserRelay | undefined> {
+export async function initBrowserRelay(logger: AppLogger): Promise<import('./sessions/tools/browser-proxy.js').BrowserRelay | undefined> {
   try {
     const { createBrowserRelay } = await import('./sessions/tools/browser-proxy.js');
     const relay = await createBrowserRelay({ logger });
@@ -279,11 +260,10 @@ export async function initBrowserRelay(
     return relay;
   } catch (err) {
     const msg = errorMessage(err);
-    const isModuleError = msg.includes('Cannot find module') || msg.includes('MODULE_NOT_FOUND');
-    const logMsg = isModuleError
+    const isModule = msg.includes('Cannot find module') || msg.includes('MODULE_NOT_FOUND');
+    logger.error(isModule
       ? 'Browser relay failed to initialize — @playwright/mcp not found, please update to the latest OpenHive version'
-      : `Browser relay failed to initialize: ${msg}`;
-    logger.error(logMsg, { error: msg });
+      : `Browser relay failed to initialize: ${msg}`, { error: msg });
     return undefined;
   }
 }

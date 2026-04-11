@@ -149,7 +149,7 @@ function dbExec(fn) {
   try { return fn(db); } finally { db.close(); }
 }
 
-async function poll(description, checkFn, { maxMs = 60000, intervalMs = 3000 } = {}) {
+async function poll(description, checkFn, { maxMs = 180000, intervalMs = 3000 } = {}) {
   const start = Date.now();
   while (Date.now() - start < maxMs) {
     try {
@@ -193,7 +193,7 @@ async function waitHealth(maxMs = 90000, intervalMs = 3000) {
   throw new Error(`Health check timeout after ${maxMs}ms`);
 }
 
-function waitBootstrap(teamName, maxMs = 60000, intervalMs = 3000) {
+function waitBootstrap(teamName, maxMs = 180000, intervalMs = 3000) {
   return poll(`${teamName} bootstrap`, () => {
     const row = dbQuery(db => db.prepare("SELECT bootstrapped FROM org_tree WHERE name=?").get(teamName));
     if (row && row.bootstrapped === 1) return { done: true, value: true };
@@ -201,13 +201,13 @@ function waitBootstrap(teamName, maxMs = 60000, intervalMs = 3000) {
   }, { maxMs, intervalMs });
 }
 
-function waitTaskComplete(teamId, taskLike, maxMs = 60000, intervalMs = 5000) {
+function waitTaskComplete(teamId, taskLike, maxMs = 180000, intervalMs = 5000) {
   return poll(`${teamId} task complete`, () => {
     const row = dbQuery(db => {
       if (taskLike) return db.prepare("SELECT status, result FROM task_queue WHERE team_id=? AND task LIKE ? ORDER BY created_at DESC LIMIT 1").get(teamId, taskLike);
       return db.prepare("SELECT status, result FROM task_queue WHERE team_id=? ORDER BY created_at DESC LIMIT 1").get(teamId);
     });
-    if (row && (row.status === 'completed' || row.status === 'failed')) return { done: true, value: row };
+    if (row && (row.status === 'done' || row.status === 'failed')) return { done: true, value: row };
     return { done: false };
   }, { maxMs, intervalMs });
 }

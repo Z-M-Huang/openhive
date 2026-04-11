@@ -77,16 +77,16 @@ describe('GET /api/v1/vault', () => {
     expect(body.total).toBe(3);
   });
 
-  it('redacts secret values (is_secret=1)', async () => {
+  it('omits value key for secret entries (is_secret=1)', async () => {
     const res = await fastify.inject({ method: 'GET', url: '/api/v1/vault' });
     const body = JSON.parse(res.body) as VaultResponse;
 
     const secretEntry = body.data.find(e => e.key === 'API_KEY')!;
-    expect(secretEntry.value).toBe('[REDACTED]');
+    expect(secretEntry.value).toBeUndefined();
     expect(secretEntry.isSecret).toBe(true);
 
     const tokenEntry = body.data.find(e => e.key === 'TOKEN')!;
-    expect(tokenEntry.value).toBe('[REDACTED]');
+    expect(tokenEntry.value).toBeUndefined();
     expect(tokenEntry.isSecret).toBe(true);
   });
 

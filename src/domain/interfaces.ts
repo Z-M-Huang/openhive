@@ -81,6 +81,7 @@ export interface ITaskQueueStore {
   getPending(): TaskEntry[];
   getByStatus(status: TaskStatus): TaskEntry[];
   removeByTeam(teamId: string): void;
+  getById(taskId: string): TaskEntry | undefined;
 }
 
 export interface ITriggerStore {
@@ -128,6 +129,40 @@ export interface ITriggerConfigStore {
   incrementFailures(team: string, name: string): number;
   resetFailures(team: string, name: string): void;
   get(team: string, name: string): TriggerConfig | undefined;
+  setActiveTask(team: string, name: string, taskId: string): void;
+  clearActiveTask(team: string, name: string): void;
+  setOverlapCount(team: string, name: string, count: number): void;
+  resetOverlapState(team: string, name: string): void;
+}
+
+// ── Plugin Tool Store ───────────────────────────────────────────────────
+
+export interface PluginToolMeta {
+  readonly teamName: string;
+  readonly toolName: string;
+  readonly status: 'active' | 'deprecated' | 'failed_verification' | 'removed';
+  readonly sourcePath: string;
+  readonly sourceHash: string;
+  readonly verification: PluginToolVerification;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly verifiedAt: string | null;
+}
+
+export interface PluginToolVerification {
+  typescript?: { valid: boolean; errors: string[] };
+  interface?: { hasDescription: boolean; hasParameters: boolean; hasExecute: boolean };
+  security?: { forbiddenPatterns: string[]; detectedSecrets: string[]; passed: boolean };
+}
+
+export interface IPluginToolStore {
+  upsert(meta: PluginToolMeta): void;
+  get(teamName: string, toolName: string): PluginToolMeta | undefined;
+  getByTeam(teamName: string): PluginToolMeta[];
+  getAll(): PluginToolMeta[];
+  setStatus(teamName: string, toolName: string, status: PluginToolMeta['status']): void;
+  remove(teamName: string, toolName: string): void;
+  removeByTeam(teamName: string): void;
 }
 
 // ── Interaction Store ─────────────────────────────────────────────────────

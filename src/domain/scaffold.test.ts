@@ -177,7 +177,7 @@ describe('Layer 0: Domain type shapes', () => {
   it('TaskStatus enum has all values', () => {
     expect(TaskStatus.Pending).toBe('pending');
     expect(TaskStatus.Running).toBe('running');
-    expect(TaskStatus.Completed).toBe('completed');
+    expect(TaskStatus.Done).toBe('done');
     expect(TaskStatus.Failed).toBe('failed');
   });
 });
@@ -284,6 +284,7 @@ describe('Layer 0: Interfaces exist', () => {
       getPending: () => [],
       getByStatus: () => [],
       removeByTeam: () => {},
+      getById: () => undefined,
     };
 
     expect(store.enqueue).toBeDefined();

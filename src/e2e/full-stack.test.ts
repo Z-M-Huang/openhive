@@ -110,7 +110,7 @@ describe('E2E-2: All 6 stores end-to-end', () => {
 
     const tid = taskStore.enqueue('t1', 'do work', 'normal', 'delegate');
     expect(taskStore.getByTeam('t1')).toHaveLength(1);
-    taskStore.updateStatus(tid, TaskStatus.Completed);
+    taskStore.updateStatus(tid, TaskStatus.Done);
 
     trigStore.recordEvent('e1', 'src', 60);
     expect(trigStore.checkDedup('e1', 'src')).toBe(true);
@@ -302,7 +302,7 @@ describe('E2E-7: Schedule, keyword, message triggers fire with dedup + rate limi
         { name: 'msg', type: 'message', config: { pattern: 'error \\d+', channel: 'alerts' }, team: 'ops', task: 'handle error' },
       ],
       dedup, rateLimiter,
-      delegateTask: async (team, task) => { taskStore.enqueue(team, task, 'normal', 'trigger'); },
+      delegateTask: async (team, task) => { return taskStore.enqueue(team, task, 'normal', 'trigger'); },
       logger: noop,
     });
     engine.register();
@@ -416,7 +416,7 @@ describe('E2E-10: Full integration chain', () => {
     const engine = new TriggerEngine({
       triggers: [{ name: 'weather-kw', type: 'keyword', config: { pattern: 'weather' }, team: 'weather', task: 'check weather' }],
       dedup, rateLimiter,
-      delegateTask: async (team, task) => { taskStore.enqueue(team, task, 'normal', 'trigger'); },
+      delegateTask: async (team, task) => { return taskStore.enqueue(team, task, 'normal', 'trigger'); },
       logger: noop,
     });
     engine.register();

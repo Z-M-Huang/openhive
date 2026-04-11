@@ -15,9 +15,11 @@ export const UpdateTriggerInputSchema = z.object({
   task: z.string().min(1).optional(),
   max_turns: z.number().int().min(1).max(500).optional(),
   failure_threshold: z.number().int().min(1).max(100).optional(),
+  overlap_policy: z.enum(['skip-then-replace', 'always-skip', 'always-replace', 'allow']).optional(),
 }).refine(
   (data) => data.config !== undefined || data.task !== undefined ||
-            data.max_turns !== undefined || data.failure_threshold !== undefined,
+            data.max_turns !== undefined || data.failure_threshold !== undefined ||
+            data.overlap_policy !== undefined,
   { message: 'at least one updatable field must be provided' },
 );
 
@@ -64,6 +66,7 @@ export function updateTrigger(
     failureThreshold: data.failure_threshold ?? existing.failureThreshold,
     consecutiveFailures: existing.consecutiveFailures,
     sourceChannelId: existing.sourceChannelId,
+    overlapPolicy: data.overlap_policy ?? existing.overlapPolicy,
   };
 
   // Pre-validate config if trigger is active and config was changed

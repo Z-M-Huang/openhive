@@ -18,7 +18,7 @@ import { runSession } from './ai-engine.js';
 import type { ProgressCallback, ProgressUpdate } from './ai-engine.js';
 import { buildSessionContext } from './context-builder.js';
 import { buildRuleCascade } from '../rules/cascade.js';
-import { loadSkillsContent } from './skill-loader.js';
+import { resolveActiveSkill, loadActiveSkillContent } from './skill-loader.js';
 import { buildMemorySection } from './memory-loader.js';
 import { scrubSecrets } from '../logging/credential-scrubber.js';
 import type { ChannelMessage, IInteractionStore, IMemoryStore, IVaultStore, ISenderTrustStore } from '../domain/interfaces.js';
@@ -41,6 +41,7 @@ export interface HandleMessageOpts {
   maxTurns?: number;
   sourceChannelId?: string;
   topicId?: string; topicName?: string;
+  skill?: string;
 }
 
 export interface MessageHandlerDeps {
@@ -74,6 +75,7 @@ export interface MessageHandlerDeps {
   readonly memoryStore?: IMemoryStore;
   readonly vaultStore?: IVaultStore;
   readonly senderTrustStore?: ISenderTrustStore;
+  readonly pluginToolStore?: import('../domain/interfaces.js').IPluginToolStore;
 }
 
 /** Collect a team's ID and all descendant IDs from the org tree via BFS. */
@@ -102,6 +104,7 @@ function assembleSystemPrompt(
   sourceChannelId?: string,
   topicId?: string,
   topicName?: string,
+  skillName?: string,
 ): SystemPromptParts {
   const cascadeLogger = {
     info: (m: string, meta?: Record<string, unknown>) => deps.logger.info(m, meta),
@@ -112,7 +115,8 @@ function assembleSystemPrompt(
     runDir: deps.runDir, dataDir: deps.dataDir, systemRulesDir: deps.systemRulesDir,
     logger: cascadeLogger,
   });
-  const skillsContent = loadSkillsContent(deps.runDir, teamName);
+  const activeSkill = resolveActiveSkill(deps.runDir, teamName, skillName, deps.systemRulesDir);
+  const skillsContent = loadActiveSkillContent(deps.runDir, teamName, activeSkill);
   const memorySection = buildMemorySection(deps.memoryStore, teamName);
 
   if (memorySection.length > 12000) {
@@ -181,9 +185,9 @@ export async function handleMessage(
     const teamCreds = { ...configCreds, ...vaultRecord };
     const credValues = extractStringCredentials(teamCreds);
 
-    const tools = assembleTools(teamConfig, teamName, deps, registry, profileName, modelId, ctx, providerSecrets, credValues, opts?.sourceChannelId);
+    const tools = await assembleTools(teamConfig, teamName, deps, registry, profileName, modelId, ctx, providerSecrets, credValues, opts?.sourceChannelId, deps.pluginToolStore, opts?.skill);
 
-    const system = assembleSystemPrompt(teamConfig, teamName, deps, opts?.sourceChannelId, opts?.topicId, opts?.topicName);
+    const system = assembleSystemPrompt(teamConfig, teamName, deps, opts?.sourceChannelId, opts?.topicId, opts?.topicName, opts?.skill);
     const safeOnProgress = opts?.onProgress && credValues.length > 0
       ? (update: ProgressUpdate) => {
           opts.onProgress!({ ...update, content: scrubSecrets(update.content, [], credValues) });

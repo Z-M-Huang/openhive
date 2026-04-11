@@ -18,6 +18,9 @@ export interface TriggerInfo {
   readonly maxTurns: number;
   readonly consecutiveFailures: number;
   readonly disabledReason?: string;
+  readonly overlapPolicy?: string;
+  readonly overlapCount?: number;
+  readonly activeTaskId?: string | null;
 }
 
 export interface ListTriggersResult {
@@ -50,6 +53,9 @@ export function listTriggers(
     maxTurns: c.maxTurns ?? 100,
     consecutiveFailures: c.consecutiveFailures ?? 0,
     disabledReason: c.disabledReason,
+    overlapPolicy: c.overlapPolicy ?? 'skip-then-replace',
+    overlapCount: c.overlapCount ?? 0,
+    activeTaskId: c.activeTaskId ?? null,
   }));
 
   return { success: true, triggers };

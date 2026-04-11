@@ -33,7 +33,6 @@ import { SendMessageInputSchema, sendMessage } from './tools/send-message.js';
 import { GetStatusInputSchema, getStatus } from './tools/get-status.js';
 import { QueryTeamInputSchema, queryTeam } from './tools/query-team.js';
 import { ListTeamsInputSchema, listTeams } from './tools/list-teams.js';
-import { GetCredentialInputSchema, getCredential } from './tools/get-credential.js';
 import { UpdateTeamInputSchema, updateTeam } from './tools/update-team.js';
 import { CreateTriggerInputSchema, createTrigger } from './tools/create-trigger.js';
 import { EnableTriggerInputSchema, enableTrigger } from './tools/enable-trigger.js';
@@ -163,16 +162,6 @@ function buildToolDefs(deps: OrgToolDeps): ToolDefinition[] {
         orgTree: deps.orgTree, getTeamConfig: deps.getTeamConfig,
         queryRunner: deps.queryRunner, log: deps.log,
       }, sourceChannelId),
-    },
-    {
-      name: 'get_credential',
-      description: 'Retrieve a credential value by key. Use for API calls — do NOT store returned values in files.',
-      inputSchema: GetCredentialInputSchema,
-      handler: (input, callerId) => Promise.resolve(
-        getCredential(input as never, callerId, {
-          getTeamConfig: deps.getTeamConfig, log: deps.log,
-        })
-      ),
     },
     {
       name: 'update_team',

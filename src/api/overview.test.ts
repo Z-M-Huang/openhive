@@ -31,6 +31,7 @@ function mockTaskQueueStore(pending: TaskEntry[] = []): ITaskQueueStore {
     getPending: () => pending,
     getByStatus: () => [],
     removeByTeam: () => {},
+    getById: () => undefined,
   };
 }
 
@@ -45,6 +46,10 @@ function mockTriggerConfigStore(triggers: TriggerConfig[] = []): ITriggerConfigS
     incrementFailures: () => 0,
     resetFailures: () => {},
     get: () => undefined,
+    setActiveTask: () => {},
+    clearActiveTask: () => {},
+    setOverlapCount: () => {},
+    resetOverlapState: () => {},
   };
 }
 

@@ -10,6 +10,7 @@ export type TaskPriority = 'low' | 'normal' | 'high' | 'critical';
 
 export interface TaskOptions {
   readonly maxTurns?: number;
+  readonly skill?: string;
 }
 
 export enum TeamStatus {
@@ -21,8 +22,9 @@ export enum TeamStatus {
 export enum TaskStatus {
   Pending = 'pending',
   Running = 'running',
-  Completed = 'completed',
+  Done = 'done',
   Failed = 'failed',
+  Cancelled = 'cancelled',
 }
 
 // ── Config Types ───────────────────────────────────────────────────────────
@@ -68,7 +70,12 @@ export interface TriggerConfig {
   readonly disabledReason?: string;
   /** Channel that created this trigger — used for notification routing when the trigger fires. */
   readonly sourceChannelId?: string;
+  readonly overlapPolicy?: OverlapPolicy;
+  readonly overlapCount?: number;
+  readonly activeTaskId?: string | null;
 }
+
+export type OverlapPolicy = 'skip-then-replace' | 'always-skip' | 'always-replace' | 'allow';
 
 export interface ProviderProfile {
   readonly name: string;

@@ -49,7 +49,10 @@ export function escalate(
   }
 
   if (!callerTeam.parentId) {
-    return { success: false, error: 'caller has no parent to escalate to' };
+    // Root team — escalate to user via channel (ADR-36)
+    const correlationId = `escalation:root:${Date.now()}`;
+    deps.taskQueue.enqueue(callerId, message, 'high', 'escalation', sourceChannelId, correlationId);
+    return { success: true, correlation_id: correlationId };
   }
 
   const correlationId = randomUUID();

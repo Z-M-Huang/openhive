@@ -39,6 +39,7 @@ export function disableTrigger(
   if (!entry) return { success: false, error: `trigger "${input.trigger_name}" not found for team "${input.team}"` };
 
   deps.configStore.setState(input.team, input.trigger_name, 'disabled', input.reason ?? 'disabled by user');
+  deps.configStore.setOverlapCount(input.team, input.trigger_name, 0);
 
   // Re-register remaining active triggers for this team
   const active = deps.configStore.getByTeam(input.team).filter(t => t.state === 'active');

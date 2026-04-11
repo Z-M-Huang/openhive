@@ -52,6 +52,26 @@ function mapMemoryRow(row: MemoryRow) {
 }
 
 export function registerMemoriesRoutes(fastify: FastifyInstance, deps: MemoriesDeps): void {
+  // GET /api/v1/memories/:id/chain — supersede chain for a memory
+  fastify.get<{ Params: { id: string } }>('/api/v1/memories/:id/chain', async (request, reply) => {
+    try {
+      const chain: ReturnType<typeof mapMemoryRow>[] = [];
+      let currentId: string | number | null = request.params.id;
+      const visited = new Set<string | number>();
+      while (currentId !== null) {
+        if (visited.has(currentId)) break; // cycle guard
+        visited.add(currentId);
+        const row = deps.raw.prepare('SELECT * FROM memories WHERE id = ?').get(currentId) as MemoryRow | undefined;
+        if (!row) break;
+        chain.push(mapMemoryRow(row));
+        currentId = row.supersedes_id;
+      }
+      await reply.code(200).send({ data: chain });
+    } catch (err) {
+      await reply.code(500).send({ error: errorMessage(err) });
+    }
+  });
+
   // GET /api/v1/memories/:id — single memory detail
   fastify.get<{ Params: { id: string } }>('/api/v1/memories/:id', async (request, reply) => {
     try {

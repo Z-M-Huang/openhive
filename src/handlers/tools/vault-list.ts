@@ -20,8 +20,10 @@ export interface VaultListDeps {
 export function vaultList(
   teamName: string,
   deps: VaultListDeps,
+  prefix?: string,
 ): VaultListItem[] {
-  const entries = deps.vaultStore.list(teamName);
+  let entries = deps.vaultStore.list(teamName);
+  if (prefix) entries = entries.filter((e) => e.key.startsWith(prefix));
   return entries.map((e) => ({
     key: e.key,
     isSecret: e.isSecret,

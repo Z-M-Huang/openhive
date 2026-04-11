@@ -12,8 +12,8 @@ import type { OrgToolContext } from './org-tool-context.js';
 
 import { DelegateTaskInputSchema, delegateTask } from '../../handlers/tools/delegate-task.js';
 import { EscalateInputSchema, escalate } from '../../handlers/tools/escalate.js';
-import { GetCredentialInputSchema, getCredential } from '../../handlers/tools/get-credential.js';
 import { GetStatusInputSchema, getStatus } from '../../handlers/tools/get-status.js';
+import { ListCompletedTasksInputSchema, listCompletedTasks } from '../../handlers/tools/list-completed-tasks.js';
 import { ListTeamsInputSchema, listTeams } from '../../handlers/tools/list-teams.js';
 import { QueryTeamInputSchema, queryTeam } from '../../handlers/tools/query-team.js';
 import { SendMessageInputSchema, sendMessage } from '../../handlers/tools/send-message.js';
@@ -58,19 +58,7 @@ export function buildOrgTools(ctx: OrgToolContext): ToolSet {
       }, ctx.sourceChannelId),
   });
 
-  // 3. get_credential
-  tools['get_credential'] = tool({
-    description:
-      'Retrieve a credential value by key. Use for API calls — do NOT store returned values in files.',
-    inputSchema: GetCredentialInputSchema,
-    execute: async (input) =>
-      getCredential(input, ctx.teamName, {
-        getTeamConfig: ctx.getTeamConfig,
-        log: ctx.log,
-      }),
-  });
-
-  // 4. get_status
+  // 3. get_status
   tools['get_status'] = tool({
     description: 'Get status of child teams including queue depth',
     inputSchema: GetStatusInputSchema,
@@ -81,7 +69,17 @@ export function buildOrgTools(ctx: OrgToolContext): ToolSet {
       }),
   });
 
-  // 5. list_teams
+  // 5. list_completed_tasks
+  tools['list_completed_tasks'] = tool({
+    description: 'List recent completed (done/failed) tasks for a team',
+    inputSchema: ListCompletedTasksInputSchema,
+    execute: async (input) =>
+      listCompletedTasks(input, ctx.teamName, {
+        taskQueue: ctx.taskQueue,
+      }),
+  });
+
+  // 6. list_teams
   tools['list_teams'] = tool({
     description:
       'List child teams with descriptions, scope keywords, and status for routing decisions',

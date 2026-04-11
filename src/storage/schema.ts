@@ -16,7 +16,6 @@ import {
 } from 'drizzle-orm/sqlite-core';
 
 // ── org_tree ────────────────────────────────────────────────────────────────
-
 export const orgTree = sqliteTable('org_tree', {
   id: text('id').primaryKey(),
   name: text('name').notNull(),
@@ -27,7 +26,6 @@ export const orgTree = sqliteTable('org_tree', {
 });
 
 // ── scope_keywords ─────────────────────────────────────────────────────────
-
 export const scopeKeywords = sqliteTable(
   'scope_keywords',
   {
@@ -40,7 +38,6 @@ export const scopeKeywords = sqliteTable(
 );
 
 // ── task_queue ──────────────────────────────────────────────────────────────
-
 export const taskQueue = sqliteTable(
   'task_queue',
   {
@@ -65,7 +62,6 @@ export const taskQueue = sqliteTable(
 );
 
 // ── trigger_dedup ───────────────────────────────────────────────────────────
-
 export const triggerDedup = sqliteTable(
   'trigger_dedup',
   {
@@ -80,7 +76,6 @@ export const triggerDedup = sqliteTable(
 );
 
 // ── log_entries ─────────────────────────────────────────────────────────────
-
 export const logEntries = sqliteTable(
   'log_entries',
   {
@@ -98,7 +93,6 @@ export const logEntries = sqliteTable(
 );
 
 // ── escalation_correlations ─────────────────────────────────────────────────
-
 export const escalationCorrelations = sqliteTable(
   'escalation_correlations',
   {
@@ -115,7 +109,6 @@ export const escalationCorrelations = sqliteTable(
 );
 
 // ── trigger_configs ───────────────────────────────────────────────────────
-
 export const triggerConfigs = sqliteTable(
   'trigger_configs',
   {
@@ -132,6 +125,9 @@ export const triggerConfigs = sqliteTable(
     consecutiveFailures: integer('consecutive_failures').notNull().default(0),
     disabledReason: text('disabled_reason'),
     sourceChannelId: text('source_channel_id'),
+    overlapPolicy: text('overlap_policy').notNull().default('skip-then-replace'),
+    overlapCount: integer('overlap_count').notNull().default(0),
+    activeTaskId: text('active_task_id'),
     createdAt: text('created_at').notNull(),
     updatedAt: text('updated_at').notNull(),
   },
@@ -143,7 +139,6 @@ export const triggerConfigs = sqliteTable(
 );
 
 // ── topics ────────────────────────────────────────────────────────────────
-
 export const topics = sqliteTable(
   'topics',
   {
@@ -162,7 +157,6 @@ export const topics = sqliteTable(
 );
 
 // ── channel_interactions ──────────────────────────────────────────────────
-
 export const channelInteractions = sqliteTable(
   'channel_interactions',
   {
@@ -187,7 +181,6 @@ export const channelInteractions = sqliteTable(
 );
 
 // ── memories ─────────────────────────────────────────────────────────────────
-
 export const memories = sqliteTable('memories', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   teamName: text('team_name').notNull(),
@@ -203,7 +196,6 @@ export const memories = sqliteTable('memories', {
 });
 
 // ── memory_chunks ────────────────────────────────────────────────────────────
-
 export const memoryChunks = sqliteTable(
   'memory_chunks',
   {
@@ -223,7 +215,6 @@ export const memoryChunks = sqliteTable(
 );
 
 // ── embedding_cache ──────────────────────────────────────────────────────────
-
 export const embeddingCache = sqliteTable('embedding_cache', {
   contentHash: text('content_hash').primaryKey(),
   embedding: blob('embedding').notNull(),
@@ -232,7 +223,6 @@ export const embeddingCache = sqliteTable('embedding_cache', {
 });
 
 // ── sender_trust ────────────────────────────────────────────────────────────
-
 export const senderTrust = sqliteTable(
   'sender_trust',
   {
@@ -250,7 +240,6 @@ export const senderTrust = sqliteTable(
 );
 
 // ── trust_audit_log ─────────────────────────────────────────────────────────
-
 export const trustAuditLog = sqliteTable(
   'trust_audit_log',
   {
@@ -268,8 +257,28 @@ export const trustAuditLog = sqliteTable(
   ],
 );
 
-// ── team_vault ─────────────────────────────────────────────────────────────
+// ── plugin_tools ──────────────────────────────────────────────────────────
+export const pluginTools = sqliteTable(
+  'plugin_tools',
+  {
+    teamName: text('team_name').notNull(),
+    toolName: text('tool_name').notNull(),
+    status: text('status').notNull().default('active'),
+    sourcePath: text('source_path').notNull(),
+    sourceHash: text('source_hash').notNull(),
+    verification: text('verification').notNull().default('{}'),
+    verifiedAt: text('verified_at'),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.teamName, table.toolName] }),
+    index('idx_plugin_tools_team').on(table.teamName),
+    index('idx_plugin_tools_status').on(table.status),
+  ],
+);
 
+// ── team_vault ─────────────────────────────────────────────────────────────
 export const teamVault = sqliteTable(
   'team_vault',
   {

@@ -107,7 +107,7 @@ describe('UT-10: list_teams', () => {
     f.taskQueue.enqueue('busy-team', 'task 1', 'normal', 'delegate');
     f.taskQueue.enqueue('busy-team', 'task 2', 'normal', 'delegate');
     const dequeued = f.taskQueue.dequeue('busy-team');  // moves task 1 to running
-    if (dequeued) f.taskQueue.updateStatus(dequeued.id, TaskStatus.Completed);
+    if (dequeued) f.taskQueue.updateStatus(dequeued.id, TaskStatus.Done);
 
     const result = await f.server.invoke('list_teams', {}, 'main');
     const typed = result as { success: boolean; teams: Array<{ pendingCount: number }> };

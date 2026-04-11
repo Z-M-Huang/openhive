@@ -14,8 +14,9 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { TriggerDedup } from './dedup.js';
 import { TriggerRateLimiter } from './rate-limiter.js';
 import { TriggerEngine } from './engine.js';
-import type { ITriggerStore } from '../domain/interfaces.js';
-import type { TriggerConfig } from '../domain/types.js';
+import type { ITriggerStore, ITriggerConfigStore, ITaskQueueStore } from '../domain/interfaces.js';
+import type { TriggerConfig, TaskEntry } from '../domain/types.js';
+import { TaskStatus } from '../domain/types.js';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -78,7 +79,7 @@ describe('Trigger Engine', () => {
     dedup = new TriggerDedup(store);
     rateLimiter = new TriggerRateLimiter(100, 60_000);
     logger = makeLogger();
-    delegateTask = vi.fn().mockResolvedValue(undefined);
+    delegateTask = vi.fn().mockResolvedValue('task-123');
   });
 
   it('registers all 3 handler types', () => {
@@ -195,7 +196,7 @@ describe('Dedup Integration', () => {
     const store = createMemoryTriggerStore();
     const dedup = new TriggerDedup(store);
     const rateLimiter = new TriggerRateLimiter(100, 60_000);
-    const delegateTask = vi.fn().mockResolvedValue(undefined);
+    const delegateTask = vi.fn().mockResolvedValue('task-123');
     const logger = makeLogger();
 
     const triggers: TriggerConfig[] = [
@@ -231,7 +232,7 @@ describe('Trigger Engine: Per-Team Registry', () => {
     dedup = new TriggerDedup(store);
     rateLimiter = new TriggerRateLimiter(100, 60_000);
     logger = makeLogger();
-    delegateTask = vi.fn().mockResolvedValue(undefined);
+    delegateTask = vi.fn().mockResolvedValue('task-123');
   });
 
   it('replaceTeamTriggers registers handlers for a team', () => {
@@ -342,7 +343,7 @@ describe('Channel threading through onMessage → delegateTask', () => {
     const store = createMemoryTriggerStore();
     dedup = new TriggerDedup(store);
     rateLimiter = new TriggerRateLimiter(100, 60_000);
-    delegateTask = vi.fn().mockResolvedValue(undefined);
+    delegateTask = vi.fn().mockResolvedValue('task-123');
     logger = makeLogger();
   });
 
@@ -412,7 +413,7 @@ describe('Rate Limiting Integration', () => {
     const store = createMemoryTriggerStore();
     const dedup = new TriggerDedup(store);
     const rateLimiter = new TriggerRateLimiter(2, 60_000); // Only 2 allowed
-    const delegateTask = vi.fn().mockResolvedValue(undefined);
+    const delegateTask = vi.fn().mockResolvedValue('task-123');
     const logger = makeLogger();
 
     const triggers: TriggerConfig[] = [
@@ -434,5 +435,301 @@ describe('Rate Limiting Integration', () => {
       'Trigger rate limited',
       expect.objectContaining({ name: 'kw-go' }),
     );
+  });
+});
+
+// ── Overlap Policy ──────────────────────────────────────────────────────
+
+function createMockConfigStore(configs: Map<string, TriggerConfig>): ITriggerConfigStore {
+  return {
+    upsert: vi.fn(),
+    remove: vi.fn(),
+    removeByTeam: vi.fn(),
+    getByTeam: vi.fn().mockReturnValue([]),
+    getAll: vi.fn().mockReturnValue([]),
+    setState: vi.fn(),
+    incrementFailures: vi.fn().mockReturnValue(1),
+    resetFailures: vi.fn(),
+    get: vi.fn((team: string, name: string) => configs.get(`${team}:${name}`)),
+    setActiveTask: vi.fn((team: string, name: string, taskId: string) => {
+      const key = `${team}:${name}`;
+      const existing = configs.get(key);
+      if (existing) configs.set(key, { ...existing, activeTaskId: taskId });
+    }),
+    clearActiveTask: vi.fn((team: string, name: string) => {
+      const key = `${team}:${name}`;
+      const existing = configs.get(key);
+      if (existing) configs.set(key, { ...existing, activeTaskId: null });
+    }),
+    setOverlapCount: vi.fn((team: string, name: string, count: number) => {
+      const key = `${team}:${name}`;
+      const existing = configs.get(key);
+      if (existing) configs.set(key, { ...existing, overlapCount: count });
+    }),
+    resetOverlapState: vi.fn((team: string, name: string) => {
+      const key = `${team}:${name}`;
+      const existing = configs.get(key);
+      if (existing) configs.set(key, { ...existing, activeTaskId: null, overlapCount: 0 });
+    }),
+  };
+}
+
+function createMockTaskQueueStore(tasks: Map<string, TaskEntry>): ITaskQueueStore {
+  return {
+    enqueue: vi.fn().mockReturnValue('task-new'),
+    dequeue: vi.fn(),
+    peek: vi.fn(),
+    getByTeam: vi.fn().mockReturnValue([]),
+    updateStatus: vi.fn((taskId: string, status: TaskStatus) => {
+      const existing = tasks.get(taskId);
+      if (existing) tasks.set(taskId, { ...existing, status });
+    }),
+    updateResult: vi.fn(),
+    getPending: vi.fn().mockReturnValue([]),
+    getByStatus: vi.fn().mockReturnValue([]),
+    removeByTeam: vi.fn(),
+    getById: vi.fn((taskId: string) => tasks.get(taskId)),
+  };
+}
+
+function makeTaskEntry(id: string, status: TaskStatus): TaskEntry {
+  return {
+    id,
+    teamId: 'weather-team',
+    task: 'check weather',
+    priority: 'normal',
+    type: 'trigger',
+    status,
+    createdAt: new Date().toISOString(),
+    correlationId: null,
+    result: null,
+    durationMs: null,
+    options: null,
+    sourceChannelId: null,
+  };
+}
+
+describe('Overlap Policy', () => {
+  let store: ITriggerStore;
+  let dedup: TriggerDedup;
+  let rateLimiter: TriggerRateLimiter;
+  let logger: ReturnType<typeof makeLogger>;
+  let delegateTask: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    store = createMemoryTriggerStore();
+    dedup = new TriggerDedup(store);
+    rateLimiter = new TriggerRateLimiter(100, 60_000);
+    logger = makeLogger();
+    delegateTask = vi.fn().mockResolvedValue('task-new');
+  });
+
+  it('always-skip: skips when active task exists', () => {
+    const tasks = new Map<string, TaskEntry>();
+    tasks.set('task-old', makeTaskEntry('task-old', TaskStatus.Running));
+
+    const configs = new Map<string, TriggerConfig>();
+    configs.set('weather-team:kw-check', {
+      name: 'kw-check', type: 'keyword', config: { pattern: 'weather' },
+      team: 'weather-team', task: 'check weather',
+      state: 'active', overlapPolicy: 'always-skip', activeTaskId: 'task-old',
+    });
+
+    const configStore = createMockConfigStore(configs);
+    const taskQueueStore = createMockTaskQueueStore(tasks);
+    const onOverlapAlert = vi.fn();
+
+    const triggers: TriggerConfig[] = [
+      makeTrigger({ name: 'kw-check', type: 'keyword', config: { pattern: 'weather' } }),
+    ];
+
+    const engine = new TriggerEngine({
+      triggers, dedup, rateLimiter, delegateTask, logger,
+      configStore, taskQueueStore, onOverlapAlert,
+    });
+    engine.register();
+    engine.onMessage('weather update');
+
+    expect(delegateTask).not.toHaveBeenCalled();
+    expect(onOverlapAlert).toHaveBeenCalledWith('weather-team', 'kw-check', 'skipped', { oldTaskId: 'task-old' });
+  });
+
+  it('always-replace: cancels old task and creates new one', () => {
+    const tasks = new Map<string, TaskEntry>();
+    tasks.set('task-old', makeTaskEntry('task-old', TaskStatus.Running));
+
+    const configs = new Map<string, TriggerConfig>();
+    configs.set('weather-team:kw-check', {
+      name: 'kw-check', type: 'keyword', config: { pattern: 'weather' },
+      team: 'weather-team', task: 'check weather',
+      state: 'active', overlapPolicy: 'always-replace', activeTaskId: 'task-old',
+    });
+
+    const configStore = createMockConfigStore(configs);
+    const taskQueueStore = createMockTaskQueueStore(tasks);
+    const abortSession = vi.fn();
+    const onOverlapAlert = vi.fn();
+
+    const triggers: TriggerConfig[] = [
+      makeTrigger({ name: 'kw-check', type: 'keyword', config: { pattern: 'weather' } }),
+    ];
+
+    const engine = new TriggerEngine({
+      triggers, dedup, rateLimiter, delegateTask, logger,
+      configStore, taskQueueStore, abortSession, onOverlapAlert,
+    });
+    engine.register();
+    engine.onMessage('weather update');
+
+    expect(taskQueueStore.updateStatus).toHaveBeenCalledWith('task-old', TaskStatus.Cancelled);
+    expect(abortSession).toHaveBeenCalledWith('weather-team', 'task-old');
+    expect(onOverlapAlert).toHaveBeenCalledWith('weather-team', 'kw-check', 'replaced', { oldTaskId: 'task-old' });
+    expect(delegateTask).toHaveBeenCalled();
+  });
+
+  it('skip-then-replace: skips first overlap, replaces second', () => {
+    const tasks = new Map<string, TaskEntry>();
+    tasks.set('task-old', makeTaskEntry('task-old', TaskStatus.Running));
+
+    const configs = new Map<string, TriggerConfig>();
+    configs.set('weather-team:kw-check', {
+      name: 'kw-check', type: 'keyword', config: { pattern: 'weather' },
+      team: 'weather-team', task: 'check weather',
+      state: 'active', overlapPolicy: 'skip-then-replace', activeTaskId: 'task-old', overlapCount: 0,
+    });
+
+    const configStore = createMockConfigStore(configs);
+    const taskQueueStore = createMockTaskQueueStore(tasks);
+    const abortSession = vi.fn();
+    const onOverlapAlert = vi.fn();
+
+    const triggers: TriggerConfig[] = [
+      makeTrigger({ name: 'kw-check', type: 'keyword', config: { pattern: 'weather' } }),
+    ];
+
+    const engine = new TriggerEngine({
+      triggers, dedup, rateLimiter, delegateTask, logger,
+      configStore, taskQueueStore, abortSession, onOverlapAlert,
+    });
+    engine.register();
+
+    // First overlap — should skip
+    engine.onMessage('weather update');
+    expect(delegateTask).not.toHaveBeenCalled();
+    expect(onOverlapAlert).toHaveBeenCalledWith('weather-team', 'kw-check', 'skipped', { oldTaskId: 'task-old' });
+    expect(configStore.setOverlapCount).toHaveBeenCalledWith('weather-team', 'kw-check', 1);
+
+    // Second overlap — should replace (overlapCount is now 1 after setOverlapCount mock)
+    engine.onMessage('weather report');
+    expect(delegateTask).toHaveBeenCalled();
+    expect(onOverlapAlert).toHaveBeenCalledWith('weather-team', 'kw-check', 'replaced', { oldTaskId: 'task-old' });
+  });
+
+  it('allow policy: fires without overlap check', () => {
+    const configs = new Map<string, TriggerConfig>();
+    configs.set('weather-team:kw-check', {
+      name: 'kw-check', type: 'keyword', config: { pattern: 'weather' },
+      team: 'weather-team', task: 'check weather',
+      state: 'active', overlapPolicy: 'allow',
+    });
+
+    const configStore = createMockConfigStore(configs);
+    const onOverlapAlert = vi.fn();
+
+    const triggers: TriggerConfig[] = [
+      makeTrigger({ name: 'kw-check', type: 'keyword', config: { pattern: 'weather' } }),
+    ];
+
+    const engine = new TriggerEngine({
+      triggers, dedup, rateLimiter, delegateTask, logger,
+      configStore, onOverlapAlert,
+    });
+    engine.register();
+
+    engine.onMessage('weather update');
+    expect(delegateTask).toHaveBeenCalled();
+    expect(onOverlapAlert).not.toHaveBeenCalled();
+    // setActiveTask should NOT be called with 'allow' policy
+    expect(configStore.setActiveTask).not.toHaveBeenCalled();
+  });
+
+  it('stale activeTaskId: clears reference and proceeds', () => {
+    const tasks = new Map<string, TaskEntry>();
+    tasks.set('task-old', makeTaskEntry('task-old', TaskStatus.Done));
+
+    const configs = new Map<string, TriggerConfig>();
+    configs.set('weather-team:kw-check', {
+      name: 'kw-check', type: 'keyword', config: { pattern: 'weather' },
+      team: 'weather-team', task: 'check weather',
+      state: 'active', overlapPolicy: 'always-skip', activeTaskId: 'task-old',
+    });
+
+    const configStore = createMockConfigStore(configs);
+    const taskQueueStore = createMockTaskQueueStore(tasks);
+
+    const triggers: TriggerConfig[] = [
+      makeTrigger({ name: 'kw-check', type: 'keyword', config: { pattern: 'weather' } }),
+    ];
+
+    const engine = new TriggerEngine({
+      triggers, dedup, rateLimiter, delegateTask, logger,
+      configStore, taskQueueStore,
+    });
+    engine.register();
+    engine.onMessage('weather update');
+
+    // Stale reference should be cleared and task should proceed
+    expect(configStore.clearActiveTask).toHaveBeenCalledWith('weather-team', 'kw-check');
+    expect(delegateTask).toHaveBeenCalled();
+  });
+
+  it('reportTaskOutcome ignores cancelled tasks', () => {
+    const tasks = new Map<string, TaskEntry>();
+    tasks.set('task-cancelled', makeTaskEntry('task-cancelled', TaskStatus.Cancelled));
+
+    const configs = new Map<string, TriggerConfig>();
+    configs.set('weather-team:kw-check', {
+      name: 'kw-check', type: 'keyword', config: { pattern: 'weather' },
+      team: 'weather-team', task: 'check weather',
+      state: 'active',
+    });
+
+    const configStore = createMockConfigStore(configs);
+    const taskQueueStore = createMockTaskQueueStore(tasks);
+
+    const engine = new TriggerEngine({
+      dedup, rateLimiter, delegateTask, logger,
+      configStore, taskQueueStore,
+    });
+
+    engine.reportTaskOutcome('weather-team', 'kw-check', false, 'task-cancelled');
+
+    // Should not increment failures for a cancelled task
+    expect(configStore.incrementFailures).not.toHaveBeenCalled();
+  });
+
+  it('reportTaskOutcome clears activeTaskId on completion', () => {
+    const tasks = new Map<string, TaskEntry>();
+    tasks.set('task-done', makeTaskEntry('task-done', TaskStatus.Done));
+
+    const configs = new Map<string, TriggerConfig>();
+    configs.set('weather-team:kw-check', {
+      name: 'kw-check', type: 'keyword', config: { pattern: 'weather' },
+      team: 'weather-team', task: 'check weather',
+      state: 'active', activeTaskId: 'task-done',
+    });
+
+    const configStore = createMockConfigStore(configs);
+    const taskQueueStore = createMockTaskQueueStore(tasks);
+
+    const engine = new TriggerEngine({
+      dedup, rateLimiter, delegateTask, logger,
+      configStore, taskQueueStore,
+    });
+
+    engine.reportTaskOutcome('weather-team', 'kw-check', true, 'task-done');
+
+    expect(configStore.resetFailures).toHaveBeenCalledWith('weather-team', 'kw-check');
+    expect(configStore.clearActiveTask).toHaveBeenCalledWith('weather-team', 'kw-check');
   });
 });

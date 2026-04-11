@@ -11,15 +11,16 @@ import { createToolInvoker, type OrgToolDeps, type OrgToolInvoker } from './hand
 import { TeamRegistry } from './sessions/team-registry.js';
 import { ChannelRouter } from './channels/router.js';
 import { registerHealthEndpoint } from './health.js';
-import { registerApiRoutes } from './api/register.js';
+import { registerApiRoutes } from './api/routes.js';
 import { WsAdapter } from './channels/ws-adapter.js';
 import { DiscordAdapter } from './channels/discord-adapter.js';
 import { handleMessage } from './sessions/message-handler.js';
 import { TaskConsumer } from './sessions/task-consumer.js';
+import { startStallDetector, stopStallDetector } from './sessions/stall-detector.js';
 import { recoverFromCrash } from './recovery/startup-recovery.js';
-import { ensureRunDir, seedOrgRules, seedTeamSkills, initStorage, initTriggerEngine, initChannels, ensureMainTeam, migrateAllowedTools, initBrowserRelay, runMemoryMigration, runVaultMigration, seedLearningTriggers } from './bootstrap-helpers.js';
+import { ensureRunDir, seedOrgRules, initStorage, initTriggerEngine, initChannels, ensureMainTeam, migrateAllowedTools, initBrowserRelay, runMemoryMigration, runVaultMigration, seedLearningTriggers } from './bootstrap-helpers.js';
 import { createChannelHandler } from './channel-handler-factory.js';
-import { TopicSessionManager } from './sessions/topic-session-manager.js';
+import { TopicSessionManager } from './sessions/topic-registry.js';
 import { buildProviderRegistry, resolveModel } from './sessions/provider-registry.js';
 import type { TriggerEngine } from './triggers/engine.js';
 import type { ChannelMessage } from './domain/interfaces.js';
@@ -32,7 +33,6 @@ export interface BootstrapDeps {
   readonly runDir?: string;
   readonly systemRulesDir?: string;
   readonly seedRulesDir?: string;
-  readonly seedSkillsDir?: string;
   readonly listenAddress?: string;
   readonly listenPort?: number;
   readonly skipListen?: boolean;
@@ -59,7 +59,6 @@ function resolveLogLevel(dataDir: string): string {
   if (!existsSync(path)) return 'info';
   try { return loadSystemConfig(path).log_level; } catch { return 'info'; }
 }
-
 function resolveTrustPolicy(dataDir: string, warn: (msg: string) => void): TrustPolicy | undefined {
   const noPolicy = 'No trust policy configured — all senders allowed';
   const path = join(dataDir, 'config', 'channels.yaml');
@@ -108,14 +107,11 @@ function buildOrgToolDeps(
     get browserRelay() { return opts.browserRelay; },
   };
 }
-
 export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> {
   const dataDir = deps?.dataDir ?? '/data';
   const runDir = deps?.runDir ?? '/app/.run';
   const systemRulesDir = deps?.systemRulesDir ?? '/app/system-rules';
   const seedRulesDir = deps?.seedRulesDir ?? '/app/seed-rules';
-  const seedSkillsDir = deps?.seedSkillsDir ?? '/app/seed-skills';
-
   ensureRunDir(runDir);
   seedOrgRules(dataDir, seedRulesDir);
   const stores = initStorage(dataDir, runDir);
@@ -137,14 +133,15 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
 
   const orgTree = new OrgTree(orgStore);
   orgTree.loadFromStore();
-  const recovery = recoverFromCrash({ orgStore, taskQueueStore, orgTree, runDir, logger, topicStore: stores.topicStore });
+  const recovery = recoverFromCrash({ orgStore, taskQueueStore, orgTree, runDir, logger, topicStore: stores.topicStore, triggerConfigStore: stores.triggerConfigStore });
   if (recovery.recovered > 0) logger.info('Recovery completed', { recovered: recovery.recovered });
   ensureMainTeam(runDir, orgTree);
-  seedTeamSkills(runDir, seedSkillsDir);
   runMemoryMigration(stores.memoryStore, orgTree, runDir, logger);
   runVaultMigration(stores.vaultStore, runDir, logger);
   migrateAllowedTools(runDir);
   seedLearningTriggers(runDir, stores.triggerConfigStore);
+  // Clean up legacy dead-letter-scan trigger (ADR-38: replaced by engine-level stall detection)
+  stores.raw.prepare("DELETE FROM trigger_configs WHERE team = 'main' AND name = 'dead-letter-scan'").run();
   const sessionManager = new TeamRegistry();
 
   // Browser relay initializes in background; lazy refs break circular deps
@@ -191,6 +188,7 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
         memoryStore: stores.memoryStore,
         senderTrustStore: stores.senderTrustStore,
         vaultStore: stores.vaultStore,
+        pluginToolStore: stores.pluginToolStore,
       }
     : null;
 
@@ -234,7 +232,7 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   const fastify = Fastify({ logger: false });
   await fastify.register(import('@fastify/websocket'));
   registerHealthEndpoint(fastify, { raw, sessionManager, triggerEngine, channelRouter });
-  registerApiRoutes(fastify, { raw, orgTree, taskQueueStore, triggerConfigStore });
+  registerApiRoutes(fastify, { raw, orgTree, taskQueueStore, triggerConfigStore, pluginToolStore: stores.pluginToolStore });
   wsAdapter?.registerRoute(fastify);
   const publicDir = fileURLToPath(new URL('../public', import.meta.url));
   await fastify.register((await import('@fastify/static')).default, {
@@ -267,11 +265,12 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
       logger.error('Task notification has no sourceChannelId — cannot route', { contentLength: content.length });
     },
     getTeamConfig: (teamId: string) => getTeamConfig(runDir, teamId),
-    reportTriggerOutcome: (team, triggerName, success) => {
-      triggerEngine.reportTaskOutcome(team, triggerName, success);
+    reportTriggerOutcome: (team, triggerName, success, taskId) => {
+      triggerEngine.reportTaskOutcome(team, triggerName, success, taskId);
     },
   }) : null;
   taskConsumer?.start(); triggerEngine.start(); await channelRouter.start();
+  startStallDetector(stores.raw, logger);
 
   // Periodic cleanup of old channel interactions (24-hour retention, every 6 hours)
   const interactionCleanupInterval = setInterval(() => {
@@ -282,11 +281,11 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   if (!deps?.skipListen) {
     await fastify.listen({ host: deps?.listenAddress ?? '0.0.0.0', port: deps?.listenPort ?? 8080 });
   }
-  logger.info('OpenHive v4 started — v4.4.0', { dataDir, runDir, systemRulesDir });
+  logger.info('OpenHive v4 started — v4.6.0', { dataDir, runDir, systemRulesDir });
 
   const shutdown = async (): Promise<void> => {
     clearInterval(interactionCleanupInterval);
-    taskConsumer?.stop(); triggerEngine.stop();
+    taskConsumer?.stop(); triggerEngine.stop(); stopStallDetector();
     await channelRouter.stop(); sessionManager.stopAll();
     await browserRelayReady; await browserRelayRef?.close();
     await fastify.close(); raw.close();

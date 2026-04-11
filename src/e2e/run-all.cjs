@@ -8,7 +8,7 @@
  * Usage:
  *   node src/e2e/run-all.cjs                  # full run (build + all suites)
  *   node src/e2e/run-all.cjs --skip-build     # skip docker build
- *   node src/e2e/run-all.cjs --suite A        # run only suite A (+ smoke)
+ *   node src/e2e/run-all.cjs --suite PLATFORM  # run only PLATFORM suite (+ smoke)
  *   node src/e2e/run-all.cjs --suite smoke    # run only smoke checks
  */
 
@@ -27,21 +27,15 @@ for (let i = 0; i < args.length; i++) {
 }
 
 if (options.help) {
-  console.log('Usage: node src/e2e/run-all.cjs [--skip-build] [--suite <SMOKE|A|B|C|D|E|F|G|H>]');
+  console.log('Usage: node src/e2e/run-all.cjs [--skip-build] [--suite <SMOKE|PLATFORM|BROWSER>]');
   process.exit(0);
 }
 
 // ── Suite Registry ───────────────────────────────────────────────────────────
 
 const SUITES = {
-  A: require('./suites/suite-a.cjs'),
-  B: require('./suites/suite-b.cjs'),
-  C: require('./suites/suite-c.cjs'),
-  D: require('./suites/suite-d.cjs'),
-  E: require('./suites/suite-e.cjs'),
-  F: require('./suites/suite-f.cjs'),
-  G: require('./suites/suite-g.cjs'),
-  H: require('./suites/suite-h.cjs'),
+  PLATFORM: require('./suites/suite-platform.cjs'),
+  BROWSER: require('./suites/suite-d.cjs'),
 };
 const suiteSmoke = require('./suites/smoke.cjs');
 
@@ -90,19 +84,19 @@ async function main() {
       process.exit(h.report.exitCode);
     }
 
-    // Phase 3: Suites A-H
-    const suitesToRun = options.suite ? [options.suite] : ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'];
+    // Phase 3: Suites (PLATFORM + BROWSER)
+    const suitesToRun = options.suite ? [options.suite] : ['PLATFORM', 'BROWSER'];
 
     for (const id of suitesToRun) {
       h.log(`\n========================================`);
       h.log(`  SUITE ${id}`);
       h.log('========================================');
 
-      if (id === 'D' && ctx.skipBrowserSuite) {
+      if (id === 'BROWSER' && ctx.skipBrowserSuite) {
         const skip = h.newSuiteResult();
         skip.status = 'skipped';
-        h.recordSuite('D', skip);
-        h.log('Suite D skipped (browser not available)');
+        h.recordSuite('BROWSER', skip);
+        h.log('Suite BROWSER skipped (browser not available)');
         continue;
       }
 
