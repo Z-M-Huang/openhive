@@ -2,21 +2,37 @@
 
 ## Skill-First
 
-For any known, repeatable task, look for a matching skill file first. Follow it step-by-step. If no skill exists and the task will recur, create one in `skills/`.
+For any known, repeatable task, look for a matching skill file first. Follow it step-by-step. If no skill exists and the task will recur, create plugin tools first (executable logic via `register_plugin_tool`), then create a skill that wires them together.
 
 ## Subagent as Feature Handler
 
 Each subagent specializes in one domain. The orchestrator delegates to the right subagent rather than handling everything itself. Subagents actively read and follow relevant skills.
 
-## Escalation Triggers
+## Escalation
 
 Escalate when:
-- Task is out of your scope
-- Blocked for more than 5 minutes
-- Requires human approval
-- Needs cross-team resources
+- Task is outside your defined scope (check scope.accepts/rejects)
+- You are blocked and cannot make progress after reasonable attempts
+- The task requires human approval or authorization
+- Cross-team coordination is needed that you cannot handle locally
 
-Do NOT escalate for things within your skills or scope.
+Do NOT escalate for:
+- Tasks within your scope and you have relevant skills
+- Issues you can resolve with available tools
+- Routine operations covered by your team-rules
+
+### Escalation Chain
+
+1. Team escalates to its parent team
+2. Parent team may re-delegate or escalate further
+3. Main team escalates to the user via channel adapters
+
+### Escalation Format
+
+When escalating, always include:
+- What you were trying to do
+- What you tried and why it failed
+- What you need from the parent/user to proceed
 
 ## Team Autonomy
 

@@ -23,6 +23,7 @@ import { UpdateTeamInputSchema, updateTeam } from '../../handlers/tools/update-t
 import { AddTrustedSenderInputSchema, addTrustedSender } from '../../handlers/tools/add-trusted-sender.js';
 import { RevokeSenderTrustInputSchema, revokeSenderTrust } from '../../handlers/tools/revoke-sender-trust.js';
 import { ListTrustedSendersInputSchema, listTrustedSenders } from '../../handlers/tools/list-trusted-senders.js';
+import { RegisterPluginToolInputSchema, registerPluginTool } from '../../handlers/tools/register-plugin-tool.js';
 
 // ── Builder ─────────────────────────────────────────────────────────────────
 
@@ -185,6 +186,20 @@ export function buildOrgTools(ctx: OrgToolContext): ToolSet {
       description: 'Revoke a sender\'s trust (removes from database)',
       inputSchema: RevokeSenderTrustInputSchema,
       execute: async (input) => revokeSenderTrust(input, ctx.teamName, trustDeps),
+    });
+  }
+
+  // ── Plugin tools ───────────────────────────────────────────────────────────
+  if (ctx.pluginToolStore) {
+    tools['register_plugin_tool'] = tool({
+      description: 'Register a new plugin tool for this team',
+      inputSchema: RegisterPluginToolInputSchema,
+      execute: async (input) =>
+        registerPluginTool(input, ctx.teamName, {
+          pluginToolStore: ctx.pluginToolStore!,
+          runDir: ctx.runDir,
+          log: ctx.log,
+        }),
     });
   }
 

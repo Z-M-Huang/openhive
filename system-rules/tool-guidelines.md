@@ -42,6 +42,22 @@ Triggers create recurring or event-driven work. Always create triggers in `pendi
 
 Browser tools require the team to have `browser:` config. Use `browser_navigate()` + `browser_snapshot()` as the primary browsing pattern — snapshots return structured accessibility data that is more reliable than screenshots for interaction. Use `browser_screenshot()` when visual context is needed.
 
+### Plugin Tools
+
+Plugin tools are team-local TypeScript `tool()` definitions for reusable capabilities not covered by built-in tools. Register them deliberately:
+
+1. Check existing skills, plugin tools, and built-in tools first.
+2. Call `register_plugin_tool({ tool_name, source_code })` to write and verify the source.
+3. Only rely on the tool after registration returns status `active`.
+4. Add the bare tool name to the skill's `## Required Tools` section.
+5. Ensure `allowed_tools` permits `{team_name}.{tool_name}` or `{team_name}.*`.
+
+**Naming:** snake_case only (`^[a-z][a-z0-9_]*$`). Reserved names (read, write, edit, glob, grep, bash) cannot be used.
+
+**Security:** Source is scanned for forbidden patterns (eval, child_process, process.env) and hardcoded secrets. If verification fails, fix the source and re-register.
+
+**Namespace:** Plugin tools are namespaced as `{teamName}.{toolName}` at runtime.
+
 ### Communication Patterns
 
 - **Parent to child:** `delegate_task()`, `query_team()`, `send_message()`

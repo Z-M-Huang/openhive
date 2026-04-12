@@ -226,7 +226,6 @@ async function cleanRestart() {
   run('sudo', ['rm', '-rf', RUN_DIR]);
   run('mkdir', ['-p', RUN_DIR]);
   shell('rm -f "' + PROJECT_ROOT + '/data/rules/"*.md');
-  shell('cp "' + PROJECT_ROOT + '/seed-rules/"* "' + PROJECT_ROOT + '/data/rules/" 2>/dev/null || true');
   // Ensure WS is enabled for e2e test harness
   const channelsYaml = PROJECT_ROOT + '/data/config/channels.yaml';
   if (fs.existsSync(channelsYaml)) {

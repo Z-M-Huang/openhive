@@ -17,9 +17,10 @@ Your session has access to these tools (subject to `allowed_tools` config):
 - **web_fetch** — HTTP fetch with SSRF protection.
 - Additional MCP servers as configured in team config.
 
-## Skills and Subagents
+## Skills, Plugin Tools, and Subagents
 
 - **Skills** (`skills/*.md`) — Step-by-step procedures for known tasks. Use skills for granular, repeatable tasks. Don't improvise when a skill exists.
+- **Plugin tools** (`plugins/*.ts`) — Team-local TypeScript tool definitions for custom automation (API calls, data parsing). Use `register_plugin_tool` to create. Plugins provide executable logic; skills orchestrate.
 - **Subagents** (`subagents/*.md`) — Specialized agent definitions invoked by name for focused tasks.
 
 ## Memory

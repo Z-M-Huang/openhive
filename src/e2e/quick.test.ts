@@ -6,7 +6,7 @@
 
 import { describe, it, expect, afterAll } from 'vitest';
 import { tmpdir } from 'node:os';
-import { mkdtempSync, existsSync, readdirSync } from 'node:fs';
+import { mkdtempSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { bootstrap } from '../index.js';
@@ -43,7 +43,7 @@ describe('Quick E2E: Bootstrap wiring', () => {
   });
 
   it('.run/ main team has all subdirectories', () => {
-    for (const sub of ['org-rules', 'team-rules', 'skills', 'subagents']) {
+    for (const sub of ['org-rules', 'team-rules', 'skills', 'subagents', 'plugins']) {
       expect(existsSync(join(dir, 'teams', 'main', sub))).toBe(true);
     }
   });
@@ -72,14 +72,6 @@ describe('Quick E2E: Bootstrap wiring', () => {
     const resp = await result.fastify.inject({ method: 'GET', url: '/health' });
     const body = JSON.parse(resp.body) as { triggers: { registered: number } };
     expect(body.triggers.registered).toBeGreaterThanOrEqual(1);
-  });
-
-  it('seed rules applied to dataDir/rules/', () => {
-    const rulesDir = join(dir, 'data', 'rules');
-    if (!existsSync(rulesDir)) return; // seed-rules dir may not exist in test env
-    const files = readdirSync(rulesDir).filter(f => f.endsWith('.md'));
-    // If seed rules exist, they should have been copied
-    expect(files.length).toBeGreaterThanOrEqual(0);
   });
 
   it('routeMessage returns response (no providers = error message)', async () => {

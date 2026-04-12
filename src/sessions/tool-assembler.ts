@@ -77,6 +77,7 @@ export async function assembleTools(
     memoryStore: deps.memoryStore,
     senderTrustStore: deps.senderTrustStore,
     vaultStore: deps.vaultStore,
+    pluginToolStore,
   };
 
   // Inline tool partitions (alphabetical within each)

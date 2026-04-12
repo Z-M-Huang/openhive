@@ -19,6 +19,7 @@ import type {
   IMemoryStore,
   ISenderTrustStore,
   IVaultStore,
+  IPluginToolStore,
 } from '../../domain/interfaces.js';
 
 // ── Narrow interfaces for concrete deps not yet in domain/interfaces ─────
@@ -70,4 +71,5 @@ export interface OrgToolContext {
   readonly memoryStore?: IMemoryStore;
   readonly senderTrustStore?: ISenderTrustStore;
   readonly vaultStore?: IVaultStore;
+  readonly pluginToolStore?: IPluginToolStore;
 }

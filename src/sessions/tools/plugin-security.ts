@@ -43,6 +43,6 @@ export function scanPluginSource(source: string): SecurityScanResult {
   return {
     forbiddenPatterns,
     detectedSecrets,
-    passed: forbiddenPatterns.length === 0,
+    passed: forbiddenPatterns.length === 0 && detectedSecrets.length === 0,
   };
 }

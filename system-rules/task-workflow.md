@@ -9,6 +9,7 @@ Understand before acting. Gather the context you need to do the job well.
 - What exactly is being asked? Restate the task in your own words.
 - What is the current state? Use `list_teams`, `get_status`, `list_triggers`, or read relevant files.
 - What constraints exist? Check your rules, scope, and available tools.
+- Does a skill already exist for this? Check `skills/` first, then `search_skill_repository` for community skills.
 - Is anything ambiguous? If the task is unclear, ask for clarification (interactive context) or query your parent (delegated context).
 
 ## Phase 2: PLAN + EXPECTATION

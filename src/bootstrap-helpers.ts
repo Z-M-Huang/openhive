@@ -2,7 +2,7 @@
  * Bootstrap helper functions — extracted from index.ts for size limit.
  */
 
-import { existsSync, mkdirSync, cpSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse as yamlParse, stringify as yamlStringify } from 'yaml';
 import { errorMessage } from './domain/errors.js';
@@ -46,14 +46,9 @@ export function ensureRunDir(runDir: string): void {
   }
 }
 
-/** Seed /data/rules/ from seed-rules if empty on first start. */
-export function seedOrgRules(dataDir: string, seedRulesDir: string): void {
-  const rulesDir = join(dataDir, 'rules');
-  mkdirSync(rulesDir, { recursive: true });
-  if (!existsSync(seedRulesDir)) return;
-  // Only seed if rules dir is empty (no .md files)
-  if (readdirSync(rulesDir).some(f => f.endsWith('.md'))) return;
-  cpSync(seedRulesDir, rulesDir, { recursive: true });
+/** Ensure /data/rules/ directory exists. Escalation content now lives in system-rules/agent-patterns.md. */
+export function ensureRulesDir(dataDir: string): void {
+  mkdirSync(join(dataDir, 'rules'), { recursive: true });
 }
 
 /** @deprecated Skills now loaded from system-rules/skills/ via resolveActiveSkill() fallback. */
@@ -182,7 +177,7 @@ export function ensureMainTeam(runDir: string, orgTree: OrgTree): void {
   const mainDir = join(runDir, 'teams', 'main');
   const configPath = join(mainDir, 'config.yaml');
 
-  const subdirs = ['org-rules', 'team-rules', 'skills', 'subagents'];
+  const subdirs = ['org-rules', 'team-rules', 'skills', 'subagents', 'plugins'];
   for (const sub of subdirs) {
     mkdirSync(join(mainDir, sub), { recursive: true });
   }

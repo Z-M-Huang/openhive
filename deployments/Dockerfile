@@ -30,7 +30,6 @@ RUN npx playwright install --with-deps chromium
 COPY src/ ./src/
 COPY tsconfig.json ./
 COPY system-rules/ ./system-rules/
-COPY seed-rules/ ./seed-rules/
 # Compile TypeScript
 RUN ./node_modules/.bin/tsc
 
@@ -68,9 +67,6 @@ COPY public/ /app/public/
 
 # Tier 1: System rules (baked in, immutable)
 COPY --from=builder /build/system-rules/ /app/system-rules/
-
-# Seed rules (copied to /data/rules/ on first start if empty)
-COPY --from=builder /build/seed-rules/ /app/seed-rules/
 
 # Create runtime directories
 RUN mkdir -p /app/.run /data/config /data/rules

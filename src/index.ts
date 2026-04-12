@@ -18,7 +18,7 @@ import { handleMessage } from './sessions/message-handler.js';
 import { TaskConsumer } from './sessions/task-consumer.js';
 import { startStallDetector, stopStallDetector } from './sessions/stall-detector.js';
 import { recoverFromCrash } from './recovery/startup-recovery.js';
-import { ensureRunDir, seedOrgRules, initStorage, initTriggerEngine, initChannels, ensureMainTeam, migrateAllowedTools, initBrowserRelay, runMemoryMigration, runVaultMigration, seedLearningTriggers } from './bootstrap-helpers.js';
+import { ensureRunDir, ensureRulesDir, initStorage, initTriggerEngine, initChannels, ensureMainTeam, migrateAllowedTools, initBrowserRelay, runMemoryMigration, runVaultMigration, seedLearningTriggers } from './bootstrap-helpers.js';
 import { createChannelHandler } from './channel-handler-factory.js';
 import { TopicSessionManager } from './sessions/topic-registry.js';
 import { buildProviderRegistry, resolveModel } from './sessions/provider-registry.js';
@@ -32,7 +32,6 @@ export interface BootstrapDeps {
   readonly dataDir?: string;
   readonly runDir?: string;
   readonly systemRulesDir?: string;
-  readonly seedRulesDir?: string;
   readonly listenAddress?: string;
   readonly listenPort?: number;
   readonly skipListen?: boolean;
@@ -111,9 +110,8 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   const dataDir = deps?.dataDir ?? '/data';
   const runDir = deps?.runDir ?? '/app/.run';
   const systemRulesDir = deps?.systemRulesDir ?? '/app/system-rules';
-  const seedRulesDir = deps?.seedRulesDir ?? '/app/seed-rules';
   ensureRunDir(runDir);
-  seedOrgRules(dataDir, seedRulesDir);
+  ensureRulesDir(dataDir);
   const stores = initStorage(dataDir, runDir);
   const { raw, orgStore, taskQueueStore, escalationStore } = stores;
 

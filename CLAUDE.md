@@ -37,7 +37,6 @@ src/
   api/                  -- Dashboard REST endpoints (vault.ts, overview, teams, etc.)
   config/               -- loader.ts (team config YAML)
 system-rules/           -- Tier 1 immutable rules (baked into Docker)
-seed-rules/             -- Default org-rules copied on first start
 ```
 
 ### Key Patterns
