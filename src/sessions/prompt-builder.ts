@@ -6,6 +6,11 @@
 import type { InteractionRecord } from '../domain/interfaces.js';
 import type { RuleCascadeResult } from '../rules/cascade.js';
 
+export interface PluginToolInfo {
+  readonly name: string;
+  readonly description: string;
+}
+
 export interface PromptBuilderOpts {
   readonly teamName: string;
   readonly cwd: string;
@@ -95,11 +100,19 @@ Your memory is managed via the memory_save, memory_search, memory_list, and memo
  *
  * Build a note about tool availability for the system prompt.
  */
-export function buildToolAvailabilityNote(allowedTools: readonly string[]): string {
+export function buildToolAvailabilityNote(
+  allowedTools: readonly string[],
+  pluginTools: readonly PluginToolInfo[] = [],
+): string {
   const allowAll = allowedTools.includes('*');
   const lines: string[] = ['--- Tool Availability for This Team ---'];
+
   if (allowAll) {
-    lines.push('All tools are ENABLED for this team. You HAVE Bash and MUST use it when you need to run shell commands, make HTTP requests (curl), or execute scripts (python3, node).');
+    lines.push('All tools are ENABLED for this team.');
+    const builtins = ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash'] as const;
+    for (const tool of builtins) {
+      lines.push(`- **${tool}** — ENABLED`);
+    }
   } else {
     const builtins = ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash'] as const;
     for (const tool of builtins) {
@@ -108,7 +121,31 @@ export function buildToolAvailabilityNote(allowedTools: readonly string[]): stri
       lines.push(`- **${tool}** — ${enabled ? 'ENABLED' : 'DISABLED'}`);
     }
   }
-  lines.push('Use Bash for HTTP requests (curl), script execution, and system commands when enabled.');
+
+  // web_fetch guidance when available
+  const hasWebFetch = allowedTools.includes('web_fetch') ||
+    allowedTools.some(e => e.endsWith('*'));
+  if (hasWebFetch) {
+    lines.push('- **web_fetch** — ENABLED (preferred for HTTP requests)');
+  }
+
+  // Plugin section
+  lines.push('');
+  lines.push('## Plugin Tools (Plugin-First Invariant — ADR-39)');
+  if (pluginTools.length > 0) {
+    lines.push('The following plugin tools are registered. PREFER these over Bash/curl for their documented domain:');
+    for (const plugin of pluginTools) {
+      lines.push(`- **${plugin.name}** — ${plugin.description}`);
+    }
+  } else {
+    lines.push('No plugin tools are loaded in this session. For external operations, delegate to a subagent whose skill declares the required plugin in \'## Required Tools\'.');
+  }
+
+  // Bash guidance
+  lines.push('');
+  lines.push('## When to use Bash');
+  lines.push('Bash is for local shell commands within your workspace only. For external APIs or HTTP requests, use web_fetch or a plugin tool.');
+
   return lines.join('\n');
 }
 
@@ -127,8 +164,8 @@ Use these tools to read, modify, and explore the filesystem within your workspac
 
 export function buildHttpRules(): string {
   return `## HTTP Request Rules
-- ALWAYS use timeouts on HTTP requests. For curl: \`--connect-timeout 10 --max-time 60\`.
-- For wget: \`--timeout=60\`. For Python requests: \`timeout=60\`.
+- Prefer a registered plugin tool (or web_fetch) for HTTP work when one exists. Use Bash/curl only for local shell work or when no plugin/web_fetch path applies.
+- ALWAYS use timeouts on HTTP requests. If you must fall back to a shell client, set an explicit timeout (e.g. curl \`--connect-timeout 10 --max-time 60\`, wget \`--timeout=60\`, Python \`timeout=60\`).
 - If a request fails due to authentication, do NOT retry more than twice. Report the error clearly.
 - Never retry indefinitely — 2 attempts max for auth failures, 3 for transient errors.`;
 }

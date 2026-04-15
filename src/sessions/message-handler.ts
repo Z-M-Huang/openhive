@@ -134,6 +134,12 @@ function assembleSystemPrompt(
   // content into the prompt. Skill resolution is delegated to the subagent
   // runtime (U24), so the main agent / team orchestrator cannot bypass
   // subagent routing by also passing a skill.
+  if (subagent && skillName) {
+    (deps.logger.warn ?? deps.logger.info)(
+      'Both skill and subagent provided — subagent wins, skill ignored (ADR-40)',
+      { teamName, subagent, skill: skillName },
+    );
+  }
   const activeSkill = subagent
     ? null
     : resolveActiveSkill(deps.runDir, teamName, skillName, deps.systemRulesDir);
@@ -210,20 +216,9 @@ export async function handleMessage(
     const vaultSecrets = deps.vaultStore?.getSecrets(teamName) ?? [];
     const credValues = vaultSecrets.map((entry) => entry.value).filter((v) => v.length >= 8);
 
-    // ADR-40 precedence: subagent is authoritative. When both `skill` and
-    // `subagent` are supplied, the skill is demoted to a non-authoritative hint
-    // and not loaded by message-handler. Log so bootstrap / executor mistakes
-    // surface in the trace without failing the task.
-    if (opts?.subagent && opts?.skill) {
-      deps.logger.info('Ignoring skill hint due to subagent precedence (ADR-40)', {
-        teamName, subagent: opts.subagent, skill: opts.skill,
-      });
-    }
-    const effectiveSkill = opts?.subagent ? undefined : opts?.skill;
+    const tools = await assembleTools(teamConfig, teamName, deps, registry, profileName, modelId, ctx, providerSecrets, credValues, opts?.sourceChannelId, deps.pluginToolStore, opts?.skill, opts?.subagent);
 
-    const tools = await assembleTools(teamConfig, teamName, deps, registry, profileName, modelId, ctx, providerSecrets, credValues, opts?.sourceChannelId, deps.pluginToolStore, effectiveSkill, opts?.subagent);
-
-    const system = assembleSystemPrompt(teamConfig, teamName, deps, opts?.sourceChannelId, opts?.topicId, opts?.topicName, effectiveSkill, opts?.subagent);
+    const system = assembleSystemPrompt(teamConfig, teamName, deps, opts?.sourceChannelId, opts?.topicId, opts?.topicName, opts?.skill, opts?.subagent);
     const safeOnProgress = opts?.onProgress && credValues.length > 0
       ? (update: ProgressUpdate) => {
           opts.onProgress!({ ...update, content: scrubSecrets(update.content, [], credValues) });

@@ -199,3 +199,53 @@ describe('buildToolAvailabilityNote', () => {
     expect(note).toContain('- **Write** — DISABLED');
   });
 });
+
+describe('buildToolAvailabilityNote ADR-39/ADR-40 wording', () => {
+  it('does not contain forbidden Bash HTTP imperative strings', () => {
+    const note = buildToolAvailabilityNote(['*']);
+    expect(note).not.toContain('MUST use Bash');
+    expect(note).not.toContain('make HTTP requests (curl)');
+    expect(note).not.toContain('Use Bash for HTTP requests');
+  });
+
+  it('still lists Bash as enabled when allowed', () => {
+    const note = buildToolAvailabilityNote(['Bash']);
+    expect(note).toContain('Bash');
+  });
+
+  it('emits plugin section under ADR-39 framing when plugins present', () => {
+    const note = buildToolAvailabilityNote(
+      ['*'],
+      [{ name: 'ops-team.query_loggly', description: 'Query Loggly' }]
+    );
+    expect(note).toContain('Plugin Tools (Plugin-First Invariant — ADR-39)');
+    expect(note).toContain('PREFER');
+    expect(note).toContain('- **ops-team.query_loggly** — Query Loggly');
+  });
+
+  it('emits delegation guidance when plugin list is empty', () => {
+    const note = buildToolAvailabilityNote(['Read'], []);
+    expect(note.toLowerCase()).toContain('delegate to a subagent');
+  });
+
+  it('prefers web_fetch over Bash/curl for HTTP when web_fetch allowed', () => {
+    const note = buildToolAvailabilityNote(['web_fetch', 'Bash']);
+    expect(note).toContain('web_fetch');
+    // The note must no longer tell the LLM to curl via Bash
+    expect(note).not.toContain('curl');
+  });
+
+  it('back-compat: callers that pass no plugins get valid output', () => {
+    const note = buildToolAvailabilityNote(['*']);
+    expect(typeof note).toBe('string');
+    expect(note.length).toBeGreaterThan(0);
+  });
+});
+
+describe('AC-15.3 — web_fetch preference', () => {
+  it('mentions web_fetch as preferred HTTP path when Bash is enabled', () => {
+    const note = buildToolAvailabilityNote(['Bash', 'web_fetch'], []);
+    // Either a direct web_fetch mention OR the ADR-39 "delegate to subagent" fallback is acceptable.
+    expect(note.toLowerCase()).toMatch(/web_fetch|delegate to a subagent/);
+  });
+});

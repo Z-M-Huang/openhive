@@ -16,7 +16,7 @@ export class LogStore implements ILogStore {
 
   append(entry: LogEntry): void {
     const durationMs = typeof entry.metadata?.['durationMs'] === 'number'
-      ? entry.metadata['durationMs'] as number
+      ? entry.metadata['durationMs']
       : null;
     this.db.insert(schema.logEntries).values({
       level: entry.level,

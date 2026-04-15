@@ -129,7 +129,7 @@ describe('handleMessage — ADR-40 subagent-only execution (AC-16)', () => {
     expect(dynamic).not.toContain('DEMO_SKILL_BODY_SENTINEL');
   });
 
-  it('ignores explicit skill when subagent is set and logs the precedence warning', async () => {
+  it('ignores explicit skill when subagent is set (skill not injected into prompt)', async () => {
     const runDir = mkdtempSync(join(tmpdir(), 'openhive-adr40-b-'));
     setupTeam(runDir, 'team-b');
     setupSubagent(runDir, 'team-b', 'writer');
@@ -147,15 +147,6 @@ describe('handleMessage — ADR-40 subagent-only execution (AC-16)', () => {
         skill: 'demo-skill',
         runSessionFn: runFn,
       },
-    );
-
-    expect(logger.info).toHaveBeenCalledWith(
-      'Ignoring skill hint due to subagent precedence (ADR-40)',
-      expect.objectContaining({
-        teamName: 'team-b',
-        subagent: 'writer',
-        skill: 'demo-skill',
-      }),
     );
 
     const dynamic = capturedDynamicSuffix(runFn);

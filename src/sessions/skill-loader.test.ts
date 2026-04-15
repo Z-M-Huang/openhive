@@ -234,6 +234,7 @@ describe('Skill and Subagent Loader', () => {
   it('omits communicationStyle field when section is absent (backward compat)', () => {
     const content = '# Agent: Legacy\n## Role\nNo new sections\n## Skills\n- noop — do nothing\n';
     writeFileSync(join(dir, 'teams', 'test-team', 'subagents', 'legacy.md'), content);
+    writeFileSync(join(dir, 'teams', 'test-team', 'skills', 'noop.md'), '# noop\nDo nothing.\n');
 
     const warn = vi.fn();
     const agent = loadSubagents(dir, 'test-team', warn)['Legacy'];
@@ -255,6 +256,7 @@ describe('Skill and Subagent Loader', () => {
       '',
     ].join('\n');
     writeFileSync(join(dir, 'teams', 'test-team', 'subagents', 'bad.md'), content);
+    writeFileSync(join(dir, 'teams', 'test-team', 'skills', 'noop.md'), '# noop\nDo nothing.\n');
 
     const warn = vi.fn();
     const agents = loadSubagents(dir, 'test-team', warn);
@@ -274,5 +276,82 @@ describe('Skill and Subagent Loader', () => {
     const content = '# Agent: NoWarn\n## Role\nUnused\n';
     writeFileSync(join(dir, 'teams', 'test-team', 'subagents', 'no-warn.md'), content);
     expect(() => loadSubagents(dir, 'test-team')).not.toThrow();
+  });
+});
+
+// ── loadSubagents resolvedSkills (AC-10) ──────────────────────────────────
+
+/**
+ * Create a temporary team directory with the given fixtures.
+ * Returns the temp directory root that can be passed as runDir to loaders.
+ */
+async function mkTempTeamDir(fixtures: {
+  subagents?: Record<string, string>;
+  skills?: Record<string, string>;
+}): Promise<string> {
+  const tmpDir = mkdtempSync(join(tmpdir(), 'openhive-mktemp-'));
+  const subagentsDir = join(tmpDir, 'teams', 'ops', 'subagents');
+  const skillsDir = join(tmpDir, 'teams', 'ops', 'skills');
+  mkdirSync(subagentsDir, { recursive: true });
+  mkdirSync(skillsDir, { recursive: true });
+
+  if (fixtures.subagents) {
+    for (const [name, content] of Object.entries(fixtures.subagents)) {
+      writeFileSync(join(subagentsDir, name), content);
+    }
+  }
+  if (fixtures.skills) {
+    for (const [name, content] of Object.entries(fixtures.skills)) {
+      writeFileSync(join(skillsDir, name), content);
+    }
+  }
+  return tmpDir;
+}
+
+describe('loadSubagents resolvedSkills', () => {
+  it('populates resolvedSkills from referenced skill files', async () => {
+    const tmpDir = await mkTempTeamDir({
+      subagents: {
+        'loggly-monitor.md': '# Agent: loggly-monitor\n## Skills\n- alert-check\n',
+      },
+      skills: {
+        'alert-check.md': '# alert-check\n## Required Tools\n- query_loggly\n',
+      },
+    });
+
+    const defs = loadSubagents(tmpDir, 'ops');
+    expect(defs['loggly-monitor'].resolvedSkills).toEqual([
+      {
+        name: 'alert-check',
+        content: expect.stringContaining('alert-check'),
+        requiredTools: ['query_loggly'],
+      },
+    ]);
+  });
+
+  it('warns and continues when a referenced skill file is missing', async () => {
+    const warn = vi.fn();
+    const tmpDir = await mkTempTeamDir({
+      subagents: {
+        'a.md': '# Agent: a\n## Skills\n- missing-skill\n',
+      },
+      skills: {},
+    });
+
+    const defs = loadSubagents(tmpDir, 'ops', warn);
+    expect(defs['a']).toBeDefined();
+    expect(defs['a'].resolvedSkills).toEqual([]);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringMatching(/missing-skill/),
+    );
+  });
+
+  it('empty ## Skills produces empty resolvedSkills array', async () => {
+    const tmpDir = await mkTempTeamDir({
+      subagents: { 'a.md': '# Agent: a\n(no skills section)\n' },
+      skills: {},
+    });
+    const defs = loadSubagents(tmpDir, 'ops');
+    expect(defs['a'].resolvedSkills).toEqual([]);
   });
 });

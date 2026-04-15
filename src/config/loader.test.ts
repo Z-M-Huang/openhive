@@ -44,7 +44,7 @@ description: Handles weather queries
     writeFileSync(file, yaml);
     const config = loadTeamConfig(file);
     expect(config.name).toBe('weather-team');
-    expect(config.maxSteps).toBe(50); // default
+    expect(config.maxSteps).toBe(100); // default (ADR-40)
     expect(config.parent).toBeNull();
   });
 
@@ -114,5 +114,66 @@ triggers:
     const file = join(tmpDir, 'bad.yaml');
     writeFileSync(file, '{{{{invalid yaml');
     expect(() => loadTeamConfig(file)).toThrow(ConfigError);
+  });
+
+  // ── AC-5: maxSteps default / validation ───────────────────────────────
+
+  it('defaults maxSteps to 100 when omitted (ADR-40)', () => {
+    const yaml = `
+name: default-steps-team
+provider_profile: default-sonnet
+description: Uses default maxSteps
+`;
+    const file = join(tmpDir, 'team.yaml');
+    writeFileSync(file, yaml);
+    const config = loadTeamConfig(file);
+    expect(config.maxSteps).toBe(100);
+  });
+
+  it('preserves explicit maxSteps: 50', () => {
+    const yaml = `
+name: explicit-steps-team
+provider_profile: default-sonnet
+description: Explicit 50 steps
+maxSteps: 50
+`;
+    const file = join(tmpDir, 'team.yaml');
+    writeFileSync(file, yaml);
+    const config = loadTeamConfig(file);
+    expect(config.maxSteps).toBe(50);
+  });
+
+  it('rejects maxSteps: 0', () => {
+    const yaml = `
+name: zero-steps-team
+provider_profile: default-sonnet
+maxSteps: 0
+`;
+    const file = join(tmpDir, 'team.yaml');
+    writeFileSync(file, yaml);
+    expect(() => loadTeamConfig(file)).toThrow(ConfigError);
+  });
+
+  it('rejects negative maxSteps', () => {
+    const yaml = `
+name: neg-steps-team
+provider_profile: default-sonnet
+maxSteps: -5
+`;
+    const file = join(tmpDir, 'team.yaml');
+    writeFileSync(file, yaml);
+    expect(() => loadTeamConfig(file)).toThrow(ConfigError);
+  });
+
+  it('rejects non-integer maxSteps (e.g. float)', () => {
+    const yaml = `name: t\nprovider_profile: p\nmaxSteps: 3.14`;
+    writeFileSync(join(tmpDir, 'team.yaml'), yaml);
+    expect(() => loadTeamConfig(join(tmpDir, 'team.yaml'))).toThrow(ConfigError);
+  });
+
+  it('rejects non-integer maxSteps (string)', () => {
+    const yaml = `name: t\nprovider_profile: p\nmaxSteps: "fifty"`;
+    writeFileSync(join(tmpDir, 'team.yaml'), yaml);
+    expect(() => loadTeamConfig(join(tmpDir, 'team.yaml'))).toThrow(ConfigError);
   });
 });

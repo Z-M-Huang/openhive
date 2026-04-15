@@ -27,6 +27,8 @@ export class TriggerConfigStore implements ITriggerConfigStore {
           subagent: config.subagent ?? null,
           maxSteps: config.maxSteps ?? 100,
           failureThreshold: config.failureThreshold ?? 3,
+          sourceChannelId: config.sourceChannelId ?? null,
+          overlapPolicy: config.overlapPolicy ?? 'skip-then-replace',
           updatedAt: now,
         })
         .where(and(

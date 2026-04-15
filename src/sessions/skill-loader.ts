@@ -21,6 +21,16 @@ export interface SubagentDefinition {
   readonly prompt: string;
   readonly skills?: string[];
   /**
+   * Resolved skill files referenced by this subagent. Each entry contains
+   * the skill's name, full content, and parsed required tools list.
+   * Populated from each referenced skill file (AC-10).
+   */
+  readonly resolvedSkills?: readonly {
+    readonly name: string;
+    readonly content: string;
+    readonly requiredTools: readonly string[];
+  }[];
+  /**
    * Free-form `## Boundaries` section from the subagent markdown — the rules
    * and constraints the subagent must respect (e.g., "never write outside
    * teams/<name>/", "never call the internet"). Present only when the
@@ -130,14 +140,35 @@ export function loadSubagents(
   warn?: (msg: string) => void,
 ): Record<string, SubagentDefinition> {
   const dir = join(runDir, 'teams', teamName, 'subagents');
+  const skillsDir = join(runDir, 'teams', teamName, 'skills');
   const files = loadRulesFromDirectory(dir);
   const result: Record<string, SubagentDefinition> = {};
   for (const f of files) {
     const def = parseSubagent(f.filename, f.content);
+
+    // AC-10: resolve each referenced skill file
+    const resolvedSkills: { name: string; content: string; requiredTools: string[] }[] = [];
+    for (const skillName of def.skills) {
+      const skillPath = join(skillsDir, `${skillName}.md`);
+      try {
+        const skillContent = readFileSync(skillPath, 'utf-8');
+        resolvedSkills.push({
+          name: skillName,
+          content: skillContent,
+          requiredTools: parseRequiredTools(skillContent),
+        });
+      } catch {
+        if (warn) {
+          warn(`subagent ${f.filename}: referenced skill "${skillName}" not found at ${skillPath}`);
+        }
+      }
+    }
+
     const entry: { -readonly [K in keyof SubagentDefinition]: SubagentDefinition[K] } = {
       description: def.description,
       prompt: def.rawContent,
       skills: def.skills,
+      resolvedSkills,
     };
     if (def.boundaries) entry.boundaries = def.boundaries;
     if (def.communicationStyle) entry.communicationStyle = def.communicationStyle;

@@ -13,7 +13,7 @@
 import { describe, it, expect } from 'vitest';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { stringify as yamlStringify } from 'yaml';
 
 import { handleMessage } from './message-handler.js';
@@ -151,5 +151,15 @@ describe('UT-7m: Message Handler', () => {
     expect(result.ok).toBe(false);
     expect(result.error).toBeDefined();
     expect(result.durationMs).toBeGreaterThanOrEqual(0);
+  });
+});
+
+// ── AC-14: effectiveSkill demotion block removal ───────────────────────────
+
+describe('message-handler ADR-40 effectiveSkill removal', () => {
+  it('file does not contain effectiveSkill demotion block', () => {
+    const src = readFileSync('src/sessions/message-handler.ts', 'utf8');
+    expect(src).not.toMatch(/effectiveSkill/);
+    expect(src).not.toMatch(/opts\?\.subagent\s*\?\s*undefined\s*:\s*opts\?\.skill/);
   });
 });

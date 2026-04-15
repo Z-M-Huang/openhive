@@ -8,10 +8,16 @@
 
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
-import type { ToolSet } from 'ai';
+import { tool, type ToolSet } from 'ai';
 import type { IPluginToolStore } from '../../domain/interfaces.js';
+import { errorMessage } from '../../domain/errors.js';
 
 export const RESERVED_TOOL_NAMES = ['read', 'write', 'edit', 'glob', 'grep', 'bash'];
+
+export interface PluginLoaderLogger {
+  warn(msg: string, meta?: Record<string, unknown>): void;
+  error?(msg: string, meta?: Record<string, unknown>): void;
+}
 
 export async function loadPluginTools(
   teamName: string,
@@ -19,6 +25,7 @@ export async function loadPluginTools(
   allowedTools: readonly string[],
   pluginToolStore: IPluginToolStore,
   runDir: string,
+  logger?: PluginLoaderLogger,
 ): Promise<ToolSet> {
   const tools: ToolSet = {};
 
@@ -43,12 +50,46 @@ export async function loadPluginTools(
 
     try {
       const mod = await import(toolPath) as Record<string, unknown>;
-      const toolDef = (mod['default'] ?? mod[toolName]) as ToolSet[string] | undefined;
-      if (!toolDef) continue;
 
-      tools[namespacedName] = toolDef;
-    } catch {
-      // Failed to load — skip silently (registration-time verification catches issues)
+      // Try legacy default export first
+      const toolDef = mod['default'] as ToolSet[string] | undefined;
+      if (toolDef) {
+        tools[namespacedName] = toolDef;
+        continue;
+      }
+
+      // Try named-export format: description + inputSchema + execute
+      if (
+        typeof mod['description'] === 'string' &&
+        mod['inputSchema'] !== undefined &&
+        typeof mod['execute'] === 'function'
+      ) {
+        tools[namespacedName] = tool({
+          description: mod['description'],
+          inputSchema: mod['inputSchema'] as never,
+          execute: mod['execute'] as never,
+        });
+        continue;
+      }
+
+      // Try named export matching toolName (original behavior)
+      const toolDefByName = mod[toolName] as ToolSet[string] | undefined;
+      if (toolDefByName) {
+        tools[namespacedName] = toolDefByName;
+        continue;
+      }
+
+      // Unrecognized export shape
+      logger?.warn(`Unrecognized plugin export shape for ${toolName}`, {
+        team: teamName,
+        tool: toolName,
+      });
+    } catch (err) {
+      (logger?.error ?? logger?.warn)?.(`Plugin load failed for ${toolName}`, {
+        team: teamName,
+        tool: toolName,
+        error: errorMessage(err),
+      });
     }
   }
 

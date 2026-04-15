@@ -101,6 +101,7 @@ describe('update_trigger', () => {
       consecutiveFailures: 0,
       sourceChannelId: 'ws:abc',
       skill: 'log-check',
+      subagent: 'log-fetcher',
     });
 
     ({ server, mockConfigStore, mockTriggerEngine } = createTriggerServer(f, triggers));
@@ -357,5 +358,63 @@ describe('update_trigger', () => {
 
     expect(result.success).toBe(false);
     expect(mockConfigStore.upsert).not.toHaveBeenCalled();
+  });
+
+  // ── ADR-40 merged-state guard ────────────────────────────────────────────
+
+  it('rejects update that would leave skill without subagent (legacy row migration path)', () => {
+    // seed an INVALID legacy row for this specific test
+    triggers.set('ops-team:t', {
+      team: 'ops-team',
+      name: 't',
+      type: 'schedule',
+      config: { cron: '* * * * *' },
+      task: 'x',
+      skill: 'log-check',
+      subagent: undefined as never,
+      state: 'active',
+      maxSteps: 100,
+      failureThreshold: 3,
+      consecutiveFailures: 0,
+      sourceChannelId: 'ws:abc',
+    });
+
+    const result = invokeUpdateTrigger(f, mockConfigStore, makeLoadSubagents({}), {
+      team: 'ops-team',
+      trigger_name: 't',
+      task: 'updated',
+    }) as { success: boolean; error?: string };
+
+    expect(result.success).toBe(false);
+    expect(result.error?.toLowerCase()).toContain('adr-40');
+    expect(mockConfigStore.upsert).not.toHaveBeenCalled();
+  });
+
+  it('preserves existing subagent when update omits it', () => {
+    triggers.set('ops-team:t', {
+      team: 'ops-team',
+      name: 't',
+      type: 'schedule',
+      config: { cron: '* * * * *' },
+      task: 'x',
+      skill: 'log-check',
+      subagent: 'log-fetcher',
+      state: 'active',
+      maxSteps: 100,
+      failureThreshold: 3,
+      consecutiveFailures: 0,
+      sourceChannelId: 'ws:abc',
+    });
+
+    const result = invokeUpdateTrigger(f, mockConfigStore, makeLoadSubagents({}), {
+      team: 'ops-team',
+      trigger_name: 't',
+      task: 'updated',
+    }) as { success: boolean };
+
+    expect(result.success).toBe(true);
+    expect(mockConfigStore.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ skill: 'log-check', subagent: 'log-fetcher', task: 'updated' }),
+    );
   });
 });

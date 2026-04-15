@@ -100,6 +100,14 @@ export function updateTrigger(
     }
   }
 
+  // ADR-40 merged-state guard
+  if (merged.skill && !merged.subagent) {
+    return {
+      success: false,
+      error: 'ADR-40 violation: skill requires a subagent. Cannot update a trigger into a skill-without-subagent state.',
+    };
+  }
+
   deps.configStore.upsert(merged);
 
   // Re-register if active

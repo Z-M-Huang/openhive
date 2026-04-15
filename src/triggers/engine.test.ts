@@ -737,6 +737,84 @@ describe('Overlap Policy', () => {
 
 // ── Subagent routing (AC-14) ────────────────────────────────────────────
 
+// ── TriggerEngine.loadFromStore ADR-40 skip+warn ──────────────────────
+
+function makeConfigStore(rows: TriggerConfig[]): ITriggerConfigStore {
+  const data = new Map<string, TriggerConfig>();
+  for (const r of rows) data.set(`${r.team}:${r.name}`, r);
+  return {
+    upsert: vi.fn((cfg: TriggerConfig) => data.set(`${cfg.team}:${cfg.name}`, cfg)),
+    remove: vi.fn((team: string, name: string) => data.delete(`${team}:${name}`)),
+    removeByTeam: vi.fn((team: string) => {
+      for (const k of data.keys()) { if (k.startsWith(`${team}:`)) data.delete(k); }
+    }),
+    getByTeam: vi.fn((team: string) => rows.filter(r => r.team === team)),
+    getAll: vi.fn(() => [...rows]),
+    setState: vi.fn(),
+    incrementFailures: vi.fn().mockReturnValue(1),
+    resetFailures: vi.fn(),
+    get: vi.fn((team: string, name: string) => data.get(`${team}:${name}`)),
+    setActiveTask: vi.fn(),
+    clearActiveTask: vi.fn(),
+    setOverlapCount: vi.fn(),
+    resetOverlapState: vi.fn(),
+  };
+}
+
+function makeSilentLogger(): { info: ReturnType<typeof vi.fn>; warn: ReturnType<typeof vi.fn>; error: ReturnType<typeof vi.fn>; debug: ReturnType<typeof vi.fn> } {
+  return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+}
+
+describe('TriggerEngine.loadFromStore ADR-40 skip+warn', () => {
+  it('skips legacy rows with skill and no subagent, warns, preserves storage', async () => {
+    const warn = vi.fn();
+    const logger = { info: vi.fn(), warn, error: vi.fn(), debug: vi.fn() };
+    const rows: TriggerConfig[] = [
+      { team: 'ops', name: 'legacy', type: 'schedule', config: { cron: '* * * * *' }, task: 'do', skill: 'log-check', state: 'active' },
+      { team: 'ops', name: 'valid', type: 'schedule', config: { cron: '* * * * *' }, task: 'do', subagent: 'agent', state: 'active' },
+    ];
+    const store = makeConfigStore(rows);
+    const dedup = new TriggerDedup(createMemoryTriggerStore());
+    const rateLimiter = new TriggerRateLimiter(100, 60_000);
+    const delegateTask = vi.fn().mockResolvedValue('task-123');
+
+    const engine = new TriggerEngine({ configStore: store, logger, dedup, rateLimiter, delegateTask });
+    await engine.loadFromStore();
+
+    // Legacy row should NOT be registered
+    expect(engine.getTeamTriggerCount('ops')).toBe(1);
+    // Valid row should be registered
+    expect(engine.getRegisteredCount()).toBe(1);
+
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringMatching(/adr-40|skill.*subagent/i),
+      expect.objectContaining({ team: 'ops', name: 'legacy', skill: 'log-check' }),
+    );
+
+    // storage unchanged
+    expect(store.getAll().map((r) => r.name)).toEqual(['legacy', 'valid']);
+  });
+
+  it('registers all valid rows when no violators present', async () => {
+    const logger = makeSilentLogger();
+    const rows: TriggerConfig[] = [
+      { team: 'ops', name: 'a', type: 'schedule', config: { cron: '* * * * *' }, task: 'do', subagent: 'agent', state: 'active' },
+    ];
+    const store = makeConfigStore(rows);
+    const dedup = new TriggerDedup(createMemoryTriggerStore());
+    const rateLimiter = new TriggerRateLimiter(100, 60_000);
+    const delegateTask = vi.fn().mockResolvedValue('task-123');
+
+    const engine = new TriggerEngine({ configStore: store, logger, dedup, rateLimiter, delegateTask });
+    await engine.loadFromStore();
+
+    expect(engine.getTeamTriggerCount('ops')).toBe(1);
+    expect(engine.getRegisteredCount()).toBe(1);
+  });
+});
+
+// ── Subagent routing (AC-14) ────────────────────────────────────────────
+
 describe('Subagent routing', () => {
   let store: ITriggerStore;
   let dedup: TriggerDedup;

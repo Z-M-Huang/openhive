@@ -18,8 +18,7 @@ import { buildMemoryTools } from './tools/memory-tools.js';
 import { buildVaultTools } from './tools/vault-tools.js';
 import type { OrgToolContext } from './tools/org-tool-context.js';
 import { buildSubagentTools } from './subagent-factory.js';
-import { loadSubagents, resolveActiveSkill, parseRequiredTools } from './skill-loader.js';
-import { loadPluginTools } from './tools/plugin-loader.js';
+import { loadSubagents } from './skill-loader.js';
 import type { buildSessionContext } from './context-builder.js';
 import type { buildProviderRegistry } from './provider-registry.js';
 import type { SecretString } from '../secrets/secret-string.js';
@@ -40,8 +39,8 @@ export async function assembleTools(
   credValues: readonly string[],
   sourceChannelId?: string,
   pluginToolStore?: IPluginToolStore,
-  skillName?: string,
-  subagent?: string,
+  _skillName?: string,
+  _subagent?: string,
 ) {
   // Vault is the sole authoritative runtime credential source (AC-10)
   const vaultSecrets = deps.vaultStore?.getSecrets(teamName) ?? [];
@@ -111,25 +110,18 @@ export async function assembleTools(
   for (const [k, v] of Object.entries(baseTools)) {
     if (allowedSet.has(k)) (filteredTools as Record<string, unknown>)[k] = v;
   }
-  const subagentTools = buildSubagentTools({
-    registry, profileName, modelId, subagentDefs: loadSubagents(deps.runDir, teamName), tools: filteredTools,
+  const subagentTools = await buildSubagentTools({
+    registry, profileName, modelId,
+    subagentDefs: loadSubagents(deps.runDir, teamName), tools: filteredTools,
+    teamName, allowedTools: teamConfig.allowed_tools ?? [],
+    pluginToolStore, runDir: deps.runDir,
   });
   const memoryTools = buildMemoryTools(orgToolCtx);
   wrapAudit(memoryTools);
   const vaultTools = buildVaultTools(orgToolCtx);
   wrapAudit(vaultTools);
 
-  // Plugin tools from active skill's Required Tools section.
-  // ADR-40: when a subagent is selected, message-handler must not directly
-  // load plugin tools via a skill — that routing is owned by the subagent
-  // runtime (U24). Skip skill-driven plugin loading whenever `subagent` is set.
-  let pluginToolSet: Record<string, unknown> = {};
-  if (pluginToolStore && !subagent) {
-    const activeSkill = resolveActiveSkill(deps.runDir, teamName, skillName, deps.systemRulesDir);
-    const required = activeSkill ? parseRequiredTools(activeSkill.content) : [];
-    if (required.length > 0) pluginToolSet = await loadPluginTools(teamName, required, teamConfig.allowed_tools, pluginToolStore, deps.runDir);
-  }
-  const allTools = { ...baseTools, ...subagentTools, ...memoryTools, ...vaultTools, ...pluginToolSet };
-  const activeTools = [...allowedNames, ...Object.keys(subagentTools), ...Object.keys(memoryTools), ...Object.keys(vaultTools), ...Object.keys(pluginToolSet)];
+  const allTools = { ...baseTools, ...subagentTools, ...memoryTools, ...vaultTools };
+  const activeTools = [...allowedNames, ...Object.keys(subagentTools), ...Object.keys(memoryTools), ...Object.keys(vaultTools)];
   return { allTools, activeTools };
 }

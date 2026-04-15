@@ -16,7 +16,7 @@ export const TeamConfigSchema = z.object({
   description: z.string().default(''),
   allowed_tools: z.array(z.string()).default([]),
   provider_profile: z.string().min(1),
-  maxSteps: z.number().int().positive().default(50),
+  maxSteps: z.number().int().positive().default(100),
   credentials: z.record(z.string(), z.string()).optional().default({}),
   browser: z.object({
     allowed_domains: z.array(z.string()).optional(),
@@ -51,14 +51,22 @@ export type ProvidersOutput = z.output<typeof ProvidersSchema>;
 
 // ── Triggers ────────────────────────────────────────────────────────────────
 
-const TriggerEntrySchema = z.object({
+export const TriggerEntrySchema = z.object({
   name: z.string().min(1),
   type: z.enum(['schedule', 'keyword', 'message']),
-  config: z.record(z.string(), z.unknown()).default({}),
+  config: z.record(z.unknown()),
   team: z.string().min(1),
   task: z.string().min(1),
+  state: z.enum(['active', 'disabled']).optional(),
   skill: z.string().optional(),
-});
+  subagent: z.string().min(1).optional(),
+}).refine(
+  (data) => !data.skill || data.subagent,
+  {
+    message: 'ADR-40 violation: skill requires subagent. Provide a subagent or remove the skill.',
+    path: ['skill'],
+  },
+);
 
 export const TriggersSchema = z.object({
   triggers: z.array(TriggerEntrySchema).default([]),

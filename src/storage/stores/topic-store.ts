@@ -78,7 +78,7 @@ export class TopicStore implements ITopicStore {
 
     return this.db.update(schema.topics)
       .set({ state: 'idle' })
-      .where(condition!)
+      .where(condition)
       .run()
       .changes;
   }

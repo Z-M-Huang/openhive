@@ -40,14 +40,11 @@ export interface TriggerEngineOpts {
   readonly onTriggerDeactivated?: (team: string, triggerName: string, reason: string) => void;
   readonly onOverlapAlert?: (team: string, triggerName: string, action: 'skipped' | 'replaced', details: { oldTaskId: string }) => void;
 }
-
 interface TeamHandlerSet { schedule: ScheduleHandler[]; keyword: KeywordHandler[]; message: MessageHandler[] }
-
 export class TriggerEngine {
   private readonly teamHandlers = new Map<string, TeamHandlerSet>();
   private running = false;
   private readonly opts: TriggerEngineOpts;
-
   constructor(opts: TriggerEngineOpts) { this.opts = opts; }
 
   register(): void { this.registerByTeam(this.opts.triggers ?? []); }
@@ -56,7 +53,16 @@ export class TriggerEngine {
     if (!this.opts.configStore) return;
     const all = this.opts.configStore.getAll();
     const active = all.filter(t => t.state === 'active');
-    this.registerByTeam(active);
+    const valid: TriggerConfig[] = [];
+    for (const t of active) {
+      // ADR-40: reject legacy rows that have a skill but no subagent
+      if (t.skill && !t.subagent) {
+        this.opts.logger.warn('ADR-40: skipping trigger with skill but no subagent', { team: t.team, name: t.name, skill: t.skill });
+        continue;
+      }
+      valid.push(t);
+    }
+    this.registerByTeam(valid);
     this.opts.logger.info('Loaded triggers from store', { total: all.length, active: active.length });
   }
 

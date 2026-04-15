@@ -76,9 +76,9 @@ describe('buildSubagentTools', () => {
     mockGenerateText.mockResolvedValue({ text: '', steps: [] });
   });
 
-  it('returns one tool per subagent definition', () => {
+  it('returns one tool per subagent definition', async () => {
     const registry = makeMockRegistry();
-    const result = buildSubagentTools({
+    const result = await buildSubagentTools({
       registry,
       profileName: 'default',
       modelId: 'claude-sonnet',
@@ -92,9 +92,9 @@ describe('buildSubagentTools', () => {
     expect(keys).toContain('reviewer');
   });
 
-  it('each tool has the correct description from the definition', () => {
+  it('each tool has the correct description from the definition', async () => {
     const registry = makeMockRegistry();
-    const result = buildSubagentTools({
+    const result = await buildSubagentTools({
       registry,
       profileName: 'default',
       modelId: 'claude-sonnet',
@@ -111,9 +111,9 @@ describe('buildSubagentTools', () => {
     );
   });
 
-  it('resolves the model from the registry using profileName:modelId', () => {
+  it('resolves the model from the registry using profileName:modelId', async () => {
     const registry = makeMockRegistry();
-    buildSubagentTools({
+    await buildSubagentTools({
       registry,
       profileName: 'myprofile',
       modelId: 'claude-opus',
@@ -124,10 +124,10 @@ describe('buildSubagentTools', () => {
     expect(registry.languageModel).toHaveBeenCalledWith('myprofile:claude-opus');
   });
 
-  it('uses custom maxSteps when provided', () => {
+  it('uses custom maxSteps when provided', async () => {
     const registry = makeMockRegistry();
 
-    buildSubagentTools({
+    await buildSubagentTools({
       registry,
       profileName: 'default',
       modelId: 'claude-sonnet',
@@ -139,10 +139,10 @@ describe('buildSubagentTools', () => {
     expect(mockStepCountIs).toHaveBeenCalledWith(25);
   });
 
-  it('uses default maxSteps (10) when not provided', () => {
+  it('uses default maxSteps (100) when not provided', async () => {
     const registry = makeMockRegistry();
 
-    buildSubagentTools({
+    await buildSubagentTools({
       registry,
       profileName: 'default',
       modelId: 'claude-sonnet',
@@ -150,12 +150,12 @@ describe('buildSubagentTools', () => {
       tools: {},
     });
 
-    expect(mockStepCountIs).toHaveBeenCalledWith(10);
+    expect(mockStepCountIs).toHaveBeenCalledWith(100);
   });
 
-  it('returns empty record when no subagent definitions', () => {
+  it('returns empty record when no subagent definitions', async () => {
     const registry = makeMockRegistry();
-    const result = buildSubagentTools({
+    const result = await buildSubagentTools({
       registry,
       profileName: 'default',
       modelId: 'claude-sonnet',
@@ -173,7 +173,7 @@ describe('buildSubagentTools', () => {
     const sharedTools = { myTool: { execute: vi.fn() } };
     mockGenerateText.mockResolvedValue({ text: 'deployment complete', steps: [{}, {}, {}] });
 
-    const result = buildSubagentTools({
+    const result = await buildSubagentTools({
       registry,
       profileName: 'default',
       modelId: 'claude-sonnet',
@@ -212,7 +212,7 @@ describe('buildSubagentTools', () => {
       steps: [{ stepId: 1 }, { stepId: 2 }, { stepId: 3 }],
     });
 
-    const result = buildSubagentTools({
+    const result = await buildSubagentTools({
       registry,
       profileName: 'default',
       modelId: 'claude-sonnet',
@@ -242,7 +242,7 @@ describe('buildSubagentTools', () => {
     const registry = makeMockRegistry();
     mockGenerateText.mockResolvedValue({ text: 'done' });
 
-    const result = buildSubagentTools({
+    const result = await buildSubagentTools({
       registry,
       profileName: 'default',
       modelId: 'claude-sonnet',
@@ -267,7 +267,7 @@ describe('buildSubagentTools', () => {
     const registry = makeMockRegistry();
     mockGenerateText.mockResolvedValue({ text: 'reply', steps: [{}] });
 
-    const result = buildSubagentTools({
+    const result = await buildSubagentTools({
       registry,
       profileName: 'default',
       modelId: 'claude-sonnet',
@@ -361,5 +361,160 @@ describe('subagent-factory.ts is ToolLoopAgent-free', () => {
       'utf-8',
     );
     expect(source).not.toContain('ToolLoopAgent');
+  });
+});
+
+// ── Plugin merge + maxSteps (AC-11, AC-12, AC-15.4) ─────────────────────────
+
+/** Minimal stub that satisfies `IPluginToolStore` for tests. */
+function makePluginStore(ops: Record<string, Record<string, { status: string }>>) {
+  return {
+    get: (teamName: string, toolName: string) => {
+      const team = ops[teamName];
+      if (!team || !team[toolName]) return undefined;
+      return {
+        teamName,
+        toolName,
+        status: team[toolName].status,
+        sourcePath: '',
+        sourceHash: '',
+        verification: {},
+        createdAt: '',
+        updatedAt: '',
+        verifiedAt: null,
+      };
+    },
+    getByTeam: () => [] as never,
+    getAll: () => [] as never,
+    upsert: () => {},
+    setStatus: () => {},
+    deprecate: () => {},
+    markRemoved: () => {},
+    remove: () => {},
+    removeByTeam: () => {},
+  } as import('../domain/interfaces.js').IPluginToolStore;
+}
+
+/** Create a minimal tool object for baseline tool sets. */
+function makeStubTool() {
+  return {
+    description: 'stub',
+    inputSchema: {} as never,
+    execute: async () => ({ result: 'ok' }),
+  } as unknown as import('ai').ToolSet[string];
+}
+
+/** Write a temporary plugin fixture file and return its directory as runDir. */
+async function writePluginFixture(teamName: string, toolName: string): Promise<string> {
+  const runDir = mkdtempSync(join(tmpdir(), 'openhive-plugin-'));
+  const pluginDir = join(runDir, 'teams', teamName, 'plugins');
+  mkdirSync(pluginDir, { recursive: true });
+  writeFileSync(
+    join(pluginDir, `${toolName}.ts`),
+    `export const description = '${toolName} plugin';\nexport const inputSchema = {};\nexport const execute = async () => ({ ok: true });\n`,
+  );
+  return runDir;
+}
+
+describe('subagent-factory plugin merge + maxSteps', () => {
+  beforeEach(() => { mockGenerateText.mockReset(); });
+
+  it('merges plugin tools from resolvedSkills into generateText tools', async () => {
+    mockGenerateText.mockResolvedValue({ text: 'ok', steps: [] });
+    const registry = makeMockRegistry();
+    const def: SubagentDefinition = {
+      description: '',
+      prompt: 'monitor logs',
+      skills: ['alert-check'],
+      resolvedSkills: [{ name: 'alert-check', content: '', requiredTools: ['query_loggly'] }],
+    };
+    const store = makePluginStore({ ops: { query_loggly: { status: 'active' } } });
+    const runDir = await writePluginFixture('ops', 'query_loggly');
+    // Pass both current and future interface fields
+    const tools = await buildSubagentTools({
+      registry,
+      profileName: 'default',
+      modelId: 'test',
+      subagentDefs: { 'loggly-monitor': def },
+      teamName: 'ops',
+      tools: { baseTool: makeStubTool() },
+      allowedTools: ['*'],
+      pluginToolStore: store,
+      runDir,
+    });
+
+    await (tools['loggly-monitor'] as any).execute(
+      { task: 'go' },
+      { abortSignal: new AbortController().signal },
+    );
+
+    const call = mockGenerateText.mock.calls[0][0];
+    // Current code passes opts.tools verbatim — no plugin merge.
+    // Expectation: plugin tools should be present (will fail until AC-11 is implemented).
+    expect(Object.keys(call.tools ?? {})).toEqual(
+      expect.arrayContaining(['baseTool', 'ops.query_loggly']),
+    );
+  });
+
+  it('propagates opts.maxSteps to stepCountIs', async () => {
+    mockGenerateText.mockResolvedValue({ text: '', steps: [] });
+    // Use new interface — both opts.subagents and opts.subagentDefs are supported.
+    const tools = await buildSubagentTools({
+      teamName: 'ops',
+      tools: {},
+      allowedTools: ['*'],
+      pluginToolStore: makePluginStore({}),
+      runDir: '/tmp',
+      subagents: { a: { name: 'a', prompt: '', resolvedSkills: [] } },
+      maxSteps: 200,
+    });
+    await (tools['a'] as any).execute(
+      { task: 't' },
+      { abortSignal: new AbortController().signal },
+    );
+    expect(mockStepCountIs).toHaveBeenCalledWith(200);
+  });
+
+  it('defaults maxSteps to 100 (not 10) when omitted', async () => {
+    mockGenerateText.mockResolvedValue({ text: '', steps: [] });
+    const registry = makeMockRegistry();
+    await buildSubagentTools({
+      registry,
+      profileName: 'default',
+      modelId: 'test',
+      subagentDefs: { a: { description: '', prompt: '', skills: [] } },
+    });
+    // AC-12: new default should be 100, not 10.
+    expect(mockStepCountIs).toHaveBeenCalledWith(100);
+    expect(mockStepCountIs).not.toHaveBeenCalledWith(10);
+  });
+
+  it('does NOT contain the DEFAULT_MAX_STEPS = 10 constant', () => {
+    const src = readFileSync(
+      join(__dirname, 'subagent-factory.ts'),
+      'utf-8',
+    );
+    expect(src).not.toMatch(/DEFAULT_MAX_STEPS\s*=\s*10/);
+  });
+
+  it('passes only opts.tools when resolvedSkills is empty', async () => {
+    mockGenerateText.mockResolvedValue({ text: '', steps: [] });
+    // Use new interface — both opts.subagents and opts.subagentDefs are supported.
+    const tools = await buildSubagentTools({
+      teamName: 'ops',
+      tools: { baseTool: makeStubTool() },
+      allowedTools: ['*'],
+      pluginToolStore: makePluginStore({}),
+      runDir: '/tmp',
+      subagents: { a: { name: 'a', prompt: '', resolvedSkills: [] } },
+    });
+
+    await (tools['a'] as any).execute(
+      { task: 't' },
+      { abortSignal: new AbortController().signal },
+    );
+
+    const call = mockGenerateText.mock.calls[0][0];
+    expect(Object.keys(call.tools ?? {})).toEqual(['baseTool']);
   });
 });

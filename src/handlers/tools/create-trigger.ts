@@ -50,10 +50,17 @@ export function createTrigger(
   const subagentCheck = validateSubagent(input.subagent, input.team, deps.runDir, deps.loadSubagents);
   if (!subagentCheck.ok) return { success: false, error: subagentCheck.error };
 
+  if (input.skill && !input.subagent) {
+    return {
+      success: false,
+      error: 'ADR-40 violation: skill requires a subagent. Provide a subagent or remove the skill.',
+    };
+  }
+
   deps.configStore.upsert({
     name: input.name,
     type: input.type,
-    config: input.config as Record<string, unknown>,
+    config: input.config,
     team: input.team,
     task: input.task,
     skill: input.skill,

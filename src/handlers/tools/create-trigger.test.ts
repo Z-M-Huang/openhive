@@ -196,4 +196,40 @@ describe('create_trigger', () => {
       subagent: undefined,
     }));
   });
+
+  // ── ADR-40 guard (AC-7) ─────────────────────────────────────────────
+
+  it('rejects skill without subagent (ADR-40)', () => {
+    const loadSubagents = makeLoadSubagents({
+      myAgent: { description: 'My agent', prompt: '# Agent: myAgent' },
+    });
+
+    const result = invokeCreateTrigger(f, mockConfigStore, loadSubagents, {
+      team: 'ops-team', name: 'adr40-test', type: 'schedule',
+      config: { cron: '* * * * *' }, task: 'x',
+      skill: 'my-skill',
+    }) as { success: boolean; error?: string };
+
+    expect(result.success).toBe(false);
+    expect(result.error?.toLowerCase()).toContain('adr-40');
+    expect(mockConfigStore.upsert).not.toHaveBeenCalled();
+  });
+
+  it('accepts skill with known subagent', () => {
+    const loadSubagents = makeLoadSubagents({
+      myAgent: { description: 'My agent', prompt: '# Agent: myAgent' },
+    });
+
+    const result = invokeCreateTrigger(f, mockConfigStore, loadSubagents, {
+      team: 'ops-team', name: 'adr40-ok', type: 'schedule',
+      config: { cron: '* * * * *' }, task: 'x',
+      skill: 'my-skill',
+      subagent: 'myAgent',
+    }) as { success: boolean };
+
+    expect(result.success).toBe(true);
+    expect(mockConfigStore.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ skill: 'my-skill', subagent: 'myAgent' }),
+    );
+  });
 });

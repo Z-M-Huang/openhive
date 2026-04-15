@@ -99,7 +99,7 @@ const ROWS = [
 function mockRawDb(rows = ROWS) {
   return {
     prepare: (_sql: string) => {
-      let sql = _sql;
+      const sql = _sql;
       return {
         get: (...params: unknown[]) => {
           // Handle single row lookup by ID
