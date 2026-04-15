@@ -17,14 +17,21 @@ import { scrubSecrets } from './logging/credential-scrubber.js';
 
 const SRC_ROOT = join(__dirname);
 
-/** Recursively collect all .ts files under a directory, excluding tests and node_modules. */
+/** Recursively collect production .ts files under a directory.
+ *  Excludes: node_modules, *.test.ts, __*.ts (test-support by convention).
+ */
 function collectTsFiles(dir: string, files: string[] = []): string[] {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const fullPath = join(dir, entry.name);
     if (entry.isDirectory()) {
       if (entry.name === 'node_modules') continue;
       collectTsFiles(fullPath, files);
-    } else if (entry.isFile() && extname(entry.name) === '.ts' && !entry.name.endsWith('.test.ts')) {
+    } else if (
+      entry.isFile() &&
+      extname(entry.name) === '.ts' &&
+      !entry.name.endsWith('.test.ts') &&
+      !entry.name.startsWith('__')
+    ) {
       files.push(fullPath);
     }
   }

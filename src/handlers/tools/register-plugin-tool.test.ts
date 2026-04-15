@@ -50,6 +50,31 @@ function createMockPluginToolStore(): IPluginToolStore & { records: PluginToolMe
         if (records[i].teamName === teamName) records.splice(i, 1);
       }
     },
+    deprecate(teamName: string, toolName: string, reason: string, by: string): void {
+      const record = this.get(teamName, toolName);
+      if (record) {
+        const now = new Date().toISOString();
+        Object.assign(record, {
+          status: 'deprecated',
+          deprecatedAt: now,
+          deprecatedReason: reason,
+          deprecatedBy: by,
+          updatedAt: now,
+        });
+      }
+    },
+    markRemoved(teamName: string, toolName: string, by: string): void {
+      const record = this.get(teamName, toolName);
+      if (record) {
+        const now = new Date().toISOString();
+        Object.assign(record, {
+          status: 'removed',
+          removedAt: now,
+          removedBy: by,
+          updatedAt: now,
+        });
+      }
+    },
   };
 }
 

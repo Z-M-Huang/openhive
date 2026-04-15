@@ -1,5 +1,5 @@
 /**
- * Core domain types for OpenHive v3.
+ * Core domain types for OpenHive v0.5.0.
  */
 
 // ── Enums ──────────────────────────────────────────────────────────────────
@@ -9,8 +9,9 @@ export type TaskType = 'delegate' | 'trigger' | 'escalation' | 'bootstrap';
 export type TaskPriority = 'low' | 'normal' | 'high' | 'critical';
 
 export interface TaskOptions {
-  readonly maxTurns?: number;
+  readonly maxSteps?: number;
   readonly skill?: string;
+  readonly subagent?: string;
 }
 
 export enum TeamStatus {
@@ -29,11 +30,6 @@ export enum TaskStatus {
 
 // ── Config Types ───────────────────────────────────────────────────────────
 
-export interface TeamScope {
-  readonly accepts: readonly string[];
-  readonly rejects: readonly string[];
-}
-
 export interface BrowserConfig {
   readonly allowed_domains?: readonly string[];
   readonly timeout_ms?: number;
@@ -43,12 +39,9 @@ export interface TeamConfig {
   readonly name: string;
   readonly parent: string | null;
   readonly description: string;
-  /** @deprecated Scope is now stored in SQLite scope_keywords table. */
-  readonly scope?: TeamScope;
   readonly allowed_tools: readonly string[];
-  readonly mcp_servers: readonly string[];
   readonly provider_profile: string;
-  readonly maxTurns: number;
+  readonly maxSteps: number;
   readonly credentials?: Readonly<Record<string, string>>;
   readonly browser?: BrowserConfig;
   readonly memory?: { readonly embedding_provider_profile?: string };
@@ -63,8 +56,9 @@ export interface TriggerConfig {
   readonly team: string;
   readonly task: string;
   readonly skill?: string;
+  readonly subagent?: string;
   readonly state?: TriggerState;
-  readonly maxTurns?: number;
+  readonly maxSteps?: number;
   readonly failureThreshold?: number;
   readonly consecutiveFailures?: number;
   readonly disabledReason?: string;

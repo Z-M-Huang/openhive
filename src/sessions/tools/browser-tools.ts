@@ -1,7 +1,7 @@
 /**
  * Inline browser tool builders — wraps 8 browser actions as AI SDK inline defs.
  *
- * Each tool uses bare names (e.g. "browser_navigate", not "mcp__org__browser_navigate").
+ * Each tool uses bare names (e.g. "browser_navigate").
  * Tools are returned in alphabetical order.
  * Returns empty `{}` when `ctx.browserRelay` is unavailable.
  *
@@ -94,7 +94,7 @@ export function buildBrowserTools(ctx: OrgToolContext): ToolSet {
     },
   });
 
-  // 3. browser_go_back (Playwright MCP name: browser_navigate_back)
+  // 3. browser_go_back (upstream name: browser_navigate_back)
   tools['browser_go_back'] = tool({
     description: 'Navigate back in browser history.',
     inputSchema: EmptySchema,
@@ -105,7 +105,7 @@ export function buildBrowserTools(ctx: OrgToolContext): ToolSet {
     },
   });
 
-  // 4. browser_go_forward (Playwright MCP name: browser_navigate_forward)
+  // 4. browser_go_forward (upstream name: browser_navigate_forward)
   tools['browser_go_forward'] = tool({
     description: 'Navigate forward in browser history.',
     inputSchema: EmptySchema,
@@ -135,7 +135,7 @@ export function buildBrowserTools(ctx: OrgToolContext): ToolSet {
     },
   });
 
-  // 6. browser_screenshot (Playwright MCP name: browser_take_screenshot)
+  // 6. browser_screenshot (upstream name: browser_take_screenshot)
   tools['browser_screenshot'] = tool({
     description: 'Take a visual screenshot of the current page.',
     inputSchema: EmptySchema,

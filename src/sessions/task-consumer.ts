@@ -13,62 +13,22 @@ import { handleMessage } from './message-handler.js';
 import type { MessageHandlerDeps, MessageResult } from './message-handler.js';
 import { scrubSecrets } from '../logging/credential-scrubber.js';
 import { errorMessage } from '../domain/errors.js';
-import { extractStringCredentials } from '../domain/credential-utils.js';
-import { safeJsonParse } from '../domain/safe-json.js';
+import { loadSubagents } from './skill-loader.js';
+import type { SubagentDefinition } from './skill-loader.js';
+import {
+  TRIGGER_NOTIFY_INSTRUCTION,
+  parseLlmNotifyDecision,
+  stripNotifyBlock,
+} from './task-consumer-notify.js';
 
-// ── Notification decision parsing ──────────────────────────────────────────
-
-/** Regex to extract the notify JSON block (```json:notify ... ```) from LLM response. */
-const NOTIFY_BLOCK_RE = /```json:notify\s*(\{[^}]*"notify"\s*:\s*(?:true|false)[^}]*\})\s*```/s;
-
-/** Instruction appended to trigger-originated tasks so the LLM decides whether to notify. */
-export const TRIGGER_NOTIFY_INSTRUCTION = `
----
-## Notification Decision
-This task was triggered automatically. After completing it, decide whether the user should be notified about this result.
-
-At the END of your response, include a JSON block with your decision:
-
-\`\`\`json:notify
-{"notify": true, "reason": "Brief reason for your decision"}
-\`\`\`
-
-Set \`notify\` to \`true\` if the result has new, important, or actionable information the user should see.
-Set \`notify\` to \`false\` if the result is routine, unchanged, or not worth interrupting the user.
-
-Ask yourself: Is there something genuinely new? Did something fail unexpectedly? Would the user want to act on this? When in doubt, notify.`;
+// Re-exported so callers that previously imported from task-consumer keep working.
+export { TRIGGER_NOTIFY_INSTRUCTION, parseLlmNotifyDecision, stripNotifyBlock };
 
 /**
- * Parse the LLM's notification decision from a ```json:notify block.
- * Fail-safe: returns { notify: true } if missing, malformed, or unparseable.
+ * Function injected for testability — verifies the subagent exists under a team.
+ * Default uses the filesystem loader; tests can override to avoid fs reads.
  */
-export function parseLlmNotifyDecision(text: string | undefined): { notify: boolean; reason?: string } {
-  if (!text) return { notify: true };
-  const match = text.match(NOTIFY_BLOCK_RE);
-  if (!match) return { notify: true };
-  const parsed = safeJsonParse<{ notify: boolean; reason?: string }>(match[1], 'notify-decision');
-  if (!parsed || typeof parsed.notify !== 'boolean') return { notify: true };
-  return { notify: parsed.notify, reason: parsed.reason };
-}
-
-/**
- * Strip the notify JSON block and any echoed instruction from displayed/stored content.
- * Removes ```json:notify blocks and <notify_decision>...</notify_decision> tags.
- */
-export function stripNotifyBlock(text: string): string {
-  // Strip <notify_decision>...</notify_decision> tags (may wrap the block)
-  let cleaned = text.replace(/<notify_decision>[\s\S]*?<\/notify_decision>/g, '');
-
-  // Try removing from the "---\n## Notification Decision" marker onward
-  const sectionStripped = cleaned.replace(/\n---\n## Notification Decision[\s\S]*$/, '').trim();
-  if (sectionStripped && sectionStripped !== cleaned.trim()) {
-    return sectionStripped;
-  }
-
-  // Fallback: just remove the json:notify block itself
-  cleaned = cleaned.replace(NOTIFY_BLOCK_RE, '').trim();
-  return cleaned;
-}
+export type SubagentLoader = (runDir: string, teamName: string) => Record<string, SubagentDefinition>;
 
 export interface TaskConsumerOpts {
   readonly taskQueueStore: ITaskQueueStore;
@@ -79,6 +39,11 @@ export interface TaskConsumerOpts {
   readonly getTeamConfig?: (teamId: string) => TeamConfig | undefined;
   readonly reportTriggerOutcome?: (team: string, triggerName: string, success: boolean, taskId?: string) => void;
   readonly interactionStore?: IInteractionStore;
+  /**
+   * Override the default filesystem-backed subagent loader. Tests use this
+   * to supply in-memory subagent definitions without touching runDir.
+   */
+  readonly loadSubagents?: SubagentLoader;
 }
 
 export class TaskConsumer {
@@ -87,9 +52,9 @@ export class TaskConsumer {
   readonly #deps: MessageHandlerDeps;
   readonly #pollMs: number;
   readonly #notifyChannel?: (content: string, sourceChannelId?: string | null) => Promise<void>;
-  readonly #getTeamConfig?: (teamId: string) => TeamConfig | undefined;
   readonly #reportTriggerOutcome?: (team: string, triggerName: string, success: boolean, taskId?: string) => void;
   readonly #interactionStore?: IInteractionStore;
+  readonly #loadSubagents: SubagentLoader;
   #timer: ReturnType<typeof setInterval> | null = null;
   #processing = false;
 
@@ -99,9 +64,9 @@ export class TaskConsumer {
     this.#deps = opts.handlerDeps;
     this.#pollMs = opts.pollIntervalMs ?? 5_000;
     this.#notifyChannel = opts.notifyChannel;
-    this.#getTeamConfig = opts.getTeamConfig;
     this.#reportTriggerOutcome = opts.reportTriggerOutcome;
     this.#interactionStore = opts.interactionStore;
+    this.#loadSubagents = opts.loadSubagents ?? loadSubagents;
   }
 
   start(): void {
@@ -141,8 +106,35 @@ export class TaskConsumer {
             taskContent += TRIGGER_NOTIFY_INSTRUCTION;
           }
 
-          // Read maxTurns from typed task options (snapshot at enqueue time)
-          const maxTurns = dequeued.options?.maxTurns;
+          // Read typed task options (snapshot at enqueue time)
+          const maxSteps = dequeued.options?.maxSteps;
+          const subagent = dequeued.options?.subagent;
+
+          // Validate subagent before execution (Risk-13 mitigation): a queued task
+          // whose subagent no longer exists on disk must fail safely — not silently
+          // fall back to a different identity or the team default.
+          if (subagent !== undefined) {
+            const available = this.#loadSubagents(this.#deps.runDir, task.teamId);
+            if (!available[subagent]) {
+              const known = Object.keys(available);
+              const hint = known.length > 0
+                ? ` (available: ${known.join(', ')})`
+                : ' (no subagents defined for this team)';
+              const error = `Unknown subagent "${subagent}" for team "${task.teamId}"${hint}`;
+              this.#taskQueue.updateStatus(dequeued.id, TaskStatus.Failed);
+              this.#taskQueue.updateResult(dequeued.id, `Error: ${error}`);
+              this.#deps.logger.info('Task failed (unknown subagent)', {
+                taskId: dequeued.id, team: task.teamId, subagent, available: known,
+              });
+              // Report trigger outcome for circuit breaker so repeated bad subagent
+              // references eventually trip the breaker.
+              const triggerMatch = dequeued.correlationId?.match(/^trigger:([^:]+):/);
+              if (triggerMatch) {
+                this.#reportTriggerOutcome?.(task.teamId, triggerMatch[1], false, dequeued.id);
+              }
+              continue;
+            }
+          }
 
           const result: MessageResult = await handleMessage(
             {
@@ -153,10 +145,11 @@ export class TaskConsumer {
             },
             { ...this.#deps, orgAncestors: this.#getAncestorNames(task.teamId) },
             {
-              teamName: task.teamId, maxTurns,
+              teamName: task.teamId, maxSteps,
               sourceChannelId: dequeued.sourceChannelId ?? undefined,
               topicId: dequeued.topicId ?? undefined,
               skill: dequeued.options?.skill,
+              subagent,
             },
           );
 
@@ -190,9 +183,10 @@ export class TaskConsumer {
           const responseText = result.ok ? result.content : `Error: ${result.error}`;
           let safeResponse = responseText;
           if (responseText) {
-            const config = this.#getTeamConfig?.(task.teamId);
-            const creds = extractStringCredentials(config?.credentials ?? {});
-            if (creds.length > 0) safeResponse = scrubSecrets(responseText, [], creds);
+            // Scrub with vault secrets only (AC-10) — never config credentials
+            const vaultSecrets = this.#deps.vaultStore?.getSecrets(task.teamId) ?? [];
+            const credValues = vaultSecrets.map((e) => e.value).filter((v) => v.length >= 8);
+            if (credValues.length > 0) safeResponse = scrubSecrets(responseText, [], credValues);
           }
 
           // For trigger tasks, parse LLM notification decision and strip the block

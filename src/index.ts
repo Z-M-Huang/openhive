@@ -1,4 +1,4 @@
-/** OpenHive v4 entry point — bootstrap and graceful shutdown. */
+/** OpenHive v0.5.0 entry point — bootstrap and graceful shutdown. */
 
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
@@ -18,7 +18,7 @@ import { handleMessage } from './sessions/message-handler.js';
 import { TaskConsumer } from './sessions/task-consumer.js';
 import { startStallDetector, stopStallDetector } from './sessions/stall-detector.js';
 import { recoverFromCrash } from './recovery/startup-recovery.js';
-import { ensureRunDir, ensureRulesDir, initStorage, initTriggerEngine, initChannels, ensureMainTeam, migrateAllowedTools, initBrowserRelay, runMemoryMigration, runVaultMigration, seedLearningTriggers } from './bootstrap-helpers.js';
+import { ensureRunDir, ensureRulesDir, initStorage, initTriggerEngine, initChannels, ensureMainTeam, initBrowserRelay, seedLearningTriggers } from './bootstrap-helpers.js';
 import { createChannelHandler } from './channel-handler-factory.js';
 import { TopicSessionManager } from './sessions/topic-registry.js';
 import { buildProviderRegistry, resolveModel } from './sessions/provider-registry.js';
@@ -134,9 +134,6 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   const recovery = recoverFromCrash({ orgStore, taskQueueStore, orgTree, runDir, logger, topicStore: stores.topicStore, triggerConfigStore: stores.triggerConfigStore });
   if (recovery.recovered > 0) logger.info('Recovery completed', { recovered: recovery.recovered });
   ensureMainTeam(runDir, orgTree);
-  runMemoryMigration(stores.memoryStore, orgTree, runDir, logger);
-  runVaultMigration(stores.vaultStore, runDir, logger);
-  migrateAllowedTools(runDir);
   seedLearningTriggers(runDir, stores.triggerConfigStore);
   // Clean up legacy dead-letter-scan trigger (ADR-38: replaced by engine-level stall detection)
   stores.raw.prepare("DELETE FROM trigger_configs WHERE team = 'main' AND name = 'dead-letter-scan'").run();
@@ -169,7 +166,7 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
 
   const handlerDeps = providersConfig
     ? {
-        providers: providersConfig, availableMcpServers: {} as Record<string, unknown>,
+        providers: providersConfig,
         runDir, dataDir, systemRulesDir, orgAncestors: [] as string[], logger,
         interactionStore: stores.interactionStore, orgTree,
         // Org tool context deps for inline builders
@@ -279,7 +276,7 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   if (!deps?.skipListen) {
     await fastify.listen({ host: deps?.listenAddress ?? '0.0.0.0', port: deps?.listenPort ?? 8080 });
   }
-  logger.info('OpenHive v4 started — v4.6.0', { dataDir, runDir, systemRulesDir });
+  logger.info('OpenHive v0.5.0 started', { dataDir, runDir, systemRulesDir });
 
   const shutdown = async (): Promise<void> => {
     clearInterval(interactionCleanupInterval);

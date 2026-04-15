@@ -7,7 +7,6 @@
 import { join } from 'node:path';
 import { getTeamConfig } from '../config/loader.js';
 import { errorMessage } from '../domain/errors.js';
-import { extractStringCredentials } from '../domain/credential-utils.js';
 import { resolveProvider } from './provider-resolver.js';
 import { buildProviderRegistry, resolveModel, getContextWindow } from './provider-registry.js';
 import type { TeamQueryRunner, IBrowserRelay, ITriggerEngine } from './tools/org-tool-context.js';
@@ -38,15 +37,30 @@ export interface HandleMessageOpts {
   runSessionFn?: typeof runSession;
   teamName?: string;
   onProgress?: ProgressCallback;
-  maxTurns?: number;
+  maxSteps?: number;
   sourceChannelId?: string;
   topicId?: string; topicName?: string;
+  /**
+   * Skill hint retained for legacy executor payloads.
+   *
+   * **Non-authoritative under ADR-40**: when `subagent` is set, any skill
+   * injection path in message-handler is suppressed — the subagent owns skill
+   * selection via its own runtime (Unit U24). Skill is still honored only for
+   * the main-team exception path (Unit U31 will enforce that boundary).
+   */
   skill?: string;
+  /**
+   * Authoritative subagent selector — when set the session executes under the
+   * chosen subagent defined in `teams/<team>/subagents/`. The task consumer
+   * validates the name exists before invoking handleMessage. Per ADR-40, setting
+   * this disables any direct skill injection by message-handler, so the main /
+   * orchestrator cannot bypass subagent routing by also passing a skill.
+   */
+  subagent?: string;
 }
 
 export interface MessageHandlerDeps {
   readonly providers: ProvidersOutput;
-  readonly availableMcpServers: Record<string, unknown>;
   readonly runDir: string;
   readonly dataDir: string;
   readonly systemRulesDir: string;
@@ -105,6 +119,7 @@ function assembleSystemPrompt(
   topicId?: string,
   topicName?: string,
   skillName?: string,
+  subagent?: string,
 ): SystemPromptParts {
   const cascadeLogger = {
     info: (m: string, meta?: Record<string, unknown>) => deps.logger.info(m, meta),
@@ -115,8 +130,24 @@ function assembleSystemPrompt(
     runDir: deps.runDir, dataDir: deps.dataDir, systemRulesDir: deps.systemRulesDir,
     logger: cascadeLogger,
   });
-  const activeSkill = resolveActiveSkill(deps.runDir, teamName, skillName, deps.systemRulesDir);
-  const skillsContent = loadActiveSkillContent(deps.runDir, teamName, activeSkill);
+  // ADR-40: when a subagent is selected, message-handler MUST NOT inject skill
+  // content into the prompt. Skill resolution is delegated to the subagent
+  // runtime (U24), so the main agent / team orchestrator cannot bypass
+  // subagent routing by also passing a skill.
+  const activeSkill = subagent
+    ? null
+    : resolveActiveSkill(deps.runDir, teamName, skillName, deps.systemRulesDir);
+
+  // AC-20: active-only skill loading. Warn when a skill was explicitly
+  // requested but could not be resolved — silent fallbacks mask missing-file
+  // bugs. No warning when skillName is undefined (no active skill is valid).
+  if (!subagent && skillName && !activeSkill) {
+    (deps.logger.warn ?? deps.logger.info)('Active skill not found — no skill content injected', {
+      teamName, skill: skillName,
+    });
+  }
+
+  const skillsContent = subagent ? '' : loadActiveSkillContent(activeSkill);
   const memorySection = buildMemorySection(deps.memoryStore, teamName);
 
   if (memorySection.length > 12000) {
@@ -139,7 +170,6 @@ function assembleSystemPrompt(
     teamName,
     cwd: join(deps.runDir, 'teams', teamName),
     allowedTools: teamConfig.allowed_tools,
-    credentialKeys: Object.keys(teamConfig.credentials ?? {}),
     ruleCascade, skillsContent, memorySection,
     conversationHistory, topicName,
   });
@@ -175,19 +205,25 @@ export async function handleMessage(
     const contextWindow = getContextWindow(deps.providers, profileName);
     const ctx = buildSessionContext(teamName, deps.runDir);
 
-    // Merge config credentials with vault secrets (vault wins on duplicates)
-    const configCreds = teamConfig.credentials ?? {};
+    // Vault is the sole authoritative runtime credential source (AC-10)
+    // Config credentials are never used at runtime — vault only.
     const vaultSecrets = deps.vaultStore?.getSecrets(teamName) ?? [];
-    const vaultRecord: Record<string, string> = {};
-    for (const entry of vaultSecrets) {
-      vaultRecord[entry.key] = entry.value;
+    const credValues = vaultSecrets.map((entry) => entry.value).filter((v) => v.length >= 8);
+
+    // ADR-40 precedence: subagent is authoritative. When both `skill` and
+    // `subagent` are supplied, the skill is demoted to a non-authoritative hint
+    // and not loaded by message-handler. Log so bootstrap / executor mistakes
+    // surface in the trace without failing the task.
+    if (opts?.subagent && opts?.skill) {
+      deps.logger.info('Ignoring skill hint due to subagent precedence (ADR-40)', {
+        teamName, subagent: opts.subagent, skill: opts.skill,
+      });
     }
-    const teamCreds = { ...configCreds, ...vaultRecord };
-    const credValues = extractStringCredentials(teamCreds);
+    const effectiveSkill = opts?.subagent ? undefined : opts?.skill;
 
-    const tools = await assembleTools(teamConfig, teamName, deps, registry, profileName, modelId, ctx, providerSecrets, credValues, opts?.sourceChannelId, deps.pluginToolStore, opts?.skill);
+    const tools = await assembleTools(teamConfig, teamName, deps, registry, profileName, modelId, ctx, providerSecrets, credValues, opts?.sourceChannelId, deps.pluginToolStore, effectiveSkill, opts?.subagent);
 
-    const system = assembleSystemPrompt(teamConfig, teamName, deps, opts?.sourceChannelId, opts?.topicId, opts?.topicName, opts?.skill);
+    const system = assembleSystemPrompt(teamConfig, teamName, deps, opts?.sourceChannelId, opts?.topicId, opts?.topicName, effectiveSkill, opts?.subagent);
     const safeOnProgress = opts?.onProgress && credValues.length > 0
       ? (update: ProgressUpdate) => {
           opts.onProgress!({ ...update, content: scrubSecrets(update.content, [], credValues) });
@@ -198,7 +234,7 @@ export async function handleMessage(
     const result = await sessionFn({
       model, system, prompt: msg.content,
       tools: tools.allTools, activeTools: tools.activeTools,
-      maxTurns: opts?.maxTurns ?? teamConfig.maxTurns,
+      maxSteps: opts?.maxSteps ?? teamConfig.maxSteps,
       contextWindow, knownSecrets: providerSecrets, rawSecrets: credValues,
       onProgress: safeOnProgress,
     });

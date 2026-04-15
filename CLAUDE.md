@@ -76,6 +76,5 @@ See `.claude/rules/coding-standards.md` for detailed rules. Key points:
 ## Testing
 
 - Tests live next to modules (`*.test.ts`)
-- E2E tests in `src/e2e/`
 - Run specific tests: `npx vitest run src/path/to/test.ts`
 - Mock patterns in `src/handlers/__test-helpers.ts`

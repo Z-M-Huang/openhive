@@ -5,6 +5,7 @@
 import { z } from 'zod';
 import type { OrgTree } from '../../domain/org-tree.js';
 import type { ITriggerConfigStore } from '../../domain/interfaces.js';
+import { validateSubagent, type LoadSubagentsFn } from './validate-subagent.js';
 
 export const CreateTriggerInputSchema = z.object({
   team: z.string().min(1),
@@ -13,7 +14,8 @@ export const CreateTriggerInputSchema = z.object({
   config: z.record(z.unknown()),
   task: z.string().min(1),
   skill: z.string().optional(),
-  max_turns: z.number().int().min(1).max(500).optional(),
+  subagent: z.string().min(1).optional(),
+  max_steps: z.number().int().min(1).max(500).optional(),
   failure_threshold: z.number().int().min(1).max(100).optional(),
   overlap_policy: z.enum(['skip-then-replace', 'always-skip', 'always-replace', 'allow']).default('skip-then-replace').optional(),
 });
@@ -26,6 +28,8 @@ export interface CreateTriggerResult {
 export interface CreateTriggerDeps {
   readonly orgTree: OrgTree;
   readonly configStore: ITriggerConfigStore;
+  readonly runDir: string;
+  readonly loadSubagents: LoadSubagentsFn;
   readonly log: (msg: string, meta?: Record<string, unknown>) => void;
 }
 
@@ -43,6 +47,9 @@ export function createTrigger(
   const existing = deps.configStore.get(input.team, input.name);
   if (existing) return { success: false, error: `trigger "${input.name}" already exists for team "${input.team}"` };
 
+  const subagentCheck = validateSubagent(input.subagent, input.team, deps.runDir, deps.loadSubagents);
+  if (!subagentCheck.ok) return { success: false, error: subagentCheck.error };
+
   deps.configStore.upsert({
     name: input.name,
     type: input.type,
@@ -50,13 +57,19 @@ export function createTrigger(
     team: input.team,
     task: input.task,
     skill: input.skill,
+    subagent: input.subagent,
     state: 'pending',
-    maxTurns: input.max_turns ?? 100,
+    maxSteps: input.max_steps ?? 100,
     failureThreshold: input.failure_threshold ?? 3,
     sourceChannelId,
     overlapPolicy: input.overlap_policy,
   });
 
-  deps.log('Created trigger', { team: input.team, trigger: input.name, state: 'pending' });
+  deps.log('Created trigger', {
+    team: input.team,
+    trigger: input.name,
+    state: 'pending',
+    subagent: input.subagent,
+  });
   return { success: true };
 }

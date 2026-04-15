@@ -4,12 +4,17 @@
  * Tests: loadSkillsContent and loadSubagents for empty/populated directories
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 
-import { loadSkillsContent, loadSubagents, resolveActiveSkill } from './skill-loader.js';
+import {
+  loadSkillsContent,
+  loadSubagents,
+  resolveActiveSkill,
+  loadActiveSkillContent,
+} from './skill-loader.js';
 
 // ── Skill and Subagent Loader ────────────────────────────────────────────
 
@@ -75,6 +80,37 @@ describe('Skill and Subagent Loader', () => {
     expect(result).toBeNull();
   });
 
+  // ── loadActiveSkillContent active-only semantics (AC-20) ─────────────────
+
+  it('loadActiveSkillContent returns empty string when no active skill', () => {
+    // Even if skills exist on disk, no active skill means no injection.
+    writeFileSync(join(dir, 'teams', 'test-team', 'skills', 'deploy.md'), '# Deploy');
+    writeFileSync(join(dir, 'teams', 'test-team', 'skills', 'review.md'), '# Review');
+    expect(loadActiveSkillContent(null)).toBe('');
+  });
+
+  it('loadActiveSkillContent injects only the active skill with header', () => {
+    writeFileSync(join(dir, 'teams', 'test-team', 'skills', 'deploy.md'), '# Deploy\nbody-deploy');
+    writeFileSync(join(dir, 'teams', 'test-team', 'skills', 'review.md'), '# Review\nbody-review');
+
+    const active = resolveActiveSkill(dir, 'test-team', 'deploy');
+    const result = loadActiveSkillContent(active);
+
+    expect(result).toContain('--- Skills ---');
+    expect(result).toContain('# Deploy');
+    expect(result).toContain('body-deploy');
+    // Critical: inactive skill body must NOT leak into the active-skill output
+    expect(result).not.toContain('body-review');
+    expect(result).not.toContain('# Review');
+  });
+
+  it('loadActiveSkillContent returns empty string when requested skill is missing', () => {
+    // Simulate resolveActiveSkill returning null because the file is missing
+    const active = resolveActiveSkill(dir, 'test-team', 'nonexistent');
+    expect(active).toBeNull();
+    expect(loadActiveSkillContent(active)).toBe('');
+  });
+
   // ── Subagent parsing ─────────────────────────────────────────────────────
 
   it('parses subagent .md format', () => {
@@ -87,5 +123,156 @@ describe('Skill and Subagent Loader', () => {
     const agent = agents['Devops'];
     expect(agent.description).toBe('Handles deployments');
     expect(agent.skills).toEqual(['deploy', 'rollback']);
+  });
+
+  // ── Subagent Boundaries parsing (AC-21) ──────────────────────────────────
+
+  it('parses single-paragraph `## Boundaries` into boundaries field', () => {
+    const content = [
+      '# Agent: Writer',
+      '## Role',
+      'Drafts copy',
+      '## Boundaries',
+      'Never publish without review. Always cite sources.',
+      '## Skills',
+      '- draft — produce first draft',
+      '',
+    ].join('\n');
+    writeFileSync(join(dir, 'teams', 'test-team', 'subagents', 'writer.md'), content);
+
+    const agents = loadSubagents(dir, 'test-team');
+    const agent = agents['Writer'];
+    expect(agent).toBeDefined();
+    expect(agent.boundaries).toBe('Never publish without review. Always cite sources.');
+  });
+
+  it('preserves multi-paragraph `## Boundaries` until next `##` heading', () => {
+    const content = [
+      '# Agent: Researcher',
+      '## Role',
+      'Investigates topics',
+      '## Boundaries',
+      'Never call external APIs without approval.',
+      '',
+      'Always record sources in the memory store.',
+      '',
+      '- no personal data in queries',
+      '- no paid APIs',
+      '## Skills',
+      '- research — investigate a topic',
+      '',
+    ].join('\n');
+    writeFileSync(join(dir, 'teams', 'test-team', 'subagents', 'researcher.md'), content);
+
+    const agent = loadSubagents(dir, 'test-team')['Researcher'];
+    expect(agent).toBeDefined();
+    const boundaries = agent.boundaries ?? '';
+    // Multi-paragraph preservation — both paragraphs and the bullet list must survive
+    expect(boundaries).toContain('Never call external APIs without approval.');
+    expect(boundaries).toContain('Always record sources in the memory store.');
+    expect(boundaries).toContain('- no personal data in queries');
+    expect(boundaries).toContain('- no paid APIs');
+    // Must NOT leak content from the following `## Skills` section
+    expect(boundaries).not.toContain('research — investigate a topic');
+    expect(boundaries).not.toContain('## Skills');
+  });
+
+  it('omits boundaries field when subagent markdown has no `## Boundaries` section', () => {
+    const content = '# Agent: Minimal\n## Role\nA minimal agent\n## Skills\n- noop — do nothing\n';
+    writeFileSync(join(dir, 'teams', 'test-team', 'subagents', 'minimal.md'), content);
+
+    const agent = loadSubagents(dir, 'test-team')['Minimal'];
+    expect(agent).toBeDefined();
+    expect(agent.boundaries).toBeUndefined();
+  });
+
+  // ── Subagent Communication Style parsing (AC-22) ─────────────────────────
+
+  it('parses `## Communication Style` into communicationStyle field', () => {
+    const content = [
+      '# Agent: Concierge',
+      '## Role',
+      'Greets users',
+      '## Communication Style',
+      'Warm, friendly, concise. Use bullet points for lists.',
+      '## Skills',
+      '- greet — greet a user',
+      '',
+    ].join('\n');
+    writeFileSync(join(dir, 'teams', 'test-team', 'subagents', 'concierge.md'), content);
+
+    const agent = loadSubagents(dir, 'test-team')['Concierge'];
+    expect(agent).toBeDefined();
+    expect(agent.communicationStyle).toBe('Warm, friendly, concise. Use bullet points for lists.');
+  });
+
+  it('preserves multi-paragraph `## Communication Style` until next `##` heading', () => {
+    const content = [
+      '# Agent: Analyst',
+      '## Role',
+      'Reports findings',
+      '## Communication Style',
+      'Formal tone. Always include a TL;DR at the top.',
+      '',
+      'Quote sources verbatim. Never paraphrase numbers.',
+      '## Boundaries',
+      'Never disclose competitor data.',
+      '',
+    ].join('\n');
+    writeFileSync(join(dir, 'teams', 'test-team', 'subagents', 'analyst.md'), content);
+
+    const agent = loadSubagents(dir, 'test-team')['Analyst'];
+    expect(agent).toBeDefined();
+    const style = agent.communicationStyle ?? '';
+    expect(style).toContain('Formal tone. Always include a TL;DR at the top.');
+    expect(style).toContain('Quote sources verbatim. Never paraphrase numbers.');
+    // Must NOT bleed into the following `## Boundaries` section
+    expect(style).not.toContain('Never disclose competitor data.');
+    expect(style).not.toContain('## Boundaries');
+  });
+
+  it('omits communicationStyle field when section is absent (backward compat)', () => {
+    const content = '# Agent: Legacy\n## Role\nNo new sections\n## Skills\n- noop — do nothing\n';
+    writeFileSync(join(dir, 'teams', 'test-team', 'subagents', 'legacy.md'), content);
+
+    const warn = vi.fn();
+    const agent = loadSubagents(dir, 'test-team', warn)['Legacy'];
+    expect(agent).toBeDefined();
+    expect(agent.communicationStyle).toBeUndefined();
+    // Missing section is NOT malformed — no warning should fire.
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('emits a warning with filename when `## Communication Style` is present but empty (malformed)', () => {
+    // Header present, body empty, then next section starts immediately.
+    const content = [
+      '# Agent: Bad',
+      '## Role',
+      'Has malformed comm style',
+      '## Communication Style',
+      '## Skills',
+      '- noop — do nothing',
+      '',
+    ].join('\n');
+    writeFileSync(join(dir, 'teams', 'test-team', 'subagents', 'bad.md'), content);
+
+    const warn = vi.fn();
+    const agents = loadSubagents(dir, 'test-team', warn);
+
+    // Loader does NOT throw — definition is still returned, just without the field
+    expect(agents['Bad']).toBeDefined();
+    expect(agents['Bad'].communicationStyle).toBeUndefined();
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    const warnMsg = warn.mock.calls[0][0] as string;
+    expect(warnMsg).toContain('bad.md');
+    expect(warnMsg).toContain('Communication Style');
+  });
+
+  it('does not require the warn callback to be passed', () => {
+    // Calling without warn must not throw — backward compat with existing 2-arg callers.
+    const content = '# Agent: NoWarn\n## Role\nUnused\n';
+    writeFileSync(join(dir, 'teams', 'test-team', 'subagents', 'no-warn.md'), content);
+    expect(() => loadSubagents(dir, 'test-team')).not.toThrow();
   });
 });

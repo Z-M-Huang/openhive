@@ -7,18 +7,21 @@ import { validate as validateCron } from 'node-cron';
 import type { OrgTree } from '../../domain/org-tree.js';
 import type { ITriggerConfigStore, TriggerConfig } from '../../domain/interfaces.js';
 import type { TriggerEngine } from '../../triggers/engine.js';
+import { validateSubagent, type LoadSubagentsFn } from './validate-subagent.js';
 
 export const UpdateTriggerInputSchema = z.object({
   team: z.string().min(1),
   trigger_name: z.string().min(1),
   config: z.record(z.unknown()).optional(),
   task: z.string().min(1).optional(),
-  max_turns: z.number().int().min(1).max(500).optional(),
+  subagent: z.string().min(1).optional(),
+  max_steps: z.number().int().min(1).max(500).optional(),
   failure_threshold: z.number().int().min(1).max(100).optional(),
   overlap_policy: z.enum(['skip-then-replace', 'always-skip', 'always-replace', 'allow']).optional(),
 }).refine(
   (data) => data.config !== undefined || data.task !== undefined ||
-            data.max_turns !== undefined || data.failure_threshold !== undefined ||
+            data.subagent !== undefined ||
+            data.max_steps !== undefined || data.failure_threshold !== undefined ||
             data.overlap_policy !== undefined,
   { message: 'at least one updatable field must be provided' },
 );
@@ -33,6 +36,8 @@ export interface UpdateTriggerDeps {
   readonly orgTree: OrgTree;
   readonly configStore: ITriggerConfigStore;
   readonly triggerEngine?: TriggerEngine;
+  readonly runDir: string;
+  readonly loadSubagents: LoadSubagentsFn;
   readonly log: (msg: string, meta?: Record<string, unknown>) => void;
 }
 
@@ -53,6 +58,13 @@ export function updateTrigger(
   const existing = deps.configStore.get(data.team, data.trigger_name);
   if (!existing) return { success: false, error: `trigger "${data.trigger_name}" not found for team "${data.team}"` };
 
+  // Validate subagent only when the caller is changing it; an omitted field must
+  // preserve the existing value without triggering re-validation.
+  if (data.subagent !== undefined) {
+    const subagentCheck = validateSubagent(data.subagent, data.team, deps.runDir, deps.loadSubagents);
+    if (!subagentCheck.ok) return { success: false, error: subagentCheck.error };
+  }
+
   // Build merged config explicitly with field-by-field mapping
   const merged: TriggerConfig = {
     name: existing.name,
@@ -61,8 +73,9 @@ export function updateTrigger(
     config: data.config ?? existing.config,
     task: data.task ?? existing.task,
     skill: existing.skill,
+    subagent: data.subagent ?? existing.subagent,
     state: existing.state,
-    maxTurns: data.max_turns ?? existing.maxTurns,
+    maxSteps: data.max_steps ?? existing.maxSteps,
     failureThreshold: data.failure_threshold ?? existing.failureThreshold,
     consecutiveFailures: existing.consecutiveFailures,
     sourceChannelId: existing.sourceChannelId,
@@ -95,6 +108,10 @@ export function updateTrigger(
     deps.triggerEngine.replaceTeamTriggers(data.team, active);
   }
 
-  deps.log('Updated trigger', { team: data.team, trigger: data.trigger_name });
+  deps.log('Updated trigger', {
+    team: data.team,
+    trigger: data.trigger_name,
+    subagent: data.subagent,
+  });
   return { success: true, trigger_name: data.trigger_name };
 }

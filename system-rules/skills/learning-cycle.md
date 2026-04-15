@@ -47,8 +47,9 @@ Only proceed with confidence >= medium.
 ### Phase 5: Record
 Persist the insight using `memory_save`. Use descriptive keys (e.g., `lesson:api-retry-backoff`).
 Include concrete examples, not vague advice. Record confidence level and source references.
-Store journal entry via `vault_set("learning:journal", ...)` with cycle timestamp,
-topics covered, and insights generated.
+Store the journal entry via `vault_set("learning:{team}:{subagent}:journal", ...)` — the key
+must be per-subagent so concurrent cycles within the same team do not overwrite each other.
+Include cycle timestamp, topics covered, and insights generated.
 
 ### Phase 6: Verify
 Re-read the saved memory to confirm it is accurate and actionable.

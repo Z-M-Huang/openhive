@@ -1,5 +1,5 @@
 /**
- * Health endpoint for OpenHive v3.
+ * Health endpoint for OpenHive v0.5.0.
  *
  * GET /health returns JSON with component status.
  * Returns 200 if storage is OK, 503 otherwise.

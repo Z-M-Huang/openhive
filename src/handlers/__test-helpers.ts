@@ -12,8 +12,9 @@ import type {
   ISessionManager,
   ITaskQueueStore,
   IEscalationStore,
+  IVaultStore,
 } from '../domain/interfaces.js';
-import type { OrgTreeNode, TeamConfig, TaskEntry, EscalationCorrelation } from '../domain/types.js';
+import type { OrgTreeNode, TeamConfig, TaskEntry, EscalationCorrelation, VaultEntry } from '../domain/types.js';
 import { TeamStatus, TaskStatus } from '../domain/types.js';
 import type { TaskPriority, TaskType, TaskOptions } from '../domain/types.js';
 import { errorMessage } from '../domain/errors.js';
@@ -49,9 +50,8 @@ export function makeTeamConfig(overrides?: Partial<TeamConfig>): TeamConfig {
     parent: null,
     description: 'A test team',
     allowed_tools: [],
-    mcp_servers: [],
     provider_profile: 'default',
-    maxTurns: 50,
+    maxSteps: 50,
     ...overrides,
   };
 }
@@ -131,6 +131,16 @@ export function createMockTaskQueue(): ITaskQueueStore & { tasks: TaskEntry[] } 
     peek(teamId: string): TaskEntry | undefined {
       return tasks.find((t) => t.teamId === teamId && t.status === TaskStatus.Pending);
     },
+    getActiveForTeam(teamId: string): TaskEntry[] {
+      const rank = (p: TaskPriority): number =>
+        ({ critical: 0, high: 1, normal: 2, low: 3 } as Record<string, number>)[p] ?? 4;
+      return tasks
+        .filter((t) => t.teamId === teamId && (t.status === TaskStatus.Pending || t.status === TaskStatus.Running))
+        .sort((a, b) => {
+          const r = rank(a.priority) - rank(b.priority);
+          return r !== 0 ? r : a.createdAt.localeCompare(b.createdAt);
+        });
+    },
     getByTeam(teamId: string): TaskEntry[] {
       return tasks.filter((t) => t.teamId === teamId);
     },
@@ -180,6 +190,66 @@ export function createMockEscalationStore(): IEscalationStore & { records: Escal
   };
 }
 
+// ── Factory: In-memory IVaultStore ───────────────────────────────────────
+
+export function createMockVaultStore(): IVaultStore & { entries: VaultEntry[] } {
+  let idCounter = 0;
+  const entries: VaultEntry[] = [];
+  return {
+    entries,
+    set(teamName: string, key: string, value: string, isSecret: boolean, updatedBy?: string): VaultEntry {
+      const existing = entries.find(e => e.teamName === teamName && e.key === key);
+      if (existing) {
+        const updated: VaultEntry = {
+          ...existing,
+          value,
+          isSecret,
+          updatedBy: updatedBy ?? null,
+          updatedAt: new Date().toISOString(),
+        };
+        const idx = entries.indexOf(existing);
+        entries[idx] = updated;
+        return updated;
+      }
+      idCounter += 1;
+      const entry: VaultEntry = {
+        id: idCounter,
+        teamName,
+        key,
+        value,
+        isSecret,
+        updatedBy: updatedBy ?? null,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      entries.push(entry);
+      return entry;
+    },
+    get(teamName: string, key: string): VaultEntry | undefined {
+      return entries.find(e => e.teamName === teamName && e.key === key);
+    },
+    list(teamName: string): VaultEntry[] {
+      return entries.filter(e => e.teamName === teamName);
+    },
+    delete(teamName: string, key: string): boolean {
+      const idx = entries.findIndex(e => e.teamName === teamName && e.key === key);
+      if (idx >= 0) {
+        entries.splice(idx, 1);
+        return true;
+      }
+      return false;
+    },
+    getSecrets(teamName: string): VaultEntry[] {
+      return entries.filter(e => e.teamName === teamName && e.isSecret);
+    },
+    removeByTeam(teamName: string): void {
+      for (let i = entries.length - 1; i >= 0; i--) {
+        if (entries[i].teamName === teamName) entries.splice(i, 1);
+      }
+    },
+  };
+}
+
 // ── OrgToolInvoker — local type for test fixtures ────────────────────────
 
 export interface ToolMeta {
@@ -201,6 +271,7 @@ export interface ServerFixtures {
   sessionManager: ISessionManager;
   taskQueue: ReturnType<typeof createMockTaskQueue>;
   escalationStore: ReturnType<typeof createMockEscalationStore>;
+  vaultStore: ReturnType<typeof createMockVaultStore>;
   teamConfigs: Map<string, TeamConfig>;
   logMessages: Array<{ msg: string; meta?: Record<string, unknown> }>;
   server: OrgToolInvoker;
@@ -215,6 +286,7 @@ export function setupServer(): ServerFixtures {
   const sessionManager: ISessionManager = { getSession: vi.fn().mockResolvedValue(null), terminateSession: vi.fn().mockResolvedValue(undefined) };
   const taskQueue = createMockTaskQueue();
   const escalationStore = createMockEscalationStore();
+  const vaultStore = createMockVaultStore();
   const teamConfigs = new Map<string, TeamConfig>();
   const logMessages: Array<{ msg: string; meta?: Record<string, unknown> }> = [];
 
@@ -276,5 +348,5 @@ export function setupServer(): ServerFixtures {
     },
   };
 
-  return { orgTree, spawner, sessionManager, taskQueue, escalationStore, teamConfigs, logMessages, server };
+  return { orgTree, spawner, sessionManager, taskQueue, escalationStore, vaultStore, teamConfigs, logMessages, server };
 }

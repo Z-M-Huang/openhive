@@ -25,6 +25,7 @@ function mockTaskQueueStore(pending: TaskEntry[] = []): ITaskQueueStore {
     enqueue: () => 'task-1',
     dequeue: () => undefined,
     peek: () => undefined,
+    getActiveForTeam: () => [],
     getByTeam: () => [],
     updateStatus: () => {},
     updateResult: () => {},

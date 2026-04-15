@@ -1,6 +1,6 @@
 /** Trigger engine — registers and manages schedule/keyword/message trigger handlers. */
 
-import type { TriggerConfig } from '../domain/types.js';
+import type { TaskOptions, TriggerConfig } from '../domain/types.js';
 import { TaskStatus } from '../domain/types.js';
 import type { ITaskQueueStore, ITriggerConfigStore } from '../domain/interfaces.js';
 import { ScheduleHandler } from './handlers/schedule.js';
@@ -8,6 +8,8 @@ import { KeywordHandler } from './handlers/keyword.js';
 import { MessageHandler } from './handlers/message.js';
 import type { TriggerDedup } from './dedup.js';
 import type { TriggerRateLimiter } from './rate-limiter.js';
+import { simpleHash, cronSlotKey, subagentScope } from './engine-helpers.js';
+import { checkOverlapPolicy as evalOverlapPolicy } from './overlap-policy.js';
 
 export interface TriggerEngineLogger {
   info(msg: string, meta?: Record<string, unknown>): void;
@@ -18,7 +20,19 @@ export interface TriggerEngineOpts {
   readonly triggers?: readonly TriggerConfig[];
   readonly dedup: TriggerDedup;
   readonly rateLimiter: TriggerRateLimiter;
-  readonly delegateTask: (team: string, task: string, priority?: string, triggerName?: string, sourceChannelId?: string) => Promise<string>;
+  /**
+   * Enqueue a task for the target team. `options` carries the subagent
+   * assignment and any maxSteps/skill overrides captured from the trigger
+   * config so downstream consumers route to the correct subagent.
+   */
+  readonly delegateTask: (
+    team: string,
+    task: string,
+    priority?: string,
+    triggerName?: string,
+    sourceChannelId?: string,
+    options?: TaskOptions,
+  ) => Promise<string>;
   readonly logger: TriggerEngineLogger;
   readonly configStore?: ITriggerConfigStore;
   readonly taskQueueStore?: ITaskQueueStore;
@@ -26,14 +40,6 @@ export interface TriggerEngineOpts {
   readonly onTriggerDeactivated?: (team: string, triggerName: string, reason: string) => void;
   readonly onOverlapAlert?: (team: string, triggerName: string, action: 'skipped' | 'replaced', details: { oldTaskId: string }) => void;
 }
-
-function simpleHash(str: string): string {
-  let h = 0;
-  for (let i = 0; i < str.length; i++) h = ((h << 5) - h + str.charCodeAt(i)) | 0;
-  return (h >>> 0).toString(36);
-}
-
-function cronSlotKey(): string { return String(Math.floor(Date.now() / 60_000)); }
 
 interface TeamHandlerSet { schedule: ScheduleHandler[]; keyword: KeywordHandler[]; message: MessageHandler[] }
 
@@ -59,14 +65,22 @@ export class TriggerEngine {
       for (const handler of set.keyword) {
         if (handler.match(text)) {
           this.dispatch(() => {
-            void this.fireTrigger(handler.trigger, `keyword:${handler.trigger.name}:${simpleHash(text)}`, channel);
+            void this.fireTrigger(
+              handler.trigger,
+              `keyword:${handler.trigger.name}:${subagentScope(handler.trigger)}:${simpleHash(text)}`,
+              channel,
+            );
           });
         }
       }
       for (const handler of set.message) {
         if (handler.match(text, channel)) {
           this.dispatch(() => {
-            void this.fireTrigger(handler.trigger, `message:${handler.trigger.name}:${simpleHash(text + (channel ?? ''))}`, channel);
+            void this.fireTrigger(
+              handler.trigger,
+              `message:${handler.trigger.name}:${subagentScope(handler.trigger)}:${simpleHash(text + (channel ?? ''))}`,
+              channel,
+            );
           });
         }
       }
@@ -179,32 +193,36 @@ export class TriggerEngine {
     const timezone = trigger.config['timezone'] as string | undefined;
     const handler = new ScheduleHandler(expression, () => {
       this.dispatch(() => {
-        void this.fireTrigger(trigger, `schedule:${trigger.name}:${cronSlotKey()}`, trigger.sourceChannelId);
+        void this.fireTrigger(
+          trigger,
+          `schedule:${trigger.name}:${subagentScope(trigger)}:${cronSlotKey()}`,
+          trigger.sourceChannelId,
+        );
       });
     }, timezone);
     set.schedule.push(handler);
-    this.opts.logger.info('Registered schedule trigger', { name: trigger.name, cron: expression });
+    this.opts.logger.info('Registered schedule trigger', { name: trigger.name, cron: expression, subagent: trigger.subagent });
   }
 
   private registerKeywordInto(set: TeamHandlerSet, trigger: TriggerConfig): void {
     const pattern = trigger.config['pattern'] as string;
     const handler = new KeywordHandler(pattern, () => {
-      void this.fireTrigger(trigger, `keyword:${trigger.name}:direct`);
+      void this.fireTrigger(trigger, `keyword:${trigger.name}:${subagentScope(trigger)}:direct`);
     });
     handler.trigger = trigger;
     set.keyword.push(handler);
-    this.opts.logger.info('Registered keyword trigger', { name: trigger.name, pattern });
+    this.opts.logger.info('Registered keyword trigger', { name: trigger.name, pattern, subagent: trigger.subagent });
   }
 
   private registerMessageInto(set: TeamHandlerSet, trigger: TriggerConfig): void {
     const pattern = trigger.config['pattern'] as string;
     const channelFilter = trigger.config['channel'] as string | undefined;
     const handler = new MessageHandler(pattern, channelFilter, () => {
-      void this.fireTrigger(trigger, `message:${trigger.name}:direct`);
+      void this.fireTrigger(trigger, `message:${trigger.name}:${subagentScope(trigger)}:direct`);
     });
     handler.trigger = trigger;
     set.message.push(handler);
-    this.opts.logger.info('Registered message trigger', { name: trigger.name, pattern });
+    this.opts.logger.info('Registered message trigger', { name: trigger.name, pattern, subagent: trigger.subagent });
   }
 
   private registerByTeam(triggers: readonly TriggerConfig[]): void {
@@ -219,74 +237,55 @@ export class TriggerEngine {
 
   private dispatch(fn: () => void): void { fn(); }
 
-  /** Cancel an active task and notify via overlap alert. */
-  private cancelAndReplace(team: string, triggerName: string, oldTaskId: string): void {
-    this.opts.taskQueueStore?.updateStatus(oldTaskId, TaskStatus.Cancelled);
-    this.opts.abortSession?.(team, oldTaskId);
-    this.opts.configStore?.resetOverlapState(team, triggerName);
-    this.opts.onOverlapAlert?.(team, triggerName, 'replaced', { oldTaskId });
-  }
-
-  /** Returns true if the trigger should be skipped (no new task created). */
-  private checkOverlapPolicy(trigger: TriggerConfig, config: TriggerConfig | undefined, policy: string): boolean {
-    if (policy === 'allow') return false;
-    const activeTaskId = config?.activeTaskId;
-    if (!activeTaskId) return false;
-
-    const task = this.opts.taskQueueStore?.getById(activeTaskId);
-    const isActive = task && (task.status === TaskStatus.Pending || task.status === TaskStatus.Running);
-
-    if (!isActive) {
-      // Stale reference — clear it
-      this.opts.configStore?.clearActiveTask(trigger.team, trigger.name);
-      this.opts.configStore?.setOverlapCount(trigger.team, trigger.name, 0);
-      return false;
-    }
-
-    if (policy === 'always-skip') {
-      this.opts.onOverlapAlert?.(trigger.team, trigger.name, 'skipped', { oldTaskId: activeTaskId });
-      return true;
-    }
-    if (policy === 'always-replace') {
-      this.cancelAndReplace(trigger.team, trigger.name, activeTaskId);
-      return false;
-    }
-    // skip-then-replace
-    const overlapCount = config?.overlapCount ?? 0;
-    if (overlapCount === 0) {
-      this.opts.configStore?.setOverlapCount(trigger.team, trigger.name, 1);
-      this.opts.onOverlapAlert?.(trigger.team, trigger.name, 'skipped', { oldTaskId: activeTaskId });
-      return true;
-    }
-    this.cancelAndReplace(trigger.team, trigger.name, activeTaskId);
-    return false;
-  }
-
   private async fireTrigger(trigger: TriggerConfig, eventId: string, sourceChannelId?: string): Promise<void> {
+    // Read latest config first so we dedup/rate-limit against the live
+    // subagent assignment (a trigger edited to swap subagents must not be
+    // masked by a dedup scope that still points at the old subagent).
+    const liveConfig = this.opts.configStore?.get(trigger.team, trigger.name);
     if (this.opts.configStore) {
-      const entry = this.opts.configStore.get(trigger.team, trigger.name);
-      if (!entry || entry.state !== 'active') {
-        this.opts.logger.info('Trigger skipped (not active)', { name: trigger.name, state: entry?.state ?? 'unknown' });
+      if (!liveConfig || liveConfig.state !== 'active') {
+        this.opts.logger.info('Trigger skipped (not active)', { name: trigger.name, state: liveConfig?.state ?? 'unknown' });
         return;
       }
     }
-    const source = trigger.team;
-    if (this.opts.dedup.check(eventId, source)) {
-      this.opts.logger.info('Trigger dedup: skipping duplicate', { name: trigger.name });
+
+    const effective = liveConfig ?? trigger;
+    // Dedup + rate-limit scope includes the subagent so routing changes
+    // cannot be shadowed by a previous firing of the same team/trigger.
+    const scope = `${trigger.team}:${subagentScope(effective)}`;
+    if (this.opts.dedup.check(eventId, scope)) {
+      this.opts.logger.info('Trigger dedup: skipping duplicate', { name: trigger.name, subagent: effective.subagent });
       return;
     }
-    const rateResult = this.opts.rateLimiter.check(source);
+    const rateResult = this.opts.rateLimiter.check(scope);
     if (!rateResult.allowed) {
-      this.opts.logger.warn('Trigger rate limited', { name: trigger.name, retryAfterMs: rateResult.retryAfterMs });
+      this.opts.logger.warn('Trigger rate limited', { name: trigger.name, subagent: effective.subagent, retryAfterMs: rateResult.retryAfterMs });
       return;
     }
-    this.opts.dedup.record(eventId, source);
+    this.opts.dedup.record(eventId, scope);
 
-    const config = this.opts.configStore?.get(trigger.team, trigger.name);
-    const policy = config?.overlapPolicy ?? 'skip-then-replace';
-    if (this.checkOverlapPolicy(trigger, config, policy)) return;
+    const policy = effective.overlapPolicy ?? 'skip-then-replace';
+    if (evalOverlapPolicy(this.opts, trigger, effective, policy)) return;
 
-    const taskId = await this.opts.delegateTask(trigger.team, trigger.task, undefined, trigger.name, sourceChannelId);
+    // Snapshot task options from the live trigger config — subagent must
+    // flow to the task consumer so the session is run with the chosen agent.
+    const options: TaskOptions | undefined =
+      effective.maxSteps !== undefined || effective.skill !== undefined || effective.subagent !== undefined
+        ? {
+            maxSteps: effective.maxSteps,
+            skill: effective.skill,
+            subagent: effective.subagent,
+          }
+        : undefined;
+
+    const taskId = await this.opts.delegateTask(
+      trigger.team,
+      effective.task ?? trigger.task,
+      undefined,
+      trigger.name,
+      sourceChannelId,
+      options,
+    );
     if (policy !== 'allow') {
       this.opts.configStore?.setActiveTask(trigger.team, trigger.name, taskId);
     }

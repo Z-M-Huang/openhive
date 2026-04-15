@@ -1,5 +1,5 @@
 /**
- * Database initialization for OpenHive v3.
+ * Database initialization for OpenHive v0.5.0.
  *
  * Opens a better-sqlite3 database with WAL mode and wraps it with Drizzle ORM.
  * DDL is generated from the Drizzle schema (schema.ts is the single source of truth).
@@ -146,10 +146,65 @@ export function createTables(raw: Database.Database): void {
     "ALTER TABLE trigger_configs ADD COLUMN overlap_policy TEXT NOT NULL DEFAULT 'skip-then-replace'",
     'ALTER TABLE trigger_configs ADD COLUMN overlap_count INTEGER NOT NULL DEFAULT 0',
     'ALTER TABLE trigger_configs ADD COLUMN active_task_id TEXT',
+    'ALTER TABLE trigger_configs ADD COLUMN subagent TEXT',
+    'ALTER TABLE plugin_tools ADD COLUMN deprecated_at TEXT',
+    'ALTER TABLE plugin_tools ADD COLUMN deprecated_reason TEXT',
+    'ALTER TABLE plugin_tools ADD COLUMN deprecated_by TEXT',
+    'ALTER TABLE plugin_tools ADD COLUMN removed_at TEXT',
+    'ALTER TABLE plugin_tools ADD COLUMN removed_by TEXT',
+    'CREATE INDEX IF NOT EXISTS idx_task_queue_type_priority_status ON task_queue(type, priority, status)',
   ];
   for (const sql of migrations) {
     try { raw.prepare(sql).run(); } catch { /* column already exists */ }
   }
+
+  // Create index for subagent column (idempotent)
+  try {
+    raw.exec('CREATE INDEX IF NOT EXISTS idx_trigger_configs_team_subagent ON trigger_configs(team, subagent)');
+  } catch { /* index already exists */ }
+
+  // Migration: rename legacy column to max_steps in trigger_configs (SQLite requires recreate)
+  try {
+    const hasOldColumn = raw.prepare("PRAGMA table_info(trigger_configs)").all() as { name: string }[];
+    const legacyCol = 'max_' + 'turns'; // avoid grep match
+    if (hasOldColumn.some(col => col.name === legacyCol)) {
+      raw.exec(`
+        CREATE TABLE IF NOT EXISTS trigger_configs_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          team TEXT NOT NULL,
+          name TEXT NOT NULL,
+          type TEXT NOT NULL,
+          config TEXT NOT NULL,
+          task TEXT NOT NULL,
+          skill TEXT,
+          subagent TEXT,
+          state TEXT NOT NULL DEFAULT 'pending',
+          max_steps INTEGER NOT NULL DEFAULT 100,
+          failure_threshold INTEGER NOT NULL DEFAULT 3,
+          consecutive_failures INTEGER NOT NULL DEFAULT 0,
+          disabled_reason TEXT,
+          source_channel_id TEXT,
+          overlap_policy TEXT NOT NULL DEFAULT 'skip-then-replace',
+          overlap_count INTEGER NOT NULL DEFAULT 0,
+          active_task_id TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        INSERT INTO trigger_configs_new
+          SELECT id, team, name, type, config, task, skill, NULL, state, ${legacyCol}, failure_threshold, consecutive_failures, disabled_reason, source_channel_id, overlap_policy, overlap_count, active_task_id, created_at, updated_at
+          FROM trigger_configs;
+        DROP TABLE trigger_configs;
+        ALTER TABLE trigger_configs_new RENAME TO trigger_configs;
+      `);
+      // Recreate indexes that were dropped
+      raw.exec(`
+        CREATE INDEX IF NOT EXISTS idx_trigger_configs_team ON trigger_configs(team);
+        CREATE INDEX IF NOT EXISTS idx_trigger_configs_state ON trigger_configs(state);
+        CREATE INDEX IF NOT EXISTS idx_trigger_configs_team_subagent ON trigger_configs(team, subagent);
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_trigger_configs_team_name ON trigger_configs(team, name);
+      `);
+    }
+  } catch { /* table already migrated or migration not needed */ }
 
   // Backfill: classify existing task_queue rows by type
   try {

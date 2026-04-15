@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { mkdtempSync, existsSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse as yamlParse } from 'yaml';
-import { spawnTeam, jitteredCron, seedLearningTrigger } from './spawn-team.js';
+import { spawnTeam, jitteredCron, seedLearningTrigger, seedReflectionTrigger } from './spawn-team.js';
 import type { ITriggerConfigStore } from '../../domain/interfaces.js';
 import type { TriggerConfig, TriggerState } from '../../domain/types.js';
 import { OrgTree } from '../../domain/org-tree.js';
@@ -37,7 +37,7 @@ describe('spawn_team', () => {
 
     const result = await f.server.invoke('spawn_team', { name: 'weather', scope_accepts: ['weather'] }, 'root');
 
-    expect(result).toEqual({ success: true, team: 'weather' });
+    expect(result).toMatchObject({ success: true, team: 'weather' });
     expect(f.orgTree.getTeam('weather')).toBeDefined();
     expect(f.orgTree.getTeam('weather')?.parentId).toBe('root');
     expect(f.spawner.spawn).toHaveBeenCalledWith('weather', 'weather');
@@ -101,10 +101,9 @@ describe('spawn_team filesystem and init', () => {
       orgTree: tree,
       spawner: mockSpawner,
       runDir: dir,
-      loadConfig: (_name: string, _cp?: string, hints?: { description?: string; scopeAccepts?: string[]; scopeRejects?: string[] }) => ({
-        name: _name, parent: null, description: hints?.description ?? '',
-        scope: { accepts: hints?.scopeAccepts ?? [], rejects: hints?.scopeRejects ?? [] },
-        allowed_tools: ['*'], mcp_servers: [] as string[], provider_profile: 'default', maxTurns: 100,
+      loadConfig: (_name: string, _cp?: string, hints?: { description?: string; parent?: string }) => ({
+        name: _name, parent: hints?.parent ?? null, description: hints?.description ?? '',
+        allowed_tools: ['*'], provider_profile: 'default', maxSteps: 100,
       }),
       taskQueue: mockTaskQueue,
       ...overrides,
@@ -126,32 +125,34 @@ describe('spawn_team filesystem and init', () => {
     expect(cfg['description']).toBe('My ops team');
   });
 
-  it('does not inject org into mcp_servers (org MCP removed)', async () => {
+  it('does not include mcp_servers in output (clean-start)', async () => {
     await spawnTeam({ name: 'ops', scope_accepts: ['ops'] }, 'root', makeDeps());
     const raw = readFileSync(join(dir, 'teams', 'ops', 'config.yaml'), 'utf-8');
-    const cfg = yamlParse(raw) as { mcp_servers: string[] };
-    expect(cfg.mcp_servers).not.toContain('org');
+    const cfg = yamlParse(raw) as Record<string, unknown>;
+    expect('mcp_servers' in cfg).toBe(false);
   });
 
-  it('preserves external mcp_servers without injecting org', async () => {
+  it('strips mcp_servers from input config (clean-start)', async () => {
     const cfgPath = join(dir, 'no-org.yaml');
-    writeFileSync(cfgPath, 'name: custom\nmcp_servers: [analytics]\nscope:\n  accepts: []\n  rejects: []\nallowed_tools: ["*"]\nprovider_profile: default\nmaxTurns: 50\n');
+    writeFileSync(cfgPath, 'name: custom\nmcp_servers: [analytics]\nallowed_tools: ["*"]\nprovider_profile: default\nmaxSteps: 50\n');
     const { loadTeamConfig } = await import('../../config/loader.js');
     const deps = makeDeps({ loadConfig: (_n, cp) => cp ? loadTeamConfig(cp) : makeDeps().loadConfig(_n) });
     await spawnTeam({ name: 'custom', config_path: cfgPath }, 'root', deps);
     const raw = readFileSync(join(dir, 'teams', 'custom', 'config.yaml'), 'utf-8');
-    const cfg = yamlParse(raw) as { mcp_servers: string[] };
-    expect(cfg.mcp_servers).not.toContain('org');
-    expect(cfg.mcp_servers).toContain('analytics');
+    const cfg = yamlParse(raw) as Record<string, unknown>;
+    expect('mcp_servers' in cfg).toBe(false);
   });
 
-  it('writes credentials to config.yaml when no vaultStore (backward compat)', async () => {
+  it('rejects credentials when vaultStore is absent (AC-10: vault is sole source)', async () => {
     const testToken = 'test-fake-token-value-1234567890';
-    await spawnTeam({ name: 'ops', scope_accepts: ['ops'], credentials: { api_key: testToken, subdomain: 'acme' } }, 'root', makeDeps());
-    const raw = readFileSync(join(dir, 'teams', 'ops', 'config.yaml'), 'utf-8');
-    const cfg = yamlParse(raw) as { credentials: Record<string, string> };
-    expect(cfg.credentials['api_key']).toBe(testToken);
-    expect(cfg.credentials['subdomain']).toBe('acme');
+    const result = await spawnTeam(
+      { name: 'ops', scope_accepts: ['ops'], credentials: { api_key: testToken, subdomain: 'acme' } },
+      'root', makeDeps(),
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('vault');
+    // Team dir must not be partially created on rejection.
+    expect(existsSync(join(dir, 'teams', 'ops', 'config.yaml'))).toBe(false);
   });
 
   it('config has no credentials section when none provided', async () => {
@@ -180,6 +181,25 @@ describe('spawn_team filesystem and init', () => {
     expect(mockTaskQueue.tasks[0].task).toContain('Bootstrap');
   });
 
+  it('bootstrap payload instructs creating subagents, plugins, skills, memory (AC-36)', async () => {
+    await spawnTeam({ name: 'ops', scope_accepts: ['ops'] }, 'root', makeDeps());
+    const payload = mockTaskQueue.tasks[0].task;
+    expect(payload).toMatch(/subagents\//);
+    expect(payload).toMatch(/plugins\//);
+    expect(payload).toMatch(/skills\//);
+    expect(payload).toMatch(/memory_save/);
+    expect(payload.toLowerCase()).toMatch(/five-layer hierarchy/);
+    expect(payload).toMatch(/register_plugin_tool/);
+  });
+
+  it('bootstrap payload includes five-layer hierarchy when init_context provided', async () => {
+    await spawnTeam({ name: 'ops', scope_accepts: ['ops'], init_context: 'ctx' }, 'root', makeDeps());
+    const payload = mockTaskQueue.tasks[0].task;
+    expect(payload.toLowerCase()).toMatch(/five-layer hierarchy/);
+    expect(payload).toMatch(/subagents\//);
+    expect(payload).toMatch(/plugins\//);
+  });
+
   it('rolls back dirs + org tree + session on enqueue failure', async () => {
     const failQueue = {
       ...mockTaskQueue,
@@ -200,6 +220,47 @@ describe('spawn_team filesystem and init', () => {
     expect(tree.getTeam('fail')).toBeUndefined();
     expect(existsSync(join(dir, 'teams', 'fail'))).toBe(false);
   });
+
+  it('success path returns status:queued', async () => {
+    const result = await spawnTeam({ name: 'ops', scope_accepts: ['ops'] }, 'root', makeDeps());
+    expect(result.success).toBe(true);
+    expect(result.status).toBe('queued');
+  });
+
+  it('success path returns a bootstrap_task_id matching the enqueued task', async () => {
+    const result = await spawnTeam({ name: 'ops', scope_accepts: ['ops'] }, 'root', makeDeps());
+    const enqueued = mockTaskQueue.getActiveForTeam('ops');
+    expect(result.bootstrap_task_id).toBe(enqueued[0]?.id);
+  });
+
+  it('success path includes message_for_user referencing setup', async () => {
+    const result = await spawnTeam({ name: 'ops', scope_accepts: ['ops'] }, 'root', makeDeps());
+    expect(result.message_for_user).toMatch(/being set up|confirm.*ready/i);
+  });
+
+  it('duplicate team returns success:false and NO status field', async () => {
+    await spawnTeam({ name: 'dup-ops', scope_accepts: ['ops'] }, 'root', makeDeps());
+    const dup = await spawnTeam({ name: 'dup-ops', scope_accepts: ['ops'] }, 'root', makeDeps());
+    expect(dup.success).toBe(false);
+    expect(dup.error).toBeTruthy();
+    expect(dup.status).toBeUndefined();
+    expect(dup.bootstrap_task_id).toBeUndefined();
+  });
+
+  it('enqueue failure returns success:false and does not leak status:queued', async () => {
+    const failQueue = {
+      ...mockTaskQueue,
+      enqueue: () => { throw new Error('queue full'); },
+    };
+    const result = await spawnTeam({ name: 'fail-enq', scope_accepts: ['test'] }, 'root', makeDeps({ taskQueue: failQueue }));
+    expect(result.success).toBe(false);
+    expect(result.status).toBeUndefined();
+  });
+
+  it('TaskConsumer ready notification text preserved', () => {
+    const src = readFileSync(join(process.cwd(), 'src/sessions/task-consumer.ts'), 'utf8');
+    expect(src).toContain('Team bootstrapped and ready.');
+  });
 });
 
 // ── spawn_team parent normalization ───────────────────────────────────────
@@ -219,10 +280,9 @@ describe('spawn_team parent normalization', () => {
         orgTree: tree,
         spawner: { spawn: vi.fn().mockResolvedValue('sid'), stop: vi.fn() },
         runDir: dir2,
-        loadConfig: (_n: string, _cp?: string, hints?: { description?: string; scopeAccepts?: string[]; scopeRejects?: string[] }) => ({
-          name: _n, parent: null, description: hints?.description ?? '',
-          scope: { accepts: hints?.scopeAccepts ?? [], rejects: hints?.scopeRejects ?? [] },
-          allowed_tools: ['*'], mcp_servers: [] as string[], provider_profile: 'default', maxTurns: 100,
+        loadConfig: (_n: string, _cp?: string, hints?: { description?: string; parent?: string }) => ({
+          name: _n, parent: hints?.parent ?? null, description: hints?.description ?? '',
+          allowed_tools: ['*'], provider_profile: 'default', maxSteps: 100,
         }),
         taskQueue: createMockTaskQueue(),
       },
@@ -274,7 +334,7 @@ describe('spawn_team scope_accepts validation', () => {
     const dir2 = mkdtempSync(join(tmpdir(), 'openhive-l5-cfg-'));
     mkdirSync(join(dir2, 'teams'), { recursive: true });
     const cfgPath = join(dir2, 'custom.yaml');
-    writeFileSync(cfgPath, 'name: custom\nscope:\n  accepts: [ops]\n  rejects: []\nallowed_tools: ["*"]\nmcp_servers: []\nprovider_profile: default\nmaxTurns: 50\n');
+    writeFileSync(cfgPath, 'name: custom\nallowed_tools: ["*"]\nprovider_profile: default\nmaxSteps: 50\n');
 
     const store = createMemoryOrgStore();
     const tree = new OrgTree(store);
@@ -303,6 +363,7 @@ describe('spawn_team credential note', () => {
   let tree: OrgTree;
   let mockSpawner: { spawn: ReturnType<typeof vi.fn>; stop: ReturnType<typeof vi.fn> };
   let mockTaskQueue: ReturnType<typeof createMockTaskQueue>;
+  let mockVaultStore: { set: ReturnType<typeof vi.fn>; removeByTeam: ReturnType<typeof vi.fn> };
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'openhive-l5-note-'));
@@ -312,19 +373,23 @@ describe('spawn_team credential note', () => {
     tree.addTeam(makeNode({ teamId: 'root', name: 'root' }));
     mockSpawner = { spawn: vi.fn().mockResolvedValue('sid'), stop: vi.fn() };
     mockTaskQueue = createMockTaskQueue();
+    mockVaultStore = { set: vi.fn(), removeByTeam: vi.fn() };
   });
 
+  // AC-10: vaultStore is required whenever credentials are provided. The
+  // note path therefore always runs through vault, never through the removed
+  // config.yaml fallback.
   function makeDeps() {
     return {
       orgTree: tree,
       spawner: mockSpawner,
       runDir: dir,
-      loadConfig: (_name: string, _cp?: string, hints?: { description?: string; scopeAccepts?: string[]; scopeRejects?: string[] }) => ({
-        name: _name, parent: null, description: hints?.description ?? '',
-        scope: { accepts: hints?.scopeAccepts ?? [], rejects: hints?.scopeRejects ?? [] },
-        allowed_tools: ['*'], mcp_servers: [] as string[], provider_profile: 'default', maxTurns: 100,
+      loadConfig: (_name: string, _cp?: string, hints?: { description?: string; parent?: string }) => ({
+        name: _name, parent: hints?.parent ?? null, description: hints?.description ?? '',
+        allowed_tools: ['*'], provider_profile: 'default', maxSteps: 100,
       }),
       taskQueue: mockTaskQueue,
+      vaultStore: mockVaultStore,
     };
   }
 
@@ -372,10 +437,9 @@ describe('spawn_team vault integration', () => {
       orgTree: tree,
       spawner: mockSpawner,
       runDir: dir,
-      loadConfig: (_name: string, _cp?: string, hints?: { description?: string; scopeAccepts?: string[] }) => ({
-        name: _name, parent: null, description: hints?.description ?? '',
-        scope: { accepts: hints?.scopeAccepts ?? [], rejects: [] },
-        allowed_tools: ['*'], mcp_servers: [] as string[], provider_profile: 'default', maxTurns: 100,
+      loadConfig: (_name: string, _cp?: string, hints?: { description?: string; parent?: string }) => ({
+        name: _name, parent: hints?.parent ?? null, description: hints?.description ?? '',
+        allowed_tools: ['*'], provider_profile: 'default', maxSteps: 100,
       }),
       taskQueue: mockTaskQueue,
       vaultStore: mockVaultStore,
@@ -519,7 +583,7 @@ describe('jitteredCron', () => {
 describe('seedLearningTrigger', () => {
   it('creates active learning-cycle trigger with always-skip overlap', () => {
     const store = createMockTriggerConfigStore();
-    seedLearningTrigger('ops', store);
+    seedLearningTrigger('ops', undefined, store);
     expect(store.configs).toHaveLength(1);
     const trigger = store.configs[0];
     expect(trigger.name).toBe('learning-cycle');
@@ -528,6 +592,7 @@ describe('seedLearningTrigger', () => {
     expect(trigger.type).toBe('schedule');
     expect(trigger.skill).toBe('learning-cycle');
     expect(trigger.overlapPolicy).toBe('always-skip');
+    expect(trigger.subagent).toBeUndefined();
   });
 
   it('does not overwrite existing trigger (get-guard)', () => {
@@ -537,7 +602,7 @@ describe('seedLearningTrigger', () => {
       name: 'learning-cycle', type: 'schedule', team: 'ops',
       config: { cron: '0 3 * * *' }, task: 'custom task', state: 'active',
     });
-    seedLearningTrigger('ops', store);
+    seedLearningTrigger('ops', undefined, store);
     expect(store.configs).toHaveLength(1);
     expect(store.configs[0].state).toBe('active');
     expect(store.configs[0].task).toBe('custom task');
@@ -545,14 +610,86 @@ describe('seedLearningTrigger', () => {
 
   it('is a no-op when store is undefined', () => {
     // Should not throw
-    seedLearningTrigger('ops', undefined);
+    seedLearningTrigger('ops');
   });
 
   it('uses jittered cron schedule', () => {
     const store = createMockTriggerConfigStore();
-    seedLearningTrigger('my-team', store);
+    seedLearningTrigger('my-team', undefined, store);
     const cfg = store.configs[0].config as { cron: string };
     expect(cfg.cron).toBe(jitteredCron('my-team'));
+  });
+
+  // AC-17: per-subagent learning-cycle seeding.
+  it('names trigger `learning-cycle-{subagent}` and sets subagent field when provided', () => {
+    const store = createMockTriggerConfigStore();
+    seedLearningTrigger('ops', 'research-analyst', store);
+    expect(store.configs).toHaveLength(1);
+    const trigger = store.configs[0];
+    expect(trigger.name).toBe('learning-cycle-research-analyst');
+    expect(trigger.team).toBe('ops');
+    expect(trigger.subagent).toBe('research-analyst');
+    expect(trigger.state).toBe('active');
+    expect(trigger.skill).toBe('learning-cycle');
+    expect(trigger.overlapPolicy).toBe('always-skip');
+  });
+
+  it('per-subagent seeding is independent of generic seeding (separate rows)', () => {
+    const store = createMockTriggerConfigStore();
+    seedLearningTrigger('ops', undefined, store);
+    seedLearningTrigger('ops', 'analyst', store);
+    seedLearningTrigger('ops', 'writer', store);
+    expect(store.configs.map(c => c.name).sort()).toEqual([
+      'learning-cycle', 'learning-cycle-analyst', 'learning-cycle-writer',
+    ]);
+    // Subagent-scoped rows carry the subagent field; generic does not.
+    expect(store.configs.find(c => c.name === 'learning-cycle')!.subagent).toBeUndefined();
+    expect(store.configs.find(c => c.name === 'learning-cycle-analyst')!.subagent).toBe('analyst');
+    expect(store.configs.find(c => c.name === 'learning-cycle-writer')!.subagent).toBe('writer');
+  });
+
+  it('per-subagent seeding is idempotent on repeat call', () => {
+    const store = createMockTriggerConfigStore();
+    seedLearningTrigger('ops', 'analyst', store);
+    seedLearningTrigger('ops', 'analyst', store);
+    expect(store.configs).toHaveLength(1);
+  });
+});
+
+// AC-18: per-subagent reflection-cycle seeding mirrors learning-cycle.
+describe('seedReflectionTrigger', () => {
+  it('creates generic reflection-cycle when no subagent is provided', () => {
+    const store = createMockTriggerConfigStore();
+    seedReflectionTrigger('ops', undefined, store);
+    expect(store.configs).toHaveLength(1);
+    expect(store.configs[0].name).toBe('reflection-cycle');
+    expect(store.configs[0].subagent).toBeUndefined();
+    expect(store.configs[0].maxSteps).toBe(30);
+  });
+
+  it('names trigger `reflection-cycle-{subagent}` and sets subagent when provided', () => {
+    const store = createMockTriggerConfigStore();
+    seedReflectionTrigger('ops', 'research-analyst', store);
+    expect(store.configs).toHaveLength(1);
+    const trigger = store.configs[0];
+    expect(trigger.name).toBe('reflection-cycle-research-analyst');
+    expect(trigger.subagent).toBe('research-analyst');
+    expect(trigger.maxSteps).toBe(30);
+    expect(trigger.state).toBe('active');
+  });
+
+  it('is a no-op when store is undefined', () => {
+    seedReflectionTrigger('ops');
+  });
+
+  it('per-subagent seeding produces one row per subagent', () => {
+    const store = createMockTriggerConfigStore();
+    seedReflectionTrigger('ops', 'analyst', store);
+    seedReflectionTrigger('ops', 'writer', store);
+    expect(store.configs).toHaveLength(2);
+    expect(store.configs.map(c => c.name).sort()).toEqual([
+      'reflection-cycle-analyst', 'reflection-cycle-writer',
+    ]);
   });
 });
 
@@ -579,10 +716,9 @@ describe('spawn_team learning trigger integration', () => {
       orgTree: tree,
       spawner: mockSpawner,
       runDir: dir,
-      loadConfig: (_name: string, _cp?: string, hints?: { description?: string; scopeAccepts?: string[] }) => ({
-        name: _name, parent: null, description: hints?.description ?? '',
-        scope: { accepts: hints?.scopeAccepts ?? [], rejects: [] },
-        allowed_tools: ['*'], mcp_servers: [] as string[], provider_profile: 'default', maxTurns: 100,
+      loadConfig: (_name: string, _cp?: string, hints?: { description?: string; parent?: string }) => ({
+        name: _name, parent: hints?.parent ?? null, description: hints?.description ?? '',
+        allowed_tools: ['*'], provider_profile: 'default', maxSteps: 100,
       }),
       taskQueue: mockTaskQueue,
       triggerConfigStore: mockTriggerStore,
@@ -604,7 +740,7 @@ describe('spawn_team learning trigger integration', () => {
     expect(reflection!.team).toBe('analytics');
     expect(reflection!.state).toBe('active');
     expect(reflection!.overlapPolicy).toBe('always-skip');
-    expect(reflection!.maxTurns).toBe(30);
+    expect(reflection!.maxSteps).toBe(30);
   });
 
   it('does not seed trigger when triggerConfigStore is absent', async () => {
@@ -623,7 +759,7 @@ describe('spawn_team learning trigger integration', () => {
       config: { cron: '0 3 * * *' }, task: 'custom', state: 'active',
     });
     // Spawn will fail because team already exists if registered, but seed guard is tested via unit fn
-    seedLearningTrigger('reuse', mockTriggerStore);
+    seedLearningTrigger('reuse', undefined, mockTriggerStore);
     expect(mockTriggerStore.configs).toHaveLength(1);
     expect(mockTriggerStore.configs[0].state).toBe('active');
   });

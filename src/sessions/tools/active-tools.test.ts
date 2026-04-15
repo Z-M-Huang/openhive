@@ -18,11 +18,11 @@ const ALL_TOOLS = [
   'Grep',
   'Read',
   'Write',
-  'mcp__org__delegate_task',
-  'mcp__org__escalate',
-  'mcp__org__spawn_team',
-  'mcp__browser__click',
-  'mcp__browser__screenshot',
+  'delegate_task',
+  'escalate',
+  'spawn_team',
+  'browser_click',
+  'browser_screenshot',
 ];
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -38,30 +38,26 @@ describe('resolveActiveTools', () => {
     expect(result).toEqual(['Read', 'Write']);
   });
 
-  it('glob prefix "mcp__org__*" matches all org tools', () => {
-    const result = resolveActiveTools(ALL_TOOLS, ['mcp__org__*']);
+  it('glob prefix "browser_*" matches all browser tools', () => {
+    const result = resolveActiveTools(ALL_TOOLS, ['browser_*']);
     expect(result).toEqual([
-      'mcp__org__delegate_task',
-      'mcp__org__escalate',
-      'mcp__org__spawn_team',
+      'browser_click',
+      'browser_screenshot',
     ]);
   });
 
-  it('glob prefix "mcp__browser__*" matches all browser tools', () => {
-    const result = resolveActiveTools(ALL_TOOLS, ['mcp__browser__*']);
-    expect(result).toEqual([
-      'mcp__browser__click',
-      'mcp__browser__screenshot',
-    ]);
+  it('glob prefix with underscores matches tool namespace', () => {
+    // 'delegate_*' matches any tool starting with 'delegate_'.
+    const result = resolveActiveTools(ALL_TOOLS, ['delegate_*']);
+    expect(result).toEqual(['delegate_task']);
   });
 
   it('combines exact matches and glob prefixes', () => {
-    const result = resolveActiveTools(ALL_TOOLS, ['Read', 'mcp__org__*']);
+    const result = resolveActiveTools(ALL_TOOLS, ['Read', 'browser_*']);
     expect(result).toEqual([
       'Read',
-      'mcp__org__delegate_task',
-      'mcp__org__escalate',
-      'mcp__org__spawn_team',
+      'browser_click',
+      'browser_screenshot',
     ]);
   });
 
@@ -88,11 +84,11 @@ describe('resolveActiveTools', () => {
 
   it('does not duplicate tools matched by both exact and glob', () => {
     const result = resolveActiveTools(ALL_TOOLS, [
-      'mcp__org__escalate',
-      'mcp__org__*',
+      'browser_click',
+      'browser_*',
     ]);
-    // mcp__org__escalate appears in both exact and prefix — should not be duplicated
-    const escalateCount = result.filter((n) => n === 'mcp__org__escalate').length;
-    expect(escalateCount).toBe(1);
+    // browser_click appears in both exact and prefix — should not be duplicated
+    const clickCount = result.filter((n) => n === 'browser_click').length;
+    expect(clickCount).toBe(1);
   });
 });

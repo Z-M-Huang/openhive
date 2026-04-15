@@ -1,7 +1,7 @@
 /**
  * Trigger config store — SQLite-backed implementation of ITriggerConfigStore.
  *
- * Stores trigger definitions with state, circuit breaker counters, and max_turns.
+ * Stores trigger definitions with state, circuit breaker counters, and max_steps.
  */
 
 import { eq, and } from 'drizzle-orm';
@@ -24,7 +24,8 @@ export class TriggerConfigStore implements ITriggerConfigStore {
           config: JSON.stringify(config.config),
           task: config.task,
           skill: config.skill ?? null,
-          maxTurns: config.maxTurns ?? 100,
+          subagent: config.subagent ?? null,
+          maxSteps: config.maxSteps ?? 100,
           failureThreshold: config.failureThreshold ?? 3,
           updatedAt: now,
         })
@@ -41,8 +42,9 @@ export class TriggerConfigStore implements ITriggerConfigStore {
         config: JSON.stringify(config.config),
         task: config.task,
         skill: config.skill ?? null,
+        subagent: config.subagent ?? null,
         state: config.state ?? 'pending',
-        maxTurns: config.maxTurns ?? 100,
+        maxSteps: config.maxSteps ?? 100,
         failureThreshold: config.failureThreshold ?? 3,
         consecutiveFailures: 0,
         sourceChannelId: config.sourceChannelId ?? null,
@@ -195,8 +197,9 @@ export class TriggerConfigStore implements ITriggerConfigStore {
       team: row.team,
       task: row.task,
       skill: row.skill ?? undefined,
+      subagent: row.subagent ?? undefined,
       state: row.state as TriggerState,
-      maxTurns: row.maxTurns,
+      maxSteps: row.maxSteps,
       failureThreshold: row.failureThreshold,
       consecutiveFailures: row.consecutiveFailures,
       disabledReason: row.disabledReason ?? undefined,

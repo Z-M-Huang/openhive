@@ -2,15 +2,15 @@
  * Bootstrap helper functions — extracted from index.ts for size limit.
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { parse as yamlParse, stringify as yamlStringify } from 'yaml';
+import { stringify as yamlStringify } from 'yaml';
 import { errorMessage } from './domain/errors.js';
 import { loadChannels } from './config/loader.js';
 import { createDatabase, createTables } from './storage/database.js';
 import { OrgStore } from './storage/stores/org-store.js';
 import { TaskQueueStore } from './storage/stores/task-queue-store.js';
-import { TriggerStore } from './storage/stores/trigger-store.js';
+import { TriggerDedupStore } from './storage/stores/trigger-dedup-store.js';
 import { LogStore } from './storage/stores/log-store.js';
 import { EscalationStore } from './storage/stores/escalation-store.js';
 import { MemoryStore } from './storage/stores/memory-store.js';
@@ -32,9 +32,8 @@ import type { DatabaseInstance } from './storage/database.js';
 import type { OrgTree } from './domain/org-tree.js';
 import { TaskStatus, TeamStatus } from './domain/types.js';
 import type { AppLogger } from './logging/logger.js';
-import { migrateFilesystemMemory } from './storage/migration.js';
-import { migrateCredentialsToVault } from './storage/migration-vault.js';
 import { seedLearningTrigger, seedReflectionTrigger } from './handlers/tools/spawn-team.js';
+import { loadSubagents } from './sessions/skill-loader.js';
 
 export interface ChannelDeps { readonly dataDir: string }
 
@@ -51,15 +50,10 @@ export function ensureRulesDir(dataDir: string): void {
   mkdirSync(join(dataDir, 'rules'), { recursive: true });
 }
 
-/** @deprecated Skills now loaded from system-rules/skills/ via resolveActiveSkill() fallback. */
-export function seedTeamSkills(_runDir: string, _seedSkillsDir: string): void {
-  return;
-}
-
 export interface StorageResult extends DatabaseInstance {
   readonly orgStore: OrgStore;
   readonly taskQueueStore: TaskQueueStore;
-  readonly triggerStore: TriggerStore;
+  readonly triggerStore: TriggerDedupStore;
   readonly logStore: LogStore;
   readonly escalationStore: EscalationStore;
   readonly memoryStore: MemoryStore;
@@ -78,7 +72,7 @@ export function initStorage(_dataDir: string, runDir: string): StorageResult {
   createTables(raw);
   const orgStore = new OrgStore(db);
   const taskQueueStore = new TaskQueueStore(db);
-  const triggerStore = new TriggerStore(db);
+  const triggerStore = new TriggerDedupStore(db);
   const logStore = new LogStore(db);
   const escalationStore = new EscalationStore(db);
   const memoryStore = new MemoryStore(db, raw);
@@ -92,20 +86,8 @@ export function initStorage(_dataDir: string, runDir: string): StorageResult {
   return { db, raw, orgStore, taskQueueStore, triggerStore, logStore, escalationStore, memoryStore, triggerConfigStore, interactionStore, topicStore, senderTrustStore, trustAuditStore, vaultStore, pluginToolStore };
 }
 
-/** Run one-time filesystem → SQLite migration for memory data. */
-export function runMemoryMigration(memoryStore: MemoryStore, orgTree: OrgTree, runDir: string, logger: AppLogger): void {
-  try { migrateFilesystemMemory(memoryStore, orgTree, runDir, (msg, meta) => logger.info(msg, meta)); }
-  catch (err) { logger.warn('Memory migration failed (non-fatal)', { error: errorMessage(err) }); }
-}
-
-/** Migrate config.yaml credentials into the vault (additive, idempotent). */
-export function runVaultMigration(vaultStore: VaultStore, runDir: string, logger: AppLogger): void {
-  try { migrateCredentialsToVault(vaultStore, runDir, (msg, meta) => logger.info(msg, meta)); }
-  catch (err) { logger.warn('Vault credential migration failed (non-fatal)', { error: errorMessage(err) }); }
-}
-
 export function initTriggerEngine(
-  triggerStore: TriggerStore,
+  triggerStore: TriggerDedupStore,
   taskQueueStore: TaskQueueStore,
   logger: AppLogger,
   triggerConfigStore: TriggerConfigStore,
@@ -118,16 +100,20 @@ export function initTriggerEngine(
     rateLimiter,
     configStore: triggerConfigStore,
     taskQueueStore,
-    delegateTask: (team, task, priority, triggerName, sourceChannelId) => {
+    delegateTask: (team, task, priority, triggerName, sourceChannelId, options) => {
       // Unique correlationId per task: trigger:{name}:{timestamp}
       const correlationId = triggerName ? `trigger:${triggerName}:${Date.now()}` : undefined;
-      // Snapshot max_turns and skill from trigger config
-      let options: import('./domain/types.js').TaskOptions | undefined;
-      if (triggerName) {
+      // Options from the engine are authoritative — they are snapshotted from the live trigger
+      // config including subagent, maxSteps, and skill. Fall back to the store only if the caller
+      // passed no options (defensive, keeps backwards compatibility for any non-engine caller).
+      let effectiveOptions: import('./domain/types.js').TaskOptions | undefined = options;
+      if (!effectiveOptions && triggerName) {
         const entry = triggerConfigStore.get(team, triggerName);
-        if (entry?.maxTurns || entry?.skill) options = { maxTurns: entry?.maxTurns, skill: entry?.skill };
+        if (entry?.maxSteps !== undefined || entry?.skill !== undefined || entry?.subagent !== undefined) {
+          effectiveOptions = { maxSteps: entry?.maxSteps, skill: entry?.skill, subagent: entry?.subagent };
+        }
       }
-      const taskId = taskQueueStore.enqueue(team, task, (priority ?? 'normal') as import('./domain/types.js').TaskPriority, 'trigger', sourceChannelId, correlationId, options);
+      const taskId = taskQueueStore.enqueue(team, task, (priority ?? 'normal') as import('./domain/types.js').TaskPriority, 'trigger', sourceChannelId, correlationId, effectiveOptions);
       return Promise.resolve(taskId);
     },
     abortSession: (teamId, taskId) => {
@@ -186,7 +172,7 @@ export function ensureMainTeam(runDir: string, orgTree: OrgTree): void {
     const config = {
       name: 'main', description: 'Main orchestrator',
       allowed_tools: ['*'],
-      mcp_servers: [], provider_profile: 'default', maxTurns: 200,
+      provider_profile: 'default', maxSteps: 200,
     };
     writeFileSync(configPath, yamlStringify(config), 'utf-8');
   }
@@ -199,51 +185,52 @@ export function ensureMainTeam(runDir: string, orgTree: OrgTree): void {
   }
 }
 
-/** Seed learning-cycle + reflection-cycle triggers for all existing teams (idempotent). */
-export function seedLearningTriggers(runDir: string, triggerConfigStore: ITriggerConfigStore): void {
-  const teamsDir = join(runDir, 'teams');
-  if (!existsSync(teamsDir)) return;
-  let teamDirs: string[];
-  try { teamDirs = readdirSync(teamsDir); } catch { return; }
-  for (const teamName of teamDirs) {
-    seedLearningTrigger(teamName, triggerConfigStore);
-    seedReflectionTrigger(teamName, triggerConfigStore);
+/**
+ * Remove any existing learning-cycle* / reflection-cycle* trigger rows owned
+ * by the main team. AC-19: the main orchestrator is routing-only — it never
+ * runs learning or reflection cycles. Called during bootstrap to clean up
+ * legacy rows migrated from earlier versions.
+ */
+export function cleanMainTeamCycleTriggers(triggerConfigStore: ITriggerConfigStore): void {
+  const rows = triggerConfigStore.getByTeam('main');
+  for (const row of rows) {
+    if (row.name.startsWith('learning-cycle') || row.name.startsWith('reflection-cycle')) {
+      triggerConfigStore.remove('main', row.name);
+    }
   }
 }
 
-
-/** Migrate legacy `mcp__org__*` allowed_tools patterns to bare tool names. */
-export function migrateAllowedTools(runDir: string): void {
+/**
+ * Seed learning-cycle + reflection-cycle triggers for all existing teams
+ * (idempotent). AC-19: the `main` team is skipped — main is routing-only.
+ *
+ * AC-17/AC-18: when a team has subagents defined under
+ * `teams/{team}/subagents/*.md`, seed one `learning-cycle-{subagent}` and one
+ * `reflection-cycle-{subagent}` trigger per subagent. The generic
+ * `learning-cycle` / `reflection-cycle` triggers are only seeded when the
+ * team has no subagents — this preserves the default behavior for teams that
+ * never adopt the subagent model.
+ */
+export function seedLearningTriggers(runDir: string, triggerConfigStore: ITriggerConfigStore): void {
+  cleanMainTeamCycleTriggers(triggerConfigStore);
   const teamsDir = join(runDir, 'teams');
   if (!existsSync(teamsDir)) return;
   let teamDirs: string[];
   try { teamDirs = readdirSync(teamsDir); } catch { return; }
   for (const teamName of teamDirs) {
-    const configPath = join(teamsDir, teamName, 'config.yaml');
-    if (!existsSync(configPath)) continue;
-    let raw: string;
-    try { raw = readFileSync(configPath, 'utf-8'); } catch { continue; }
-    let parsed: Record<string, unknown>;
-    try { parsed = yamlParse(raw) as Record<string, unknown>; } catch { continue; }
-    const allowedTools = parsed['allowed_tools'];
-    if (!Array.isArray(allowedTools)) continue;
-    let changed = false;
-    const migrated = allowedTools.map((tool: unknown) => {
-      if (typeof tool !== 'string') return tool;
-      if (!tool.startsWith('mcp__org__')) return tool;
-      changed = true;
-      if (tool === 'mcp__org__*') return '*';
-      return tool.slice('mcp__org__'.length);
-    });
-    if (!changed) continue;
-    parsed['allowed_tools'] = [...new Set(migrated as string[])];
-    // Also strip 'org' from mcp_servers if present
-    const mcpServers = parsed['mcp_servers'];
-    if (Array.isArray(mcpServers)) {
-      const filtered = mcpServers.filter((s: unknown) => s !== 'org');
-      if (filtered.length !== mcpServers.length) parsed['mcp_servers'] = filtered;
+    if (teamName === 'main') continue;
+    const subagents = Object.keys(loadSubagents(runDir, teamName));
+    if (subagents.length === 0) {
+      // No subagents defined — seed generic triggers for this team.
+      seedLearningTrigger(teamName, undefined, triggerConfigStore);
+      seedReflectionTrigger(teamName, undefined, triggerConfigStore);
+      continue;
     }
-    try { writeFileSync(configPath, yamlStringify(parsed), 'utf-8'); } catch { /* best effort */ }
+    // Per-subagent seeding: one learning + one reflection trigger per subagent.
+    for (const subagent of subagents) {
+      seedLearningTrigger(teamName, subagent, triggerConfigStore);
+      seedReflectionTrigger(teamName, subagent, triggerConfigStore);
+    }
   }
 }
 

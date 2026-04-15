@@ -6,11 +6,16 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
+import { readFileSync } from 'fs';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
 
 import { buildOrgTools } from './org-tools.js';
 import type { OrgToolContext } from './org-tool-context.js';
 import { OrgTree } from '../../domain/org-tree.js';
 import { createMemoryOrgStore, createMockTaskQueue, createMockEscalationStore } from '../../handlers/__test-helpers.js';
+
+const __dirn = dirname(fileURLToPath(import.meta.url));
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -95,5 +100,42 @@ describe('buildOrgTools', () => {
       expect(typeof t.execute, `${name} should have execute`).toBe('function');
       expect(typeof t.description, `${name} should have description`).toBe('string');
     }
+  });
+});
+
+// ── delegate_task schema wiring (AC-7) ───────────────────────────────────────
+
+type SchemaBag = { safeParse: (v: unknown) => { success: boolean; data: Record<string, unknown> } };
+
+describe('delegate_task tool wiring', () => {
+  it('tool schema accepts overlap_policy and defaults to confirm', () => {
+    const ctx = createMockContext({ queryRunner: async () => 'ok' });
+    const tools = buildOrgTools(ctx);
+    const delegate = tools['delegate_task'];
+    expect(delegate).toBeTruthy();
+
+    const schema = delegate.inputSchema as unknown as SchemaBag;
+
+    // Default overlap_policy is 'confirm'
+    const r1 = schema.safeParse({ team: 'A', task: 'x' });
+    expect(r1.success).toBe(true);
+    expect(r1.data.overlap_policy).toBe('confirm');
+
+    // Accepts explicit 'replace'
+    const r2 = schema.safeParse({ team: 'A', task: 'x', overlap_policy: 'replace' });
+    expect(r2.success).toBe(true);
+    expect(r2.data.overlap_policy).toBe('replace');
+
+    // Rejects invalid value
+    const r3 = schema.safeParse({ team: 'A', task: 'x', overlap_policy: 'bogus' });
+    expect(r3.success).toBe(false);
+  });
+
+  it('org-tools.ts imports schema from handler — overlap_policy not re-declared', () => {
+    const src = readFileSync(join(__dirn, 'org-tools.ts'), 'utf8');
+    // Schema is imported from the handler module
+    expect(src).toMatch(/DelegateTaskInputSchema/);
+    // overlap_policy lives in the handler schema, not re-declared here
+    expect(src).not.toMatch(/overlap_policy/);
   });
 });

@@ -69,7 +69,7 @@ describe('disable_trigger', () => {
       config: { cron: '*/2 * * * *' },
       task: 'Check logs',
       state: 'active',
-      maxTurns: 100,
+      maxSteps: 100,
       failureThreshold: 3,
       consecutiveFailures: 0,
     });

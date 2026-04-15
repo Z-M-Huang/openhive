@@ -13,6 +13,7 @@ import {
   makeNode,
   makeTeamConfig,
   createMemoryOrgStore,
+  createMockVaultStore,
 } from '../__test-helpers.js';
 import type { ServerFixtures } from '../__test-helpers.js';
 
@@ -118,11 +119,11 @@ describe('query_team credential scrubbing', () => {
 
     const testFakeValue = 'test-fake-value-for-scrubbing';
     const configs = new Map<string, TeamConfig>();
-    configs.set('child', makeTeamConfig({
-      name: 'child',
-      credentials: { subdomain: testFakeValue },
-    }));
+    configs.set('child', makeTeamConfig({ name: 'child' }));
     tree.addScopeKeywords('child', ['test']);
+
+    const vaultStore = createMockVaultStore();
+    vaultStore.set('child', 'subdomain', testFakeValue, true, 'root');
 
     const result = await queryTeam(
       { team: 'child', query: 'test query' },
@@ -130,6 +131,7 @@ describe('query_team credential scrubbing', () => {
       {
         orgTree: tree,
         getTeamConfig: (id) => configs.get(id),
+        vaultStore,
         queryRunner: async () => `The value is ${testFakeValue} and it works`,
         log: () => {},
       },

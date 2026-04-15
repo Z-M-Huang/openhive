@@ -68,17 +68,14 @@ describe('Layer 0: Domain type shapes', () => {
       name: 'test-team',
       parent: null,
       description: 'A test team',
-      scope: { accepts: ['*'], rejects: [] },
       allowed_tools: [],
-      mcp_servers: [],
       provider_profile: 'default-sonnet',
-      maxTurns: 10,
+      maxSteps: 10,
     };
 
     expect(team.name).toBe('test-team');
     expect(team.parent).toBeNull();
-    expect(team.scope?.accepts).toEqual(['*']);
-    expect(team.maxTurns).toBe(10);
+    expect(team.maxSteps).toBe(10);
   });
 
   it('TriggerConfig has required fields', () => {
@@ -278,6 +275,7 @@ describe('Layer 0: Interfaces exist', () => {
       enqueue: () => 'task-id',
       dequeue: () => undefined,
       peek: () => undefined,
+      getActiveForTeam: () => [],
       getByTeam: () => [],
       updateStatus: () => {},
       updateResult: () => {},

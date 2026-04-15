@@ -12,9 +12,9 @@ import { z } from 'zod';
 import type { OrgTree } from '../../domain/org-tree.js';
 import type { TeamConfig } from '../../domain/types.js';
 import type { TeamQueryRunner } from '../../sessions/tools/org-tool-context.js';
+import type { IVaultStore } from '../../domain/interfaces.js';
 import { scrubSecrets } from '../../logging/credential-scrubber.js';
 import { errorMessage } from '../../domain/errors.js';
-import { extractStringCredentials } from '../../domain/credential-utils.js';
 
 export const QueryTeamInputSchema = z.object({
   team: z.string().min(1),
@@ -32,6 +32,7 @@ export interface QueryTeamResult {
 export interface QueryTeamDeps {
   readonly orgTree: OrgTree;
   readonly getTeamConfig: (teamId: string) => TeamConfig | undefined;
+  readonly vaultStore?: IVaultStore;
   readonly queryRunner?: TeamQueryRunner;
   readonly log: (msg: string, meta?: Record<string, unknown>) => void;
 }
@@ -77,10 +78,9 @@ export async function queryTeam(
       return { success: false, error: 'Team returned empty response' };
     }
 
-    // Scrub child team credential values from response
-    const config = deps.getTeamConfig(team);
-    const childCreds = config?.credentials ?? {};
-    const childCredValues = extractStringCredentials(childCreds);
+    // Scrub child team credential values from response using vault secrets (AC-10)
+    const vaultSecrets = deps.vaultStore?.getSecrets(team) ?? [];
+    const childCredValues = vaultSecrets.map((e) => e.value).filter((v) => v.length >= 8);
     const scrubbedResponse = childCredValues.length > 0
       ? scrubSecrets(response, [], childCredValues) : response;
 

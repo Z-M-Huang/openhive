@@ -15,7 +15,7 @@ Your session has access to these tools (subject to `allowed_tools` config):
 
 - **Organization tools** — Always available: spawn_team, delegate_task, query_team, escalate, send_message, get_status, list_teams, shutdown_team, vault_get, vault_set, vault_list, vault_delete, create_trigger, enable_trigger, disable_trigger, test_trigger, list_triggers, update_team, update_trigger. Teams with `browser:` config also get browser tools (browser_navigate, browser_snapshot, browser_screenshot, browser_click, browser_type, browser_go_back, browser_go_forward, browser_close).
 - **web_fetch** — HTTP fetch with SSRF protection.
-- Additional MCP servers as configured in team config.
+- Additional plugin tools as registered in team config (see `plugins/*.ts`).
 
 ## Skills, Plugin Tools, and Subagents
 

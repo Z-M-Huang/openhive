@@ -240,13 +240,13 @@ describe('INV-8: query-options.ts has been removed', () => {
   });
 });
 
-// ── INV-9: All MCP tools wrapped with audit hooks ──────────────────────────
+// ── INV-9: All org tools wrapped with audit hooks ─────────────────────────
 
-describe('INV-9: All org-MCP tools have audit wrapping', () => {
-  it('MCP tools are wrapped with audit at the assembly boundary', () => {
+describe('INV-9: All org tools have audit wrapping', () => {
+  it('org tools are wrapped with audit at the assembly boundary', () => {
     // Audit wrapping is in message-handler.ts which wraps tools with withAudit
-    // when assembling sessions. The old http-server.ts MCP transport has been
-    // removed — all tool invocation now goes through the inline AI SDK path.
+    // when assembling sessions. All tool invocation goes through the inline
+    // AI SDK path.
 
     // Audit wrapping lives in tool-assembler.ts (imported by message-handler.ts).
     const assemblerPath = join(SRC_ROOT, 'sessions', 'tool-assembler.ts');
@@ -256,7 +256,7 @@ describe('INV-9: All org-MCP tools have audit wrapping', () => {
       /import.*tool-audit/.test(asmContent);
     expect(
       asmImportsAudit,
-      'sessions/tool-assembler.ts does not import withAudit — MCP tools lack audit wrapping',
+      'sessions/tool-assembler.ts does not import withAudit — org tools lack audit wrapping',
     ).toBe(true);
     // Verify message-handler.ts delegates to tool-assembler.ts
     const messageHandlerPath = join(SRC_ROOT, 'sessions', 'message-handler.ts');

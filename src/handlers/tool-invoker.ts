@@ -3,9 +3,6 @@
  *
  * Used by bootstrap (index.ts) and E2E tests for tool invocation
  * without going through the AI SDK tool layer.
- *
- * Extracted from the deleted registry.ts during the v4 transport removal.
- * Moved from org-mcp/ to handlers/ in v4 (no longer MCP-related).
  */
 
 import { z } from 'zod';
@@ -35,6 +32,7 @@ import { QueryTeamInputSchema, queryTeam } from './tools/query-team.js';
 import { ListTeamsInputSchema, listTeams } from './tools/list-teams.js';
 import { UpdateTeamInputSchema, updateTeam } from './tools/update-team.js';
 import { CreateTriggerInputSchema, createTrigger } from './tools/create-trigger.js';
+import { loadSubagents } from '../sessions/skill-loader.js';
 import { EnableTriggerInputSchema, enableTrigger } from './tools/enable-trigger.js';
 import { DisableTriggerInputSchema, disableTrigger } from './tools/disable-trigger.js';
 import { TestTriggerInputSchema, testTrigger } from './tools/test-trigger.js';
@@ -183,7 +181,9 @@ function buildToolDefs(deps: OrgToolDeps): ToolDefinition[] {
       inputSchema: CreateTriggerInputSchema,
       handler: (input, callerId, sourceChannelId) => Promise.resolve(
         createTrigger(input as never, callerId, {
-          orgTree: deps.orgTree, configStore, log: deps.log,
+          orgTree: deps.orgTree, configStore,
+          runDir: deps.runDir, loadSubagents,
+          log: deps.log,
         }, sourceChannelId)
       ),
     });
@@ -218,7 +218,7 @@ function buildToolDefs(deps: OrgToolDeps): ToolDefinition[] {
 
     tools.push({
       name: 'test_trigger',
-      description: 'Fire a trigger once for testing without changing its state. Supports max_turns override.',
+      description: 'Fire a trigger once for testing without changing its state. Supports max_steps override.',
       inputSchema: TestTriggerInputSchema,
       handler: (input, callerId, sourceChannelId) => Promise.resolve(
         testTrigger(input as never, callerId, {
@@ -246,7 +246,9 @@ function buildToolDefs(deps: OrgToolDeps): ToolDefinition[] {
         if (!deps.triggerEngine) return Promise.resolve({ success: false, error: 'trigger engine not available' });
         return Promise.resolve(
           updateTrigger(input as never, callerId, {
-            orgTree: deps.orgTree, configStore, triggerEngine: deps.triggerEngine, log: deps.log,
+            orgTree: deps.orgTree, configStore, triggerEngine: deps.triggerEngine,
+            runDir: deps.runDir, loadSubagents,
+            log: deps.log,
           })
         );
       },

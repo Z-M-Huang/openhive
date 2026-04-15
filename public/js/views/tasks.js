@@ -81,7 +81,12 @@ async function fetchStats() {
   const res = await fetch('/api/v1/tasks/stats');
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const body = await res.json();
-  return body.data;
+  return {
+    status: body.status ?? body.data ?? {},
+    byType: body.byType ?? {},
+    byPriority: body.byPriority ?? {},
+    byTypeAndPriority: body.byTypeAndPriority ?? [],
+  };
 }
 
 function renderPagination(container, { offset, total, onPage }) {
@@ -108,12 +113,16 @@ function renderPagination(container, { offset, total, onPage }) {
   container.append(prevBtn, info, nextBtn);
 }
 
-function renderStatsCards(container, stats) {
-  container.textContent = '';
+function renderGroupCards(container, title, entries, testHook) {
+  if (entries.length === 0) return;
+  const section = document.createElement('section');
+  section.setAttribute('data-test', testHook);
+  const h = document.createElement('h3');
+  h.textContent = title;
+  section.append(h);
   const grid = document.createElement('div');
   grid.className = 'card-grid';
-
-  for (const [status, count] of Object.entries(stats)) {
+  for (const [key, count] of entries) {
     const card = document.createElement('div');
     card.className = 'card';
     const val = document.createElement('div');
@@ -121,12 +130,51 @@ function renderStatsCards(container, stats) {
     val.textContent = String(count);
     const label = document.createElement('div');
     label.className = 'metric-label';
-    label.textContent = status;
+    label.textContent = key;
     card.append(val, label);
     grid.append(card);
   }
+  section.append(grid);
+  container.append(section);
+}
 
-  container.append(grid);
+function renderTypePriorityMatrix(container, rows) {
+  if (rows.length === 0) return;
+  const section = document.createElement('section');
+  section.setAttribute('data-test', 'stats-type-priority');
+  const h = document.createElement('h3');
+  h.textContent = 'By Type × Priority';
+  section.append(h);
+  const table = document.createElement('table');
+  table.className = 'data-table';
+  const thead = document.createElement('thead');
+  const headRow = document.createElement('tr');
+  for (const label of ['Type', 'Priority', 'Count']) {
+    const th = document.createElement('th');
+    th.textContent = label;
+    headRow.append(th);
+  }
+  thead.append(headRow);
+  table.append(thead);
+  const tbody = document.createElement('tbody');
+  for (const { type, priority, count } of rows) {
+    const tr = document.createElement('tr');
+    const tdT = document.createElement('td'); tdT.textContent = type; tr.append(tdT);
+    const tdP = document.createElement('td'); tdP.textContent = priority; tr.append(tdP);
+    const tdC = document.createElement('td'); tdC.textContent = String(count); tr.append(tdC);
+    tbody.append(tr);
+  }
+  table.append(tbody);
+  section.append(table);
+  container.append(section);
+}
+
+function renderStatsCards(container, stats) {
+  container.textContent = '';
+  renderGroupCards(container, 'By Status',   Object.entries(stats.status),     'stats-by-status');
+  renderGroupCards(container, 'By Type',     Object.entries(stats.byType),     'stats-by-type');
+  renderGroupCards(container, 'By Priority', Object.entries(stats.byPriority), 'stats-by-priority');
+  renderTypePriorityMatrix(container, stats.byTypeAndPriority);
 }
 
 export async function render(container) {

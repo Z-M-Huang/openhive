@@ -10,20 +10,13 @@ import { TrustPolicySchema } from './trust-policy.js';
 
 // ── Team Config ─────────────────────────────────────────────────────────────
 
-const TeamScopeSchema = z.object({
-  accepts: z.array(z.string()).default([]),
-  rejects: z.array(z.string()).default([]),
-});
-
 export const TeamConfigSchema = z.object({
   name: z.string().min(1),
   parent: z.string().nullable().optional().default(null),
   description: z.string().default(''),
-  scope: TeamScopeSchema.optional(),
   allowed_tools: z.array(z.string()).default([]),
-  mcp_servers: z.array(z.string()).default([]),
   provider_profile: z.string().min(1),
-  maxTurns: z.number().int().positive().default(50),
+  maxSteps: z.number().int().positive().default(50),
   credentials: z.record(z.string(), z.string()).optional().default({}),
   browser: z.object({
     allowed_domains: z.array(z.string()).optional(),

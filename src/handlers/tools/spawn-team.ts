@@ -25,6 +25,18 @@ import { scrubSecrets } from '../../logging/credential-scrubber.js';
 import { errorMessage } from '../../domain/errors.js';
 import { extractStringCredentials } from '../../domain/credential-utils.js';
 import { cleanupTeamDirs } from './team-fs.js';
+import {
+  seedLearningTrigger,
+  seedReflectionTrigger,
+} from './trigger-seed.js';
+
+// Re-exported so callers that previously imported from spawn-team keep working.
+export {
+  jitteredCron,
+  reflectionJitteredCron,
+  seedLearningTrigger,
+  seedReflectionTrigger,
+} from './trigger-seed.js';
 
 /** Team names must be lowercase slugs to prevent path traversal. */
 const TEAM_SLUG_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
@@ -48,6 +60,10 @@ export interface SpawnTeamResult {
   readonly team?: string;
   readonly error?: string;
   readonly note?: string;
+  // NEW: truthful queued status fields (success path only)
+  readonly status?: 'queued' | 'failed';
+  readonly bootstrap_task_id?: string;
+  readonly message_for_user?: string;
 }
 
 export interface SpawnTeamConfigHints {
@@ -124,40 +140,9 @@ export async function spawnTeam(
     return { success: false, error: `config error: ${msg}` };
   }
 
-  // Store credentials: vault (preferred) or config.yaml (backward compat)
-  const hasCredentials = parsed.data.credentials && Object.keys(parsed.data.credentials).length > 0;
-  if (hasCredentials && deps.vaultStore) {
-    // Write each credential to vault with is_secret=1
-    for (const [key, value] of Object.entries(parsed.data.credentials!)) {
-      deps.vaultStore.set(name, key, value, true, callerId);
-    }
-  } else if (hasCredentials) {
-    // Backward compat: merge credentials into config.yaml
-    config = { ...config, credentials: parsed.data.credentials };
-  }
-
-  // Scaffold directories and write config + optional memory files
-  try {
-    scaffoldTeamDirs(deps.runDir, name);
-    const cfgPath = join(deps.runDir, 'teams', name, 'config.yaml');
-    writeFileSync(cfgPath, yamlStringify(config), 'utf-8');
-
-    // Write initialization context to team-rules/team-context.md (scrub credential values)
-    if (parsed.data.init_context) {
-      const initPath = join(deps.runDir, 'teams', name, 'team-rules', 'team-context.md');
-      let safeContext = parsed.data.init_context;
-      if (parsed.data.credentials) {
-        const credValues = extractStringCredentials(parsed.data.credentials);
-        if (credValues.length > 0) safeContext = scrubSecrets(safeContext, [], credValues);
-      }
-      writeFileSync(initPath, safeContext, 'utf-8');
-    }
-  } catch (err) {
-    deps.vaultStore?.removeByTeam(name);
-    cleanupTeamDirs(deps.runDir, name);
-    const msg = errorMessage(err);
-    return { success: false, error: `scaffold error: ${msg}` };
-  }
+  // Store credentials + scaffold dirs/files (extracted to keep spawnTeam under complexity limit)
+  const artifactErr = setupTeamArtifacts(name, config, parsed.data, deps, callerId);
+  if (artifactErr) return { success: false, error: artifactErr };
 
   // Register in org tree
   deps.orgTree.addTeam({
@@ -173,10 +158,6 @@ export async function spawnTeam(
   if (parsed.data.scope_accepts && parsed.data.scope_accepts.length > 0) {
     deps.orgTree.addScopeKeywords(name, parsed.data.scope_accepts);
   }
-  // Backward compat: if loaded from config_path with legacy scope.accepts, backfill SQLite
-  if (config.scope?.accepts && config.scope.accepts.length > 0 && !parsed.data.scope_accepts) {
-    deps.orgTree.addScopeKeywords(name, [...config.scope.accepts]);
-  }
 
   // Spawn the session
   try {
@@ -190,40 +171,103 @@ export async function spawnTeam(
   }
 
   // Auto-queue initialization task so the team self-bootstraps
-  const initError = enqueueInitTask(name, parsed.data.init_context, deps, sourceChannelId);
-  if (initError) return initError;
+  const initResult = enqueueInitTask(name, parsed.data.init_context, deps, sourceChannelId);
+  if (initResult !== null && !initResult.ok) {
+    return { success: false, error: initResult.error };
+  }
+  const bootstrapTaskId = initResult?.taskId;
 
-  // Seed a disabled learning-cycle trigger (skip if one already exists)
-  seedLearningTrigger(name, deps.triggerConfigStore);
+  // AC-17/AC-18: seed generic triggers at spawn time — subagents haven't been
+  // authored yet (the bootstrap task will create them). Once subagents exist,
+  // `seedLearningTriggers` in bootstrap-helpers re-seeds per-subagent triggers
+  // at the next startup. The bare `learning-cycle` / `reflection-cycle` names
+  // are only emitted for teams with NO subagents at discovery time.
+  seedLearningTrigger(name, undefined, deps.triggerConfigStore);
+  seedReflectionTrigger(name, undefined, deps.triggerConfigStore);
 
-  // Seed an active reflection-cycle trigger (skip if one already exists)
-  seedReflectionTrigger(name, deps.triggerConfigStore);
-
+  // Success: team is queued for bootstrap; surface task ID and user-facing message
+  const note = parsed.data.credentials ? 'Credentials stored securely. Do NOT echo credential values.' : undefined;
   return {
-    success: true, team: name,
-    ...(parsed.data.credentials ? { note: 'Credentials stored securely. Do NOT echo credential values.' } : {}),
+    success: true,
+    status: 'queued',
+    team: name,
+    bootstrap_task_id: bootstrapTaskId,
+    message_for_user: `Team ${name} is being set up. I'll confirm here when it's ready.`,
+    ...(note ? { note } : {}),
   };
 }
 
-/** Build and enqueue the bootstrap initialization task. Returns error result on failure. */
+/**
+ * Store credentials in vault and scaffold team dirs + config file + init context.
+ * Returns an error string on failure, or null on success.
+ * Rolls back vault entries on scaffold failure.
+ */
+function setupTeamArtifacts(
+  name: string,
+  config: TeamConfig,
+  data: SpawnTeamInput,
+  deps: SpawnTeamDeps,
+  callerId: string,
+): string | null {
+  // AC-10: vault is sole runtime credential source
+  const hasCredentials = data.credentials && Object.keys(data.credentials).length > 0;
+  if (hasCredentials && deps.vaultStore) {
+    for (const [key, value] of Object.entries(data.credentials!)) {
+      deps.vaultStore.set(name, key, value, true, callerId);
+    }
+  } else if (hasCredentials) {
+    return 'credentials require vaultStore — vault is the sole runtime credential source';
+  }
+
+  try {
+    scaffoldTeamDirs(deps.runDir, name);
+    writeFileSync(join(deps.runDir, 'teams', name, 'config.yaml'), yamlStringify(config), 'utf-8');
+    if (data.init_context) {
+      const initPath = join(deps.runDir, 'teams', name, 'team-rules', 'team-context.md');
+      let safeContext = data.init_context;
+      if (data.credentials) {
+        const credValues = extractStringCredentials(data.credentials);
+        if (credValues.length > 0) safeContext = scrubSecrets(safeContext, [], credValues);
+      }
+      writeFileSync(initPath, safeContext, 'utf-8');
+    }
+    return null;
+  } catch (err) {
+    deps.vaultStore?.removeByTeam(name);
+    cleanupTeamDirs(deps.runDir, name);
+    return `scaffold error: ${errorMessage(err)}`;
+  }
+}
+
+/** Build and enqueue the bootstrap initialization task.
+ * Returns { ok: true, taskId } on success, { ok: false, error } on failure,
+ * or null when no taskQueue is configured.
+ */
 function enqueueInitTask(
-  name: string, initContext: string | undefined, deps: SpawnTeamDeps, sourceChannelId?: string,
-): SpawnTeamResult | null {
+  name: string,
+  initContext: string | undefined,
+  deps: SpawnTeamDeps,
+  sourceChannelId?: string,
+): { ok: true; taskId: string } | { ok: false; error: string } | null {
   if (!deps.taskQueue) return null;
 
+  const sharedSteps =
+    'Follow the v0.5.0 five-layer hierarchy (Main Agent → Team Orchestrator → Subagent → Skill → Plugin): ' +
+    '(1) Author one or more subagents under subagents/ — each subagent markdown declares its role, boundaries, and communication style. ' +
+    '(2) Create and register plugins under plugins/ for deterministic tool capabilities (use register_plugin_tool for runtime registration). ' +
+    '(3) Create skills under skills/ that subagents can invoke to do repeatable work. ' +
+    '(4) Use memory_save to record your team identity, key decisions, and initial context. ' +
+    '(5) Respond with a brief, user-friendly summary of your new capabilities.';
   const initPayload = initContext
     ? 'Bootstrap this team. Your team context is already in your system prompt (from team-rules/team-context.md). ' +
       'Use the vault_get tool to access any credentials provided during team creation. ' +
-      'Steps: (1) Create skills in skills/ for your core tasks, ' +
-      '(2) Use memory_save to record your identity, key decisions, and initial context, ' +
-      '(3) Respond with a brief, user-friendly summary of what capabilities you now have.'
+      sharedSteps
     : 'Bootstrap this team. Your description and scope are in your system prompt. ' +
-      'Create initial skills in skills/ and use memory_save to record your identity. ' +
-      'Respond with a summary of your capabilities.';
+      sharedSteps;
 
   try {
-    deps.taskQueue.enqueue(name, initPayload, 'critical', 'bootstrap', sourceChannelId);
-    return null;
+    const taskId = deps.taskQueue.enqueue(name, initPayload, 'critical', 'bootstrap', sourceChannelId);
+    return { ok: true, taskId };
   } catch (err) {
     // Roll back everything: session + org tree + vault + dirs
     try { deps.spawner.stop?.(name); } catch { /* best effort */ }
@@ -231,55 +275,7 @@ function enqueueInitTask(
     deps.vaultStore?.removeByTeam(name);
     cleanupTeamDirs(deps.runDir, name);
     const msg = errorMessage(err);
-    return { success: false, error: `init enqueue failed: ${msg}` };
+    return { ok: false, error: `init enqueue failed: ${msg}` };
   }
 }
 
-/** Deterministic jittered cron from team name hash: runs daily at 2:{minute}. */
-export function jitteredCron(teamName: string): string {
-  const hash = Buffer.from(teamName).reduce((a, b) => a + b, 0);
-  const minute = hash % 31;
-  return `${minute} 2 * * *`;
-}
-
-/** Create an active learning-cycle trigger for a team (idempotent — skips if exists). */
-export function seedLearningTrigger(teamName: string, store?: ITriggerConfigStore): void {
-  if (!store) return;
-  const existing = store.get(teamName, 'learning-cycle');
-  if (existing) return;
-  store.upsert({
-    name: 'learning-cycle',
-    type: 'schedule',
-    config: { cron: jitteredCron(teamName) },
-    team: teamName,
-    task: 'Run a learning cycle: review recent interactions, extract patterns, and update memory.',
-    skill: 'learning-cycle',
-    state: 'active',
-    overlapPolicy: 'always-skip',
-  });
-}
-
-/** Deterministic jittered cron for reflection: runs daily at 3:{minute} (offset from learning at 2:xx). */
-export function reflectionJitteredCron(teamName: string): string {
-  const hash = Buffer.from(teamName).reduce((a, b) => a + b, 0);
-  const minute = hash % 31;
-  return `${minute} 3 * * *`;
-}
-
-/** Create an active reflection-cycle trigger for a team (idempotent — skips if exists). */
-export function seedReflectionTrigger(teamName: string, store?: ITriggerConfigStore): void {
-  if (!store) return;
-  const existing = store.get(teamName, 'reflection-cycle');
-  if (existing) return;
-  store.upsert({
-    name: 'reflection-cycle',
-    type: 'schedule',
-    config: { cron: reflectionJitteredCron(teamName) },
-    team: teamName,
-    task: 'Run a reflection cycle: review task outcomes and improve.',
-    skill: 'reflection-cycle',
-    state: 'active',
-    overlapPolicy: 'always-skip',
-    maxTurns: 30,
-  });
-}

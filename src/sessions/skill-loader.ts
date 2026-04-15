@@ -20,12 +20,33 @@ export interface SubagentDefinition {
   readonly description: string;
   readonly prompt: string;
   readonly skills?: string[];
+  /**
+   * Free-form `## Boundaries` section from the subagent markdown — the rules
+   * and constraints the subagent must respect (e.g., "never write outside
+   * teams/<name>/", "never call the internet"). Present only when the
+   * markdown declares a `## Boundaries` section (AC-21).
+   */
+  readonly boundaries?: string;
+  /**
+   * Free-form `## Communication Style` section — how the subagent should
+   * phrase its responses, e.g. tone, formality, output format. Present only
+   * when the markdown declares a `## Communication Style` section (AC-22).
+   */
+  readonly communicationStyle?: string;
 }
 
 interface ParsedSubagent {
   readonly name: string;
   readonly description: string;
   readonly skills: string[];
+  readonly boundaries: string;
+  readonly communicationStyle: string;
+  /**
+   * True iff the `## Communication Style` header is present in the file. Used
+   * to distinguish "section absent (backward-compat)" from "section present
+   * but empty (malformed)" — the latter produces a warning per AC-22.
+   */
+  readonly hasCommunicationStyleHeader: boolean;
   readonly rawContent: string;
 }
 
@@ -38,6 +59,8 @@ interface ParsedSubagent {
  *   {description}
  *   ## Skills
  *   - {skill-name} — {purpose}
+ *   ## Boundaries
+ *   {multi-paragraph boundaries until next ## heading}
  */
 function parseSubagent(filename: string, content: string): ParsedSubagent {
   const nameMatch = content.match(/^#\s+Agent:\s*(.+)$/m);
@@ -56,20 +79,77 @@ function parseSubagent(filename: string, content: string): ParsedSubagent {
     }
   }
 
-  return { name, description, skills, rawContent: content };
+  // AC-21: capture the full `## Boundaries` block — including blank lines —
+  // up to the next `##` heading so multi-paragraph constraints survive.
+  const boundariesMatch = content.match(/##\s+Boundaries\s*\n([\s\S]*?)(?=\n##|\n$|$)/);
+  const boundaries = boundariesMatch ? boundariesMatch[1].trim() : '';
+
+  // AC-22: capture the `## Communication Style` block. We track whether the
+  // header is present separately from the extracted text so a present-but-
+  // empty section can be flagged as malformed (the parser still returns a
+  // definition — it never throws — just signals the caller to warn).
+  //
+  // Two-step parse: an "empty body" (header immediately followed by another
+  // `## Heading`) is detected with a dedicated pre-check because the main
+  // lookahead `(?=\n##|\n$|$)` — intentionally kept anchored to `\n##` to
+  // preserve multi-paragraph bodies — would otherwise greedily absorb the
+  // next section when the body is empty.
+  const commHeader = /##\s+Communication Style\s*\n/.test(content);
+  const commEmptyBody = /##\s+Communication Style\s*\n##/.test(content);
+  const commMatch = commEmptyBody
+    ? null
+    : content.match(/##\s+Communication Style\s*\n([\s\S]*?)(?=\n##|\n$|$)/);
+  const communicationStyle = commMatch ? commMatch[1].trim() : '';
+
+  return {
+    name,
+    description,
+    skills,
+    boundaries,
+    communicationStyle,
+    hasCommunicationStyleHeader: commHeader,
+    rawContent: content,
+  };
 }
 
 /**
  * Load all subagent definitions from a team's subagents/ directory.
- * Returns Record<string, SubagentDefinition>.
+ *
+ * @param runDir    Runtime root (e.g. `.run/`).
+ * @param teamName  Team slug.
+ * @param warn      Optional callback invoked when a subagent file is
+ *                  present but has malformed sections (e.g., an empty
+ *                  `## Communication Style` block). The loader NEVER
+ *                  throws; missing sections are treated as backward-
+ *                  compatible and do not trigger the callback.
+ * @returns         Map of subagent name → `SubagentDefinition`.
  */
-export function loadSubagents(runDir: string, teamName: string): Record<string, SubagentDefinition> {
+export function loadSubagents(
+  runDir: string,
+  teamName: string,
+  warn?: (msg: string) => void,
+): Record<string, SubagentDefinition> {
   const dir = join(runDir, 'teams', teamName, 'subagents');
   const files = loadRulesFromDirectory(dir);
   const result: Record<string, SubagentDefinition> = {};
   for (const f of files) {
     const def = parseSubagent(f.filename, f.content);
-    result[def.name] = { description: def.description, prompt: def.rawContent, skills: def.skills };
+    const entry: { -readonly [K in keyof SubagentDefinition]: SubagentDefinition[K] } = {
+      description: def.description,
+      prompt: def.rawContent,
+      skills: def.skills,
+    };
+    if (def.boundaries) entry.boundaries = def.boundaries;
+    if (def.communicationStyle) entry.communicationStyle = def.communicationStyle;
+
+    // AC-22: malformed = the `## Communication Style` header exists but the
+    // extracted body is empty. Surface a clear warning with the filename so
+    // authors can fix the file; never throw.
+    if (def.hasCommunicationStyleHeader && !def.communicationStyle && warn) {
+      warn(`subagent ${f.filename}: "## Communication Style" section is empty`);
+    }
+
+    result[def.name] = entry;
   }
   return result;
 }
@@ -139,15 +219,19 @@ export function parseRequiredTools(skillContent: string): string[] {
 
 /**
  * Load only the active skill's content for the prompt.
- * Falls back to loadSkillsContent() if no specific skill is active.
+ *
+ * **Active-only semantics (AC-20)**: when no skill is selected, this returns
+ * an empty string — inactive skill files remain on disk but are never loaded
+ * into the prompt. The former `loadSkillsContent` fallback that injected
+ * every team skill is intentionally removed. Callers that need to know a
+ * requested skill is missing compare their `skillName` against the
+ * `activeSkill` result from `resolveActiveSkill` and log a warning there.
  */
 export function loadActiveSkillContent(
-  runDir: string,
-  teamName: string,
   activeSkill: { name: string; content: string } | null,
 ): string {
   if (activeSkill) {
     return `--- Skills ---\n${activeSkill.content}`;
   }
-  return loadSkillsContent(runDir, teamName);
+  return '';
 }

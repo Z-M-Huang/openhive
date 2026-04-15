@@ -1,5 +1,5 @@
 /**
- * Core interfaces for OpenHive v3.
+ * Core interfaces for OpenHive v0.5.0.
  *
  * Every external dependency sits behind an interface defined here.
  */
@@ -74,6 +74,7 @@ export interface ITaskQueueStore {
   enqueue(teamId: string, task: string, priority: TaskPriority, type: TaskType, sourceChannelId?: string, correlationId?: string, options?: TaskOptions, topicId?: string): string;
   dequeue(teamId: string): TaskEntry | undefined;
   peek(teamId: string): TaskEntry | undefined;
+  getActiveForTeam(teamId: string): TaskEntry[];
   getByTeam(teamId: string): TaskEntry[];
   updateStatus(taskId: string, status: TaskStatus): void;
   updateResult(taskId: string, result: string): void;
@@ -147,6 +148,11 @@ export interface PluginToolMeta {
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly verifiedAt: string | null;
+  readonly deprecatedAt?: string | null;
+  readonly deprecatedReason?: string | null;
+  readonly deprecatedBy?: string | null;
+  readonly removedAt?: string | null;
+  readonly removedBy?: string | null;
 }
 
 export interface PluginToolVerification {
@@ -161,6 +167,8 @@ export interface IPluginToolStore {
   getByTeam(teamName: string): PluginToolMeta[];
   getAll(): PluginToolMeta[];
   setStatus(teamName: string, toolName: string, status: PluginToolMeta['status']): void;
+  deprecate(teamName: string, toolName: string, reason: string, by: string): void;
+  markRemoved(teamName: string, toolName: string, by: string): void;
   remove(teamName: string, toolName: string): void;
   removeByTeam(teamName: string): void;
 }

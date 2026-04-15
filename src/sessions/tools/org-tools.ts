@@ -1,7 +1,7 @@
 /**
  * Inline org tool builders — wraps 10 handler functions as AI SDK inline defs.
  *
- * Each tool uses bare names (e.g. "spawn_team", not "mcp__org__spawn_team").
+ * Each tool uses bare names (e.g. "spawn_team").
  * Tools are returned in alphabetical order. The query_team tool is
  * conditionally included only when ctx.queryRunner is defined.
  */

@@ -4,7 +4,7 @@
  * Priority ordering: critical > high > normal > low, then FIFO within same priority.
  */
 
-import { eq, and, sql } from 'drizzle-orm';
+import { eq, and, sql, inArray } from 'drizzle-orm';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { randomBytes } from 'node:crypto';
 import type { ITaskQueueStore } from '../../domain/interfaces.js';
@@ -101,6 +101,30 @@ export class TaskQueueStore implements ITaskQueueStore {
 
     if (!row) return undefined;
     return this.rowToEntry(row);
+  }
+
+  getActiveForTeam(teamId: string): TaskEntry[] {
+    const rows = this.db
+      .select()
+      .from(schema.taskQueue)
+      .where(
+        and(
+          eq(schema.taskQueue.teamId, teamId),
+          inArray(schema.taskQueue.status, [TaskStatus.Pending, TaskStatus.Running]),
+        ),
+      )
+      .orderBy(
+        sql`CASE ${schema.taskQueue.priority}
+          WHEN 'critical' THEN 0
+          WHEN 'high' THEN 1
+          WHEN 'normal' THEN 2
+          WHEN 'low' THEN 3
+          ELSE 4 END`,
+        schema.taskQueue.createdAt,
+      )
+      .all();
+
+    return rows.map((r) => this.rowToEntry(r));
   }
 
   getByTeam(teamId: string): TaskEntry[] {

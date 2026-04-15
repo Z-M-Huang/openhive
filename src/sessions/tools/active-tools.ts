@@ -1,7 +1,5 @@
 /**
  * Active tool resolution — determines which tools a team is allowed to use.
- *
- * Extracted from mcp-bridge.ts for reuse without MCP transport dependency.
  */
 
 /**
@@ -9,8 +7,8 @@
  *
  * Supports:
  * - '*' wildcard: allows all tools
- * - Exact names: 'Read', 'mcp__org__spawn_team'
- * - Glob prefixes: 'mcp__org__*' matches any tool starting with 'mcp__org__'
+ * - Exact names: 'Read', 'spawn_team'
+ * - Glob prefixes: 'browser_*' matches any tool starting with 'browser_'
  *
  * Returns the subset of allToolNames that match allowed_tools.
  */

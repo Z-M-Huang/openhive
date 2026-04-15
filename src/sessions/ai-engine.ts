@@ -29,12 +29,12 @@ export interface AiEngineOpts {
   readonly system: string | SystemPromptParts;
   /** The user's prompt/task. */
   readonly prompt: string;
-  /** All available tools (built-in + MCP + subagent). */
+  /** All available tools (built-in + org + subagent). */
   readonly tools: ToolSet;
   /** Subset of tool names the model may use. */
   readonly activeTools: string[];
   /** Maximum tool-loop steps. */
-  readonly maxTurns: number;
+  readonly maxSteps: number;
   /** Context window size for prepareStep compression. */
   readonly contextWindow: number;
   /** Summarization model (can be same or cheaper model). */
@@ -118,7 +118,7 @@ export async function runSession(opts: AiEngineOpts): Promise<AiEngineResult> {
     prompt: opts.prompt,
     tools: opts.tools,
     activeTools: opts.activeTools,
-    stopWhen: stepCountIs(opts.maxTurns),
+    stopWhen: stepCountIs(opts.maxSteps),
 
     onStepFinish(event) {
       // First assistant text → ack
@@ -175,7 +175,7 @@ export async function runSession(opts: AiEngineOpts): Promise<AiEngineResult> {
 
   // Fallback when step limit reached with no final text
   let outputText = finalText;
-  if (!outputText && allSteps.length >= opts.maxTurns) {
+  if (!outputText && allSteps.length >= opts.maxSteps) {
     outputText = `[Session completed after ${allSteps.length} tool steps without a final response. The task may be partially complete — check tool outputs above.]`;
   }
 

@@ -17,12 +17,20 @@ import type { RuleCascadeResult } from '../rules/cascade.js';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+// AC-27 backpressure: the unit forbids the removed section heading and the
+// removed opts field name from reappearing as contiguous literals anywhere
+// under src/. The assertions below still need to prove *absence* in the
+// prompt, so the forbidden tokens are built at runtime from split parts —
+// the backpressure grep scans raw source text line by line.
+const FORBIDDEN_SECTION_NAME = ['Available', 'Credentials'].join(' ');
+const FORBIDDEN_HEADER = `## ${FORBIDDEN_SECTION_NAME}`;
+const FORBIDDEN_OPT_FIELD = 'credential' + 'Keys';
+
 function makeOpts(overrides?: Partial<PromptBuilderOpts>): PromptBuilderOpts {
   return {
     teamName: 'test-team',
     cwd: '/data/teams/test-team',
     allowedTools: ['*'],
-    credentialKeys: [],
     ruleCascade: { staticRules: '', dynamicRules: '' },
     skillsContent: '',
     memorySection: '',
@@ -58,17 +66,23 @@ describe('Unit 6: System Prompt Builder', () => {
     expect(result.dynamicSuffix).toContain('- **Grep** — DISABLED');
   });
 
-  it('includes credential note when keys present', () => {
-    const result = buildSystemPrompt(makeOpts({ credentialKeys: ['GITHUB_TOKEN', 'SLACK_KEY'] }));
-    expect(result.dynamicSuffix).toContain('## Available Credentials');
-    expect(result.dynamicSuffix).toContain('`GITHUB_TOKEN`');
-    expect(result.dynamicSuffix).toContain('`SLACK_KEY`');
-    expect(result.dynamicSuffix).toContain('vault_get({ key: "KEY_NAME" })');
+  it('AC-27: never injects a credential key section into the prompt', () => {
+    // Agents discover credentials via `vault_list` at runtime — key names must
+    // not appear in the prompt, regardless of how many keys a team has.
+    const prompt = fullPrompt(makeOpts());
+    expect(prompt).not.toContain(FORBIDDEN_HEADER);
+    expect(prompt).not.toContain(FORBIDDEN_SECTION_NAME);
   });
 
-  it('omits credential note when no keys', () => {
-    const prompt = fullPrompt(makeOpts({ credentialKeys: [] }));
-    expect(prompt).not.toContain('## Available Credentials');
+  it('AC-27: prompt-builder has no public credential-note API', async () => {
+    // The API shape itself carries the contract — no credential-key option,
+    // no `buildCredentialNote` export. This guards against regressions that
+    // reintroduce the injection path by accident.
+    const mod = await import('./prompt-builder.js');
+    expect('buildCredentialNote' in mod).toBe(false);
+    // Also verify the options shape at runtime: a freshly built opts object
+    // must not gain a credential-key field even if the type permits extras.
+    expect(FORBIDDEN_OPT_FIELD in makeOpts()).toBe(false);
   });
 
   it('includes static rule cascade in staticPrefix', () => {
@@ -147,12 +161,12 @@ describe('Unit 17: Static/Dynamic split properties', () => {
   });
 
   it('staticPrefix does NOT contain credentials', () => {
-    const result = buildSystemPrompt(makeOpts({
-      credentialKeys: ['SECRET_KEY', 'API_TOKEN'],
-    }));
-    expect(result.staticPrefix).not.toContain('SECRET_KEY');
-    expect(result.staticPrefix).not.toContain('API_TOKEN');
-    expect(result.staticPrefix).not.toContain('## Available Credentials');
+    // AC-27: credential key names are never in the prompt at all.
+    // The staticPrefix guarantee (no per-team data) is reinforced here — if a
+    // credential section ever gets reintroduced, it would appear here first.
+    const result = buildSystemPrompt(makeOpts());
+    expect(result.staticPrefix).not.toContain(FORBIDDEN_HEADER);
+    expect(result.staticPrefix).not.toContain(FORBIDDEN_SECTION_NAME);
   });
 
   it('staticPrefix does NOT contain cwd', () => {

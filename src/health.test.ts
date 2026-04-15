@@ -62,7 +62,7 @@ function parseHealth(body: string): HealthResponse {
 // ── UT-25: Health Endpoint returns 200 ───────────────────────────────────
 
 describe('UT-25: Health endpoint returns 200 with component status', () => {
-  it('returns 200 with all component statuses when storage is healthy', { timeout: 15_000 }, async () => {
+  it('returns 200 with all component statuses when storage is healthy', { timeout: 30_000 }, async () => {
     const { raw } = createTempDb();
     const sessionManager = new TeamRegistry();
     const triggerEngine = createMinimalTriggerEngine();

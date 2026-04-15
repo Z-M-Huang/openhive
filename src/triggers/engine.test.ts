@@ -105,7 +105,7 @@ describe('Trigger Engine', () => {
     engine.register();
 
     engine.onMessage('please deploy now');
-    expect(delegateTask).toHaveBeenCalledWith('weather-team', 'check weather', undefined, 'kw-deploy', undefined);
+    expect(delegateTask).toHaveBeenCalledWith('weather-team', 'check weather', undefined, 'kw-deploy', undefined, undefined);
   });
 
   it('onMessage does not dispatch non-matching keyword', () => {
@@ -133,7 +133,7 @@ describe('Trigger Engine', () => {
     engine.register();
 
     engine.onMessage('got error 500', 'ops');
-    expect(delegateTask).toHaveBeenCalledWith('weather-team', 'check weather', undefined, 'msg-error', 'ops');
+    expect(delegateTask).toHaveBeenCalledWith('weather-team', 'check weather', undefined, 'msg-error', 'ops', undefined);
   });
 
   it('onMessage respects message trigger channel filter', () => {
@@ -214,7 +214,7 @@ describe('Dedup Integration', () => {
     // gets a unique event_id. The dedup prevents replay of the *same* event,
     // not repeated triggers from different messages.
     // This test verifies the dedup.record() path was exercised.
-    expect(delegateTask).toHaveBeenCalledWith('weather-team', 'check weather', undefined, 'kw-test', undefined);
+    expect(delegateTask).toHaveBeenCalledWith('weather-team', 'check weather', undefined, 'kw-test', undefined, undefined);
   });
 });
 
@@ -326,8 +326,8 @@ describe('Trigger Engine: Per-Team Registry', () => {
 
     engine.onMessage('shared event');
     expect(delegateTask).toHaveBeenCalledTimes(2);
-    expect(delegateTask).toHaveBeenCalledWith('alpha', 'alpha task', undefined, 'kw-a', undefined);
-    expect(delegateTask).toHaveBeenCalledWith('beta', 'beta task', undefined, 'kw-b', undefined);
+    expect(delegateTask).toHaveBeenCalledWith('alpha', 'alpha task', undefined, 'kw-a', undefined, undefined);
+    expect(delegateTask).toHaveBeenCalledWith('beta', 'beta task', undefined, 'kw-b', undefined, undefined);
   });
 });
 
@@ -355,7 +355,7 @@ describe('Channel threading through onMessage → delegateTask', () => {
     engine.register();
 
     engine.onMessage('alert now', 'ws:chan1');
-    expect(delegateTask).toHaveBeenCalledWith('weather-team', 'check weather', undefined, 'kw-alert', 'ws:chan1');
+    expect(delegateTask).toHaveBeenCalledWith('weather-team', 'check weather', undefined, 'kw-alert', 'ws:chan1', undefined);
   });
 
   it('passes channel to delegateTask for message triggers', () => {
@@ -366,7 +366,7 @@ describe('Channel threading through onMessage → delegateTask', () => {
     engine.register();
 
     engine.onMessage('notify me', 'general');
-    expect(delegateTask).toHaveBeenCalledWith('weather-team', 'check weather', undefined, 'msg-notify', 'general');
+    expect(delegateTask).toHaveBeenCalledWith('weather-team', 'check weather', undefined, 'msg-notify', 'general', undefined);
   });
 
   it('passes undefined channel for scheduled triggers without sourceChannelId', () => {
@@ -400,7 +400,7 @@ describe('Channel threading through onMessage → delegateTask', () => {
     expect(delegateTask).toHaveBeenCalled();
     // sourceChannelId should be passed through from the trigger config
     expect(delegateTask).toHaveBeenCalledWith(
-      'weather-team', 'check weather', undefined, 'sched-ws', 'ws:originator-123',
+      'weather-team', 'check weather', undefined, 'sched-ws', 'ws:originator-123', undefined,
     );
     engine.stop();
   });
@@ -479,6 +479,7 @@ function createMockTaskQueueStore(tasks: Map<string, TaskEntry>): ITaskQueueStor
     enqueue: vi.fn().mockReturnValue('task-new'),
     dequeue: vi.fn(),
     peek: vi.fn(),
+    getActiveForTeam: vi.fn().mockReturnValue([]),
     getByTeam: vi.fn().mockReturnValue([]),
     updateStatus: vi.fn((taskId: string, status: TaskStatus) => {
       const existing = tasks.get(taskId);
@@ -731,5 +732,191 @@ describe('Overlap Policy', () => {
 
     expect(configStore.resetFailures).toHaveBeenCalledWith('weather-team', 'kw-check');
     expect(configStore.clearActiveTask).toHaveBeenCalledWith('weather-team', 'kw-check');
+  });
+});
+
+// ── Subagent routing (AC-14) ────────────────────────────────────────────
+
+describe('Subagent routing', () => {
+  let store: ITriggerStore;
+  let dedup: TriggerDedup;
+  let rateLimiter: TriggerRateLimiter;
+  let logger: ReturnType<typeof makeLogger>;
+  let delegateTask: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    store = createMemoryTriggerStore();
+    dedup = new TriggerDedup(store);
+    rateLimiter = new TriggerRateLimiter(100, 60_000);
+    logger = makeLogger();
+    delegateTask = vi.fn().mockResolvedValue('task-new');
+  });
+
+  it('propagates subagent to delegateTask options for schedule triggers', async () => {
+    const triggers: TriggerConfig[] = [
+      makeTrigger({
+        name: 'sched-research',
+        type: 'schedule',
+        config: { cron: '* * * * * *' },
+        subagent: 'researcher',
+      }),
+    ];
+    const engine = new TriggerEngine({ triggers, dedup, rateLimiter, delegateTask, logger });
+    engine.register();
+    engine.start();
+
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+
+    expect(delegateTask).toHaveBeenCalled();
+    const lastCall = delegateTask.mock.calls[delegateTask.mock.calls.length - 1];
+    expect(lastCall[5]).toEqual(expect.objectContaining({ subagent: 'researcher' }));
+    engine.stop();
+  });
+
+  it('propagates subagent to delegateTask options for keyword triggers', () => {
+    const triggers: TriggerConfig[] = [
+      makeTrigger({
+        name: 'kw-deploy',
+        type: 'keyword',
+        config: { pattern: 'deploy' },
+        subagent: 'deployer',
+      }),
+    ];
+    const engine = new TriggerEngine({ triggers, dedup, rateLimiter, delegateTask, logger });
+    engine.register();
+
+    engine.onMessage('please deploy now');
+    expect(delegateTask).toHaveBeenCalledWith(
+      'weather-team', 'check weather', undefined, 'kw-deploy', undefined,
+      expect.objectContaining({ subagent: 'deployer' }),
+    );
+  });
+
+  it('propagates subagent to delegateTask options for message triggers', () => {
+    const triggers: TriggerConfig[] = [
+      makeTrigger({
+        name: 'msg-error',
+        type: 'message',
+        config: { pattern: 'error', channel: 'ops' },
+        subagent: 'analyst',
+      }),
+    ];
+    const engine = new TriggerEngine({ triggers, dedup, rateLimiter, delegateTask, logger });
+    engine.register();
+
+    engine.onMessage('got error now', 'ops');
+    expect(delegateTask).toHaveBeenCalledWith(
+      'weather-team', 'check weather', undefined, 'msg-error', 'ops',
+      expect.objectContaining({ subagent: 'analyst' }),
+    );
+  });
+
+  it('propagates maxSteps + skill + subagent together as TaskOptions', () => {
+    const triggers: TriggerConfig[] = [
+      makeTrigger({
+        name: 'kw-combo',
+        type: 'keyword',
+        config: { pattern: 'combo' },
+        subagent: 'researcher',
+        maxSteps: 50,
+        skill: 'deep-dive',
+      }),
+    ];
+    const engine = new TriggerEngine({ triggers, dedup, rateLimiter, delegateTask, logger });
+    engine.register();
+
+    engine.onMessage('combo trigger');
+    expect(delegateTask).toHaveBeenCalledWith(
+      'weather-team', 'check weather', undefined, 'kw-combo', undefined,
+      { maxSteps: 50, skill: 'deep-dive', subagent: 'researcher' },
+    );
+  });
+
+  it('omits options when trigger has no maxSteps/skill/subagent', () => {
+    const triggers: TriggerConfig[] = [
+      makeTrigger({
+        name: 'kw-plain',
+        type: 'keyword',
+        config: { pattern: 'plain' },
+      }),
+    ];
+    const engine = new TriggerEngine({ triggers, dedup, rateLimiter, delegateTask, logger });
+    engine.register();
+
+    engine.onMessage('plain trigger');
+    expect(delegateTask).toHaveBeenCalledWith(
+      'weather-team', 'check weather', undefined, 'kw-plain', undefined, undefined,
+    );
+  });
+
+  it('dedup scope is separated by subagent — same trigger name but different subagents dedup independently', () => {
+    // Two keyword triggers in the same team, same pattern, different subagents.
+    // onMessage with identical text should fire BOTH (not dedup against each other)
+    // because the dedup scope includes subagent.
+    const configs = new Map<string, TriggerConfig>();
+    const triggerA: TriggerConfig = {
+      name: 'kw-a', type: 'keyword', config: { pattern: 'shared' },
+      team: 'weather-team', task: 'task A',
+      state: 'active', subagent: 'researcher',
+    };
+    const triggerB: TriggerConfig = {
+      name: 'kw-b', type: 'keyword', config: { pattern: 'shared' },
+      team: 'weather-team', task: 'task B',
+      state: 'active', subagent: 'analyst',
+    };
+    configs.set('weather-team:kw-a', triggerA);
+    configs.set('weather-team:kw-b', triggerB);
+    const configStore = createMockConfigStore(configs);
+
+    const engine = new TriggerEngine({
+      triggers: [triggerA, triggerB],
+      dedup, rateLimiter, delegateTask, logger,
+      configStore,
+    });
+    engine.register();
+
+    engine.onMessage('shared event');
+    // Both triggers fire — their subagent-scoped event keys differ
+    expect(delegateTask).toHaveBeenCalledTimes(2);
+    expect(delegateTask).toHaveBeenCalledWith(
+      'weather-team', 'task A', undefined, 'kw-a', undefined,
+      expect.objectContaining({ subagent: 'researcher' }),
+    );
+    expect(delegateTask).toHaveBeenCalledWith(
+      'weather-team', 'task B', undefined, 'kw-b', undefined,
+      expect.objectContaining({ subagent: 'analyst' }),
+    );
+  });
+
+  it('live config subagent takes precedence over registered trigger subagent', () => {
+    // Trigger was registered with subagent 'old-agent', but the configStore
+    // (live config) has 'new-agent'. The engine must use the live config.
+    const staticTrigger = makeTrigger({
+      name: 'kw-live',
+      type: 'keyword',
+      config: { pattern: 'ping' },
+      subagent: 'old-agent',
+    });
+
+    const configs = new Map<string, TriggerConfig>();
+    configs.set('weather-team:kw-live', {
+      ...staticTrigger,
+      state: 'active',
+      subagent: 'new-agent',
+    });
+    const configStore = createMockConfigStore(configs);
+
+    const engine = new TriggerEngine({
+      triggers: [staticTrigger],
+      dedup, rateLimiter, delegateTask, logger,
+      configStore,
+    });
+    engine.register();
+
+    engine.onMessage('ping!');
+    expect(delegateTask).toHaveBeenCalledWith(
+      'weather-team', 'check weather', undefined, 'kw-live', undefined,
+      expect.objectContaining({ subagent: 'new-agent' }),
+    );
   });
 });

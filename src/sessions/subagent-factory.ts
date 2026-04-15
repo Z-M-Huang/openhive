@@ -1,12 +1,19 @@
 /**
- * Subagent Factory — builds AI SDK ToolLoopAgent instances from SubagentDefinitions.
+ * Subagent Factory — builds AI SDK tools that execute subagents via `generateText`.
  *
- * Each subagent becomes a tool that the main agent can invoke.
- * Internally each tool delegates to a ToolLoopAgent with its own
- * system prompt, model, and available tools.
+ * Each subagent from `SubagentDefinition` becomes a tool the main agent
+ * (or team orchestrator) can invoke. When the tool is called, we run
+ * `generateText()` bound to the subagent's system prompt, the provided
+ * tool set, and a step cap. The tool returns a structured, traceable
+ * envelope — `{ subagent, text, steps }` — instead of a bare string
+ * so callers can log, audit, and surface step counts without regex
+ * parsing the model output.
+ *
+ * Per AC-23 / ADR-40 subagents are plain `generateText` calls that stop
+ * on step count — no separate agent-loop wrapper class is used.
  */
 
-import { ToolLoopAgent, stepCountIs, tool } from 'ai';
+import { generateText, stepCountIs, tool } from 'ai';
 import type { ToolSet } from 'ai';
 import { z } from 'zod';
 import type { SubagentDefinition } from './skill-loader.js';
@@ -27,8 +34,21 @@ export interface BuildSubagentToolsOpts {
 }
 
 /**
+ * Structured subagent result surfaced to the orchestrator. Keeping the
+ * subagent name on the envelope makes traces unambiguous when a single
+ * message triggers multiple delegations.
+ */
+export interface SubagentToolResult {
+  readonly subagent: string;
+  readonly text: string;
+  readonly steps: number;
+}
+
+/**
  * Build a record of tools — one per subagent definition — that the main
- * agent can call to delegate work. Each tool wraps a ToolLoopAgent.
+ * agent can call to delegate work. Each tool runs `generateText()` with
+ * the subagent's system prompt, the shared tool set, and a step-count
+ * stop condition.
  */
 export function buildSubagentTools(
   opts: BuildSubagentToolsOpts,
@@ -40,22 +60,30 @@ export function buildSubagentTools(
     const model = opts.registry.languageModel(
       `${opts.profileName}:${opts.modelId}`,
     );
-
-    const agent = new ToolLoopAgent({
-      model,
-      instructions: def.prompt,
-      tools: opts.tools,
-      stopWhen: stepCountIs(maxSteps),
-    });
+    // Precompute the stop condition once per subagent; `stepCountIs` is a
+    // pure factory over a constant `maxSteps`, so recomputing on every
+    // invocation would be wasted allocation.
+    const stopWhen = stepCountIs(maxSteps);
 
     result[name] = tool({
       description: def.description,
       inputSchema: z.object({
         task: z.string().describe('The task for this subagent'),
       }),
-      execute: async ({ task }, { abortSignal }) => {
-        const res = await agent.generate({ prompt: task, abortSignal });
-        return res.text;
+      execute: async ({ task }, { abortSignal }): Promise<SubagentToolResult> => {
+        const res = await generateText({
+          model,
+          system: def.prompt,
+          prompt: task,
+          tools: opts.tools,
+          stopWhen,
+          abortSignal,
+        });
+        return {
+          subagent: name,
+          text: res.text,
+          steps: Array.isArray(res.steps) ? res.steps.length : 0,
+        };
       },
     });
   }

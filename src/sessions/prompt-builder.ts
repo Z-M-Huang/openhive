@@ -10,7 +10,6 @@ export interface PromptBuilderOpts {
   readonly teamName: string;
   readonly cwd: string;
   readonly allowedTools: readonly string[];
-  readonly credentialKeys: readonly string[];
   readonly ruleCascade: RuleCascadeResult;
   readonly skillsContent: string;
   readonly memorySection: string;
@@ -50,26 +49,26 @@ export function buildSystemPrompt(opts: PromptBuilderOpts): SystemPromptParts {
   // 5. Tool availability note
   dynamicSections.push(buildToolAvailabilityNote(opts.allowedTools));
 
-  // 6. Credential availability note
-  if (opts.credentialKeys.length > 0) {
-    dynamicSections.push(buildCredentialNote(opts.credentialKeys));
-  }
+  // AC-27: Credential key names are never injected into the prompt. Agents
+  // discover keys via `vault_list` at point of use; values are only returned
+  // by `vault_get`. Real secret values are scrubbed from output in
+  // message-handler / task-consumer using vault + provider secrets.
 
-  // 7. Ancestor/team org-rules (Tier 3) + Team-only rules (Tier 4)
+  // 6. Ancestor/team org-rules (Tier 3) + Team-only rules (Tier 4)
   if (opts.ruleCascade.dynamicRules) dynamicSections.push(opts.ruleCascade.dynamicRules);
 
-  // 8. Skills content
+  // 7. Skills content
   if (opts.skillsContent) dynamicSections.push(opts.skillsContent);
 
-  // 9. Memory (injectable entries from SQLite)
+  // 8. Memory (injectable entries from SQLite)
   if (opts.memorySection) dynamicSections.push(opts.memorySection);
 
-  // 10. Topic context
+  // 9. Topic context
   if (opts.topicName) {
     dynamicSections.push(`## Current Topic\nYou are responding within the topic "${opts.topicName}". Stay focused on this topic.`);
   }
 
-  // 11. Recent channel conversation history
+  // 10. Recent channel conversation history
   if (opts.conversationHistory) dynamicSections.push(opts.conversationHistory);
 
   const dynamicSuffix = dynamicSections.filter(Boolean).join('\n\n');
@@ -80,7 +79,7 @@ export function buildSystemPrompt(opts: PromptBuilderOpts): SystemPromptParts {
 // ── Section builders ─────────────────────────────────────────────────────────
 
 export function buildCoreInstructions(cwd: string): string {
-  return `You are an AI agent team member in the OpenHive system. You operate within a team hierarchy managed by an Organization MCP Server. Follow your team's rules and use the tools available to you to complete tasks.
+  return `You are an AI agent team member in the OpenHive system. You operate within a team hierarchy managed by the organization orchestrator. Follow your team's rules and use the tools available to you to complete tasks.
 
 ## Workspace
 Your working directory is \`${cwd}\`. All file paths for Read, Write, Edit, Glob, and Grep tools MUST use paths relative to or under this directory.
@@ -124,10 +123,6 @@ export function buildToolUsageGuide(): string {
 - **Bash** — Execute a shell command. Parameters: command (string), timeout? (number)
 
 Use these tools to read, modify, and explore the filesystem within your workspace.`;
-}
-
-export function buildCredentialNote(keys: readonly string[]): string {
-  return `\n## Available Credentials\nThis team has credentials configured: ${keys.map(k => `\`${k}\``).join(', ')}. Use \`vault_get({ key: "KEY_NAME" })\` to retrieve each value at point of use. Never hardcode or store credential values.\n`;
 }
 
 export function buildHttpRules(): string {

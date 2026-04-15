@@ -1,8 +1,9 @@
 /**
  * Plugin tool store — SQLite-backed implementation of IPluginToolStore.
  *
- * Manages per-team plugin tool metadata with verification state.
+ * Manages per-team plugin tool metadata with verification + lifecycle audit state.
  * upsert() performs INSERT OR REPLACE via onConflictDoUpdate on (team_name, tool_name).
+ * deprecate() and markRemoved() record audit fields for AC-29.
  */
 
 import { eq, and } from 'drizzle-orm';
@@ -24,6 +25,11 @@ export class PluginToolStore implements IPluginToolStore {
       sourceHash: meta.sourceHash,
       verification: JSON.stringify(meta.verification),
       verifiedAt: meta.verifiedAt ?? null,
+      deprecatedAt: meta.deprecatedAt ?? null,
+      deprecatedReason: meta.deprecatedReason ?? null,
+      deprecatedBy: meta.deprecatedBy ?? null,
+      removedAt: meta.removedAt ?? null,
+      removedBy: meta.removedBy ?? null,
       createdAt: now,
       updatedAt: now,
     }).onConflictDoUpdate({
@@ -34,6 +40,11 @@ export class PluginToolStore implements IPluginToolStore {
         sourceHash: meta.sourceHash,
         verification: JSON.stringify(meta.verification),
         verifiedAt: meta.verifiedAt ?? null,
+        deprecatedAt: meta.deprecatedAt ?? null,
+        deprecatedReason: meta.deprecatedReason ?? null,
+        deprecatedBy: meta.deprecatedBy ?? null,
+        removedAt: meta.removedAt ?? null,
+        removedBy: meta.removedBy ?? null,
         updatedAt: now,
       },
     }).run();
@@ -74,6 +85,39 @@ export class PluginToolStore implements IPluginToolStore {
       .run();
   }
 
+  deprecate(teamName: string, toolName: string, reason: string, by: string): void {
+    const now = new Date().toISOString();
+    this.db.update(schema.pluginTools)
+      .set({
+        status: 'deprecated',
+        deprecatedAt: now,
+        deprecatedReason: reason,
+        deprecatedBy: by,
+        updatedAt: now,
+      })
+      .where(and(
+        eq(schema.pluginTools.teamName, teamName),
+        eq(schema.pluginTools.toolName, toolName),
+      ))
+      .run();
+  }
+
+  markRemoved(teamName: string, toolName: string, by: string): void {
+    const now = new Date().toISOString();
+    this.db.update(schema.pluginTools)
+      .set({
+        status: 'removed',
+        removedAt: now,
+        removedBy: by,
+        updatedAt: now,
+      })
+      .where(and(
+        eq(schema.pluginTools.teamName, teamName),
+        eq(schema.pluginTools.toolName, toolName),
+      ))
+      .run();
+  }
+
   remove(teamName: string, toolName: string): void {
     this.db.delete(schema.pluginTools)
       .where(and(
@@ -100,6 +144,11 @@ export class PluginToolStore implements IPluginToolStore {
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
       verifiedAt: row.verifiedAt ?? null,
+      deprecatedAt: row.deprecatedAt ?? null,
+      deprecatedReason: row.deprecatedReason ?? null,
+      deprecatedBy: row.deprecatedBy ?? null,
+      removedAt: row.removedAt ?? null,
+      removedBy: row.removedBy ?? null,
     };
   }
 }

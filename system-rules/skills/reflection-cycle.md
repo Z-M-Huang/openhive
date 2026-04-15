@@ -21,8 +21,9 @@ improvements. Introspective cycle focused on accuracy and efficiency gains.
 ## Cycle Phases
 
 ### Phase 1: Journal Read
-`vault_get("reflection:journal")` to load previous cycle notes. Check for cooldown
-violations — same skill cannot be modified in consecutive cycles.
+`vault_get("reflection:{team}:{subagent}:journal")` to load previous cycle notes for this
+subagent. Keys are per-subagent so each subagent has its own cooldown and history —
+check for cooldown violations (same skill cannot be modified in consecutive cycles).
 
 ### Phase 2: Evidence Gather
 `list_completed_tasks` (last 7 days, limit 50) to collect recent outcomes.

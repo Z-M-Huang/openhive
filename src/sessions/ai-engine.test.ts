@@ -52,7 +52,7 @@ function makeOpts(overrides?: Partial<AiEngineOpts>): AiEngineOpts {
     prompt: 'Do something.',
     tools: {},
     activeTools: [],
-    maxTurns: 10,
+    maxSteps: 10,
     contextWindow: 200_000,
     ...overrides,
   };
@@ -159,7 +159,7 @@ describe('runSession', () => {
       prompt: 'Custom task',
       tools,
       activeTools: ['Read'],
-      maxTurns: 5,
+      maxSteps: 5,
     });
 
     await runSession(opts);

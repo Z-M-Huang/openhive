@@ -15,7 +15,9 @@ export interface TriggerInfo {
   readonly type: string;
   readonly state: string;
   readonly task: string;
-  readonly maxTurns: number;
+  readonly skill?: string;
+  readonly subagent?: string;
+  readonly maxSteps: number;
   readonly consecutiveFailures: number;
   readonly disabledReason?: string;
   readonly overlapPolicy?: string;
@@ -50,7 +52,9 @@ export function listTriggers(
     type: c.type,
     state: c.state ?? 'pending',
     task: c.task,
-    maxTurns: c.maxTurns ?? 100,
+    skill: c.skill,
+    subagent: c.subagent,
+    maxSteps: c.maxSteps ?? 100,
     consecutiveFailures: c.consecutiveFailures ?? 0,
     disabledReason: c.disabledReason,
     overlapPolicy: c.overlapPolicy ?? 'skip-then-replace',

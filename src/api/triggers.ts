@@ -23,8 +23,9 @@ interface TriggerRow {
   readonly config: string;
   readonly task: string;
   readonly skill: string | null;
+  readonly subagent: string | null;
   readonly state: string;
-  readonly max_turns: number;
+  readonly max_steps: number;
   readonly failure_threshold: number;
   readonly consecutive_failures: number;
   readonly disabled_reason: string | null;
@@ -52,8 +53,9 @@ function mapTriggerRow(row: TriggerRow) {
     config: row.config,
     task: row.task,
     skill: row.skill,
+    subagent: row.subagent,
     state: row.state,
-    maxTurns: row.max_turns,
+    maxSteps: row.max_steps,
     failureThreshold: row.failure_threshold,
     consecutiveFailures: row.consecutive_failures,
     disabledReason: row.disabled_reason,
@@ -109,14 +111,14 @@ export function registerTriggersRoutes(fastify: FastifyInstance, deps: TriggersD
     }
   });
 
-  // GET /api/v1/triggers — paginated, filterable by team, state, and name
+  // GET /api/v1/triggers — paginated, filterable by team, state, name, and subagent
   fastify.get<{
-    Querystring: { limit?: string; offset?: string; team?: string; state?: string; name?: string };
+    Querystring: { limit?: string; offset?: string; team?: string; state?: string; name?: string; subagent?: string };
   }>('/api/v1/triggers', async (request, reply) => {
     try {
       const limit = clampLimit(request.query.limit);
       const offset = clampOffset(request.query.offset);
-      const { team, state, name } = request.query;
+      const { team, state, name, subagent } = request.query;
 
       const conditions: string[] = [];
       const params: unknown[] = [];
@@ -132,6 +134,10 @@ export function registerTriggersRoutes(fastify: FastifyInstance, deps: TriggersD
       if (name) {
         conditions.push('name = ?');
         params.push(name);
+      }
+      if (subagent) {
+        conditions.push('subagent = ?');
+        params.push(subagent);
       }
 
       const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';

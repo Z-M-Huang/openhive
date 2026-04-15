@@ -32,6 +32,14 @@ interface TaskStatsRow {
   readonly count: number;
 }
 
+interface TypeStatsRow { readonly type: string; readonly count: number; }
+interface PriorityStatsRow { readonly priority: string; readonly count: number; }
+interface TypePriorityStatsRow {
+  readonly type: string;
+  readonly priority: string;
+  readonly count: number;
+}
+
 function clampLimit(raw: unknown): number {
   const n = Number(raw) || 50;
   return Math.max(1, Math.min(n, 100));
@@ -74,14 +82,41 @@ function buildWhereClause(filters: Record<string, string | undefined>): { where:
 
 export function registerTasksRoutes(fastify: FastifyInstance, deps: TasksDeps): void {
   // GET /api/v1/tasks/stats — MUST be registered before :id param route
+  // Returns grouped counts: by status, by type, by priority, and by (type, priority).
+  // All rows are included (no exclusion of failed/cancelled); consumers can filter.
   fastify.get('/api/v1/tasks/stats', async (_request, reply) => {
     try {
-      const rows = deps.raw.prepare(
+      const statusRows = deps.raw.prepare(
         'SELECT status, COUNT(*) AS count FROM task_queue GROUP BY status',
       ).all() as TaskStatsRow[];
-      const stats: Record<string, number> = {};
-      for (const row of rows) { stats[row.status] = row.count; }
-      await reply.code(200).send({ data: stats });
+      const typeRows = deps.raw.prepare(
+        'SELECT type, COUNT(*) AS count FROM task_queue GROUP BY type',
+      ).all() as TypeStatsRow[];
+      const priorityRows = deps.raw.prepare(
+        'SELECT priority, COUNT(*) AS count FROM task_queue GROUP BY priority',
+      ).all() as PriorityStatsRow[];
+      const typePriorityRows = deps.raw.prepare(
+        'SELECT type, priority, COUNT(*) AS count FROM task_queue GROUP BY type, priority ORDER BY type, priority',
+      ).all() as TypePriorityStatsRow[];
+
+      const status: Record<string, number> = {};
+      for (const row of statusRows) { status[row.status] = row.count; }
+      const byType: Record<string, number> = {};
+      for (const row of typeRows) { byType[row.type] = row.count; }
+      const byPriority: Record<string, number> = {};
+      for (const row of priorityRows) { byPriority[row.priority] = row.count; }
+      const byTypeAndPriority = typePriorityRows.map(r => ({
+        type: r.type, priority: r.priority, count: r.count,
+      }));
+
+      await reply.code(200).send({
+        data: status,
+        status,
+        byType,
+        byPriority,
+        byTypeAndPriority,
+        includes: 'all-rows',
+      });
     } catch (err) {
       await reply.code(500).send({ error: errorMessage(err) });
     }

@@ -4,7 +4,7 @@
  * Migrated from query-options.test.ts (Unit 8).
  * Tests: handleMessage error paths + config loading.
  *
- * Note: Tests that require a running MCP server (maxTurns passthrough,
+ * Note: Tests that require a running model (maxSteps passthrough,
  * credential scrubbing, sourceChannelId) are covered by the individual
  * component tests: provider-resolver.test.ts, context-builder.test.ts,
  * memory-loader.test.ts, skill-loader.test.ts, and prompt-builder.test.ts.
@@ -41,7 +41,6 @@ function makeProviders(overrides?: Partial<ProvidersOutput>): ProvidersOutput {
 function makeDeps(runDir: string, overrides?: Partial<MessageHandlerDeps>): MessageHandlerDeps {
   return {
     providers: makeProviders(),
-    availableMcpServers: {},
     runDir,
     dataDir: runDir,
     systemRulesDir: join(runDir, 'system-rules'),
@@ -97,7 +96,7 @@ describe('UT-7m: Message Handler', () => {
       allowed_tools: ['Read'],
       mcp_servers: [],
       provider_profile: 'nonexistent-profile',
-      maxTurns: 25,
+      maxSteps: 25,
     };
     writeFileSync(join(teamDir, 'config.yaml'), yamlStringify(config));
 
@@ -135,9 +134,8 @@ describe('UT-7m: Message Handler', () => {
       name: 'mcp-team',
       description: 'Test',
       allowed_tools: ['Read'],
-      mcp_servers: [],
       provider_profile: 'default',
-      maxTurns: 25,
+      maxSteps: 25,
     };
     writeFileSync(join(teamDir, 'config.yaml'), yamlStringify(config));
 

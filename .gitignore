@@ -12,3 +12,4 @@ data/config/channels.yaml
 data/config/config.yaml
 .claude/worktrees
 .vcp/plan/
+test-results/.last-run.json

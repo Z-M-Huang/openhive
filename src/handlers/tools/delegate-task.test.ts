@@ -7,6 +7,9 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { setupServer, makeNode, makeTeamConfig } from '../__test-helpers.js';
 import type { ServerFixtures } from '../__test-helpers.js';
+import { TaskStatus } from '../../domain/types.js';
+import type { TaskEntry } from '../../domain/types.js';
+import type { DelegateTaskResult } from './delegate-task.js';
 
 describe('delegate_task', () => {
   let f: ServerFixtures;
@@ -80,5 +83,107 @@ describe('delegate_task', () => {
 
     expect(result).toEqual(expect.objectContaining({ success: true }));
     expect(f.taskQueue.tasks[0].sourceChannelId).toBeNull();
+  });
+
+  describe('delegate_task concurrency', () => {
+    beforeEach(() => {
+      f.orgTree.addTeam(makeNode({ teamId: 'ops', name: 'ops', parentId: 'root' }));
+      f.teamConfigs.set('ops', makeTeamConfig({ name: 'ops' }));
+    });
+
+    function seedTask(overrides: Partial<TaskEntry> & { teamId: string }): TaskEntry {
+      const entry: TaskEntry = {
+        id: `pre-seed-${String(Math.random()).slice(2, 8)}`,
+        task: 'existing task',
+        priority: 'normal',
+        type: 'delegate',
+        status: TaskStatus.Pending,
+        createdAt: new Date().toISOString(),
+        correlationId: null,
+        result: null,
+        durationMs: null,
+        options: null,
+        sourceChannelId: null,
+        ...overrides,
+      };
+      f.taskQueue.tasks.push(entry);
+      return entry;
+    }
+
+    it('default policy is confirm → requires_confirmation when team has active work', async () => {
+      seedTask({ teamId: 'ops', type: 'bootstrap', status: TaskStatus.Running });
+      const r = await f.server.invoke('delegate_task', { team: 'ops', task: 'x' }, 'root') as DelegateTaskResult;
+      expect(r.enqueued).toBe(false);
+      expect(r.requires_confirmation).toBe(true);
+      expect(r.overlap_policy_applied).toBe('confirm');
+      expect(r.in_flight?.[0]?.type).toBe('bootstrap');
+    });
+
+    it('skip → returns enqueued:false, still success:true', async () => {
+      seedTask({ teamId: 'ops', type: 'delegate', status: TaskStatus.Pending });
+      const r = await f.server.invoke('delegate_task', { team: 'ops', task: 'x', overlap_policy: 'skip' }, 'root') as DelegateTaskResult;
+      expect(r.success).toBe(true);
+      expect(r.enqueued).toBe(false);
+      expect(r.overlap_policy_applied).toBe('skip');
+    });
+
+    it('allow → enqueues despite active work', async () => {
+      seedTask({ teamId: 'ops', type: 'bootstrap', status: TaskStatus.Running });
+      const r = await f.server.invoke('delegate_task', { team: 'ops', task: 'x', overlap_policy: 'allow' }, 'root') as DelegateTaskResult;
+      expect(r.enqueued).toBe(true);
+      expect(r.task_id).toBeTruthy();
+    });
+
+    it('replace with pending-only → cancels pending, enqueues', async () => {
+      const pending = seedTask({ teamId: 'ops', type: 'delegate', status: TaskStatus.Pending });
+      const r = await f.server.invoke('delegate_task', { team: 'ops', task: 'x', overlap_policy: 'replace' }, 'root') as DelegateTaskResult;
+      expect(r.enqueued).toBe(true);
+      expect(f.taskQueue.getActiveForTeam('ops').map((t) => t.id)).not.toContain(pending.id);
+    });
+
+    it('replace with non-stale running → downgrade to requires_confirmation', async () => {
+      seedTask({ teamId: 'ops', type: 'bootstrap', status: TaskStatus.Running, createdAt: new Date().toISOString() });
+      const r = await f.server.invoke('delegate_task', { team: 'ops', task: 'x', overlap_policy: 'replace' }, 'root') as DelegateTaskResult;
+      expect(r.enqueued).toBe(false);
+      expect(r.requires_confirmation).toBe(true);
+      expect(r.reason).toBe('replace_targets_running_session');
+    });
+
+    it('invalid overlap_policy is rejected by the Zod schema', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const r = await f.server.invoke('delegate_task', { team: 'ops', task: 'x', overlap_policy: 'bogus' as any }, 'root') as DelegateTaskResult;
+      expect(r.success).toBe(false);
+      expect(r.reason).toMatch(/overlap_policy/i);
+    });
+
+    it('team-not-found → success:false, no concurrency fields', async () => {
+      const r = await f.server.invoke('delegate_task', { team: 'ghost', task: 'x' }, 'root') as DelegateTaskResult;
+      expect(r.success).toBe(false);
+      expect(r.enqueued).toBeUndefined();
+      expect(r.requires_confirmation).toBeUndefined();
+    });
+
+    it('caller-not-parent → success:false, no concurrency fields', async () => {
+      const r = await f.server.invoke('delegate_task', { team: 'ops', task: 'x' }, 'stranger') as DelegateTaskResult;
+      expect(r.success).toBe(false);
+      expect(r.requires_confirmation).toBeUndefined();
+    });
+
+    it('in_flight projects task_id/type/status/age_ms correctly', async () => {
+      seedTask({
+        teamId: 'ops',
+        type: 'bootstrap',
+        status: TaskStatus.Running,
+        createdAt: new Date(Date.now() - 5000).toISOString(),
+      });
+      const r = await f.server.invoke('delegate_task', { team: 'ops', task: 'x' }, 'root') as DelegateTaskResult;
+      expect(r.in_flight?.[0]).toMatchObject({
+        task_id: expect.any(String),
+        type: 'bootstrap',
+        status: 'running',
+        age_ms: expect.any(Number),
+      });
+      expect(r.in_flight?.[0]?.age_ms).toBeGreaterThanOrEqual(5000);
+    });
   });
 });

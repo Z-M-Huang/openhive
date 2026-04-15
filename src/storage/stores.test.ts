@@ -22,7 +22,7 @@ import { createDatabase, createTables } from './database.js';
 import type { DatabaseInstance } from './database.js';
 import { OrgStore } from './stores/org-store.js';
 import { TaskQueueStore } from './stores/task-queue-store.js';
-import { TriggerStore } from './stores/trigger-store.js';
+import { TriggerDedupStore } from './stores/trigger-dedup-store.js';
 import { LogStore } from './stores/log-store.js';
 import { EscalationStore } from './stores/escalation-store.js';
 import { MemoryStore } from './stores/memory-store.js';
@@ -327,10 +327,10 @@ describe('Task Queue Store', () => {
   });
 
   it('enqueue serializes and deserializes TaskOptions', () => {
-    const opts = { maxTurns: 50 };
+    const opts = { maxSteps: 50 };
     const id = store.enqueue('team-1', 'opts task', 'normal', 'delegate', undefined, undefined, opts);
     const task = store.getByTeam('team-1').find((t) => t.id === id);
-    expect(task?.options).toEqual({ maxTurns: 50 });
+    expect(task?.options).toEqual({ maxSteps: 50 });
   });
 
   it('enqueue without options stores null', () => {
@@ -344,18 +344,59 @@ describe('Task Queue Store', () => {
     const dequeued = store.dequeue('team-1');
     expect(dequeued?.type).toBe('bootstrap');
   });
+
+  describe('getActiveForTeam', () => {
+    it('returns empty array for unknown team', () => {
+      expect(store.getActiveForTeam('ghost')).toEqual([]);
+    });
+
+    it('includes pending and running tasks', () => {
+      const id1 = store.enqueue('A', 'task-1', 'high', 'delegate');
+      const id2 = store.enqueue('A', 'task-2', 'high', 'delegate');
+      store.updateStatus(id2, TaskStatus.Running);
+      const active = store.getActiveForTeam('A');
+      expect(active).toHaveLength(2);
+      expect(active.map((t) => t.id).sort()).toEqual([id1, id2].sort());
+    });
+
+    it('excludes done/failed/cancelled', () => {
+      const doneId = store.enqueue('A', 'done-task', 'normal', 'delegate');
+      const failedId = store.enqueue('A', 'failed-task', 'normal', 'delegate');
+      const cancelledId = store.enqueue('A', 'cancelled-task', 'normal', 'delegate');
+      store.updateStatus(doneId, TaskStatus.Done);
+      store.updateStatus(failedId, TaskStatus.Failed);
+      store.updateStatus(cancelledId, TaskStatus.Cancelled);
+      expect(store.getActiveForTeam('A')).toEqual([]);
+    });
+
+    it('filters by teamId', () => {
+      store.enqueue('A', 'task-a', 'high', 'delegate');
+      store.enqueue('B', 'task-b', 'high', 'delegate');
+      expect(store.getActiveForTeam('A')).toHaveLength(1);
+      expect(store.getActiveForTeam('B')).toHaveLength(1);
+    });
+
+    it('orders by priority rank then createdAt', () => {
+      const lowId = store.enqueue('A', 'low-task', 'low', 'delegate');
+      const critId = store.enqueue('A', 'crit-task', 'critical', 'delegate');
+      const high1Id = store.enqueue('A', 'high-task-1', 'high', 'delegate');
+      const high2Id = store.enqueue('A', 'high-task-2', 'high', 'delegate');
+      const ids = store.getActiveForTeam('A').map((t) => t.id);
+      expect(ids).toEqual([critId, high1Id, high2Id, lowId]);
+    });
+  });
 });
 
 // ── Trigger Dedup Store ─────────────────────────────────────────────────────
 
 describe('Trigger Dedup Store', () => {
   let instance: DatabaseInstance;
-  let store: TriggerStore;
+  let store: TriggerDedupStore;
 
   beforeEach(() => {
     instance = createDatabase(':memory:');
     createTables(instance.raw);
-    store = new TriggerStore(instance.db);
+    store = new TriggerDedupStore(instance.db);
   });
 
   afterEach(() => {

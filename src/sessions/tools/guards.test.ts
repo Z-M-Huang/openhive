@@ -76,7 +76,7 @@ describe('assertBrowserEnabled', () => {
           allowed_tools: [],
           mcp_servers: [],
           provider_profile: 'default',
-          maxTurns: 50,
+          maxSteps: 50,
           browser: { headless: true },
         } as TeamConfig;
       }
@@ -94,9 +94,8 @@ describe('assertBrowserEnabled', () => {
           parent: null,
           description: 'No browser',
           allowed_tools: [],
-          mcp_servers: [],
           provider_profile: 'default',
-          maxTurns: 50,
+          maxSteps: 50,
         } as TeamConfig;
       }
       return undefined;

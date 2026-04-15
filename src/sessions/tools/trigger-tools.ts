@@ -1,7 +1,7 @@
 /**
- * Inline trigger tool builders — wraps 6 trigger-mcp handlers as AI SDK inline defs.
+ * Inline trigger tool builders — wraps 6 trigger handlers as AI SDK inline defs.
  *
- * Each tool uses bare names (e.g. "create_trigger", not "mcp__org__create_trigger").
+ * Each tool uses bare names (e.g. "create_trigger").
  * Tools are returned in alphabetical order.
  * Returns empty `{}` when `ctx.triggerConfigStore` is undefined.
  */
@@ -11,6 +11,7 @@ import type { ToolSet } from 'ai';
 import type { OrgToolContext } from './org-tool-context.js';
 
 import { CreateTriggerInputSchema, createTrigger } from '../../handlers/tools/create-trigger.js';
+import { loadSubagents } from '../skill-loader.js';
 import { DisableTriggerInputSchema, disableTrigger, type DisableTriggerDeps } from '../../handlers/tools/disable-trigger.js';
 import { EnableTriggerInputSchema, enableTrigger, type EnableTriggerDeps } from '../../handlers/tools/enable-trigger.js';
 import { ListTriggersInputSchema, listTriggers } from '../../handlers/tools/list-triggers.js';
@@ -32,12 +33,16 @@ export function buildTriggerTools(ctx: OrgToolContext): ToolSet {
 
   // 1. create_trigger
   tools['create_trigger'] = tool({
-    description: 'Create a new trigger in pending state for a child team',
+    description:
+      'Create a new trigger in pending state for a child team. ' +
+      'Pass `subagent` to route fired tasks to a specific subagent defined under the team.',
     inputSchema: CreateTriggerInputSchema,
     execute: async (input) =>
       createTrigger(input, ctx.teamName, {
         orgTree: ctx.orgTree,
         configStore,
+        runDir: ctx.runDir,
+        loadSubagents,
         log: ctx.log,
       }, ctx.sourceChannelId),
   });
@@ -76,7 +81,9 @@ export function buildTriggerTools(ctx: OrgToolContext): ToolSet {
 
   // 4. list_triggers
   tools['list_triggers'] = tool({
-    description: 'List all triggers and their states for a team',
+    description:
+      'List all triggers and their states for a team. ' +
+      'Each result includes `subagent` showing which subagent (if any) handles the trigger.',
     inputSchema: ListTriggersInputSchema,
     execute: async (input) =>
       listTriggers(input, ctx.teamName, {
@@ -87,7 +94,7 @@ export function buildTriggerTools(ctx: OrgToolContext): ToolSet {
 
   // 5. test_trigger
   tools['test_trigger'] = tool({
-    description: 'Fire a trigger once for testing without changing its state. Supports max_turns override.',
+    description: 'Fire a trigger once for testing without changing its state. Supports max_steps override.',
     inputSchema: TestTriggerInputSchema,
     execute: async (input) =>
       testTrigger(input, ctx.teamName, {
@@ -100,7 +107,9 @@ export function buildTriggerTools(ctx: OrgToolContext): ToolSet {
 
   // 6. update_trigger
   tools['update_trigger'] = tool({
-    description: 'Update trigger config, task, or settings',
+    description:
+      'Update trigger config, task, or settings. ' +
+      'Pass `subagent` to change routing; omit it to preserve the existing subagent.',
     inputSchema: UpdateTriggerInputSchema,
     execute: async (input) => {
       if (!ctx.triggerEngine) return { success: false, error: 'trigger engine not available' };
@@ -108,6 +117,8 @@ export function buildTriggerTools(ctx: OrgToolContext): ToolSet {
         orgTree: ctx.orgTree,
         configStore,
         triggerEngine: ctx.triggerEngine as UpdateTriggerDeps['triggerEngine'],
+        runDir: ctx.runDir,
+        loadSubagents,
         log: ctx.log,
       });
     },

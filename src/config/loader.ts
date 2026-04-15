@@ -102,7 +102,7 @@ export function getOrCreateTeamConfig(
   runDir: string,
   name: string,
   configPath?: string,
-  hints?: { description?: string; scopeAccepts?: string[]; parent?: string },
+  hints?: { description?: string; parent?: string },
 ): TeamConfig {
   if (configPath) return loadTeamConfig(configPath);
   const path = join(runDir, 'teams', name, 'config.yaml');
@@ -112,9 +112,8 @@ export function getOrCreateTeamConfig(
     parent: hints?.parent ?? null,
     description: hints?.description ?? '',
     allowed_tools: ['*'],
-    mcp_servers: [],
     provider_profile: 'default',
-    maxTurns: 100,
+    maxSteps: 100,
   };
 }
 

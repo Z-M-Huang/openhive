@@ -1,5 +1,5 @@
 /**
- * Domain error hierarchy for OpenHive v3.
+ * Domain error hierarchy for OpenHive v0.5.0.
  *
  * All domain errors extend OpenHiveError so callers can catch
  * a single base class when they don't care about the specific kind.

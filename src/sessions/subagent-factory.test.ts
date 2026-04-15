@@ -1,12 +1,13 @@
 /**
  * Subagent Factory tests.
  *
- * Validates:
+ * Validates (post-AC-23):
  * 1. buildSubagentTools returns a tool for each subagent definition
  * 2. Each tool has the correct description
- * 3. Tool execution delegates to ToolLoopAgent.generate()
- * 4. loadSubagents returns SubagentDefinition (not AgentDefinition)
- * 5. No claude-agent-sdk import in skill-loader.ts
+ * 3. Tool execution calls `generateText()` with the subagent's system prompt
+ * 4. Tool execution returns the structured `{ subagent, text, steps }` envelope
+ * 5. loadSubagents returns SubagentDefinition (not AgentDefinition)
+ * 6. subagent-factory.ts does NOT import ToolLoopAgent or claude-agent-sdk
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -17,20 +18,18 @@ import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 
 // ── Mock the 'ai' module ──────────────────────────────────────────────────────
 
-// vi.mock is hoisted, so we cannot reference top-level variables inside the
-// factory. Instead we use vi.hoisted() to declare the mocks before the hoist.
-const { mockGenerate, MockToolLoopAgent, mockStepCountIs, mockTool } = vi.hoisted(() => {
-  const mockGenerate = vi.fn();
-  const MockToolLoopAgent = vi.fn().mockImplementation(() => ({
-    generate: mockGenerate,
-  }));
+// `vi.mock` is hoisted, so we cannot reference module-level variables inside
+// the factory. `vi.hoisted()` creates the spy instances before the hoist so
+// both the mock factory and the test bodies see the same handles.
+const { mockGenerateText, mockStepCountIs, mockTool } = vi.hoisted(() => {
+  const mockGenerateText = vi.fn();
   const mockStepCountIs = vi.fn((n: number) => ({ type: 'stepCount', count: n }));
   const mockTool = vi.fn((def: Record<string, unknown>) => def);
-  return { mockGenerate, MockToolLoopAgent, mockStepCountIs, mockTool };
+  return { mockGenerateText, mockStepCountIs, mockTool };
 });
 
 vi.mock('ai', () => ({
-  ToolLoopAgent: MockToolLoopAgent,
+  generateText: mockGenerateText,
   stepCountIs: mockStepCountIs,
   tool: mockTool,
 }));
@@ -72,6 +71,9 @@ const sampleDefs: Record<string, SubagentDefinition> = {
 describe('buildSubagentTools', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // Default: resolve with a minimal GenerateTextResult shape so tests that
+    // don't override this don't hang.
+    mockGenerateText.mockResolvedValue({ text: '', steps: [] });
   });
 
   it('returns one tool per subagent definition', () => {
@@ -109,28 +111,6 @@ describe('buildSubagentTools', () => {
     );
   });
 
-  it('creates a ToolLoopAgent for each subagent with correct instructions', () => {
-    const registry = makeMockRegistry();
-    buildSubagentTools({
-      registry,
-      profileName: 'default',
-      modelId: 'claude-sonnet',
-      subagentDefs: sampleDefs,
-      tools: {},
-    });
-
-    expect(MockToolLoopAgent).toHaveBeenCalledTimes(2);
-
-    // First call — devops
-    const firstCallArgs = MockToolLoopAgent.mock.calls[0][0];
-    expect(firstCallArgs.instructions).toBe('You are a DevOps engineer.');
-    expect(firstCallArgs.model).toEqual({ modelId: 'test-model' });
-
-    // Second call — reviewer
-    const secondCallArgs = MockToolLoopAgent.mock.calls[1][0];
-    expect(secondCallArgs.instructions).toBe('You are a code reviewer.');
-  });
-
   it('resolves the model from the registry using profileName:modelId', () => {
     const registry = makeMockRegistry();
     buildSubagentTools({
@@ -142,22 +122,6 @@ describe('buildSubagentTools', () => {
     });
 
     expect(registry.languageModel).toHaveBeenCalledWith('myprofile:claude-opus');
-  });
-
-  it('passes the provided tools to each ToolLoopAgent', () => {
-    const registry = makeMockRegistry();
-    const sharedTools = { myTool: { execute: vi.fn() } };
-
-    buildSubagentTools({
-      registry,
-      profileName: 'default',
-      modelId: 'claude-sonnet',
-      subagentDefs: { solo: sampleDefs['devops'] },
-      tools: sharedTools as unknown as import('ai').ToolSet,
-    });
-
-    const agentArgs = MockToolLoopAgent.mock.calls[0][0];
-    expect(agentArgs.tools).toBe(sharedTools);
   });
 
   it('uses custom maxSteps when provided', () => {
@@ -200,12 +164,53 @@ describe('buildSubagentTools', () => {
     });
 
     expect(Object.keys(result)).toHaveLength(0);
-    expect(MockToolLoopAgent).not.toHaveBeenCalled();
+    expect(mockGenerateText).not.toHaveBeenCalled();
+    expect(mockStepCountIs).not.toHaveBeenCalled();
   });
 
-  it('tool execute delegates to ToolLoopAgent.generate() with prompt and signal', async () => {
+  it('tool execute calls generateText with system prompt, task, tools, stopWhen and signal', async () => {
     const registry = makeMockRegistry();
-    mockGenerate.mockResolvedValue({ text: 'deployment complete' });
+    const sharedTools = { myTool: { execute: vi.fn() } };
+    mockGenerateText.mockResolvedValue({ text: 'deployment complete', steps: [{}, {}, {}] });
+
+    const result = buildSubagentTools({
+      registry,
+      profileName: 'default',
+      modelId: 'claude-sonnet',
+      subagentDefs: { solo: sampleDefs['devops'] },
+      tools: sharedTools as unknown as import('ai').ToolSet,
+      maxSteps: 7,
+    });
+
+    const toolDef = result['solo'] as unknown as Record<string, unknown>;
+    const execute = toolDef['execute'] as (
+      input: { task: string },
+      opts: { abortSignal?: AbortSignal },
+    ) => Promise<{ subagent: string; text: string; steps: number }>;
+
+    const controller = new AbortController();
+    await execute(
+      { task: 'deploy to production' },
+      { abortSignal: controller.signal },
+    );
+
+    expect(mockGenerateText).toHaveBeenCalledTimes(1);
+    const callArgs = mockGenerateText.mock.calls[0][0];
+    expect(callArgs.model).toEqual({ modelId: 'test-model' });
+    expect(callArgs.system).toBe('You are a DevOps engineer.');
+    expect(callArgs.prompt).toBe('deploy to production');
+    expect(callArgs.tools).toBe(sharedTools);
+    // stopWhen is whatever stepCountIs(7) returned from the mock
+    expect(callArgs.stopWhen).toEqual({ type: 'stepCount', count: 7 });
+    expect(callArgs.abortSignal).toBe(controller.signal);
+  });
+
+  it('tool execute returns structured { subagent, text, steps } envelope', async () => {
+    const registry = makeMockRegistry();
+    mockGenerateText.mockResolvedValue({
+      text: 'deployment complete',
+      steps: [{ stepId: 1 }, { stepId: 2 }, { stepId: 3 }],
+    });
 
     const result = buildSubagentTools({
       registry,
@@ -215,25 +220,75 @@ describe('buildSubagentTools', () => {
       tools: {},
     });
 
-    // The tool() mock returns the definition object directly,
-    // so we can call execute on it
     const toolDef = result['solo'] as unknown as Record<string, unknown>;
     const execute = toolDef['execute'] as (
       input: { task: string },
       opts: { abortSignal?: AbortSignal },
-    ) => Promise<string>;
+    ) => Promise<{ subagent: string; text: string; steps: number }>;
 
-    const controller = new AbortController();
-    const output = await execute(
-      { task: 'deploy to production' },
-      { abortSignal: controller.signal },
-    );
+    const output = await execute({ task: 'deploy' }, {});
 
-    expect(mockGenerate).toHaveBeenCalledWith({
-      prompt: 'deploy to production',
-      abortSignal: controller.signal,
+    expect(output).toEqual({
+      subagent: 'solo',
+      text: 'deployment complete',
+      steps: 3,
     });
-    expect(output).toBe('deployment complete');
+  });
+
+  it('tool execute returns steps=0 when the SDK result omits the steps array', async () => {
+    // Defensive: if the SDK ever returns no `steps` field we must not blow up
+    // with `.length of undefined` — the subagent envelope should still be
+    // well-formed so audit logs stay usable.
+    const registry = makeMockRegistry();
+    mockGenerateText.mockResolvedValue({ text: 'done' });
+
+    const result = buildSubagentTools({
+      registry,
+      profileName: 'default',
+      modelId: 'claude-sonnet',
+      subagentDefs: { solo: sampleDefs['devops'] },
+      tools: {},
+    });
+
+    const toolDef = result['solo'] as unknown as Record<string, unknown>;
+    const execute = toolDef['execute'] as (
+      input: { task: string },
+      opts: { abortSignal?: AbortSignal },
+    ) => Promise<{ subagent: string; text: string; steps: number }>;
+
+    const output = await execute({ task: 'x' }, {});
+
+    expect(output).toEqual({ subagent: 'solo', text: 'done', steps: 0 });
+  });
+
+  it('preserves subagent identity in the envelope when multiple subagents run', async () => {
+    // With multiple subagents, each tool's envelope must carry the correct
+    // name — a regression here would make tool traces misleading.
+    const registry = makeMockRegistry();
+    mockGenerateText.mockResolvedValue({ text: 'reply', steps: [{}] });
+
+    const result = buildSubagentTools({
+      registry,
+      profileName: 'default',
+      modelId: 'claude-sonnet',
+      subagentDefs: sampleDefs,
+      tools: {},
+    });
+
+    const execDevops = (result['devops'] as unknown as Record<string, unknown>)['execute'] as (
+      input: { task: string },
+      opts: { abortSignal?: AbortSignal },
+    ) => Promise<{ subagent: string; text: string; steps: number }>;
+    const execReviewer = (result['reviewer'] as unknown as Record<string, unknown>)['execute'] as (
+      input: { task: string },
+      opts: { abortSignal?: AbortSignal },
+    ) => Promise<{ subagent: string; text: string; steps: number }>;
+
+    const devopsOut = await execDevops({ task: 'a' }, {});
+    const reviewerOut = await execReviewer({ task: 'b' }, {});
+
+    expect(devopsOut.subagent).toBe('devops');
+    expect(reviewerOut.subagent).toBe('reviewer');
   });
 });
 
@@ -289,14 +344,22 @@ describe('skill-loader.ts has no claude-agent-sdk import', () => {
   });
 });
 
-// ── subagent-factory.ts has no claude-agent-sdk import ────────────────────────
+// ── subagent-factory.ts has no claude-agent-sdk or ToolLoopAgent ──────────────
 
-describe('subagent-factory.ts has no claude-agent-sdk import', () => {
+describe('subagent-factory.ts is ToolLoopAgent-free', () => {
   it('does not import from @anthropic-ai/claude-agent-sdk', () => {
     const source = readFileSync(
       join(__dirname, 'subagent-factory.ts'),
       'utf-8',
     );
     expect(source).not.toContain('@anthropic-ai/claude-agent-sdk');
+  });
+
+  it('does not reference ToolLoopAgent (replaced by generateText per AC-23)', () => {
+    const source = readFileSync(
+      join(__dirname, 'subagent-factory.ts'),
+      'utf-8',
+    );
+    expect(source).not.toContain('ToolLoopAgent');
   });
 });

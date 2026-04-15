@@ -41,8 +41,14 @@ export async function assembleTools(
   sourceChannelId?: string,
   pluginToolStore?: IPluginToolStore,
   skillName?: string,
+  subagent?: string,
 ) {
-  const teamCreds = teamConfig.credentials ?? {};
+  // Vault is the sole authoritative runtime credential source (AC-10)
+  const vaultSecrets = deps.vaultStore?.getSecrets(teamName) ?? [];
+  const teamCreds: Record<string, string> = {};
+  for (const entry of vaultSecrets) {
+    teamCreds[entry.key] = entry.value;
+  }
   const builtinTools = buildBuiltinTools({
     cwd: ctx.cwd,
     additionalDirs: ctx.additionalDirectories,
@@ -113,9 +119,12 @@ export async function assembleTools(
   const vaultTools = buildVaultTools(orgToolCtx);
   wrapAudit(vaultTools);
 
-  // Plugin tools from active skill's Required Tools section
+  // Plugin tools from active skill's Required Tools section.
+  // ADR-40: when a subagent is selected, message-handler must not directly
+  // load plugin tools via a skill — that routing is owned by the subagent
+  // runtime (U24). Skip skill-driven plugin loading whenever `subagent` is set.
   let pluginToolSet: Record<string, unknown> = {};
-  if (pluginToolStore) {
+  if (pluginToolStore && !subagent) {
     const activeSkill = resolveActiveSkill(deps.runDir, teamName, skillName, deps.systemRulesDir);
     const required = activeSkill ? parseRequiredTools(activeSkill.content) : [];
     if (required.length > 0) pluginToolSet = await loadPluginTools(teamName, required, teamConfig.allowed_tools, pluginToolStore, deps.runDir);

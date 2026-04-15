@@ -1,7 +1,7 @@
 /**
- * BrowserRelay — manages @playwright/mcp lifecycle as an MCP client.
+ * BrowserRelay — manages the @playwright/mcp browser backend lifecycle.
  *
- * Lazily spawns a playwright-mcp child process via StdioClientTransport,
+ * Lazily spawns a playwright child process via StdioClientTransport,
  * reuses the connection for subsequent calls, and auto-closes after
  * an idle TTL (default 5 minutes).
  */
@@ -96,7 +96,7 @@ export async function createBrowserRelay(opts: BrowserRelayOpts): Promise<Browse
 
     const c = new Client({ name: 'openhive-browser-relay', version: '1.0.0' });
     try {
-      await withTimeout(c.connect(t), 2_000, 'MCP connect');
+      await withTimeout(c.connect(t), 2_000, 'browser relay connect');
       const { tools } = await withTimeout(c.listTools(), 5_000, 'listTools');
       toolNames = tools.map((tool) => tool.name);
     } catch (err) {

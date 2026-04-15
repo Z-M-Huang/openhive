@@ -39,15 +39,12 @@ describe('UT-1: Config Loader', () => {
 name: weather-team
 provider_profile: default-sonnet
 description: Handles weather queries
-scope:
-  accepts: ["weather", "forecast"]
-  rejects: []
 `;
     const file = join(tmpDir, 'team.yaml');
     writeFileSync(file, yaml);
     const config = loadTeamConfig(file);
     expect(config.name).toBe('weather-team');
-    expect(config.maxTurns).toBe(50); // default
+    expect(config.maxSteps).toBe(50); // default
     expect(config.parent).toBeNull();
   });
 

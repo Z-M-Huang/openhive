@@ -1,4 +1,4 @@
-# OpenHive v4
+# OpenHive v0.5.0
 
 AI agent orchestration platform built on the **Agent as a Feature** principle -- every user message
 flows directly to an AI agent that decides how to respond.
@@ -31,14 +31,6 @@ User --> Channel (WS/Discord/CLI)
            '-- team-beta (operations)
                  '-- triggers -> scheduled tasks
 ```
-
-### v4 Changes from v3
-
-- **Inline AI SDK tools** replace HTTP MCP transport -- tools are `tool()` definitions passed directly to `streamText()`
-- **Typed task queue** -- `TaskType` enum routes tasks; `sourceChannelId` is a first-class column
-- **Prompt cache boundary** -- system prompt split into static/dynamic parts for Anthropic cache optimization
-- **Tool audit logging** -- three-tier logging (debug/trace/info) via `withAudit()`
-- **OrgToolContext** -- interface-first dependency injection for all tool builders
 
 ## Quick Start
 

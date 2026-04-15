@@ -1,19 +1,11 @@
 /**
- * Drizzle ORM schema definitions for OpenHive v3.
+ * Drizzle ORM schema definitions for OpenHive v0.5.0.
  *
  * 9 tables: org_tree, scope_keywords, task_queue, trigger_dedup,
  * log_entries, escalation_correlations, trigger_configs, channel_interactions, topics
  */
 
-import {
-  sqliteTable,
-  text,
-  integer,
-  blob,
-  index,
-  primaryKey,
-  unique,
-} from 'drizzle-orm/sqlite-core';
+import { sqliteTable, text, integer, blob, index, primaryKey, unique } from 'drizzle-orm/sqlite-core';
 
 // ── org_tree ────────────────────────────────────────────────────────────────
 export const orgTree = sqliteTable('org_tree', {
@@ -58,6 +50,7 @@ export const taskQueue = sqliteTable(
   (table) => [
     index('idx_task_queue_team_id').on(table.teamId),
     index('idx_task_queue_status').on(table.status),
+    index('idx_task_queue_type_priority_status').on(table.type, table.priority, table.status),
   ],
 );
 
@@ -119,8 +112,9 @@ export const triggerConfigs = sqliteTable(
     config: text('config').notNull(),
     task: text('task').notNull(),
     skill: text('skill'),
+    subagent: text('subagent'),
     state: text('state').notNull().default('pending'),
-    maxTurns: integer('max_turns').notNull().default(100),
+    maxSteps: integer('max_steps').notNull().default(100),
     failureThreshold: integer('failure_threshold').notNull().default(3),
     consecutiveFailures: integer('consecutive_failures').notNull().default(0),
     disabledReason: text('disabled_reason'),
@@ -268,6 +262,11 @@ export const pluginTools = sqliteTable(
     sourceHash: text('source_hash').notNull(),
     verification: text('verification').notNull().default('{}'),
     verifiedAt: text('verified_at'),
+    deprecatedAt: text('deprecated_at'),
+    deprecatedReason: text('deprecated_reason'),
+    deprecatedBy: text('deprecated_by'),
+    removedAt: text('removed_at'),
+    removedBy: text('removed_by'),
     createdAt: text('created_at').notNull(),
     updatedAt: text('updated_at').notNull(),
   },

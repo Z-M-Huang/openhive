@@ -66,7 +66,7 @@ describe('list_triggers', () => {
       config: { cron: '*/5 * * * *' },
       task: 'Check logs',
       state: 'active',
-      maxTurns: 100,
+      maxSteps: 100,
       failureThreshold: 3,
       consecutiveFailures: 1,
       overlapPolicy: 'always-skip',
@@ -85,6 +85,29 @@ describe('list_triggers', () => {
     expect(result.triggers[0].activeTaskId).toBe('task-123');
   });
 
+  it('includes skill and subagent in response', async () => {
+    triggers.set('ops-team:report-trigger', {
+      name: 'report-trigger',
+      type: 'schedule',
+      team: 'ops-team',
+      config: { cron: '0 9 * * *' },
+      task: 'Generate report',
+      skill: 'reporting',
+      subagent: 'reporter',
+      state: 'active',
+      maxSteps: 100,
+    });
+
+    const result = await server.invoke('list_triggers', {
+      team: 'ops-team',
+    }, 'root') as { success: boolean; triggers: TriggerInfo[] };
+
+    expect(result.success).toBe(true);
+    expect(result.triggers).toHaveLength(1);
+    expect(result.triggers[0].skill).toBe('reporting');
+    expect(result.triggers[0].subagent).toBe('reporter');
+  });
+
   it('defaults overlap fields when not set on config', async () => {
     triggers.set('ops-team:basic', {
       name: 'basic',
@@ -93,7 +116,7 @@ describe('list_triggers', () => {
       config: { pattern: 'test' },
       task: 'Do basic stuff',
       state: 'pending',
-      maxTurns: 50,
+      maxSteps: 50,
     });
 
     const result = await server.invoke('list_triggers', {
