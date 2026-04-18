@@ -1,4 +1,4 @@
-# OpenHive v0.5.1
+# OpenHive v4.6.3
 
 AI agent orchestration platform built on the **Agent as a Feature** principle -- every user message
 flows directly to an AI agent that decides how to respond.

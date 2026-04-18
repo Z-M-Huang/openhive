@@ -71,7 +71,7 @@ describe('SK-2: No explicit any in production source', () => {
 });
 
 // ── SK-3: All production source files under 400 lines ────────────────────
-// Threshold raised from 300 → 400 in v0.5.1 to absorb legitimate growth from
+// Threshold raised from 300 → 400 in v4.6.3 to absorb legitimate growth from
 // ADR-41 (concurrency manager integration) and ADR-42 (window trigger handler).
 // Files opting to carry a coherent responsibility cluster (interfaces hub,
 // task-consumer dispatch, trigger engine registry) stay under 400 lines.

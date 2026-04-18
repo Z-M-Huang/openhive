@@ -1,4 +1,4 @@
-/** OpenHive v0.5.1 entry point — bootstrap and graceful shutdown. */
+/** OpenHive v4.6.3 entry point — bootstrap and graceful shutdown. */
 
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
@@ -282,7 +282,7 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   if (!deps?.skipListen) {
     await fastify.listen({ host: deps?.listenAddress ?? '0.0.0.0', port: deps?.listenPort ?? 8080 });
   }
-  logger.info('OpenHive v0.5.1 started', { dataDir, runDir, systemRulesDir });
+  logger.info('OpenHive v4.6.3 started', { dataDir, runDir, systemRulesDir });
 
   const shutdown = async (): Promise<void> => {
     clearInterval(interactionCleanupInterval);
