@@ -111,7 +111,6 @@ export const triggerConfigs = sqliteTable(
     type: text('type').notNull(),
     config: text('config').notNull(),
     task: text('task').notNull(),
-    skill: text('skill'),
     subagent: text('subagent'),
     state: text('state').notNull().default('pending'),
     maxSteps: integer('max_steps').notNull().default(100),

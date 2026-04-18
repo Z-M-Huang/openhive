@@ -1,15 +1,20 @@
 /**
  * Learning- and reflection-cycle trigger seeding.
  *
- * Extracted from `spawn-team.ts` so the tool orchestration stays focused on
- * spawning teams and scaffolding filesystem state. These helpers have no
- * dependency on spawn logic and are invoked both from the `spawn_team` tool
- * (at team creation) and from `bootstrap-helpers.seedLearningTriggers` (at
- * startup, once subagents have been discovered).
+ * Bug #1 (2026-04): seeding is NOT done at `spawn_team` time — at that
+ * moment the team has no subagents yet, so we'd seed the wrong rows. The
+ * actual seeding happens at two points where subagents are already known:
+ *
+ *   1. Startup bulk seed via `bootstrap-helpers.seedLearningTriggers`
+ *      (iterates `.run/teams/{team}` and fans out to the per-team helper).
+ *   2. Post-bootstrap hook in `sessions/task-consumer.ts` — fires
+ *      immediately after a team's bootstrap task completes, so per-subagent
+ *      rows appear as soon as the subagent files land on disk.
  *
  * AC-17 / AC-18: when a `subagent` is provided, the trigger is named
  * `learning-cycle-{subagent}` / `reflection-cycle-{subagent}` and scoped to
- * that subagent. When omitted, the generic trigger is seeded.
+ * that subagent. When omitted, the generic trigger is seeded (only used
+ * when a team has zero subagents).
  */
 
 import type { ITriggerConfigStore } from '../../domain/interfaces.js';
@@ -54,7 +59,6 @@ export function seedLearningTrigger(
     config: { cron: jitteredCron(teamName) },
     team: teamName,
     task: 'Run a learning cycle: review recent interactions, extract patterns, and update memory.',
-    skill: 'learning-cycle',
     state: 'active',
     overlapPolicy: 'always-skip',
     ...(subagent ? { subagent } : {}),
@@ -83,7 +87,6 @@ export function seedReflectionTrigger(
     config: { cron: reflectionJitteredCron(teamName) },
     team: teamName,
     task: 'Run a reflection cycle: review task outcomes and improve.',
-    skill: 'reflection-cycle',
     state: 'active',
     overlapPolicy: 'always-skip',
     maxSteps: 30,

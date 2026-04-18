@@ -68,15 +68,8 @@ export const TriggerEntrySchema = z.object({
   team: z.string().min(1),
   task: z.string().min(1),
   state: z.enum(['active', 'disabled']).optional(),
-  skill: z.string().optional(),
   subagent: z.string().min(1).optional(),
-}).refine(
-  (data) => !data.skill || data.subagent,
-  {
-    message: 'ADR-40 violation: skill requires subagent. Provide a subagent or remove the skill.',
-    path: ['skill'],
-  },
-);
+});
 
 export const TriggersSchema = z.object({
   triggers: z.array(TriggerEntrySchema).default([]),

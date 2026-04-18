@@ -104,13 +104,13 @@ export function initTriggerEngine(
       // Unique correlationId per task: trigger:{name}:{timestamp}
       const correlationId = triggerName ? `trigger:${triggerName}:${Date.now()}` : undefined;
       // Options from the engine are authoritative — they are snapshotted from the live trigger
-      // config including subagent, maxSteps, and skill. Fall back to the store only if the caller
-      // passed no options (defensive, keeps backwards compatibility for any non-engine caller).
+      // config (subagent, maxSteps). Fall back to the store only if the caller passed no options
+      // (defensive, keeps backwards compatibility for any non-engine caller).
       let effectiveOptions: import('./domain/types.js').TaskOptions | undefined = options;
       if (!effectiveOptions && triggerName) {
         const entry = triggerConfigStore.get(team, triggerName);
-        if (entry?.maxSteps !== undefined || entry?.skill !== undefined || entry?.subagent !== undefined) {
-          effectiveOptions = { maxSteps: entry?.maxSteps, skill: entry?.skill, subagent: entry?.subagent };
+        if (entry?.maxSteps !== undefined || entry?.subagent !== undefined) {
+          effectiveOptions = { maxSteps: entry?.maxSteps, subagent: entry?.subagent };
         }
       }
       const taskId = taskQueueStore.enqueue(team, task, (priority ?? 'normal') as import('./domain/types.js').TaskPriority, 'trigger', sourceChannelId, correlationId, effectiveOptions);
@@ -201,6 +201,36 @@ export function cleanMainTeamCycleTriggers(triggerConfigStore: ITriggerConfigSto
 }
 
 /**
+ * Seed learning- + reflection-cycle triggers for one team. Used both by the
+ * startup bulk seeder (`seedLearningTriggers`) and by the post-bootstrap hook
+ * in task-consumer, where subagents only become visible after the bootstrap
+ * task writes `teams/{team}/subagents/*.md` to disk.
+ *
+ * The `main` team is always skipped (routing-only, AC-19). When a team has
+ * zero subagents on disk, the generic `learning-cycle` / `reflection-cycle`
+ * rows are seeded — that is the correct outcome for teams that never adopt
+ * the subagent model. When subagents exist, one trigger per subagent is
+ * seeded instead.
+ */
+export function seedLearningTriggersForTeam(
+  runDir: string,
+  teamName: string,
+  triggerConfigStore: ITriggerConfigStore,
+): void {
+  if (teamName === 'main') return;
+  const subagents = Object.keys(loadSubagents(runDir, teamName));
+  if (subagents.length === 0) {
+    seedLearningTrigger(teamName, undefined, triggerConfigStore);
+    seedReflectionTrigger(teamName, undefined, triggerConfigStore);
+    return;
+  }
+  for (const subagent of subagents) {
+    seedLearningTrigger(teamName, subagent, triggerConfigStore);
+    seedReflectionTrigger(teamName, subagent, triggerConfigStore);
+  }
+}
+
+/**
  * Seed learning-cycle + reflection-cycle triggers for all existing teams
  * (idempotent). AC-19: the `main` team is skipped — main is routing-only.
  *
@@ -218,19 +248,7 @@ export function seedLearningTriggers(runDir: string, triggerConfigStore: ITrigge
   let teamDirs: string[];
   try { teamDirs = readdirSync(teamsDir); } catch { return; }
   for (const teamName of teamDirs) {
-    if (teamName === 'main') continue;
-    const subagents = Object.keys(loadSubagents(runDir, teamName));
-    if (subagents.length === 0) {
-      // No subagents defined — seed generic triggers for this team.
-      seedLearningTrigger(teamName, undefined, triggerConfigStore);
-      seedReflectionTrigger(teamName, undefined, triggerConfigStore);
-      continue;
-    }
-    // Per-subagent seeding: one learning + one reflection trigger per subagent.
-    for (const subagent of subagents) {
-      seedLearningTrigger(teamName, subagent, triggerConfigStore);
-      seedReflectionTrigger(teamName, subagent, triggerConfigStore);
-    }
+    seedLearningTriggersForTeam(runDir, teamName, triggerConfigStore);
   }
 }
 

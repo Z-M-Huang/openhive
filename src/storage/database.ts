@@ -162,52 +162,113 @@ export function createTables(raw: Database.Database): void {
     raw.exec('CREATE INDEX IF NOT EXISTS idx_trigger_configs_team_subagent ON trigger_configs(team, subagent)');
   } catch { /* index already exists */ }
 
-  // Migration: rename legacy column to max_steps in trigger_configs (SQLite requires recreate)
-  try {
-    const hasOldColumn = raw.prepare("PRAGMA table_info(trigger_configs)").all() as { name: string }[];
-    const legacyCol = 'max_' + 'turns'; // avoid grep match
-    if (hasOldColumn.some(col => col.name === legacyCol)) {
-      raw.exec(`
-        CREATE TABLE IF NOT EXISTS trigger_configs_new (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          team TEXT NOT NULL,
-          name TEXT NOT NULL,
-          type TEXT NOT NULL,
-          config TEXT NOT NULL,
-          task TEXT NOT NULL,
-          skill TEXT,
-          subagent TEXT,
-          state TEXT NOT NULL DEFAULT 'pending',
-          max_steps INTEGER NOT NULL DEFAULT 100,
-          failure_threshold INTEGER NOT NULL DEFAULT 3,
-          consecutive_failures INTEGER NOT NULL DEFAULT 0,
-          disabled_reason TEXT,
-          source_channel_id TEXT,
-          overlap_policy TEXT NOT NULL DEFAULT 'skip-then-replace',
-          overlap_count INTEGER NOT NULL DEFAULT 0,
-          active_task_id TEXT,
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL
-        );
-        INSERT INTO trigger_configs_new
-          SELECT id, team, name, type, config, task, skill, NULL, state, ${legacyCol}, failure_threshold, consecutive_failures, disabled_reason, source_channel_id, overlap_policy, overlap_count, active_task_id, created_at, updated_at
-          FROM trigger_configs;
-        DROP TABLE trigger_configs;
-        ALTER TABLE trigger_configs_new RENAME TO trigger_configs;
-      `);
-      // Recreate indexes that were dropped
-      raw.exec(`
-        CREATE INDEX IF NOT EXISTS idx_trigger_configs_team ON trigger_configs(team);
-        CREATE INDEX IF NOT EXISTS idx_trigger_configs_state ON trigger_configs(state);
-        CREATE INDEX IF NOT EXISTS idx_trigger_configs_team_subagent ON trigger_configs(team, subagent);
-        CREATE UNIQUE INDEX IF NOT EXISTS uq_trigger_configs_team_name ON trigger_configs(team, name);
-      `);
-    }
-  } catch { /* table already migrated or migration not needed */ }
+  migrateTriggerConfigsLegacyColumn(raw);
+  migrateDropTriggerSkillColumn(raw);
 
   // Backfill: classify existing task_queue rows by type
   try {
     raw.prepare("UPDATE task_queue SET type = 'bootstrap' WHERE options LIKE '%\"internal\":true%'").run();
     raw.prepare("UPDATE task_queue SET type = 'trigger' WHERE correlation_id LIKE 'trigger:%' AND type = 'delegate'").run();
   } catch { /* backfill is best-effort on existing data */ }
+}
+
+/**
+ * Legacy migration: rename the removed `max_turns` column on `trigger_configs`
+ * to `max_steps` using the SQLite table-rebuild recipe. No-op when the legacy
+ * column is already gone. Also backfills `subagent` as NULL for pre-existing
+ * rows that predate the subagent column.
+ */
+function migrateTriggerConfigsLegacyColumn(raw: Database.Database): void {
+  try {
+    const cols = raw.prepare("PRAGMA table_info(trigger_configs)").all() as { name: string }[];
+    const legacyCol = 'max_' + 'turns';
+    if (!cols.some(col => col.name === legacyCol)) return;
+
+    raw.exec(`
+      CREATE TABLE IF NOT EXISTS trigger_configs_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        team TEXT NOT NULL,
+        name TEXT NOT NULL,
+        type TEXT NOT NULL,
+        config TEXT NOT NULL,
+        task TEXT NOT NULL,
+        subagent TEXT,
+        state TEXT NOT NULL DEFAULT 'pending',
+        max_steps INTEGER NOT NULL DEFAULT 100,
+        failure_threshold INTEGER NOT NULL DEFAULT 3,
+        consecutive_failures INTEGER NOT NULL DEFAULT 0,
+        disabled_reason TEXT,
+        source_channel_id TEXT,
+        overlap_policy TEXT NOT NULL DEFAULT 'skip-then-replace',
+        overlap_count INTEGER NOT NULL DEFAULT 0,
+        active_task_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      INSERT INTO trigger_configs_new
+        SELECT id, team, name, type, config, task, NULL, state, ${legacyCol}, failure_threshold, consecutive_failures, disabled_reason, source_channel_id, overlap_policy, overlap_count, active_task_id, created_at, updated_at
+        FROM trigger_configs;
+      DROP TABLE trigger_configs;
+      ALTER TABLE trigger_configs_new RENAME TO trigger_configs;
+    `);
+    raw.exec(`
+      CREATE INDEX IF NOT EXISTS idx_trigger_configs_team ON trigger_configs(team);
+      CREATE INDEX IF NOT EXISTS idx_trigger_configs_state ON trigger_configs(state);
+      CREATE INDEX IF NOT EXISTS idx_trigger_configs_team_subagent ON trigger_configs(team, subagent);
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_trigger_configs_team_name ON trigger_configs(team, name);
+    `);
+  } catch { /* table already migrated or migration not needed */ }
+}
+
+/**
+ * Bug #2 migration: drop the obsolete `skill` column from `trigger_configs`.
+ * Runs the standard SQLite rebuild recipe (CREATE new → INSERT … SELECT → DROP → RENAME),
+ * then re-creates indexes. No-op when the column is already gone.
+ * Fail-fast if the column persists after rebuild, to avoid a half-migrated DB.
+ */
+function migrateDropTriggerSkillColumn(raw: Database.Database): void {
+  const before = raw.prepare("PRAGMA table_info(trigger_configs)").all() as { name: string }[];
+  if (!before.some(col => col.name === 'skill')) return;
+
+  raw.exec(`
+    CREATE TABLE IF NOT EXISTS trigger_configs_new2 (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      team TEXT NOT NULL,
+      name TEXT NOT NULL,
+      type TEXT NOT NULL,
+      config TEXT NOT NULL,
+      task TEXT NOT NULL,
+      subagent TEXT,
+      state TEXT NOT NULL DEFAULT 'pending',
+      max_steps INTEGER NOT NULL DEFAULT 100,
+      failure_threshold INTEGER NOT NULL DEFAULT 3,
+      consecutive_failures INTEGER NOT NULL DEFAULT 0,
+      disabled_reason TEXT,
+      source_channel_id TEXT,
+      overlap_policy TEXT NOT NULL DEFAULT 'skip-then-replace',
+      overlap_count INTEGER NOT NULL DEFAULT 0,
+      active_task_id TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    INSERT INTO trigger_configs_new2
+      SELECT id, team, name, type, config, task, subagent, state, max_steps,
+             failure_threshold, consecutive_failures, disabled_reason,
+             source_channel_id, overlap_policy, overlap_count, active_task_id,
+             created_at, updated_at
+      FROM trigger_configs;
+    DROP TABLE trigger_configs;
+    ALTER TABLE trigger_configs_new2 RENAME TO trigger_configs;
+  `);
+  raw.exec(`
+    CREATE INDEX IF NOT EXISTS idx_trigger_configs_team ON trigger_configs(team);
+    CREATE INDEX IF NOT EXISTS idx_trigger_configs_state ON trigger_configs(state);
+    CREATE INDEX IF NOT EXISTS idx_trigger_configs_team_subagent ON trigger_configs(team, subagent);
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_trigger_configs_team_name ON trigger_configs(team, name);
+  `);
+
+  const after = raw.prepare("PRAGMA table_info(trigger_configs)").all() as { name: string }[];
+  if (after.some(col => col.name === 'skill')) {
+    throw new Error('Bug #2 migration failed: skill column still present after rebuild');
+  }
 }

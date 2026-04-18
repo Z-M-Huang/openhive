@@ -85,14 +85,13 @@ describe('list_triggers', () => {
     expect(result.triggers[0].activeTaskId).toBe('task-123');
   });
 
-  it('includes skill and subagent in response', async () => {
+  it('includes subagent in response', async () => {
     triggers.set('ops-team:report-trigger', {
       name: 'report-trigger',
       type: 'schedule',
       team: 'ops-team',
       config: { cron: '0 9 * * *' },
       task: 'Generate report',
-      skill: 'reporting',
       subagent: 'reporter',
       state: 'active',
       maxSteps: 100,
@@ -104,7 +103,6 @@ describe('list_triggers', () => {
 
     expect(result.success).toBe(true);
     expect(result.triggers).toHaveLength(1);
-    expect(result.triggers[0].skill).toBe('reporting');
     expect(result.triggers[0].subagent).toBe('reporter');
   });
 

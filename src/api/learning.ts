@@ -23,7 +23,6 @@ interface TriggerConfigRow {
   readonly team: string;
   readonly type: string;
   readonly state: string;
-  readonly skill: string | null;
   readonly subagent: string | null;
 }
 
@@ -46,8 +45,11 @@ export function registerLearningRoutes(fastify: FastifyInstance, deps: LearningD
       try {
         const { team: teamFilter, subagent: subagentFilter } = request.query;
 
+        // Bug #2: filter learning/reflection cycle triggers by reserved name prefix
+        // (the `skill` column no longer exists). `create-trigger` reserves these
+        // prefixes for system-seeded triggers, so the name filter is unambiguous.
         const clauses = [
-          "skill IN ('learning-cycle', 'reflection-cycle')",
+          "(name LIKE 'learning-cycle%' OR name LIKE 'reflection-cycle%')",
           "team != 'main'",
         ];
         const params: string[] = [];
@@ -55,7 +57,7 @@ export function registerLearningRoutes(fastify: FastifyInstance, deps: LearningD
         if (subagentFilter) { clauses.push('subagent = ?'); params.push(subagentFilter); }
 
         const triggers = deps.raw.prepare(
-          `SELECT name, team, type, state, skill, subagent FROM trigger_configs WHERE ${clauses.join(' AND ')}`,
+          `SELECT name, team, type, state, subagent FROM trigger_configs WHERE ${clauses.join(' AND ')}`,
         ).all(...params) as TriggerConfigRow[];
 
         const teams = [...new Set(triggers.map(t => t.team))];
@@ -68,7 +70,7 @@ export function registerLearningRoutes(fastify: FastifyInstance, deps: LearningD
           return {
             team,
             triggers: teamTriggers.map(t => ({
-              name: t.name, skill: t.skill, state: t.state, subagent: t.subagent,
+              name: t.name, state: t.state, subagent: t.subagent,
             })),
             lastTriggerRun: lastTask
               ? { taskId: lastTask.id, createdAt: lastTask.created_at, status: lastTask.status }

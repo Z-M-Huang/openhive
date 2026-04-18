@@ -128,3 +128,79 @@ describe('seedLearningTriggers main-team exception (AC-19)', () => {
     expect(store.get('main', 'custom-trigger')).toBeDefined();
   });
 });
+
+/**
+ * Bug #1: seedLearningTriggersForTeam is the single-team helper invoked from
+ * the post-bootstrap hook (task-consumer) as well as the bulk startup seeder.
+ * These tests verify the helper matches the bulk loop's behavior for one team.
+ */
+describe('seedLearningTriggersForTeam (Bug #1 per-team helper)', () => {
+  let runDir: string;
+  let store: InMemoryTriggerStore;
+
+  beforeEach(() => {
+    runDir = fs.mkdtempSync(path.join(os.tmpdir(), 'openhive-bootstrap-team-'));
+    store = new InMemoryTriggerStore();
+  });
+
+  afterEach(() => {
+    fs.rmSync(runDir, { recursive: true, force: true });
+  });
+
+  it('skips main team (routing-only)', () => {
+    fs.mkdirSync(path.join(runDir, 'teams', 'main', 'subagents'), { recursive: true });
+    bootstrapHelpers.seedLearningTriggersForTeam(runDir, 'main', store);
+    expect(store.getByTeam('main')).toHaveLength(0);
+  });
+
+  it('seeds generic learning-cycle and reflection-cycle when team has zero subagents', () => {
+    fs.mkdirSync(path.join(runDir, 'teams', 'alpha', 'subagents'), { recursive: true });
+    bootstrapHelpers.seedLearningTriggersForTeam(runDir, 'alpha', store);
+    const rows = store.getByTeam('alpha');
+    expect(rows.map(r => r.name).sort()).toEqual(['learning-cycle', 'reflection-cycle']);
+    expect(rows.every(r => r.subagent === undefined)).toBe(true);
+  });
+
+  it('seeds per-subagent rows when team has subagents on disk', () => {
+    const subagentsDir = path.join(runDir, 'teams', 'beta', 'subagents');
+    fs.mkdirSync(subagentsDir, { recursive: true });
+    fs.writeFileSync(path.join(subagentsDir, 'analyst.md'),
+      '---\ndescription: analyst\n---\n# Agent: analyst\n');
+    fs.writeFileSync(path.join(subagentsDir, 'writer.md'),
+      '---\ndescription: writer\n---\n# Agent: writer\n');
+
+    bootstrapHelpers.seedLearningTriggersForTeam(runDir, 'beta', store);
+    const names = store.getByTeam('beta').map(r => r.name).sort();
+    expect(names).toEqual([
+      'learning-cycle-analyst',
+      'learning-cycle-writer',
+      'reflection-cycle-analyst',
+      'reflection-cycle-writer',
+    ]);
+    expect(store.get('beta', 'learning-cycle')).toBeUndefined();
+    expect(store.get('beta', 'reflection-cycle')).toBeUndefined();
+  });
+
+  it('matches the bulk loop output for a single team (parity)', () => {
+    fs.mkdirSync(path.join(runDir, 'teams', 'main', 'subagents'), { recursive: true });
+    const subagentsDir = path.join(runDir, 'teams', 'gamma', 'subagents');
+    fs.mkdirSync(subagentsDir, { recursive: true });
+    fs.writeFileSync(path.join(subagentsDir, 'planner.md'),
+      '---\ndescription: planner\n---\n# Agent: planner\n');
+
+    // Per-team helper
+    bootstrapHelpers.seedLearningTriggersForTeam(runDir, 'gamma', store);
+    const viaHelper = [...store.getByTeam('gamma')]
+      .map(r => ({ name: r.name, subagent: r.subagent ?? null }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+    // Bulk loop into a fresh store
+    const bulkStore = new InMemoryTriggerStore();
+    bootstrapHelpers.seedLearningTriggers(runDir, bulkStore);
+    const viaBulk = [...bulkStore.getByTeam('gamma')]
+      .map(r => ({ name: r.name, subagent: r.subagent ?? null }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+    expect(viaHelper).toEqual(viaBulk);
+  });
+});

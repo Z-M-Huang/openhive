@@ -73,7 +73,6 @@ export function updateTrigger(
     team: existing.team,
     config: data.config ?? existing.config,
     task: data.task ?? existing.task,
-    skill: existing.skill,
     subagent: data.subagent ?? existing.subagent,
     state: existing.state,
     maxSteps: data.max_steps ?? existing.maxSteps,
@@ -99,14 +98,6 @@ export function updateTrigger(
         }
       }
     }
-  }
-
-  // ADR-40 merged-state guard
-  if (merged.skill && !merged.subagent) {
-    return {
-      success: false,
-      error: 'ADR-40 violation: skill requires a subagent. Cannot update a trigger into a skill-without-subagent state.',
-    };
   }
 
   deps.configStore.upsert(merged);

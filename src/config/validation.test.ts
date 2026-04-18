@@ -1,7 +1,10 @@
 /**
- * Validation schema tests for ADR-40 compliance.
+ * Validation schema tests.
  *
- * AC-6: TriggerEntrySchema rejects skill without subagent.
+ * Post-Bug #2: TriggerEntrySchema no longer carries a `skill` field. Skills
+ * are owned by the subagent (`## Skills` section, per ADR-40); the trigger
+ * names the subagent and nothing else.
+ *
  * AC-15.4: stepCountIs source (config-parse time) rejects invalid types.
  */
 
@@ -16,33 +19,15 @@ const base = {
   config: { cron: '* * * * *' },
 };
 
-describe('TriggerEntrySchema ADR-40 refine', () => {
-  it('rejects skill without subagent', () => {
-    const result = TriggerEntrySchema.safeParse({ ...base, skill: 's' });
-    expect(result.success).toBe(false);
-    if (!result.success) {
-      expect(result.error.issues[0].message.toLowerCase()).toContain('adr-40');
-    }
-  });
-
-  it('accepts skill with subagent', () => {
-    const result = TriggerEntrySchema.safeParse({ ...base, skill: 's', subagent: 'a' });
-    expect(result.success).toBe(true);
-  });
-
+describe('TriggerEntrySchema', () => {
   it('accepts subagent alone', () => {
     const result = TriggerEntrySchema.safeParse({ ...base, subagent: 'a' });
     expect(result.success).toBe(true);
   });
 
-  it('accepts neither skill nor subagent', () => {
+  it('accepts neither subagent nor any skill field', () => {
     const result = TriggerEntrySchema.safeParse(base);
     expect(result.success).toBe(true);
-  });
-
-  it('rejects empty-string subagent combined with skill', () => {
-    const result = TriggerEntrySchema.safeParse({ ...base, skill: 's', subagent: '' });
-    expect(result.success).toBe(false);
   });
 });
 

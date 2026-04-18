@@ -10,7 +10,6 @@ export type TaskPriority = 'low' | 'normal' | 'high' | 'critical';
 
 export interface TaskOptions {
   readonly maxSteps?: number;
-  readonly skill?: string;
   readonly subagent?: string;
 }
 
@@ -71,7 +70,6 @@ export interface TriggerConfig {
   readonly config: Record<string, unknown>;
   readonly team: string;
   readonly task: string;
-  readonly skill?: string;
   readonly subagent?: string;
   readonly state?: TriggerState;
   readonly maxSteps?: number;

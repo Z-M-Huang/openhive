@@ -767,36 +767,7 @@ function makeSilentLogger(): { info: ReturnType<typeof vi.fn>; warn: ReturnType<
   return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
 }
 
-describe('TriggerEngine.loadFromStore ADR-40 skip+warn', () => {
-  it('skips legacy rows with skill and no subagent, warns, preserves storage', async () => {
-    const warn = vi.fn();
-    const logger = { info: vi.fn(), warn, error: vi.fn(), debug: vi.fn() };
-    const rows: TriggerConfig[] = [
-      { team: 'ops', name: 'legacy', type: 'schedule', config: { cron: '* * * * *' }, task: 'do', skill: 'log-check', state: 'active' },
-      { team: 'ops', name: 'valid', type: 'schedule', config: { cron: '* * * * *' }, task: 'do', subagent: 'agent', state: 'active' },
-    ];
-    const store = makeConfigStore(rows);
-    const dedup = new TriggerDedup(createMemoryTriggerStore());
-    const rateLimiter = new TriggerRateLimiter(100, 60_000);
-    const delegateTask = vi.fn().mockResolvedValue('task-123');
-
-    const engine = new TriggerEngine({ configStore: store, logger, dedup, rateLimiter, delegateTask });
-    engine.loadFromStore();
-
-    // Legacy row should NOT be registered
-    expect(engine.getTeamTriggerCount('ops')).toBe(1);
-    // Valid row should be registered
-    expect(engine.getRegisteredCount()).toBe(1);
-
-    expect(warn).toHaveBeenCalledWith(
-      expect.stringMatching(/adr-40|skill.*subagent/i),
-      expect.objectContaining({ team: 'ops', name: 'legacy', skill: 'log-check' }),
-    );
-
-    // storage unchanged
-    expect(store.getAll().map((r) => r.name)).toEqual(['legacy', 'valid']);
-  });
-
+describe('TriggerEngine.loadFromStore', () => {
   it('registers all valid rows when no violators present', async () => {
     const logger = makeSilentLogger();
     const rows: TriggerConfig[] = [
@@ -891,7 +862,7 @@ describe('Subagent routing', () => {
     );
   });
 
-  it('propagates maxSteps + skill + subagent together as TaskOptions', () => {
+  it('propagates maxSteps + subagent together as TaskOptions', () => {
     const triggers: TriggerConfig[] = [
       makeTrigger({
         name: 'kw-combo',
@@ -899,7 +870,6 @@ describe('Subagent routing', () => {
         config: { pattern: 'combo' },
         subagent: 'researcher',
         maxSteps: 50,
-        skill: 'deep-dive',
       }),
     ];
     const engine = new TriggerEngine({ triggers, dedup, rateLimiter, delegateTask, logger });
@@ -908,11 +878,11 @@ describe('Subagent routing', () => {
     engine.onMessage('combo trigger');
     expect(delegateTask).toHaveBeenCalledWith(
       'weather-team', 'check weather', undefined, 'kw-combo', undefined,
-      { maxSteps: 50, skill: 'deep-dive', subagent: 'researcher' },
+      { maxSteps: 50, subagent: 'researcher' },
     );
   });
 
-  it('omits options when trigger has no maxSteps/skill/subagent', () => {
+  it('omits options when trigger has no maxSteps/subagent', () => {
     const triggers: TriggerConfig[] = [
       makeTrigger({
         name: 'kw-plain',

@@ -15,7 +15,6 @@ export interface TriggerInfo {
   readonly type: string;
   readonly state: string;
   readonly task: string;
-  readonly skill?: string;
   readonly subagent?: string;
   readonly maxSteps: number;
   readonly consecutiveFailures: number;
@@ -52,7 +51,6 @@ export function listTriggers(
     type: c.type,
     state: c.state ?? 'pending',
     task: c.task,
-    skill: c.skill,
     subagent: c.subagent,
     maxSteps: c.maxSteps ?? 100,
     consecutiveFailures: c.consecutiveFailures ?? 0,

@@ -58,16 +58,7 @@ export class TriggerEngine {
     if (!this.opts.configStore) return;
     const all = this.opts.configStore.getAll();
     const active = all.filter(t => t.state === 'active');
-    const valid: TriggerConfig[] = [];
-    for (const t of active) {
-      // ADR-40: reject legacy rows that have a skill but no subagent
-      if (t.skill && !t.subagent) {
-        this.opts.logger.warn('ADR-40: skipping trigger with skill but no subagent', { team: t.team, name: t.name, skill: t.skill });
-        continue;
-      }
-      valid.push(t);
-    }
-    this.registerByTeam(valid);
+    this.registerByTeam(active);
     this.opts.logger.info('Loaded triggers from store', { total: all.length, active: active.length });
   }
 
@@ -348,10 +339,9 @@ export class TriggerEngine {
     // Snapshot task options from the live trigger config — subagent must
     // flow to the task consumer so the session is run with the chosen agent.
     const options: TaskOptions | undefined =
-      effective.maxSteps !== undefined || effective.skill !== undefined || effective.subagent !== undefined
+      effective.maxSteps !== undefined || effective.subagent !== undefined
         ? {
             maxSteps: effective.maxSteps,
-            skill: effective.skill,
             subagent: effective.subagent,
           }
         : undefined;

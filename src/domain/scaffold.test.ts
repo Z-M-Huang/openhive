@@ -88,7 +88,7 @@ describe('Layer 0: Domain type shapes', () => {
     };
 
     expect(trigger.type).toBe('schedule');
-    expect(trigger.skill).toBeUndefined();
+    expect(trigger.subagent).toBeUndefined();
   });
 
   it('ProviderProfile has required fields', () => {

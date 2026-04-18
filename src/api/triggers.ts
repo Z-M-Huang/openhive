@@ -22,7 +22,6 @@ interface TriggerRow {
   readonly type: string;
   readonly config: string;
   readonly task: string;
-  readonly skill: string | null;
   readonly subagent: string | null;
   readonly state: string;
   readonly max_steps: number;
@@ -52,7 +51,6 @@ function mapTriggerRow(row: TriggerRow) {
     type: row.type,
     config: row.config,
     task: row.task,
-    skill: row.skill,
     subagent: row.subagent,
     state: row.state,
     maxSteps: row.max_steps,

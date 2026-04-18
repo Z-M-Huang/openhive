@@ -197,40 +197,59 @@ describe('create_trigger', () => {
     }));
   });
 
-  // ── ADR-40 guard (AC-7) ─────────────────────────────────────────────
+  // ── Reserved-name guard (Bug #2 Option A) ───────────────────────────
 
-  it('rejects skill without subagent (ADR-40)', () => {
-    const loadSubagents = makeLoadSubagents({
-      myAgent: { description: 'My agent', prompt: '# Agent: myAgent' },
-    });
+  it('rejects user-created names that collide with the reserved cycle prefix', () => {
+    const loadSubagents = makeLoadSubagents();
 
-    const result = invokeCreateTrigger(f, mockConfigStore, loadSubagents, {
-      team: 'ops-team', name: 'adr40-test', type: 'schedule',
+    const exactLearning = invokeCreateTrigger(f, mockConfigStore, loadSubagents, {
+      team: 'ops-team', name: 'learning-cycle', type: 'schedule',
       config: { cron: '* * * * *' }, task: 'x',
-      skill: 'my-skill',
     }) as { success: boolean; error?: string };
+    expect(exactLearning.success).toBe(false);
+    expect(exactLearning.error?.toLowerCase()).toContain('reserved');
 
-    expect(result.success).toBe(false);
-    expect(result.error?.toLowerCase()).toContain('adr-40');
+    const exactReflection = invokeCreateTrigger(f, mockConfigStore, loadSubagents, {
+      team: 'ops-team', name: 'reflection-cycle', type: 'schedule',
+      config: { cron: '* * * * *' }, task: 'x',
+    }) as { success: boolean; error?: string };
+    expect(exactReflection.success).toBe(false);
+
+    const suffixed = invokeCreateTrigger(f, mockConfigStore, loadSubagents, {
+      team: 'ops-team', name: 'learning-cycle-custom', type: 'schedule',
+      config: { cron: '* * * * *' }, task: 'x',
+    }) as { success: boolean };
+    expect(suffixed.success).toBe(false);
+
     expect(mockConfigStore.upsert).not.toHaveBeenCalled();
   });
 
-  it('accepts skill with known subagent', () => {
+  it('allows non-reserved names that merely contain "cycle"', () => {
+    const loadSubagents = makeLoadSubagents();
+    const result = invokeCreateTrigger(f, mockConfigStore, loadSubagents, {
+      team: 'ops-team', name: 'deploy-cycle-watch', type: 'schedule',
+      config: { cron: '* * * * *' }, task: 'x',
+    }) as { success: boolean };
+    expect(result.success).toBe(true);
+  });
+
+  it('upserts with subagent targeting and no skill field (post-Bug #2)', () => {
     const loadSubagents = makeLoadSubagents({
       myAgent: { description: 'My agent', prompt: '# Agent: myAgent' },
     });
 
     const result = invokeCreateTrigger(f, mockConfigStore, loadSubagents, {
-      team: 'ops-team', name: 'adr40-ok', type: 'schedule',
+      team: 'ops-team', name: 'agent-run', type: 'schedule',
       config: { cron: '* * * * *' }, task: 'x',
-      skill: 'my-skill',
       subagent: 'myAgent',
     }) as { success: boolean };
 
     expect(result.success).toBe(true);
     expect(mockConfigStore.upsert).toHaveBeenCalledWith(
-      expect.objectContaining({ skill: 'my-skill', subagent: 'myAgent' }),
+      expect.objectContaining({ subagent: 'myAgent' }),
     );
+    const upsertArg = mockConfigStore.upsert.mock.calls[0][0];
+    expect('skill' in upsertArg).toBe(false);
   });
 });
 

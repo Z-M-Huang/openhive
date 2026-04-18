@@ -65,20 +65,19 @@ function renderLearningTable(container, teams) {
   table.className = 'data-table';
   const thead = document.createElement('thead');
   const headerRow = document.createElement('tr');
-  for (const label of ['Team', 'Subagent', 'Trigger', 'Skill', 'State', 'Last Run', 'Status']) {
+  for (const label of ['Team', 'Subagent', 'Trigger', 'State', 'Last Run', 'Status']) {
     headerRow.appendChild(el('th', label));
   }
   thead.appendChild(headerRow);
   table.appendChild(thead);
   const tbody = document.createElement('tbody');
   for (const team of visible) {
-    const triggers = team.triggers.length > 0 ? team.triggers : [{ name: '(none)', skill: null, state: '-', subagent: null }];
+    const triggers = team.triggers.length > 0 ? team.triggers : [{ name: '(none)', state: '-', subagent: null }];
     for (const trig of triggers) {
       const tr = document.createElement('tr');
       tr.appendChild(el('td', team.team));
       tr.appendChild(el('td', trig.subagent || '—'));
       tr.appendChild(el('td', trig.name));
-      tr.appendChild(el('td', trig.skill || '—'));
       tr.appendChild(el('td', trig.state));
       const lastRun = team.lastTriggerRun ? formatTime(team.lastTriggerRun.createdAt) : 'Never';
       const status = team.lastTriggerRun ? team.lastTriggerRun.status : 'n/a';

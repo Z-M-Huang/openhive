@@ -590,7 +590,6 @@ describe('seedLearningTrigger', () => {
     expect(trigger.team).toBe('ops');
     expect(trigger.state).toBe('active');
     expect(trigger.type).toBe('schedule');
-    expect(trigger.skill).toBe('learning-cycle');
     expect(trigger.overlapPolicy).toBe('always-skip');
     expect(trigger.subagent).toBeUndefined();
   });
@@ -630,7 +629,6 @@ describe('seedLearningTrigger', () => {
     expect(trigger.team).toBe('ops');
     expect(trigger.subagent).toBe('research-analyst');
     expect(trigger.state).toBe('active');
-    expect(trigger.skill).toBe('learning-cycle');
     expect(trigger.overlapPolicy).toBe('always-skip');
   });
 
@@ -726,21 +724,13 @@ describe('spawn_team learning trigger integration', () => {
     };
   }
 
-  it('seeds active learning-cycle and reflection-cycle triggers after successful spawn', async () => {
+  // Bug #1: spawn_team no longer seeds learning/reflection triggers at spawn time.
+  // Subagents don't exist yet — the bootstrap task creates them, and seeding now
+  // happens after bootstrap completion in task-consumer via seedLearningTriggersForTeam.
+  it('does NOT seed learning/reflection triggers at spawn time', async () => {
     const result = await spawnTeam({ name: 'analytics', scope_accepts: ['data'] }, 'root', makeDeps());
     expect(result.success).toBe(true);
-    expect(mockTriggerStore.configs).toHaveLength(2);
-    const learning = mockTriggerStore.configs.find((c: { name: string }) => c.name === 'learning-cycle');
-    const reflection = mockTriggerStore.configs.find((c: { name: string }) => c.name === 'reflection-cycle');
-    expect(learning).toBeDefined();
-    expect(learning!.team).toBe('analytics');
-    expect(learning!.state).toBe('active');
-    expect(learning!.overlapPolicy).toBe('always-skip');
-    expect(reflection).toBeDefined();
-    expect(reflection!.team).toBe('analytics');
-    expect(reflection!.state).toBe('active');
-    expect(reflection!.overlapPolicy).toBe('always-skip');
-    expect(reflection!.maxSteps).toBe(30);
+    expect(mockTriggerStore.configs).toHaveLength(0);
   });
 
   it('does not seed trigger when triggerConfigStore is absent', async () => {
@@ -758,7 +748,7 @@ describe('spawn_team learning trigger integration', () => {
       name: 'learning-cycle', type: 'schedule', team: 'reuse',
       config: { cron: '0 3 * * *' }, task: 'custom', state: 'active',
     });
-    // Spawn will fail because team already exists if registered, but seed guard is tested via unit fn
+    // Unit-level guard on seedLearningTrigger: pre-existing active trigger is not overwritten.
     seedLearningTrigger('reuse', undefined, mockTriggerStore);
     expect(mockTriggerStore.configs).toHaveLength(1);
     expect(mockTriggerStore.configs[0].state).toBe('active');

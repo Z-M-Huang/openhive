@@ -25,10 +25,6 @@ import { scrubSecrets } from '../../logging/credential-scrubber.js';
 import { errorMessage } from '../../domain/errors.js';
 import { extractStringCredentials } from '../../domain/credential-utils.js';
 import { cleanupTeamDirs } from './team-fs.js';
-import {
-  seedLearningTrigger,
-  seedReflectionTrigger,
-} from './trigger-seed.js';
 
 // Re-exported so callers that previously imported from spawn-team keep working.
 export {
@@ -176,14 +172,6 @@ export async function spawnTeam(
     return { success: false, error: initResult.error };
   }
   const bootstrapTaskId = initResult?.taskId;
-
-  // AC-17/AC-18: seed generic triggers at spawn time — subagents haven't been
-  // authored yet (the bootstrap task will create them). Once subagents exist,
-  // `seedLearningTriggers` in bootstrap-helpers re-seeds per-subagent triggers
-  // at the next startup. The bare `learning-cycle` / `reflection-cycle` names
-  // are only emitted for teams with NO subagents at discovery time.
-  seedLearningTrigger(name, undefined, deps.triggerConfigStore);
-  seedReflectionTrigger(name, undefined, deps.triggerConfigStore);
 
   // Success: team is queued for bootstrap; surface task ID and user-facing message
   const note = parsed.data.credentials ? 'Credentials stored securely. Do NOT echo credential values.' : undefined;

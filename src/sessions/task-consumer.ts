@@ -18,6 +18,7 @@ import { scrubSecrets } from '../logging/credential-scrubber.js';
 import { errorMessage } from '../domain/errors.js';
 import { loadSubagents } from './skill-loader.js';
 import type { SubagentDefinition } from './skill-loader.js';
+import { seedLearningTriggersForTeam } from '../bootstrap-helpers.js';
 import {
   TRIGGER_NOTIFY_INSTRUCTION,
   parseLlmNotifyDecision,
@@ -185,7 +186,6 @@ export class TaskConsumer {
               teamName: task.teamId, maxSteps,
               sourceChannelId: dequeued.sourceChannelId ?? undefined,
               topicId: dequeued.topicId ?? undefined,
-              skill: dequeued.options?.skill,
               subagent,
             },
           );
@@ -200,9 +200,15 @@ export class TaskConsumer {
           const isError = !result.ok;
           this.#taskQueue.updateStatus(dequeued.id, isError ? TaskStatus.Failed : TaskStatus.Done);
 
-          // Mark team as bootstrapped on successful bootstrap task completion
+          // Mark team as bootstrapped on successful bootstrap task completion.
+          // Seed learning/reflection triggers now that subagents are authored
+          // on disk (Bug #1: replaces the speculative seeding that ran at spawn
+          // time before any subagent could exist).
           if (dequeued.type === 'bootstrap' && !isError) {
             this.#orgTree.setBootstrapped(dequeued.teamId);
+            if (this.#deps.triggerConfigStore) {
+              seedLearningTriggersForTeam(this.#deps.runDir, dequeued.teamId, this.#deps.triggerConfigStore);
+            }
           }
 
           // Record duration

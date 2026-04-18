@@ -7,13 +7,20 @@ import type { OrgTree } from '../../domain/org-tree.js';
 import type { ITriggerConfigStore } from '../../domain/interfaces.js';
 import { validateSubagent, type LoadSubagentsFn } from './validate-subagent.js';
 
+/**
+ * Reserved trigger-name prefixes. Learning/reflection cycles are seeded by the
+ * system (bootstrap-helpers.seedLearningTrigger / seedReflectionTrigger) and
+ * must not collide with user-created triggers — the api/learning dashboard
+ * uses name-prefix matching to surface them.
+ */
+export const RESERVED_TRIGGER_NAME_RE = /^(learning|reflection)-cycle(-|$)/;
+
 export const CreateTriggerInputSchema = z.object({
   team: z.string().min(1),
   name: z.string().min(1).regex(/^[a-z0-9]+(-[a-z0-9]+)*$/, 'trigger name must be a lowercase slug'),
   type: z.enum(['schedule', 'keyword', 'message', 'window']),
   config: z.record(z.unknown()),
   task: z.string().min(1),
-  skill: z.string().optional(),
   subagent: z.string().min(1).optional(),
   max_steps: z.number().int().min(1).max(500).optional(),
   failure_threshold: z.number().int().min(1).max(100).optional(),
@@ -44,18 +51,18 @@ export function createTrigger(
   if (callerId !== 'root' && team.parentId !== callerId)
     return { success: false, error: 'caller is not parent of target team' };
 
+  if (RESERVED_TRIGGER_NAME_RE.test(input.name)) {
+    return {
+      success: false,
+      error: `trigger name "${input.name}" is reserved — learning-cycle* and reflection-cycle* names are system-seeded`,
+    };
+  }
+
   const existing = deps.configStore.get(input.team, input.name);
   if (existing) return { success: false, error: `trigger "${input.name}" already exists for team "${input.team}"` };
 
   const subagentCheck = validateSubagent(input.subagent, input.team, deps.runDir, deps.loadSubagents);
   if (!subagentCheck.ok) return { success: false, error: subagentCheck.error };
-
-  if (input.skill && !input.subagent) {
-    return {
-      success: false,
-      error: 'ADR-40 violation: skill requires a subagent. Provide a subagent or remove the skill.',
-    };
-  }
 
   deps.configStore.upsert({
     name: input.name,
@@ -63,7 +70,6 @@ export function createTrigger(
     config: input.config,
     team: input.team,
     task: input.task,
-    skill: input.skill,
     subagent: input.subagent,
     state: 'pending',
     maxSteps: input.max_steps ?? 100,
