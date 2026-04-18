@@ -91,7 +91,16 @@ export async function buildSubagentTools(
 ): Promise<ToolSet> {
   const result: ToolSet = {};
   // Support both new (subagents) and legacy (subagentDefs) interfaces.
-  const subagents = opts.subagents ?? opts.subagentDefs ?? {};
+  type DefShape = {
+    description?: string;
+    prompt: string;
+    resolvedSkills?: readonly {
+      name: string;
+      content: string;
+      requiredTools: readonly string[];
+    }[];
+  };
+  const subagents: Record<string, DefShape> = (opts.subagents ?? opts.subagentDefs ?? {}) as Record<string, DefShape>;
 
   for (const [name, def] of Object.entries(subagents)) {
     // Model: new interface supplies opts.model; legacy resolves from registry.

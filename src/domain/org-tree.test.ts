@@ -1,7 +1,7 @@
 /**
  * OrgTree tests (migrated from layer-3.test.ts)
  *
- * Org tree: addTeam, getTeam, getChildren, getAncestors (root->parent), isDescendant, removeTeam
+ * Org tree: addTeam, getTeam, getChildren, getAncestors (root->parent), removeTeam
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
@@ -116,29 +116,6 @@ describe('Org Tree', () => {
     tree.addTeam(makeNode({ teamId: 'tid-root', name: 'root' }));
     const ancestors = tree.getAncestors('tid-root');
     expect(ancestors).toHaveLength(0);
-  });
-
-  it('isDescendant returns true for child of ancestor', () => {
-    tree.addTeam(makeNode({ teamId: 'tid-root', name: 'root' }));
-    tree.addTeam(makeNode({ teamId: 'tid-mid', name: 'mid', parentId: 'tid-root' }));
-    tree.addTeam(makeNode({ teamId: 'tid-leaf', name: 'leaf', parentId: 'tid-mid' }));
-
-    expect(tree.isDescendant('tid-leaf', 'tid-root')).toBe(true);
-    expect(tree.isDescendant('tid-leaf', 'tid-mid')).toBe(true);
-    expect(tree.isDescendant('tid-mid', 'tid-root')).toBe(true);
-  });
-
-  it('isDescendant returns false for non-ancestor', () => {
-    tree.addTeam(makeNode({ teamId: 'tid-a', name: 'a' }));
-    tree.addTeam(makeNode({ teamId: 'tid-b', name: 'b' }));
-
-    expect(tree.isDescendant('tid-a', 'tid-b')).toBe(false);
-    expect(tree.isDescendant('tid-b', 'tid-a')).toBe(false);
-  });
-
-  it('isDescendant returns false for self', () => {
-    tree.addTeam(makeNode({ teamId: 'tid-a', name: 'a' }));
-    expect(tree.isDescendant('tid-a', 'tid-a')).toBe(false);
   });
 
   it('removeTeam removes from tree and store', () => {

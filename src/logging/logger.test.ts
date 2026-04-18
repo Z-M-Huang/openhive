@@ -121,6 +121,7 @@ describe('createLogger integration with LogStore', () => {
   it('ToolCall:end metadata includes tool and durationMs', async () => {
     const logger = createLogger({ logStore, level: 'debug' });
 
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars -- _input must be present so withAudit infers the right execute signature
     const execute = async (_input: Record<string, unknown>) => 'ok';
     const wrapped = withAudit('Bash', execute, { logger });
 
@@ -140,8 +141,8 @@ describe('createLogger integration with LogStore', () => {
   it('bare pino call (wrong arg order) drops metadata — proves the bug we fixed', async () => {
     // Create a raw pino logger (bypassing our wrapper) to demonstrate the bug
     const rawPino = pino({ level: 'info' }, new (await import('node:stream')).Writable({
-      write(chunk, _enc, cb) {
-        const line = chunk.toString();
+      write(chunk: Buffer | string, _enc, cb) {
+        const line = typeof chunk === 'string' ? chunk : chunk.toString();
         try {
           const parsed = JSON.parse(line) as Record<string, unknown>;
           logStore.append({

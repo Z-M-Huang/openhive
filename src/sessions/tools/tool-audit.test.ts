@@ -31,7 +31,7 @@ function findCall(
     const found = method.mock.calls.find(
       (args: unknown[]) => args[0] === msg,
     );
-    if (found) return found;
+    if (found) return found as unknown[];
   }
   return undefined;
 }

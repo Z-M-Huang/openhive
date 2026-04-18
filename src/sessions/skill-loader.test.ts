@@ -323,7 +323,7 @@ describe('loadSubagents resolvedSkills', () => {
     expect(defs['loggly-monitor'].resolvedSkills).toEqual([
       {
         name: 'alert-check',
-        content: expect.stringContaining('alert-check'),
+        content: expect.stringContaining('alert-check') as unknown,
         requiredTools: ['query_loggly'],
       },
     ]);

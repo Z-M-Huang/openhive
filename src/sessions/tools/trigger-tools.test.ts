@@ -168,6 +168,72 @@ describe('buildTriggerTools', () => {
   });
 });
 
+// ── Window end-to-end lifecycle (AC-50) ──────────────────────────────────────
+
+describe('window end-to-end lifecycle', () => {
+  it('list_triggers tool is accessible and accepts team name input', () => {
+    // Verify that the list_triggers tool is exposed and its schema accepts a team
+    // name — the tool is the surface through which window triggers are observable
+    // once they are stored in the configStore (AC-50).
+    const ctx = createMockContext();
+    const tools = buildTriggerTools(ctx);
+    const listTool = tools['list_triggers'];
+    expect(listTool).toBeTruthy();
+
+    const schema = listTool.inputSchema as { safeParse: (v: unknown) => { success: boolean } };
+    const parsed = schema.safeParse({ team: 'main' });
+    expect(parsed.success).toBe(true);
+  });
+
+  it('list_triggers tool returns window-type triggers stored in configStore', async () => {
+    // Confirm that the list_triggers tool transparently passes window-type
+    // triggers returned by the store back to the caller without filtering by type
+    // (AC-50: window triggers must be listable through normal flows).
+    const { listTriggers } = await import('../../handlers/tools/list-triggers.js');
+    const { OrgTree } = await import('../../domain/org-tree.js');
+    const { createMemoryOrgStore, makeNode } = await import('../../handlers/__test-helpers.js');
+
+    const memStore = createMemoryOrgStore();
+    const orgTree = new OrgTree(memStore);
+    orgTree.addTeam(makeNode({ teamId: 'root', name: 'root' }));
+    orgTree.addTeam(makeNode({ teamId: 'ops', name: 'ops', parentId: 'root' }));
+
+    const windowConfig = {
+      name: 'win-check',
+      type: 'window' as const,
+      config: { tick_interval_ms: 900_000 },
+      team: 'ops',
+      task: 'run window check',
+      state: 'active' as const,
+      maxSteps: 100,
+      consecutiveFailures: 0,
+    };
+
+    // Build a minimal configStore that returns the window config for team 'ops'
+    const configStore = {
+      upsert: vi.fn(),
+      get: vi.fn(),
+      getByTeam: vi.fn().mockReturnValue([windowConfig]),
+      getAll: vi.fn().mockReturnValue([windowConfig]),
+      remove: vi.fn(),
+      removeByTeam: vi.fn(),
+      setState: vi.fn(),
+      incrementFailures: vi.fn().mockReturnValue(0),
+      resetFailures: vi.fn(),
+      setActiveTask: vi.fn(),
+      clearActiveTask: vi.fn(),
+      setOverlapCount: vi.fn(),
+      resetOverlapState: vi.fn(),
+    };
+
+    const result = listTriggers({ team: 'ops' }, 'root', { orgTree, configStore });
+    expect(result.success).toBe(true);
+    expect(result.triggers).toHaveLength(1);
+    expect(result.triggers?.[0].type).toBe('window');
+    expect(result.triggers?.[0].name).toBe('win-check');
+  });
+});
+
 // ── test_trigger schema wiring (AC-7) ────────────────────────────────────────
 
 type SchemaBag = { safeParse: (v: unknown) => { success: boolean; data: Record<string, unknown> } };

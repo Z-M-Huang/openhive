@@ -195,14 +195,14 @@ describe('buildSubagentTools', () => {
     );
 
     expect(mockGenerateText).toHaveBeenCalledTimes(1);
-    const callArgs = mockGenerateText.mock.calls[0][0];
-    expect(callArgs.model).toEqual({ modelId: 'test-model' });
-    expect(callArgs.system).toBe('You are a DevOps engineer.');
-    expect(callArgs.prompt).toBe('deploy to production');
-    expect(callArgs.tools).toBe(sharedTools);
+    const callArgs = mockGenerateText.mock.calls[0][0] as Record<string, unknown>;
+    expect(callArgs['model']).toEqual({ modelId: 'test-model' });
+    expect(callArgs['system']).toBe('You are a DevOps engineer.');
+    expect(callArgs['prompt']).toBe('deploy to production');
+    expect(callArgs['tools']).toBe(sharedTools);
     // stopWhen is whatever stepCountIs(7) returned from the mock
-    expect(callArgs.stopWhen).toEqual({ type: 'stepCount', count: 7 });
-    expect(callArgs.abortSignal).toBe(controller.signal);
+    expect(callArgs['stopWhen']).toEqual({ type: 'stepCount', count: 7 });
+    expect(callArgs['abortSignal']).toBe(controller.signal);
   });
 
   it('tool execute returns structured { subagent, text, steps } envelope', async () => {
@@ -443,12 +443,13 @@ describe('subagent-factory plugin merge + maxSteps', () => {
       runDir,
     });
 
-    await (tools['loggly-monitor'] as any).execute(
+    type ExecutableTool = { execute: (input: unknown, opts: unknown) => Promise<unknown> };
+    await (tools['loggly-monitor'] as unknown as ExecutableTool).execute(
       { task: 'go' },
       { abortSignal: new AbortController().signal },
     );
 
-    const call = mockGenerateText.mock.calls[0][0];
+    const call = mockGenerateText.mock.calls[0][0] as { tools?: Record<string, unknown> };
     // Current code passes opts.tools verbatim — no plugin merge.
     // Expectation: plugin tools should be present (will fail until AC-11 is implemented).
     expect(Object.keys(call.tools ?? {})).toEqual(
@@ -468,7 +469,8 @@ describe('subagent-factory plugin merge + maxSteps', () => {
       subagents: { a: { name: 'a', prompt: '', resolvedSkills: [] } },
       maxSteps: 200,
     });
-    await (tools['a'] as any).execute(
+    type ExecutableTool = { execute: (input: unknown, opts: unknown) => Promise<unknown> };
+    await (tools['a'] as unknown as ExecutableTool).execute(
       { task: 't' },
       { abortSignal: new AbortController().signal },
     );
@@ -509,12 +511,13 @@ describe('subagent-factory plugin merge + maxSteps', () => {
       subagents: { a: { name: 'a', prompt: '', resolvedSkills: [] } },
     });
 
-    await (tools['a'] as any).execute(
+    type ExecutableTool = { execute: (input: unknown, opts: unknown) => Promise<unknown> };
+    await (tools['a'] as unknown as ExecutableTool).execute(
       { task: 't' },
       { abortSignal: new AbortController().signal },
     );
 
-    const call = mockGenerateText.mock.calls[0][0];
+    const call = mockGenerateText.mock.calls[0][0] as { tools?: Record<string, unknown> };
     expect(Object.keys(call.tools ?? {})).toEqual(['baseTool']);
   });
 });

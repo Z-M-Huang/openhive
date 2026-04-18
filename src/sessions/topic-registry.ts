@@ -16,7 +16,7 @@ export class TopicSessionManager {
     const safe = next.catch(() => {});
     this.#queues.set(topicId, safe);
     // Clean up when this is still the tail of the chain
-    safe.then(() => {
+    void safe.then(() => {
       if (this.#queues.get(topicId) === safe) this.#queues.delete(topicId);
     });
     return next;

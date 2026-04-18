@@ -20,6 +20,7 @@ import type {
   ISenderTrustStore,
   IVaultStore,
   IPluginToolStore,
+  IConcurrencyManager,
 } from '../../domain/interfaces.js';
 
 // ── Narrow interfaces for concrete deps not yet in domain/interfaces ─────
@@ -72,4 +73,6 @@ export interface OrgToolContext {
   readonly senderTrustStore?: ISenderTrustStore;
   readonly vaultStore?: IVaultStore;
   readonly pluginToolStore?: IPluginToolStore;
+  /** Central admission manager — applied at tool-assembly time (ADR-41, Unit 29). */
+  readonly concurrencyManager?: IConcurrencyManager;
 }

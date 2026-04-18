@@ -10,6 +10,13 @@ import { TrustPolicySchema } from './trust-policy.js';
 
 // ── Team Config ─────────────────────────────────────────────────────────────
 
+// Per wiki Team-Configuration.md — the bucket value is just {rps, burst};
+// the map key IS the rate_limit_key passed to consumers.
+const RateLimitBucketSchema = z.object({
+  rps: z.number().positive(),
+  burst: z.number().int().positive(),
+});
+
 export const TeamConfigSchema = z.object({
   name: z.string().min(1),
   parent: z.string().nullable().optional().default(null),
@@ -25,6 +32,9 @@ export const TeamConfigSchema = z.object({
   memory: z.object({
     embedding_provider_profile: z.string().optional(),
   }).optional(),
+  // ADR-41: concurrency and rate-limiting configuration.
+  max_concurrent_daily_ops: z.number().int().positive().optional().default(5),
+  rate_limit_buckets: z.record(z.string(), RateLimitBucketSchema).optional(),
 });
 
 export type TeamConfigInput = z.input<typeof TeamConfigSchema>;
@@ -53,7 +63,7 @@ export type ProvidersOutput = z.output<typeof ProvidersSchema>;
 
 export const TriggerEntrySchema = z.object({
   name: z.string().min(1),
-  type: z.enum(['schedule', 'keyword', 'message']),
+  type: z.enum(['schedule', 'keyword', 'message', 'window']),
   config: z.record(z.unknown()),
   team: z.string().min(1),
   task: z.string().min(1),

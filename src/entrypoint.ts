@@ -51,7 +51,7 @@ process.on('unhandledRejection', (reason) => {
 });
 
 bootstrap()
-  .then((result) => { shutdownFn = result.shutdown; })
+  .then((result) => { shutdownFn = () => result.shutdown(); })
   .catch((err: unknown) => {
     // eslint-disable-next-line no-console
     console.error('Fatal: bootstrap failed', err);

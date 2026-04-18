@@ -35,17 +35,20 @@ describe('escalate', () => {
     expect(f.escalationStore.records[0].correlationId).toBe(typed.correlation_id);
   });
 
-  it('queues task for parent with high priority', async () => {
-    await f.server.invoke(
+  it('is notification-only for non-root callers and does not enqueue a parent task (ADR-43)', async () => {
+    const result = await f.server.invoke(
       'escalate',
       { message: 'Need help' },
       'child',
     );
 
-    expect(f.taskQueue.tasks).toHaveLength(1);
-    expect(f.taskQueue.tasks[0].teamId).toBe('root');
-    expect(f.taskQueue.tasks[0].priority).toBe('high');
-    expect(f.taskQueue.tasks[0].task).toContain('Need help');
+    const typed = result as { success: boolean; notification_only: boolean; correlation_id: string };
+    expect(typed.success).toBe(true);
+    expect(typed.notification_only).toBe(true);
+    // Parent queue untouched — work handoff belongs to enqueue_parent_task.
+    expect(f.taskQueue.tasks).toHaveLength(0);
+    // Correlation record is still persisted for audit.
+    expect(f.escalationStore.records).toHaveLength(1);
   });
 
   it('escalates to user via channel when caller has no parent (root team)', async () => {
@@ -65,14 +68,14 @@ describe('escalate', () => {
     expect(f.taskQueue.tasks[0].type).toBe('escalation');
   });
 
-  it('threads sourceChannelId when provided', async () => {
-    const result = await f.server.invoke('escalate', { message: 'need help' }, 'child', 'ws:abc123');
+  it('threads sourceChannelId on the root-escalation queue entry', async () => {
+    const result = await f.server.invoke('escalate', { message: 'need help' }, 'root', 'ws:abc123');
     expect(result).toEqual(expect.objectContaining({ success: true }));
     expect(f.taskQueue.tasks[0].sourceChannelId).toBe('ws:abc123');
   });
 
-  it('sets sourceChannelId null when not provided', async () => {
-    const result = await f.server.invoke('escalate', { message: 'need help' }, 'child');
+  it('sets sourceChannelId null when the root escalation does not supply one', async () => {
+    const result = await f.server.invoke('escalate', { message: 'need help' }, 'root');
     expect(result).toEqual(expect.objectContaining({ success: true }));
     expect(f.taskQueue.tasks[0].sourceChannelId).toBeNull();
   });

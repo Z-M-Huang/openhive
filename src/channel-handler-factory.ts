@@ -33,7 +33,7 @@ function withChannelLock<T>(ch: string, fn: () => Promise<T>): Promise<T> {
   const next = prev.then(() => fn(), () => fn());
   const safe = next.catch(() => {});
   channelLocks.set(ch, safe);
-  safe.then(() => { if (channelLocks.get(ch) === safe) channelLocks.delete(ch); });
+  void safe.then(() => { if (channelLocks.get(ch) === safe) channelLocks.delete(ch); });
   return next;
 }
 

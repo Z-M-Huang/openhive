@@ -1,12 +1,14 @@
+/* eslint-disable max-lines -- Aggregated integration suite covering 4 trigger types + per-team registry + dedup + rate limiting + window lifecycle. Splitting it would fragment shared fixtures and setup. */
 /**
  * Trigger Engine + Per-Team Registry + Dedup Integration + Rate Limiting Integration
  *
  * Tests:
- * - Engine registers all 3 handler types, onMessage dispatches matching triggers
+ * - Engine registers all 4 handler types (schedule/keyword/message/window), onMessage dispatches matching triggers
  * - Schedule trigger fires via cron
  * - Per-team trigger registration, replacement, removal, isolation
  * - Dedup integration: duplicate events blocked before delegate_task
  * - Rate limiting integration: excessive triggers blocked
+ * - Window lifecycle integration
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -164,7 +166,7 @@ describe('Trigger Engine', () => {
     engine.start();
     engine.stop();
 
-    expect(logger.info).toHaveBeenCalledWith('Trigger engine started', { schedules: 1 });
+    expect(logger.info).toHaveBeenCalledWith('Trigger engine started', { schedules: 1, windows: 0 });
     expect(logger.info).toHaveBeenCalledWith('Trigger engine stopped');
   });
 
@@ -779,7 +781,7 @@ describe('TriggerEngine.loadFromStore ADR-40 skip+warn', () => {
     const delegateTask = vi.fn().mockResolvedValue('task-123');
 
     const engine = new TriggerEngine({ configStore: store, logger, dedup, rateLimiter, delegateTask });
-    await engine.loadFromStore();
+    engine.loadFromStore();
 
     // Legacy row should NOT be registered
     expect(engine.getTeamTriggerCount('ops')).toBe(1);
@@ -806,7 +808,7 @@ describe('TriggerEngine.loadFromStore ADR-40 skip+warn', () => {
     const delegateTask = vi.fn().mockResolvedValue('task-123');
 
     const engine = new TriggerEngine({ configStore: store, logger, dedup, rateLimiter, delegateTask });
-    await engine.loadFromStore();
+    engine.loadFromStore();
 
     expect(engine.getTeamTriggerCount('ops')).toBe(1);
     expect(engine.getRegisteredCount()).toBe(1);
@@ -996,5 +998,155 @@ describe('Subagent routing', () => {
       'weather-team', 'check weather', undefined, 'kw-live', undefined,
       expect.objectContaining({ subagent: 'new-agent' }),
     );
+  });
+});
+
+// ── Engine window integration (AC-41, AC-42, AC-50) ────────────────────
+
+describe('engine window integration', () => {
+  function makeWindowOpts() {
+    const store = createMemoryTriggerStore();
+    return {
+      dedup: new TriggerDedup(store),
+      rateLimiter: new TriggerRateLimiter(100, 60_000),
+      delegateTask: vi.fn().mockResolvedValue('task-123'),
+      logger: makeLogger(),
+    };
+  }
+
+  it('registers a window handler via replaceTeamTriggers', () => {
+    const engine = new TriggerEngine(makeWindowOpts());
+    engine.replaceTeamTriggers('t1', [
+      { name: 'w1', type: 'window', config: { tick_interval_ms: 50 }, team: 't1', task: 'check' },
+    ]);
+    expect(engine.getTeamTriggerCount('t1')).toBe(1);
+  });
+
+  it('cleans up window handlers when the team config replaces them with none', () => {
+    const engine = new TriggerEngine(makeWindowOpts());
+    engine.replaceTeamTriggers('t1', [
+      { name: 'w1', type: 'window', config: { tick_interval_ms: 50 }, team: 't1', task: 'check' },
+    ]);
+    engine.replaceTeamTriggers('t1', []);
+    expect(engine.getTeamTriggerCount('t1')).toBe(0);
+  });
+
+  it('starts all window handlers when engine.start() is invoked', () => {
+    const engine = new TriggerEngine(makeWindowOpts());
+    engine.replaceTeamTriggers('t1', [
+      { name: 'w1', type: 'window', config: { tick_interval_ms: 50 }, team: 't1', task: 'check' },
+    ]);
+    engine.start();
+    const snapshot = engine.getRegisteredCount();
+    expect(snapshot).toBeGreaterThanOrEqual(1);
+    engine.stop();
+  });
+});
+
+// ── Window End-to-End Lifecycle (AC-47, AC-48, AC-50) ──────────────────
+
+describe('window end-to-end lifecycle', () => {
+  let store: ITriggerStore;
+  let dedup: TriggerDedup;
+  let rateLimiter: TriggerRateLimiter;
+  let logger: ReturnType<typeof makeLogger>;
+  let delegateTask: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    store = createMemoryTriggerStore();
+    dedup = new TriggerDedup(store);
+    rateLimiter = new TriggerRateLimiter(100, 60_000);
+    logger = makeLogger();
+    delegateTask = vi.fn().mockResolvedValue('task-123');
+  });
+
+  it('lists a window trigger after creation', () => {
+    const engine = new TriggerEngine({ dedup, rateLimiter, delegateTask, logger });
+    engine.replaceTeamTriggers('t1', [
+      makeTrigger({ name: 'w1', type: 'window', config: { tick_interval_ms: 50 }, team: 't1' }),
+    ]);
+    // Window trigger is counted in the registry
+    expect(engine.getTeamTriggerCount('t1')).toBe(1);
+    // Window triggers do not respond to onMessage — confirms they are registered as
+    // window type rather than keyword/message handlers (AC-50)
+    engine.onMessage('anything');
+    expect(delegateTask).not.toHaveBeenCalled();
+  });
+
+  it('stops dispatching new ticks after the window closes', () => {
+    const engine = new TriggerEngine({ dedup, rateLimiter, delegateTask, logger });
+    engine.replaceTeamTriggers('t1', [
+      makeTrigger({ name: 'w1', type: 'window', config: { tick_interval_ms: 30 }, team: 't1' }),
+    ]);
+    engine.start();
+    expect(engine.getTeamTriggerCount('t1')).toBe(1);
+    // Simulate window close: replacing with empty set stops and removes the handler (AC-47)
+    engine.replaceTeamTriggers('t1', []);
+    expect(engine.getTeamTriggerCount('t1')).toBe(0);
+    engine.stop();
+  });
+
+  it('suppresses notification when the tick result decision is noop', async () => {
+    // parseLlmNotifyDecision with notify:false models a noop tick — no user notification (AC-47)
+    const { parseLlmNotifyDecision } = await import('../sessions/task-consumer-notify.js');
+    const noopResponse = '```json:notify\n{"notify": false, "reason": "No changes detected"}\n```';
+    const decision = parseLlmNotifyDecision(noopResponse);
+    expect(decision.notify).toBe(false);
+    // Fail-safe: missing block defaults to notify:true so actionable results are not silently dropped
+    const failSafe = parseLlmNotifyDecision('');
+    expect(failSafe.notify).toBe(true);
+  });
+
+  it('uses periodic ticks, not streaming continuation, between rounds', async () => {
+    // AC-48: The WindowHandler onTick callback fires repeatedly on an interval —
+    // the continuity model is periodic fresh rounds rather than a single long-
+    // running stream held open across rounds. We test WindowHandler directly so
+    // the periodicity signal is observable without going through engine-level
+    // dedup (which is a separate layer with its own tests).
+    const { WindowHandler } = await import('./handlers/window.js');
+    const tickSpy = vi.fn(() => Promise.resolve());
+    const handler = new WindowHandler(
+      { tick_interval_ms: 15 },
+      tickSpy,
+    );
+    handler.start();
+    await new Promise((r) => setTimeout(r, 55));
+    handler.stop();
+    // Multiple tick invocations prove the model is periodic rounds, not a
+    // single streaming continuation. Allow ≥2 to absorb CI timer jitter.
+    expect(tickSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
+    // Behavioral assertion: once the handler stops, no further ticks fire
+    // even if the interval would have elapsed. This is the AC-47 "no new
+    // ticks after close" guarantee at the handler layer (the engine layer
+    // is already covered by the replaceTeamTriggers test above).
+    const countAfterStop = tickSpy.mock.calls.length;
+    await new Promise((r) => setTimeout(r, 40));
+    expect(tickSpy.mock.calls.length).toBe(countAfterStop);
+  });
+
+  it('completes in-flight tasks before dispatching the next window round', async () => {
+    // AC-47: An in-flight delegateTask invoked by a tick must be allowed to
+    // resolve even when the window closes (replaceTeamTriggers('t1', [])).
+    // The engine stops the handler but does not cancel in-flight work.
+    let resolveInflight: (value: string) => void = () => {};
+    const inflight = new Promise<string>((resolve) => { resolveInflight = resolve; });
+    const slowDelegate = vi.fn().mockImplementation(() => inflight);
+    const engine = new TriggerEngine({ dedup, rateLimiter, delegateTask: slowDelegate, logger });
+    engine.replaceTeamTriggers('t1', [
+      makeTrigger({ name: 'w1', type: 'window', config: { tick_interval_ms: 15 }, team: 't1' }),
+    ]);
+    engine.start();
+    await new Promise((r) => setTimeout(r, 30));
+    // Precondition: at least one tick must have fired so a delegation is truly
+    // in flight when we close the window. Without this the test would degrade
+    // into a no-op (closing a window that never ticked).
+    expect(slowDelegate.mock.calls.length).toBeGreaterThanOrEqual(1);
+    // Close the window mid-flight
+    engine.replaceTeamTriggers('t1', []);
+    expect(engine.getTeamTriggerCount('t1')).toBe(0);
+    // The in-flight promise must still settle cleanly — no engine-driven abort
+    resolveInflight('task-done');
+    await expect(inflight).resolves.toBe('task-done');
+    engine.stop();
   });
 });

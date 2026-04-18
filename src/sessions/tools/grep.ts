@@ -58,7 +58,7 @@ export function createGrepTool(cwd: string, additionalDirs: string[]) {
       } catch (err: unknown) {
         // rg exits with code 1 when no matches — that's not an error.
         if (
-          err != null &&
+          err !== null &&
           typeof err === 'object' &&
           'code' in err &&
           (err as { code: number }).code === 1

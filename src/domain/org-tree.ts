@@ -88,15 +88,4 @@ export class OrgTree {
   isBootstrapped(teamId: string): boolean {
     return this.store.isBootstrapped(teamId);
   }
-
-  isDescendant(teamId: string, ancestorId: string): boolean {
-    let current = this.nodes.get(teamId);
-
-    while (current?.parentId) {
-      if (current.parentId === ancestorId) return true;
-      current = this.nodes.get(current.parentId);
-    }
-
-    return false;
-  }
 }

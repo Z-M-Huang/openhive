@@ -7,8 +7,7 @@
  *   Query: subagent? — narrow to a single subagent's per-subagent journal
  *
  * The `main` team is excluded from results — main is routing-only (AC-19).
- * Journal keys follow the per-subagent shape `{cycle}:{team}:{subagent}:journal`
- * from `src/domain/journal-keys.ts`.
+ * Journal keys follow the per-subagent shape `{cycle}:{team}:{subagent}:journal`.
  */
 
 import type { FastifyInstance } from 'fastify';

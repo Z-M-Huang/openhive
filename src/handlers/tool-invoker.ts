@@ -79,6 +79,7 @@ export interface OrgToolInvoker {
 
 // ── Build tool definitions ─────────────────────────────────────────────────
 
+// eslint-disable-next-line max-lines-per-function -- Tool registry is a flat list of definitions; splitting would scatter the contract.
 function buildToolDefs(deps: OrgToolDeps): ToolDefinition[] {
   const tools: ToolDefinition[] = [
     {

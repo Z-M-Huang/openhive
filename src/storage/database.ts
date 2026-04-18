@@ -60,8 +60,7 @@ function tableToSQL(table: SQLiteTable): string {
 
     if (col.primary) {
       parts.push('PRIMARY KEY');
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      if ((col as any).autoIncrement) {
+      if ((col as { autoIncrement?: boolean }).autoIncrement) {
         parts.push('AUTOINCREMENT');
       }
     }

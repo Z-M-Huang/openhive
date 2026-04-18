@@ -7,7 +7,7 @@
 
 import { z } from 'zod';
 import type { OrgTree } from '../../domain/org-tree.js';
-import type { ITaskQueueStore } from '../../domain/interfaces.js';
+import type { ITaskQueueStore, IConcurrencyManager } from '../../domain/interfaces.js';
 import { TaskStatus } from '../../domain/types.js';
 
 export const GetStatusInputSchema = z.object({
@@ -16,14 +16,26 @@ export const GetStatusInputSchema = z.object({
 
 export type GetStatusInput = z.infer<typeof GetStatusInputSchema>;
 
+/**
+ * Per-team status block returned by `get_status`.
+ *
+ * Shape matches wiki [[Organization-Tools#get_status]] verbatim:
+ *   { teamId, name, status, active_daily_ops, saturation, org_op_pending,
+ *     queue_depth, current_task?, pending_tasks[] }
+ *
+ * `saturation` is strictly `active_daily_ops >= max_concurrent_daily_ops`
+ * (boolean, never a ratio — ADR-41 / wiki §get_status).
+ */
 export interface TeamStatusInfo {
   readonly teamId: string;
   readonly name: string;
   readonly status: string;
-  readonly queueDepth: number;
-  readonly currentTask: string | null;
-  readonly pendingCount: number;
-  readonly latestResult: string | null;
+  readonly active_daily_ops: number;
+  readonly saturation: boolean;
+  readonly org_op_pending: boolean;
+  readonly queue_depth: number;
+  readonly current_task: string | null;
+  readonly pending_tasks: readonly string[];
 }
 
 export interface GetStatusResult {
@@ -35,6 +47,8 @@ export interface GetStatusResult {
 export interface GetStatusDeps {
   readonly orgTree: OrgTree;
   readonly taskQueue: ITaskQueueStore;
+  /** Live concurrency manager — injected from session context (ADR-41, AC-59). */
+  readonly concurrencyManager?: IConcurrencyManager;
 }
 
 export function getStatus(
@@ -74,32 +88,30 @@ function buildStatusInfo(teamId: string, deps: GetStatusDeps): TeamStatusInfo {
 
   const runningTask = tasks.find((t) => t.status === TaskStatus.Running);
   const pendingTasks = tasks.filter((t) => t.status === TaskStatus.Pending);
-  const completed = tasks.filter((t) => t.status === TaskStatus.Done || t.status === TaskStatus.Failed);
-  const latest = completed.sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
 
   // Redact bootstrap tasks — hide implementation details from parent agents
   const currentTask = runningTask
     ? runningTask.type === 'bootstrap' ? '(initializing)' : runningTask.task
     : null;
 
-  let latestResult: string | null = null;
-  if (latest) {
-    if (latest.type === 'bootstrap') {
-      latestResult = latest.status === TaskStatus.Done
-        ? 'Bootstrapped successfully'
-        : 'Bootstrap failed';
-    } else {
-      latestResult = latest.result ?? null;
-    }
-  }
+  // Concurrency snapshot is PER-TARGET (ADR-41, AC-54): one saturated team
+  // must not mask another. Falls back to a zeroed snapshot when the manager
+  // is not wired (tests, bootstrap path).
+  const snapshot = deps.concurrencyManager?.getSnapshot(teamId) ?? {
+    active_daily_ops: 0,
+    saturation: false,
+    org_op_pending: false,
+  };
 
   return {
     teamId,
     name: team?.name ?? teamId,
     status: team?.status ?? 'unknown',
-    queueDepth: tasks.length,
-    currentTask,
-    pendingCount: pendingTasks.length,
-    latestResult,
+    active_daily_ops: snapshot.active_daily_ops,
+    saturation: snapshot.saturation,
+    org_op_pending: snapshot.org_op_pending,
+    queue_depth: tasks.length,
+    current_task: currentTask,
+    pending_tasks: pendingTasks.map((t) => t.task),
   };
 }

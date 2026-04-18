@@ -10,7 +10,7 @@ import { validateSubagent, type LoadSubagentsFn } from './validate-subagent.js';
 export const CreateTriggerInputSchema = z.object({
   team: z.string().min(1),
   name: z.string().min(1).regex(/^[a-z0-9]+(-[a-z0-9]+)*$/, 'trigger name must be a lowercase slug'),
-  type: z.enum(['schedule', 'keyword', 'message']),
+  type: z.enum(['schedule', 'keyword', 'message', 'window']),
   config: z.record(z.unknown()),
   task: z.string().min(1),
   skill: z.string().optional(),

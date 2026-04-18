@@ -16,12 +16,15 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { assembleTools } from './tool-assembler.js';
+import { assembleTools, TOOL_CLASSIFICATION, withConcurrencyAdmission } from './tool-assembler.js';
 import { buildProviderRegistry } from './provider-registry.js';
 import { buildSessionContext } from './context-builder.js';
 import type { MessageHandlerDeps } from './message-handler.js';
 import type { TeamConfig } from '../domain/types.js';
 import type { IPluginToolStore, PluginToolMeta } from '../domain/interfaces.js';
+import type { TeamQueryRunner } from './tools/org-tool-context.js';
+import type { IConcurrencyManager } from '../domain/interfaces.js';
+import { ConcurrencyManager } from '../domain/concurrency-manager.js';
 
 /** Test-only placeholder. Not a real key. */
 const TEST_KEY_VALUE = 'test-placeholder-key-not-real';
@@ -171,8 +174,6 @@ describe('assembleTools ADR-40 — no orchestrator plugins', () => {
       [],
       undefined,
       store,
-      undefined /* skillName */,
-      undefined /* subagent */,
     );
 
     const keys = Object.keys(result.allTools);
@@ -196,8 +197,6 @@ describe('assembleTools ADR-40 — no orchestrator plugins', () => {
       [],
       undefined,
       store,
-      'alert-check' /* skillName */,
-      undefined /* subagent */,
     );
 
     expect(Object.keys(result.allTools)).not.toContain('ops.query_loggly');
@@ -220,10 +219,335 @@ describe('assembleTools ADR-40 — no orchestrator plugins', () => {
       [],
       undefined,
       store,
-      undefined /* skillName */,
-      'loggly-monitor' /* subagent */,
     );
 
     expect(Object.keys(result.allTools)).not.toContain('ops.query_loggly');
+  });
+});
+
+// ── Audit wrapping for query_teams (AC-16) ────────────────────────────────────
+
+describe('tool-assembler audit wrap', () => {
+  const runDirs: string[] = [];
+
+  afterEach(() => {
+    for (const d of runDirs.splice(0)) {
+      rmSync(d, { recursive: true, force: true });
+    }
+  });
+
+  it('wraps query_teams execute with the central audit layer', async () => {
+    const runDir = mkdtempSync(join(tmpdir(), 'audit-wrap-'));
+    runDirs.push(runDir);
+
+    const queryRunner: TeamQueryRunner = async () => 'ok';
+    const deps: MessageHandlerDeps = { ...makeDeps(runDir), queryRunner };
+
+    const result = await assembleTools(
+      makeTeamConfig('ops'),
+      'ops',
+      deps,
+      makeRegistry(),
+      'default',
+      'claude-test',
+      makeCtx(runDir),
+      [],
+      [],
+      undefined,
+      undefined,
+    );
+
+    const allTools = result.allTools as Record<string, Record<string, unknown>>;
+
+    // query_teams must be present when queryRunner is provided
+    expect(allTools['query_teams']).toBeDefined();
+
+    // The execute function must have been replaced by the central wrapAudit wrapper,
+    // which logs ToolCall:start / ToolCall:end events in its body.
+    const executeStr = String(allTools['query_teams'].execute);
+    expect(executeStr).toMatch(/ToolCall/);
+  });
+});
+
+// ── Central concurrency admission (ADR-41, Unit 29) ─────────────────────────
+
+describe('central concurrency admission', () => {
+  it('maps every resolved tool name to exactly one class', () => {
+    for (const name of Object.keys(TOOL_CLASSIFICATION)) {
+      expect(['daily', 'org']).toContain(TOOL_CLASSIFICATION[name]);
+    }
+  });
+
+  it('classifies spawn_team as org-op per ADR-41', () => {
+    expect(TOOL_CLASSIFICATION['spawn_team']).toBe('org');
+  });
+
+  it('classifies query_team as daily-op per ADR-41', () => {
+    expect(TOOL_CLASSIFICATION['query_team']).toBe('daily');
+  });
+
+  it('records classification for the disputed tools (query_teams, enqueue_parent_task, create_trigger, update_trigger, disable_trigger)', () => {
+    for (const name of ['query_teams', 'enqueue_parent_task', 'create_trigger', 'update_trigger', 'disable_trigger']) {
+      expect(TOOL_CLASSIFICATION[name]).toBeDefined();
+    }
+  });
+
+  it('rejects an additional daily-op call once the pool is saturated', async () => {
+    // Test withConcurrencyAdmission directly: when acquireDaily returns ok=false the
+    // wrapper must return { success: false, retry_after_ms } without calling the tool.
+    const mockTool = {
+      // Signature mirrors AI SDK tool.execute(input, ctx); params are declared only to
+      // match the typed call site below but are never read because the admission wrapper
+      // short-circuits before dispatch when the daily-op pool is saturated.
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      execute: async (_input: unknown, _ctx: unknown) =>
+        ({ success: true, data: 'should-not-reach' } as unknown as { success: boolean; retry_after_ms?: number }),
+    };
+    const mockMgr: IConcurrencyManager = {
+      acquireDaily: () => ({ ok: false, retry_after_ms: 1000 }),
+      releaseDaily: () => {},
+      acquireOrg: () => ({ ok: true }),
+      releaseOrg: () => {},
+      getSnapshot: () => ({ active_daily_ops: 5, saturation: true, org_op_pending: false }),
+      setTeamCap: () => {},
+    };
+    const wrapped = withConcurrencyAdmission(
+      'query_team',
+      mockTool,
+      mockMgr,
+      (_input, callerId) => callerId,
+    );
+    const result = await wrapped.execute(
+      { teamId: 't1', query: 'x' },
+      {},
+    );
+    expect(result.success).toBe(false);
+    expect(result.retry_after_ms).toBe(1000);
+  });
+});
+
+// ── enqueue_parent_task registry integrity (R11b) ─────────────────────────
+
+describe('enqueue_parent_task runtime registration', () => {
+  const runDirs: string[] = [];
+
+  afterEach(() => {
+    for (const d of runDirs.splice(0)) {
+      rmSync(d, { recursive: true, force: true });
+    }
+  });
+
+  it('is registered in the assembled tool set and routed through audit', async () => {
+    const runDir = mkdtempSync(join(tmpdir(), 'enq-reg-'));
+    runDirs.push(runDir);
+
+    const result = await assembleTools(
+      makeTeamConfig('ops'),
+      'ops',
+      makeDeps(runDir),
+      makeRegistry(),
+      'default',
+      'claude-test',
+      makeCtx(runDir),
+      [],
+      [],
+      undefined,
+      undefined,
+    );
+
+    const allTools = result.allTools as Record<string, Record<string, unknown>>;
+    expect(allTools['enqueue_parent_task']).toBeDefined();
+    expect(typeof allTools['enqueue_parent_task'].execute).toBe('function');
+    // Audit wrapper leaves a ToolCall marker in the wrapped execute source.
+    expect(String(allTools['enqueue_parent_task'].execute)).toMatch(/ToolCall/);
+  });
+});
+
+// ── Concurrency admission wired through assembleTools (R11a) ────────────────
+
+describe('concurrency admission integration via assembleTools', () => {
+  const runDirs: string[] = [];
+
+  afterEach(() => {
+    for (const d of runDirs.splice(0)) {
+      rmSync(d, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a saturated daily-op tool call with { success:false, retry_after_ms }', async () => {
+    const runDir = mkdtempSync(join(tmpdir(), 'conc-int-'));
+    runDirs.push(runDir);
+
+    // Real manager, cap=1 so a single external acquire saturates the team.
+    const mgr = new ConcurrencyManager({ maxConcurrentDailyOps: 1 });
+    const queryRunner: TeamQueryRunner = async () => 'unreachable';
+
+    const deps: MessageHandlerDeps = {
+      ...makeDeps(runDir),
+      queryRunner,
+      concurrencyManager: mgr,
+    };
+
+    const assembled = await assembleTools(
+      makeTeamConfig('ops'),
+      'ops',
+      deps,
+      makeRegistry(),
+      'default',
+      'claude-test',
+      makeCtx(runDir),
+      [],
+      [],
+      undefined,
+      undefined,
+    );
+
+    // Saturate pool for team 'ops' by taking the only daily slot.
+    const held = mgr.acquireDaily('ops');
+    expect(held.ok).toBe(true);
+
+    const allTools = assembled.allTools as unknown as Record<
+      string,
+      { execute: (input: unknown, ctx: unknown) => Promise<unknown> }
+    >;
+    const queryTeamTool = allTools['query_team'];
+    expect(queryTeamTool).toBeDefined();
+
+    // With pool saturated, admission must short-circuit before queryRunner.
+    const result = (await queryTeamTool.execute(
+      { team: 'child', query: 'hi' },
+      {},
+    )) as { success: boolean; retry_after_ms?: number };
+
+    expect(result.success).toBe(false);
+    expect(result.retry_after_ms).toBe(5_000);
+
+    // Releasing the external slot returns the pool to available (snapshot
+    // check is sufficient — verifies admission is driven by the real manager
+    // state, not static test fixtures).
+    mgr.releaseDaily('ops');
+    expect(mgr.getSnapshot('ops').saturation).toBe(false);
+  });
+});
+
+// ── Disputed tool classification (Unit 30 — ADR-41 commit) ──────────────────
+
+describe('disputed tool classification', () => {
+  for (const name of ['query_teams', 'enqueue_parent_task', 'create_trigger', 'update_trigger', 'disable_trigger']) {
+    it(`${name} has a recorded classification`, () => {
+      expect(TOOL_CLASSIFICATION[name]).toMatch(/daily|org/);
+    });
+  }
+});
+
+// ── web_fetch rate limiter wired via teamConfig.rate_limit_buckets (R11d) ───
+
+describe('web_fetch rate limiter wired via teamConfig.rate_limit_buckets', () => {
+  const runDirs: string[] = [];
+  let originalFetch: typeof globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    for (const d of runDirs.splice(0)) {
+      rmSync(d, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a web_fetch call for a domain whose bucket is exhausted', async () => {
+    const runDir = mkdtempSync(join(tmpdir(), 'rl-wired-'));
+    runDirs.push(runDir);
+
+    originalFetch = globalThis.fetch;
+    // Stub fetch — rejected calls must NOT reach the network.
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls++;
+      return new Response('ok', { status: 200 });
+    }) as typeof globalThis.fetch;
+
+    // burst=1, rps tiny: first call succeeds, second is rejected with no meaningful refill.
+    const teamConfig: TeamConfig = {
+      ...makeTeamConfig('ops'),
+      rate_limit_buckets: {
+        'example.com': { rps: 0.001, burst: 1 },
+      },
+    };
+
+    const assembled = await assembleTools(
+      teamConfig,
+      'ops',
+      makeDeps(runDir),
+      makeRegistry(),
+      'default',
+      'claude-test',
+      makeCtx(runDir),
+      [],
+      [],
+      undefined,
+      undefined,
+    );
+
+    const allTools = assembled.allTools as unknown as Record<
+      string,
+      { execute: (input: unknown, ctx: unknown) => Promise<unknown> }
+    >;
+    const webFetch = allTools['web_fetch'];
+    expect(webFetch).toBeDefined();
+
+    // Burst=1: first call is allowed and reaches the stubbed fetch.
+    const first = (await webFetch.execute(
+      { url: 'https://example.com/' },
+      {},
+    )) as { success: boolean };
+    expect(first.success).toBe(true);
+    expect(fetchCalls).toBe(1);
+
+    // Second call is rate-limited before fetch runs.
+    const second = (await webFetch.execute(
+      { url: 'https://example.com/' },
+      {},
+    )) as { success: boolean; retry_after_ms?: number; error?: string };
+    expect(second.success).toBe(false);
+    expect(second.retry_after_ms).toBeGreaterThan(0);
+    expect(second.error).toMatch(/rate limit/i);
+    expect(fetchCalls).toBe(1);
+  });
+
+  it('leaves web_fetch unrestricted when teamConfig has no rate_limit_buckets', async () => {
+    const runDir = mkdtempSync(join(tmpdir(), 'rl-none-'));
+    runDirs.push(runDir);
+
+    originalFetch = globalThis.fetch;
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls++;
+      return new Response('ok', { status: 200 });
+    }) as typeof globalThis.fetch;
+
+    const assembled = await assembleTools(
+      makeTeamConfig('ops'),
+      'ops',
+      makeDeps(runDir),
+      makeRegistry(),
+      'default',
+      'claude-test',
+      makeCtx(runDir),
+      [],
+      [],
+      undefined,
+      undefined,
+    );
+
+    const allTools = assembled.allTools as unknown as Record<
+      string,
+      { execute: (input: unknown, ctx: unknown) => Promise<unknown> }
+    >;
+    const webFetch = allTools['web_fetch'];
+
+    // All three calls reach fetch — no bucket is enforcing a quota.
+    await webFetch.execute({ url: 'https://example.com/a' }, {});
+    await webFetch.execute({ url: 'https://example.com/b' }, {});
+    await webFetch.execute({ url: 'https://example.com/c' }, {});
+    expect(fetchCalls).toBe(3);
   });
 });

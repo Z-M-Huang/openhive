@@ -156,6 +156,7 @@ export class DiscordAdapter implements IChannelAdapter {
     });
   }
 
+  // eslint-disable-next-line complexity -- Sequential validation + dispatch flow; splitting would fragment the read.
   async #handleMessage(message: DiscordMessage): Promise<void> {
     if (message.author.bot) return;
     if (this.#watchedChannelIds && !this.#watchedChannelIds.has(message.channelId)) return;
@@ -195,7 +196,9 @@ export class DiscordAdapter implements IChannelAdapter {
           }
         };
         const raw = await this.#directHandler(msg, sendProgress);
-        if (ackPromise) await ackPromise; // wait for ack outcome before dedup
+        if (ackPromise !== null) {
+          await (ackPromise as Promise<void>); // wait for ack outcome before dedup
+        }
 
         // Normalize to array of results (multi-topic or single)
         type ResultEntry = { response: string; topicId?: string; topicName?: string };

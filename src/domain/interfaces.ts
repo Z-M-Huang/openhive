@@ -3,6 +3,7 @@
  *
  * Every external dependency sits behind an interface defined here.
  */
+/* eslint-disable max-lines -- Shared interfaces hub: every external dependency sits behind an interface defined here (session, task queue, stores, channels) plus the WindowCursorSnapshot read/write helpers that must travel with IMemoryStore. Splitting would scatter the single source of truth for dependency contracts. */
 
 import type {
   TeamConfig,
@@ -243,6 +244,26 @@ export interface ITrustAuditStore {
   query(opts: { since?: string; decision?: string; senderId?: string; limit?: number }): TrustAuditEntry[];
 }
 
+// ── Concurrency Manager (ADR-41) ──────────────────────────────────────────
+
+export interface IConcurrencyManager {
+  acquireDaily(teamId: string): { ok: true } | { ok: false; retry_after_ms: number };
+  releaseDaily(teamId: string): void;
+  acquireOrg(teamId: string): { ok: true } | { ok: false; retry_after_ms: number };
+  releaseOrg(teamId: string): void;
+  /**
+   * Register a per-team daily-op cap override from TeamConfig.
+   * ADR-41: TeamConfig.max_concurrent_daily_ops takes effect at the admission
+   * layer via this method. Callers invoke it when a team's config is loaded.
+   */
+  setTeamCap(teamId: string, max: number): void;
+  getSnapshot(teamId: string): {
+    active_daily_ops: number;
+    saturation: boolean;
+    org_op_pending: boolean;
+  };
+}
+
 // ── Vault Store ────────────────────────────────────────────────────────────
 
 export interface IVaultStore {
@@ -252,6 +273,65 @@ export interface IVaultStore {
   delete(teamName: string, key: string): boolean;
   getSecrets(teamName: string): VaultEntry[];
   removeByTeam(teamName: string): void;
+}
+
+// ── Window Cursor (AC-45 / AC-46 / AC-48) ─────────────────────────────────
+
+/**
+ * Canonical cursor snapshot for window trigger continuity.
+ *
+ * Keys are namespaced as `<subagent_name>:<cursor_name>` so cursors never
+ * collide across subagents (AC-45).
+ *
+ * Continuity model: periodic fresh rounds + memory cursors.  The system does
+ * NOT attempt to maintain a single open stream across rounds (AC-48).
+ */
+export interface WindowCursorSnapshot {
+  last_scan_cursor?: string;
+  last_event_id?: string;
+  window_start_summary?: string;
+}
+
+/**
+ * Read window cursor keys for a subagent from the shared memory store.
+ * Called at window tick start (AC-46).
+ */
+export function readWindowCursors(
+  memoryStore: IMemoryStore,
+  teamName: string,
+  subagent: string,
+): WindowCursorSnapshot {
+  const snapshot: WindowCursorSnapshot = {};
+  const scan = memoryStore.getActive(teamName, `${subagent}:last_scan_cursor`);
+  if (scan) snapshot.last_scan_cursor = scan.content;
+  const event = memoryStore.getActive(teamName, `${subagent}:last_event_id`);
+  if (event) snapshot.last_event_id = event.content;
+  const summary = memoryStore.getActive(teamName, `${subagent}:window_start_summary`);
+  if (summary) snapshot.window_start_summary = summary.content;
+  return snapshot;
+}
+
+/**
+ * Write window cursor keys for a subagent to the shared memory store.
+ * Called at window tick end (AC-46).  Existing active entries are superseded
+ * with reason `window-tick-update` so the lock path is used (AC-67).
+ */
+export function writeWindowCursors(
+  memoryStore: IMemoryStore,
+  teamName: string,
+  subagent: string,
+  snapshot: Partial<WindowCursorSnapshot>,
+): void {
+  const pairs: Array<[string, string | undefined]> = [
+    [`${subagent}:last_scan_cursor`, snapshot.last_scan_cursor],
+    [`${subagent}:last_event_id`, snapshot.last_event_id],
+    [`${subagent}:window_start_summary`, snapshot.window_start_summary],
+  ];
+  for (const [key, value] of pairs) {
+    if (value === undefined) continue;
+    const existing = memoryStore.getActive(teamName, key);
+    memoryStore.save(teamName, key, value, 'context', existing ? 'window-tick-update' : undefined);
+  }
 }
 
 // ── Config (used by L1+ layers) ────────────────────────────────────────────

@@ -149,6 +149,34 @@ describe('parseLlmNotifyDecision', () => {
       reason: 'routine data, no anomalies',
     });
   });
+
+  // ── No-op tick contract (ADR-42) ────────────────────────────────────────────
+
+  it('returns {notify: false, reason: "noop"} when the response contains {"action":"noop"}', () => {
+    const result = parseLlmNotifyDecision('Window checked. No changes detected.\n\n{"action":"noop"}');
+    expect(result).toEqual({ notify: false, reason: 'noop' });
+  });
+
+  it('detects noop inside a code-fenced json block', () => {
+    const text = 'No new updates.\n\n```json\n{"action":"noop"}\n```';
+    expect(parseLlmNotifyDecision(text)).toEqual({ notify: false, reason: 'noop' });
+  });
+
+  it('detects noop when extra fields are present in the action object', () => {
+    const text = '{"action":"noop", "reason":"no diff since last tick"}';
+    expect(parseLlmNotifyDecision(text)).toEqual({ notify: false, reason: 'noop' });
+  });
+
+  it('noop action takes precedence over a notify-true block', () => {
+    const text = `Some content.
+
+{"action":"noop"}
+
+\`\`\`json:notify
+{"notify": true, "reason": "would have notified"}
+\`\`\``;
+    expect(parseLlmNotifyDecision(text)).toEqual({ notify: false, reason: 'noop' });
+  });
 });
 
 // ── stripNotifyBlock ────────────────────────────────────────────────────────

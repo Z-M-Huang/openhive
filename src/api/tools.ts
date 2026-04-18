@@ -19,6 +19,7 @@ import type { FastifyInstance } from 'fastify';
 import type { IPluginToolStore } from '../domain/interfaces.js';
 import { errorMessage } from '../domain/errors.js';
 
+// eslint-disable-next-line max-lines-per-function -- Route registration is a flat list of HTTP handlers; splitting into helpers would obscure the API surface.
 export function registerToolRoutes(
   fastify: FastifyInstance,
   pluginToolStore: IPluginToolStore,

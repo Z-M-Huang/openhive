@@ -8,28 +8,12 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { buildSkillRepoTools } from './skill-repo-tool.js';
 import { validateBrowserUrl } from './url-validator.js';
-import type { OrgToolContext } from './org-tool-context.js';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-function createMockContext(): OrgToolContext {
-  return {
-    teamName: 'test-team',
-    orgTree: {} as OrgToolContext['orgTree'],
-    spawner: { spawn: vi.fn().mockResolvedValue('') },
-    sessionManager: { getSession: vi.fn(), terminateSession: vi.fn() },
-    taskQueue: {} as OrgToolContext['taskQueue'],
-    escalationStore: {} as OrgToolContext['escalationStore'],
-    runDir: '/tmp/test',
-    loadConfig: vi.fn(),
-    getTeamConfig: vi.fn(),
-    log: vi.fn(),
-  };
-}
-
 /** Extract the execute function from the built tool. */
-function getExecute(ctx?: OrgToolContext) {
-  const tools = buildSkillRepoTools(ctx ?? createMockContext());
+function getExecute() {
+  const tools = buildSkillRepoTools();
   const t = tools.search_skill_repository as unknown as { execute: (input: Record<string, unknown>) => Promise<unknown> };
   return t.execute;
 }

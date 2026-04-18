@@ -3,17 +3,17 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 describe('version clean start', () => {
-  it('package.json version should be 0.5.0', () => {
+  it('package.json version should be 0.5.1', () => {
     const pkgPath = path.join(__dirname, '..', 'package.json');
-    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
-    expect(pkg.version).toBe('0.5.0');
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8')) as { version: string };
+    expect(pkg.version).toBe('0.5.1');
   });
 
   it('README.md should not reference v4 or v3 in title', () => {
     const readmePath = path.join(__dirname, '..', 'README.md');
     const readme = fs.readFileSync(readmePath, 'utf-8');
     const firstLine = readme.split('\n')[0];
-    expect(firstLine).toContain('OpenHive v0.5.0');
+    expect(firstLine).toContain('OpenHive v0.5.1');
     expect(firstLine).not.toContain('v4');
     expect(firstLine).not.toContain('v3');
   });
@@ -24,19 +24,19 @@ describe('version clean start', () => {
     expect(readme).not.toContain('Changes from v3');
   });
 
-  it('src/index.ts header comment should reference v0.5.0', () => {
+  it('src/index.ts header comment should reference v0.5.1', () => {
     const indexPath = path.join(__dirname, 'index.ts');
     const index = fs.readFileSync(indexPath, 'utf-8');
     const firstLine = index.split('\n')[0];
-    expect(firstLine).toContain('OpenHive v0.5.0');
+    expect(firstLine).toContain('OpenHive v0.5.1');
     expect(firstLine).not.toContain('v4');
     expect(firstLine).not.toContain('v3');
   });
 
-  it('src/index.ts startup log should contain 0.5.0', () => {
+  it('src/index.ts startup log should contain 0.5.1', () => {
     const indexPath = path.join(__dirname, 'index.ts');
     const index = fs.readFileSync(indexPath, 'utf-8');
-    expect(index).toContain('OpenHive v0.5.0 started');
+    expect(index).toContain('OpenHive v0.5.1 started');
     expect(index).not.toContain('v4.6.0');
     expect(index).not.toContain('v4.6.1');
   });
@@ -57,7 +57,7 @@ describe('version clean start', () => {
 
   it('package.json should not have v4 version string', () => {
     const pkgPath = path.join(__dirname, '..', 'package.json');
-    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8')) as { version: string };
     expect(pkg.version).not.toBe('4.6.1');
     expect(pkg.version).not.toContain('v4');
   });
@@ -91,6 +91,6 @@ describe('version clean start', () => {
     const startupLog = startupLogMatch![0];
     expect(startupLog).not.toMatch(/v4\b/);
     expect(startupLog).not.toMatch(/v3\b/);
-    expect(startupLog).toContain('0.5.0');
+    expect(startupLog).toContain('0.5.1');
   });
 });

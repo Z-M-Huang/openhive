@@ -20,14 +20,14 @@ import type { TrustEvalResult } from './channels/trust-gate.js';
 
 const mockHandleMessage = vi.fn().mockResolvedValue({ ok: true, content: 'Hello' });
 vi.mock('./sessions/message-handler.js', () => ({
-  handleMessage: (...args: unknown[]) => mockHandleMessage(...args),
+  handleMessage: (...args: unknown[]): unknown => mockHandleMessage(...args),
 }));
 
 // ── Mock evaluateTrust ──────────────────────────────────────────────────
 
 const mockEvaluateTrust = vi.fn().mockReturnValue({ decision: 'allow', reason: 'no_trust_config' } satisfies TrustEvalResult);
 vi.mock('./channels/trust-gate.js', () => ({
-  evaluateTrust: (...args: unknown[]) => mockEvaluateTrust(...(args as [])),
+  evaluateTrust: (...args: unknown[]): unknown => mockEvaluateTrust(...(args as [])),
 }));
 
 // ── Mock classifyTopics ─────────────────────────────────────────────────
@@ -37,7 +37,7 @@ vi.mock('./sessions/topic-classifier.js', async (importOriginal) => {
   const orig = await importOriginal<typeof import('./sessions/topic-classifier.js')>();
   return {
     ...orig,
-    classifyTopics: (...args: unknown[]) => mockClassifyTopics(...args),
+    classifyTopics: (...args: unknown[]): unknown => mockClassifyTopics(...args),
   };
 });
 

@@ -11,7 +11,6 @@
 import { z } from 'zod';
 import { tool } from 'ai';
 import type { ToolSet } from 'ai';
-import type { OrgToolContext } from './org-tool-context.js';
 import { validateBrowserUrl } from './url-validator.js';
 // Note: withAudit wrapping is applied centrally in message-handler.ts.
 // Do NOT add withAudit here — it would cause double-wrapping.
@@ -32,18 +31,44 @@ const WebFetchInputSchema = z.object({
     .describe('Timeout in milliseconds (default: 30000, max: 60000)'),
 });
 
+export interface WebFetchToolOpts {
+  /** Override fetch (for tests). Defaults to globalThis.fetch. */
+  readonly fetch?: typeof globalThis.fetch;
+  /** Optional per-domain rate limiter (ADR-41). When present, consume() runs after SSRF, before fetch. */
+  readonly rateLimiter?: {
+    consume(domain: string): { ok: true } | { ok: false; retry_after_ms: number };
+  };
+}
+
 // ── Builder ────────────────────────────────────────────────────────────────
 
 /**
  * Build the web_fetch tool as an AI SDK inline tool definition.
  * Returns a ToolSet with a single `web_fetch` key.
  */
-export function buildWebFetchTool(ctx: OrgToolContext): ToolSet {
-  const execute = async (input: z.infer<typeof WebFetchInputSchema>): Promise<unknown> => {
+// eslint-disable-next-line max-lines-per-function -- Inline web_fetch tool wires SSRF guard, rate limiter, and stream/truncation in one factory.
+export function buildWebFetchTool(opts: WebFetchToolOpts = {}): ToolSet {
+  const fetchFn = opts.fetch ?? globalThis.fetch;
+  const rateLimiter = opts.rateLimiter;
+
+  const execute = async (input: z.infer<typeof WebFetchInputSchema>): Promise<Record<string, unknown>> => {
     // SSRF protection: validate URL scheme + private IP check
     const validation = validateBrowserUrl(input.url);
     if (!validation.allowed) {
       return { success: false, error: validation.reason ?? 'URL not allowed' };
+    }
+
+    // Domain rate limiting (ADR-41) — runs after SSRF, before network I/O
+    if (rateLimiter) {
+      const hostname = new URL(input.url).hostname;
+      const decision = rateLimiter.consume(hostname);
+      if (!decision.ok) {
+        return {
+          success: false,
+          error: `Rate limit exceeded for ${hostname}`,
+          retry_after_ms: decision.retry_after_ms,
+        };
+      }
     }
 
     const timeoutMs = Math.min(input.timeout_ms ?? DEFAULT_TIMEOUT_MS, 60_000);
@@ -51,7 +76,7 @@ export function buildWebFetchTool(ctx: OrgToolContext): ToolSet {
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
-      const response = await fetch(input.url, {
+      const response = await fetchFn(input.url, {
         method: input.method ?? 'GET',
         headers: input.headers,
         body: input.body,
@@ -75,19 +100,19 @@ export function buildWebFetchTool(ctx: OrgToolContext): ToolSet {
       let totalBytes = 0;
       let truncated = false;
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+      let chunk = await reader.read();
+      while (!chunk.done) {
+        const { value } = chunk;
         totalBytes += value.byteLength;
         if (totalBytes > MAX_BODY_BYTES) {
           truncated = true;
-          // Keep only up to the cap
           const excess = totalBytes - MAX_BODY_BYTES;
           chunks.push(value.slice(0, value.byteLength - excess));
           reader.cancel().catch(() => {});
           break;
         }
         chunks.push(value);
+        chunk = await reader.read();
       }
 
       const body = new TextDecoder().decode(

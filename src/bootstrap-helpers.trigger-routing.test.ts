@@ -100,7 +100,8 @@ describe('initTriggerEngine delegateTask wrapper', () => {
     engine.onMessage('please research this');
 
     expect(enqueue).toHaveBeenCalledTimes(1);
-    const [team, task, priority, type, sourceChannelId, correlationId, options] = enqueue.mock.calls[0];
+    const [team, task, priority, type, sourceChannelId, correlationId, options] =
+      enqueue.mock.calls[0] as [string, string, string, string, string | undefined, string | undefined, Record<string, unknown>];
     expect(team).toBe('analysis-team');
     expect(task).toBe('run research');
     expect(priority).toBe('normal');
@@ -141,7 +142,7 @@ describe('initTriggerEngine delegateTask wrapper', () => {
     engine.onMessage('trigger bare');
 
     expect(enqueue).toHaveBeenCalledTimes(1);
-    const options = enqueue.mock.calls[0][6];
+    const options = enqueue.mock.calls[0][6] as unknown;
     expect(options).toBeUndefined();
   });
 
@@ -193,7 +194,7 @@ describe('initTriggerEngine delegateTask wrapper', () => {
     engine.onMessage('x trigger');
 
     expect(enqueue).toHaveBeenCalledTimes(1);
-    const options = enqueue.mock.calls[0][6];
+    const options = enqueue.mock.calls[0][6] as unknown;
     expect(options).toEqual(expect.objectContaining({ subagent: 'analyst' }));
   });
 });

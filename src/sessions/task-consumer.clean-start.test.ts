@@ -17,7 +17,7 @@ vi.mock('./message-handler.js', async (importOriginal) => {
   const orig = await importOriginal<typeof import('./message-handler.js')>();
   return {
     ...orig,
-    handleMessage: (...args: unknown[]) => mockHandleMessage(...args),
+    handleMessage: (...args: unknown[]): unknown => mockHandleMessage(...args),
   };
 });
 
@@ -118,7 +118,7 @@ describe('TaskConsumer clean-start subagent forwarding', () => {
     await flushTick(consumer);
 
     expect(mockHandleMessage).toHaveBeenCalledTimes(1);
-    const callArgs = mockHandleMessage.mock.calls[0];
+    const callArgs = mockHandleMessage.mock.calls[0] as unknown[];
     const opts = callArgs[2];
     expect(opts).toEqual(expect.objectContaining({
       teamName: 'weather-team',
@@ -179,7 +179,7 @@ describe('TaskConsumer clean-start subagent forwarding', () => {
     await flushTick(consumer);
 
     expect(mockHandleMessage).toHaveBeenCalledTimes(1);
-    const opts = mockHandleMessage.mock.calls[0][2];
+    const opts = mockHandleMessage.mock.calls[0][2] as { subagent?: string; maxSteps?: number };
     expect(opts.subagent).toBeUndefined();
     expect(opts.maxSteps).toBe(10);
   });

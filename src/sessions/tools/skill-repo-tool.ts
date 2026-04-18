@@ -13,7 +13,6 @@
 import { z } from 'zod';
 import { tool } from 'ai';
 import type { ToolSet } from 'ai';
-import type { OrgToolContext } from './org-tool-context.js';
 import { validateBrowserUrl } from './url-validator.js';
 import { safeJsonParse } from '../../domain/safe-json.js';
 
@@ -33,7 +32,7 @@ const SkillSearchInputSchema = z.object({
  * Build the search_skill_repository tool as an AI SDK inline tool definition.
  * Returns a ToolSet with a single `search_skill_repository` key.
  */
-export function buildSkillRepoTools(_ctx: OrgToolContext): ToolSet {
+export function buildSkillRepoTools(): ToolSet {
   const execute = async (input: z.infer<typeof SkillSearchInputSchema>): Promise<unknown> => {
     try {
       // SSRF defense-in-depth (hardcoded URL, but validate pattern)

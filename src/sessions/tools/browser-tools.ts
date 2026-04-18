@@ -66,6 +66,7 @@ const TypeSchema = z.object({
  * Returns a ToolSet keyed by bare tool name, sorted alphabetically.
  * Returns empty `{}` when `ctx.browserRelay` is unavailable.
  */
+// eslint-disable-next-line max-lines-per-function -- Tool factory enumerates 8 browser tools inline; refactor would obscure the toolset.
 export function buildBrowserTools(ctx: OrgToolContext): ToolSet {
   if (!ctx.browserRelay?.available) return {};
 

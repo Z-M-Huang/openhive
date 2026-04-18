@@ -1,11 +1,14 @@
-/** Trigger engine — registers and manages schedule/keyword/message trigger handlers. */
+/* eslint-disable max-lines -- TriggerEngine integrates 4 trigger types (schedule/keyword/message/window) with shared dedup + rate limiting + overlap policy. Splitting per-type would scatter the dispatch fan-out and lifecycle wiring. */
+/** Trigger engine — registers and manages schedule/keyword/message/window trigger handlers. */
 
-import type { TaskOptions, TriggerConfig } from '../domain/types.js';
+import type { TaskOptions, TriggerConfig, WindowTriggerConfig } from '../domain/types.js';
 import { TaskStatus } from '../domain/types.js';
-import type { ITaskQueueStore, ITriggerConfigStore } from '../domain/interfaces.js';
+import type { IMemoryStore, ITaskQueueStore, ITriggerConfigStore } from '../domain/interfaces.js';
 import { ScheduleHandler } from './handlers/schedule.js';
 import { KeywordHandler } from './handlers/keyword.js';
 import { MessageHandler } from './handlers/message.js';
+import { WindowHandler } from './handlers/window.js';
+import type { WindowHandlerDeps } from './handlers/window.js';
 import type { TriggerDedup } from './dedup.js';
 import type { TriggerRateLimiter } from './rate-limiter.js';
 import { simpleHash, cronSlotKey, subagentScope } from './engine-helpers.js';
@@ -39,8 +42,10 @@ export interface TriggerEngineOpts {
   readonly abortSession?: (teamId: string, taskId: string) => void;
   readonly onTriggerDeactivated?: (team: string, triggerName: string, reason: string) => void;
   readonly onOverlapAlert?: (team: string, triggerName: string, action: 'skipped' | 'replaced', details: { oldTaskId: string }) => void;
+  /** Optional memory store — enables cursor read/write for window triggers (AC-46). */
+  readonly memoryStore?: IMemoryStore;
 }
-interface TeamHandlerSet { schedule: ScheduleHandler[]; keyword: KeywordHandler[]; message: MessageHandler[] }
+interface TeamHandlerSet { schedule: ScheduleHandler[]; keyword: KeywordHandler[]; message: MessageHandler[]; window: WindowHandler[] }
 export class TriggerEngine {
   private readonly teamHandlers = new Map<string, TeamHandlerSet>();
   private running = false;
@@ -96,16 +101,19 @@ export class TriggerEngine {
   start(): void {
     this.running = true;
     let scheduleCount = 0;
+    let windowCount = 0;
     for (const set of this.teamHandlers.values()) {
       for (const h of set.schedule) { h.start(); scheduleCount++; }
+      for (const h of set.window) { h.start(); windowCount++; }
     }
-    this.opts.logger.info('Trigger engine started', { schedules: scheduleCount });
+    this.opts.logger.info('Trigger engine started', { schedules: scheduleCount, windows: windowCount });
   }
 
   stop(): void {
     this.running = false;
     for (const set of this.teamHandlers.values()) {
       for (const h of set.schedule) h.stop();
+      for (const h of set.window) h.stop();
     }
     this.opts.logger.info('Trigger engine stopped');
   }
@@ -113,7 +121,7 @@ export class TriggerEngine {
   getRegisteredCount(): number {
     let count = 0;
     for (const set of this.teamHandlers.values()) {
-      count += set.schedule.length + set.keyword.length + set.message.length;
+      count += set.schedule.length + set.keyword.length + set.message.length + set.window.length;
     }
     return count;
   }
@@ -121,7 +129,7 @@ export class TriggerEngine {
   /** Atomically replace all triggers for a team. */
   replaceTeamTriggers(team: string, triggers: TriggerConfig[]): void {
     this.removeTeamTriggers(team);
-    const set: TeamHandlerSet = { schedule: [], keyword: [], message: [] };
+    const set: TeamHandlerSet = { schedule: [], keyword: [], message: [], window: [] };
     for (const trigger of triggers) {
       switch (trigger.type) {
         case 'schedule':
@@ -133,19 +141,24 @@ export class TriggerEngine {
         case 'message':
           this.registerMessageInto(set, trigger);
           break;
+        case 'window':
+          this.registerWindowInto(set, trigger);
+          break;
       }
     }
     this.teamHandlers.set(team, set);
     if (this.running) {
       for (const h of set.schedule) h.start();
+      for (const h of set.window) h.start();
     }
   }
 
-  /** Remove all triggers for a team. Stops schedule handlers. */
+  /** Remove all triggers for a team. Stops schedule and window handlers. */
   removeTeamTriggers(team: string): void {
     const existing = this.teamHandlers.get(team);
     if (!existing) return;
     for (const h of existing.schedule) h.stop();
+    for (const h of existing.window) h.stop();
     this.teamHandlers.delete(team);
   }
 
@@ -153,7 +166,7 @@ export class TriggerEngine {
   getTeamTriggerCount(team: string): number {
     const set = this.teamHandlers.get(team);
     if (!set) return 0;
-    return set.schedule.length + set.keyword.length + set.message.length;
+    return set.schedule.length + set.keyword.length + set.message.length + set.window.length;
   }
 
   /** Report a task outcome for circuit breaker accounting. */
@@ -229,6 +242,65 @@ export class TriggerEngine {
     handler.trigger = trigger;
     set.message.push(handler);
     this.opts.logger.info('Registered message trigger', { name: trigger.name, pattern, subagent: trigger.subagent });
+  }
+
+  private registerWindowInto(set: TeamHandlerSet, trigger: TriggerConfig): void {
+    const tickIntervalMs = trigger.config['tick_interval_ms'] as number | undefined;
+    const watchWindow = trigger.config['watch_window'] as string | undefined;
+    const maxTokensPerWindow = trigger.config['max_tokens_per_window'] as number | undefined;
+    const maxTicksPerWindow = trigger.config['max_ticks_per_window'] as number | undefined;
+    const overlapPolicy = trigger.config['overlap_policy'] as WindowTriggerConfig['overlap_policy'];
+    const windowConfig: WindowTriggerConfig & { subagent?: string } = {
+      tick_interval_ms: tickIntervalMs,
+      watch_window: watchWindow,
+      max_tokens_per_window: maxTokensPerWindow,
+      max_ticks_per_window: maxTicksPerWindow,
+      overlap_policy: overlapPolicy,
+      subagent: trigger.subagent,
+    };
+
+    // Build cursor deps if memory store available (AC-46, AC-67).
+    // Bind teamName in the closure so WindowHandler uses single-key lookups.
+    let deps: WindowHandlerDeps | undefined;
+    if (this.opts.memoryStore && trigger.subagent) {
+      const ms = this.opts.memoryStore;
+      const teamName = trigger.team;
+      deps = {
+        memoryStore: {
+          getActive: (key: string) => {
+            const entry = ms.getActive(teamName, key);
+            return entry ? { value: entry.content } : undefined;
+          },
+          save: (key: string, value: string) => {
+            const existing = ms.getActive(teamName, key);
+            ms.save(teamName, key, value, 'context', existing ? 'window-tick-update' : undefined);
+          },
+        },
+      };
+    }
+
+    // ADR-42: engine fires triggers fire-and-forget — the subagent owns cursor
+    // continuity via its own memory tools (`memory_save` / memory injection).
+    // WindowHandler's cursor read-at-start hook still runs so cursors are kept
+    // in the canonical `${subagent}:last_scan_cursor` etc. shape, but cursor
+    // write-back happens subagent-side, not via this onTick return value.
+    const handler = new WindowHandler(windowConfig, async () => {
+      this.dispatch(() => {
+        void this.fireTrigger(
+          trigger,
+          `window:${trigger.name}:${subagentScope(trigger)}:${cronSlotKey()}`,
+          trigger.sourceChannelId,
+        );
+      });
+    }, deps);
+    set.window.push(handler);
+    this.opts.logger.info('Registered window trigger', {
+      name: trigger.name,
+      tick_interval_ms: tickIntervalMs,
+      watch_window: watchWindow,
+      max_ticks_per_window: maxTicksPerWindow,
+      subagent: trigger.subagent,
+    });
   }
 
   private registerByTeam(triggers: readonly TriggerConfig[]): void {

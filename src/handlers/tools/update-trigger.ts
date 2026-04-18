@@ -41,6 +41,7 @@ export interface UpdateTriggerDeps {
   readonly log: (msg: string, meta?: Record<string, unknown>) => void;
 }
 
+// eslint-disable-next-line complexity -- Sequential validation gates; refactor would fragment the trigger-update contract.
 export function updateTrigger(
   input: z.infer<typeof UpdateTriggerInputSchema>,
   callerId: string,

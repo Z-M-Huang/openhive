@@ -53,7 +53,7 @@ function createTriggerServer(f: ServerFixtures, triggers: Map<string, TriggerCon
 }
 
 function makeLoadSubagents(subagents: Record<string, SubagentDefinition> = {}) {
-  return vi.fn((_runDir: string, _team: string) => subagents);
+  return vi.fn(() => subagents);
 }
 
 function invokeUpdateTrigger(

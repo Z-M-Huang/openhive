@@ -133,8 +133,7 @@ describe('test_trigger concurrency', () => {
     expect(typeof r.taskId).toBe('string');
     expect((r.taskId as string).length).toBeGreaterThan(0);
     // Field must not be renamed — existing callers depend on "taskId"
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    expect((r as any).task_id).toBeUndefined();
+    expect((r as unknown as { task_id?: unknown }).task_id).toBeUndefined();
   });
 
   it('replace with pending-only → cancels pending, enqueues', () => {
@@ -157,8 +156,7 @@ describe('test_trigger concurrency', () => {
   });
 
   it('invalid overlap_policy is rejected by the Zod schema', () => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const r = call({ team: 'ops', trigger_name: 'x', overlap_policy: 'bogus' as any }, 'root', deps);
+    const r = call({ team: 'ops', trigger_name: 'x', overlap_policy: 'bogus' as unknown as 'wait' }, 'root', deps);
     expect(r.success).toBe(false);
     expect(r.error).toMatch(/overlap_policy/i);
   });

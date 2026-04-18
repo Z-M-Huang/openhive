@@ -35,6 +35,18 @@ export interface BrowserConfig {
   readonly timeout_ms?: number;
 }
 
+/**
+ * Token-bucket limiter (ADR-41).
+ *
+ * Per wiki ([[Team-Configuration#Rate Limit Buckets]]), buckets are a map
+ * keyed on a caller-supplied `rate_limit_key` (passed to `web_fetch` etc.).
+ * The value carries only `rps` and `burst`; the key is the bucket identity.
+ */
+export interface RateLimitBucket {
+  readonly rps: number;
+  readonly burst: number;
+}
+
 export interface TeamConfig {
   readonly name: string;
   readonly parent: string | null;
@@ -45,13 +57,17 @@ export interface TeamConfig {
   readonly credentials?: Readonly<Record<string, string>>;
   readonly browser?: BrowserConfig;
   readonly memory?: { readonly embedding_provider_profile?: string };
+  /** ADR-41: maximum concurrent daily-class ops per team (default 5). */
+  readonly max_concurrent_daily_ops?: number;
+  /** ADR-41: per-domain token bucket limits, keyed by bucket name. */
+  readonly rate_limit_buckets?: Readonly<Record<string, RateLimitBucket>>;
 }
 
 export type TriggerState = 'pending' | 'active' | 'disabled';
 
 export interface TriggerConfig {
   readonly name: string;
-  readonly type: 'schedule' | 'keyword' | 'message';
+  readonly type: 'schedule' | 'keyword' | 'message' | 'window';
   readonly config: Record<string, unknown>;
   readonly team: string;
   readonly task: string;
@@ -70,6 +86,24 @@ export interface TriggerConfig {
 }
 
 export type OverlapPolicy = 'skip-then-replace' | 'always-skip' | 'always-replace' | 'allow';
+
+/**
+ * Window trigger configuration (ADR-42).
+ *
+ * Per wiki (Architecture-Decisions.md §ADR-42 and Triggers.md §window):
+ *  - `watch_window`        — cron expression defining when polling is active (optional)
+ *  - `tick_interval_ms`    — cadence within the window (default 30000 ms)
+ *  - `max_tokens_per_window` — hard cap on total token consumption per window occurrence
+ *  - `max_ticks_per_window`  — hard cap on number of ticks per window occurrence
+ *  - `overlap_policy`        — reuses existing trigger overlap policy
+ */
+export interface WindowTriggerConfig {
+  readonly tick_interval_ms?: number;
+  readonly watch_window?: string;
+  readonly max_tokens_per_window?: number;
+  readonly max_ticks_per_window?: number;
+  readonly overlap_policy?: OverlapPolicy;
+}
 
 export interface ProviderProfile {
   readonly name: string;

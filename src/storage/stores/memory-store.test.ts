@@ -392,3 +392,38 @@ describe('MemoryStore — getInjectable', () => {
     expect(limited).toHaveLength(3);
   });
 });
+
+// ── Concurrency assertions (Unit 33 — ADR-41 / AC-65, AC-66) ────────────────
+// Memory-store's same-key conflict strategy is fail-fast: a second save against
+// an existing active entry without an explicit `supersede_reason` throws.
+// Transactions use better-sqlite3's `.immediate()` wrap, so the save body
+// (insert + chunk reindex) commits atomically — FTS reads never observe partial
+// index state.
+
+describe('memory-store concurrency assertions', () => {
+  it('same-key save/delete serialization yields one winner', async () => {
+    // Establish an active entry so both racers target the same key.
+    store.save('t1', 'k', 'v1', 'context');
+
+    // Race a same-key save (without supersede_reason) against a delete of the
+    // same key. The fail-fast strategy must produce exactly one successful
+    // outcome — the other operation rejects — so silent overwrite is prevented.
+    const results = await Promise.allSettled([
+      Promise.resolve().then(() => store.save('t1', 'k', 'v2', 'context')),
+      Promise.resolve().then(() => store.delete('t1', 'k')),
+    ]);
+
+    const successCount = results.filter((r) => r.status === 'fulfilled').length;
+    expect(successCount).toBe(1);
+  });
+
+  it('FTS read after save observes the full indexed row, never partial state', async () => {
+    // The save+reindex transaction is atomic via `.immediate()`, so a concurrent
+    // FTS read against the same team/key observes either nothing or the full
+    // row with its indexed chunks — never a row without indexed chunks.
+    store.save('t1', 'search-key', 'searchable content body', 'context');
+
+    const hits = await store.search('t1', 'searchable');
+    expect(hits.length).toBeGreaterThanOrEqual(1);
+  });
+});

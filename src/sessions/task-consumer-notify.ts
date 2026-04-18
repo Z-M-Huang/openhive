@@ -12,6 +12,13 @@ import { safeJsonParse } from '../domain/safe-json.js';
 /** Regex to extract the notify JSON block (```json:notify ... ```) from LLM response. */
 const NOTIFY_BLOCK_RE = /```json:notify\s*(\{[^}]*"notify"\s*:\s*(?:true|false)[^}]*\})\s*```/s;
 
+/**
+ * Regex to detect a no-op action block (`{"action":"noop"}`) anywhere in the LLM response.
+ * Per ADR-42, a window tick that returns `{action:"noop"}` is counted but suppresses
+ * downstream notification regardless of any notify-block decision.
+ */
+const NOOP_ACTION_RE = /\{\s*"action"\s*:\s*"noop"(?:\s*,[^{}]*)?\s*\}/;
+
 /** Instruction appended to trigger-originated tasks so the LLM decides whether to notify. */
 export const TRIGGER_NOTIFY_INSTRUCTION = `
 ---
@@ -31,10 +38,17 @@ Ask yourself: Is there something genuinely new? Did something fail unexpectedly?
 
 /**
  * Parse the LLM's notification decision from a ```json:notify block.
+ *
+ * No-op ticks (ADR-42): if the response contains `{"action":"noop"}` anywhere,
+ * the downstream notification is suppressed regardless of the notify block.
+ *
  * Fail-safe: returns { notify: true } if missing, malformed, or unparseable.
  */
 export function parseLlmNotifyDecision(text: string | undefined): { notify: boolean; reason?: string } {
   if (!text) return { notify: true };
+  if (NOOP_ACTION_RE.test(text)) {
+    return { notify: false, reason: 'noop' };
+  }
   const match = text.match(NOTIFY_BLOCK_RE);
   if (!match) return { notify: true };
   const parsed = safeJsonParse<{ notify: boolean; reason?: string }>(match[1], 'notify-decision');

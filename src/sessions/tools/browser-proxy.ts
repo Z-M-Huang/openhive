@@ -46,6 +46,7 @@ function findChromiumPath(): string | undefined {
  * Resolves the playwright-mcp CLI binary, spawns it, enumerates available
  * tools, and returns the relay. Throws if @playwright/mcp is not installed.
  */
+// eslint-disable-next-line max-lines-per-function -- Inline MCP relay setup co-locates spawn/discover/cleanup logic.
 export async function createBrowserRelay(opts: BrowserRelayOpts): Promise<BrowserRelay> {
   const { logger, idleTtlMs = DEFAULT_IDLE_TTL_MS } = opts;
 
@@ -131,11 +132,11 @@ export async function createBrowserRelay(opts: BrowserRelayOpts): Promise<Browse
   await connect();
 
   // Idle TTL: check periodically, close if no activity
-  const idleTimer = setInterval(async () => {
+  const idleTimer = setInterval(() => {
     if (closed) return;
     if (client && Date.now() - lastUsedAt > idleTtlMs) {
       logger.info('Browser relay idle timeout — closing');
-      await disconnect();
+      void disconnect();
     }
   }, 60_000);
   idleTimer.unref();

@@ -1,11 +1,12 @@
 {
   "name": "openhive",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "private": true,
   "type": "module",
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
+    "test:uat": "playwright test tests/uat/openhive-uat.spec.ts",
     "lint": "eslint src/"
   },
   "dependencies": {
@@ -30,6 +31,7 @@
     "zod": "^3.25.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.52.0",
     "@types/better-sqlite3": "^7.6.13",
     "@typescript-eslint/eslint-plugin": "^8.0.0",
     "@typescript-eslint/parser": "^8.0.0",

@@ -20,6 +20,7 @@ export type EscalateInput = z.infer<typeof EscalateInputSchema>;
 export interface EscalateResult {
   readonly success: boolean;
   readonly correlation_id?: string;
+  readonly notification_only?: boolean;
   readonly error?: string;
 }
 
@@ -40,7 +41,7 @@ export function escalate(
     return { success: false, error: `invalid input: ${parsed.error.message}` };
   }
 
-  const { message, reason } = parsed.data;
+  const { message } = parsed.data;
 
   // Find caller's team and parent
   const callerTeam = deps.orgTree.getTeam(callerId);
@@ -55,10 +56,11 @@ export function escalate(
     return { success: true, correlation_id: correlationId };
   }
 
+  // ADR-43 (discovery B3 correction): non-root escalate is notification-only.
+  // Persist the correlation record, but do NOT enqueue to the parent queue —
+  // for work handoff, the tool surface exposes enqueue_parent_task instead.
   const correlationId = randomUUID();
-  const escalationMessage = reason ? `[Escalation: ${reason}] ${message}` : `[Escalation] ${message}`;
 
-  // Persist to escalation store
   deps.escalationStore.create({
     correlationId,
     sourceTeam: callerId,
@@ -68,15 +70,7 @@ export function escalate(
     createdAt: new Date().toISOString(),
   });
 
-  // Queue task for parent team with high priority
-  deps.taskQueue.enqueue(
-    callerTeam.parentId,
-    escalationMessage,
-    'high',
-    'escalation',
-    sourceChannelId,
-    correlationId,
-  );
+  void sourceChannelId; // retained on signature for future correlation threading
 
-  return { success: true, correlation_id: correlationId };
+  return { success: true, correlation_id: correlationId, notification_only: true };
 }

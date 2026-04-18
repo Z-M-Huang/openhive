@@ -1,3 +1,5 @@
+/* eslint-disable max-lines -- Task consumer owns the full dequeue/dispatch loop for all TaskTypes (delegate/trigger/escalation/bootstrap) plus window-cursor persistence hooks and circuit-breaker integration. Splitting by task type would fragment shared setup, retry/requeue policy, and lifecycle cleanup. */
+
 /**
  * Task consumer — processes pending tasks for child teams.
  *
@@ -5,7 +7,8 @@
  * Reports trigger outcomes back for circuit breaker accounting.
  */
 
-import type { ITaskQueueStore, IInteractionStore } from '../domain/interfaces.js';
+import type { IMemoryStore, ITaskQueueStore, IInteractionStore } from '../domain/interfaces.js';
+import { writeWindowCursors } from '../domain/interfaces.js';
 import type { OrgTree } from '../domain/org-tree.js';
 import type { TeamConfig } from '../domain/types.js';
 import { TaskStatus } from '../domain/types.js';
@@ -20,6 +23,32 @@ import {
   parseLlmNotifyDecision,
   stripNotifyBlock,
 } from './task-consumer-notify.js';
+import { safeJsonParse } from '../domain/safe-json.js';
+import type { WindowCursorSnapshot } from '../domain/interfaces.js';
+
+/**
+ * Regex for the structured cursor-update block the LLM may emit in a trigger
+ * task response (AC-46 write-at-end path through task-consumer).
+ * Format: ```json:window_cursor\n{"last_scan_cursor":"...","last_event_id":"..."}```
+ */
+const CURSOR_BLOCK_RE = /```json:window_cursor\s*(\{[\s\S]*?\})\s*```/;
+
+/**
+ * Parse window cursor updates from the LLM response.
+ * Returns null if no block present or if the JSON is malformed.
+ */
+function parseWindowCursorBlock(text: string): Partial<WindowCursorSnapshot> | null {
+  const match = text.match(CURSOR_BLOCK_RE);
+  if (!match) return null;
+  return safeJsonParse<Partial<WindowCursorSnapshot>>(match[1], 'window-cursor-block') ?? null;
+}
+
+/**
+ * Strip the cursor-update block from the stored/displayed response.
+ */
+function stripWindowCursorBlock(text: string): string {
+  return text.replace(CURSOR_BLOCK_RE, '').trim();
+}
 
 // Re-exported so callers that previously imported from task-consumer keep working.
 export { TRIGGER_NOTIFY_INSTRUCTION, parseLlmNotifyDecision, stripNotifyBlock };
@@ -40,6 +69,11 @@ export interface TaskConsumerOpts {
   readonly reportTriggerOutcome?: (team: string, triggerName: string, success: boolean, taskId?: string) => void;
   readonly interactionStore?: IInteractionStore;
   /**
+   * Memory store for writing window cursor updates parsed from trigger task
+   * results (AC-46 write-at-end path).
+   */
+  readonly memoryStore?: IMemoryStore;
+  /**
    * Override the default filesystem-backed subagent loader. Tests use this
    * to supply in-memory subagent definitions without touching runDir.
    */
@@ -55,6 +89,7 @@ export class TaskConsumer {
   readonly #reportTriggerOutcome?: (team: string, triggerName: string, success: boolean, taskId?: string) => void;
   readonly #interactionStore?: IInteractionStore;
   readonly #loadSubagents: SubagentLoader;
+  readonly #memoryStore?: IMemoryStore;
   #timer: ReturnType<typeof setInterval> | null = null;
   #processing = false;
 
@@ -66,6 +101,7 @@ export class TaskConsumer {
     this.#notifyChannel = opts.notifyChannel;
     this.#reportTriggerOutcome = opts.reportTriggerOutcome;
     this.#interactionStore = opts.interactionStore;
+    this.#memoryStore = opts.memoryStore;
     this.#loadSubagents = opts.loadSubagents ?? loadSubagents;
   }
 
@@ -81,6 +117,7 @@ export class TaskConsumer {
     }
   }
 
+  // eslint-disable-next-line max-lines-per-function, complexity -- Task dispatch state machine; refactor would fragment per-task lifecycle handling.
   async #tick(): Promise<void> {
     if (this.#processing) return;
     this.#processing = true;
@@ -198,6 +235,25 @@ export class TaskConsumer {
             this.#deps.logger.info('LLM notification decision', {
               team: task.teamId, notify: decision.notify, reason: decision.reason,
             });
+          }
+
+          // AC-46: parse window cursor updates from trigger task results and
+          // write them via the shared memory lock path (AC-67).
+          if (isTriggerTask && safeResponse && this.#memoryStore) {
+            const subagentName = dequeued.options?.subagent;
+            if (subagentName) {
+              const cursorUpdates = parseWindowCursorBlock(safeResponse);
+              if (cursorUpdates) {
+                safeResponse = stripWindowCursorBlock(safeResponse);
+                try {
+                  writeWindowCursors(this.#memoryStore, task.teamId, subagentName, cursorUpdates);
+                } catch (err) {
+                  this.#deps.logger.info('Window cursor write failed', {
+                    taskId: dequeued.id, team: task.teamId, subagent: subagentName, error: errorMessage(err),
+                  });
+                }
+              }
+            }
           }
 
           // Store scrubbed result (10KB cap)

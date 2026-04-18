@@ -74,6 +74,7 @@ export class WsAdapter implements IChannelAdapter {
    * WS routes incoming messages through #directHandler, not ChannelRouter.
    * ChannelRouter only uses WsAdapter for sendResponse (notifications).
    */
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   onMessage(_handler: (msg: ChannelMessage) => Promise<void>): void {
     // No-op — see class docstring.
   }
@@ -116,7 +117,9 @@ export class WsAdapter implements IChannelAdapter {
   }
 
   /** Register /ws route on Fastify. Called during bootstrap. */
+  // eslint-disable-next-line max-lines-per-function -- Inline socket lifecycle handlers; splitting would scatter the per-connection state across helpers.
   registerRoute(fastify: FastifyInstance): void {
+    // eslint-disable-next-line max-lines-per-function -- Single Fastify route handler co-locates connection setup and message dispatch.
     fastify.get('/ws', { websocket: true }, (socket: WebSocketLike, request: FastifyRequest) => {
       const rawSenderId = request.headers['x-sender-id'];
       const senderId = (typeof rawSenderId === 'string' && rawSenderId.trim().length > 0)
@@ -129,8 +132,10 @@ export class WsAdapter implements IChannelAdapter {
         this.#processing.delete(channelId);
       });
 
+      // eslint-disable-next-line max-lines-per-function -- Inline message-handler closure; splitting would lose access to per-connection state.
       socket.on('message', (raw: unknown) => {
         const rawBuf = raw as Buffer;
+        // eslint-disable-next-line complexity, max-lines-per-function -- Single async message dispatch path; refactor would obscure the inbound message contract.
         void (async () => {
           let parsed: Record<string, unknown>;
           try {

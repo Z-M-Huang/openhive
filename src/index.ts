@@ -1,4 +1,4 @@
-/** OpenHive v0.5.0 entry point — bootstrap and graceful shutdown. */
+/** OpenHive v0.5.1 entry point — bootstrap and graceful shutdown. */
 
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
@@ -7,6 +7,7 @@ import { createLogger, type AppLogger } from './logging/logger.js';
 import { loadProviders, loadSystemConfig, loadChannels, getTeamConfig, getOrCreateTeamConfig } from './config/loader.js';
 import type { TrustPolicy } from './config/trust-policy.js';
 import { OrgTree } from './domain/org-tree.js';
+import { ConcurrencyManager } from './domain/concurrency-manager.js';
 import { createToolInvoker, type OrgToolDeps, type OrgToolInvoker } from './handlers/tool-invoker.js';
 import { TeamRegistry } from './sessions/team-registry.js';
 import { ChannelRouter } from './channels/router.js';
@@ -106,6 +107,7 @@ function buildOrgToolDeps(
     get browserRelay() { return opts.browserRelay; },
   };
 }
+// eslint-disable-next-line max-lines-per-function, complexity -- Linear bootstrap wiring; splitting would scatter dependency construction.
 export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> {
   const dataDir = deps?.dataDir ?? '/data';
   const runDir = deps?.runDir ?? '/app/.run';
@@ -143,8 +145,12 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   let browserRelayRef: import('./sessions/tools/browser-proxy.js').BrowserRelay | undefined;
   const browserRelayReady = initBrowserRelay(logger).then(r => { browserRelayRef = r; });
   let queryRunnerRef: import('./handlers/tool-invoker.js').TeamQueryRunner | undefined;
-  let triggerEngineRef: TriggerEngine | undefined;
   const { triggerConfigStore } = stores;
+  const triggerEngine = initTriggerEngine(
+    stores.triggerStore, taskQueueStore, logger, triggerConfigStore,
+    (team, triggerName, reason) => logger.warn('Trigger auto-disabled', { team, trigger: triggerName, reason }),
+  );
+  const triggerEngineRef: TriggerEngine = triggerEngine;
 
   const orgToolDeps = buildOrgToolDeps(
     { orgTree, sessionManager, taskQueueStore, escalationStore, triggerConfigStore,
@@ -157,12 +163,11 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
     () => triggerEngineRef,
   );
   const orgToolInvoker = createToolInvoker(orgToolDeps);
-  const triggerEngine = initTriggerEngine(
-    stores.triggerStore, taskQueueStore, logger, triggerConfigStore,
-    (team, triggerName, reason) => logger.warn('Trigger auto-disabled', { team, trigger: triggerName, reason }),
-  );
-  triggerEngineRef = triggerEngine;
   const { adapters, wsEnabled } = initChannels({ dataDir }, logger);
+
+  // ADR-41: single shared concurrency manager; per-team caps enforced by
+  // the manager's per-team counters. Default 5 matches TeamConfigSchema default.
+  const concurrencyManager = new ConcurrencyManager({ maxConcurrentDailyOps: 5 });
 
   const handlerDeps = providersConfig
     ? {
@@ -184,6 +189,7 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
         senderTrustStore: stores.senderTrustStore,
         vaultStore: stores.vaultStore,
         pluginToolStore: stores.pluginToolStore,
+        concurrencyManager,
       }
     : null;
 
@@ -276,7 +282,7 @@ export async function bootstrap(deps?: BootstrapDeps): Promise<BootstrapResult> 
   if (!deps?.skipListen) {
     await fastify.listen({ host: deps?.listenAddress ?? '0.0.0.0', port: deps?.listenPort ?? 8080 });
   }
-  logger.info('OpenHive v0.5.0 started', { dataDir, runDir, systemRulesDir });
+  logger.info('OpenHive v0.5.1 started', { dataDir, runDir, systemRulesDir });
 
   const shutdown = async (): Promise<void> => {
     clearInterval(interactionCleanupInterval);

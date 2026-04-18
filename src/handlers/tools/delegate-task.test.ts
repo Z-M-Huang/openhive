@@ -150,8 +150,7 @@ describe('delegate_task', () => {
     });
 
     it('invalid overlap_policy is rejected by the Zod schema', async () => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const r = await f.server.invoke('delegate_task', { team: 'ops', task: 'x', overlap_policy: 'bogus' as any }, 'root') as DelegateTaskResult;
+      const r = await f.server.invoke('delegate_task', { team: 'ops', task: 'x', overlap_policy: 'bogus' as unknown as 'wait' }, 'root') as DelegateTaskResult;
       expect(r.success).toBe(false);
       expect(r.reason).toMatch(/overlap_policy/i);
     });
@@ -178,10 +177,10 @@ describe('delegate_task', () => {
       });
       const r = await f.server.invoke('delegate_task', { team: 'ops', task: 'x' }, 'root') as DelegateTaskResult;
       expect(r.in_flight?.[0]).toMatchObject({
-        task_id: expect.any(String),
+        task_id: expect.any(String) as unknown,
         type: 'bootstrap',
         status: 'running',
-        age_ms: expect.any(Number),
+        age_ms: expect.any(Number) as unknown,
       });
       expect(r.in_flight?.[0]?.age_ms).toBeGreaterThanOrEqual(5000);
     });

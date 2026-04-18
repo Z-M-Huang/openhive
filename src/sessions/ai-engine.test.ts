@@ -165,12 +165,12 @@ describe('runSession', () => {
     await runSession(opts);
 
     expect(mockStreamText).toHaveBeenCalledTimes(1);
-    const callArgs = mockStreamText.mock.calls[0][0];
-    expect(callArgs.model).toBe(opts.model);
-    expect(callArgs.system).toBe('Custom system prompt');
-    expect(callArgs.prompt).toBe('Custom task');
-    expect(callArgs.tools).toBe(tools);
-    expect(callArgs.activeTools).toEqual(['Read']);
+    const callArgs = mockStreamText.mock.calls[0][0] as Record<string, unknown>;
+    expect(callArgs['model']).toBe(opts.model);
+    expect(callArgs['system']).toBe('Custom system prompt');
+    expect(callArgs['prompt']).toBe('Custom task');
+    expect(callArgs['tools']).toBe(tools);
+    expect(callArgs['activeTools']).toEqual(['Read']);
     expect(mockStepCountIs).toHaveBeenCalledWith(5);
   });
 
@@ -272,8 +272,8 @@ describe('runSession', () => {
 
     // Should have called generateText for summarization
     expect(mockGenerateText).toHaveBeenCalledTimes(1);
-    const genCallArgs = mockGenerateText.mock.calls[0][0];
-    expect(genCallArgs.system).toContain('Summarize preserving');
+    const genCallArgs = mockGenerateText.mock.calls[0][0] as Record<string, unknown>;
+    expect(genCallArgs['system']).toContain('Summarize preserving');
 
     // Result should have compressed messages: summary + last 5
     const resolved = await result as { messages: Array<{ role: string; content: string }> };
@@ -331,7 +331,7 @@ describe('runSession', () => {
     });
 
     expect(mockGenerateText).toHaveBeenCalledTimes(1);
-    expect(mockGenerateText.mock.calls[0][0].model).toBe(summaryModel);
+    expect((mockGenerateText.mock.calls[0][0] as Record<string, unknown>)['model']).toBe(summaryModel);
   });
 
   // ── Secret scrubbing ────────────────────────────────────────────────────
@@ -453,14 +453,14 @@ describe('resolveSystemPrompt', () => {
     }));
 
     expect(mockStreamText).toHaveBeenCalledTimes(1);
-    const callArgs = mockStreamText.mock.calls[0][0];
+    const callArgs = mockStreamText.mock.calls[0][0] as { system: Array<Record<string, unknown>> };
     // Should be a SystemModelMessage array, not a string
     expect(Array.isArray(callArgs.system)).toBe(true);
-    expect(callArgs.system[0].role).toBe('system');
-    expect(callArgs.system[0].content).toBe('Cached rules');
-    expect(callArgs.system[0].providerOptions.anthropic.cacheControl.type).toBe('ephemeral');
-    expect(callArgs.system[1].role).toBe('system');
-    expect(callArgs.system[1].content).toBe('Team context');
+    expect(callArgs.system[0]['role']).toBe('system');
+    expect(callArgs.system[0]['content']).toBe('Cached rules');
+    expect(((callArgs.system[0]['providerOptions'] as Record<string, Record<string, Record<string, unknown>>>)['anthropic']['cacheControl'])['type']).toBe('ephemeral');
+    expect(callArgs.system[1]['role']).toBe('system');
+    expect(callArgs.system[1]['content']).toBe('Team context');
   });
 });
 

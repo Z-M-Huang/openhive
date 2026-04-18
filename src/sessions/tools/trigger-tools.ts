@@ -25,6 +25,7 @@ import { UpdateTriggerInputSchema, updateTrigger, type UpdateTriggerDeps } from 
  * Returns a ToolSet keyed by bare tool name, sorted alphabetically.
  * Returns empty `{}` when `ctx.triggerConfigStore` is undefined.
  */
+// eslint-disable-next-line max-lines-per-function -- Tool factory enumerates 6 trigger tools inline.
 export function buildTriggerTools(ctx: OrgToolContext): ToolSet {
   if (!ctx.triggerConfigStore) return {};
 

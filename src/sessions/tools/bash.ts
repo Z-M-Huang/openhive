@@ -69,7 +69,7 @@ export function createBashTool(cwd: string, credentials: Record<string, string>)
       } catch (err: unknown) {
         // Non-zero exit — include both stdout and stderr
         if (
-          err != null &&
+          err !== null &&
           typeof err === 'object' &&
           'stdout' in err &&
           'stderr' in err

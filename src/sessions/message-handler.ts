@@ -90,6 +90,14 @@ export interface MessageHandlerDeps {
   readonly vaultStore?: IVaultStore;
   readonly senderTrustStore?: ISenderTrustStore;
   readonly pluginToolStore?: import('../domain/interfaces.js').IPluginToolStore;
+  /**
+   * Runtime concurrency governance (ADR-41). When provided, `assembleTools`
+   * wraps every classified tool with `withConcurrencyAdmission`, enforcing
+   * the per-team daily-ops pool and org-op mutex. When absent, admission is
+   * skipped (test ergonomics), and `get_status` live concurrency fields
+   * fall back to zeros.
+   */
+  readonly concurrencyManager?: import('../domain/interfaces.js').IConcurrencyManager;
 }
 
 /** Collect a team's ID and all descendant IDs from the org tree via BFS. */
@@ -216,7 +224,7 @@ export async function handleMessage(
     const vaultSecrets = deps.vaultStore?.getSecrets(teamName) ?? [];
     const credValues = vaultSecrets.map((entry) => entry.value).filter((v) => v.length >= 8);
 
-    const tools = await assembleTools(teamConfig, teamName, deps, registry, profileName, modelId, ctx, providerSecrets, credValues, opts?.sourceChannelId, deps.pluginToolStore, opts?.skill, opts?.subagent);
+    const tools = await assembleTools(teamConfig, teamName, deps, registry, profileName, modelId, ctx, providerSecrets, credValues, opts?.sourceChannelId, deps.pluginToolStore);
 
     const system = assembleSystemPrompt(teamConfig, teamName, deps, opts?.sourceChannelId, opts?.topicId, opts?.topicName, opts?.skill, opts?.subagent);
     const safeOnProgress = opts?.onProgress && credValues.length > 0
