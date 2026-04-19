@@ -69,6 +69,42 @@ function computeSourceHash(source: string): string {
   return createHash('sha256').update(source, 'utf-8').digest('hex');
 }
 
+/**
+ * Reject imports the plugin loader cannot resolve at runtime. Catches the
+ * common LLM hallucinations (`@openhive/ai-sdk`, `axios`, `tool` from `'ai'`)
+ * before they cause a confusing dynamic-import failure later. Returns the
+ * list of human-readable error strings; empty when the source is clean.
+ */
+function checkUnresolvableImports(source: string): string[] {
+  const errors: string[] = [];
+  if (/from\s+['"]@openhive\/ai-sdk['"]|require\s*\(\s*['"]@openhive\/ai-sdk['"]\s*\)/.test(source)) {
+    errors.push("imports '@openhive/ai-sdk' which does not exist — remove this import");
+  }
+  if (/from\s+['"]axios['"]|require\s*\(\s*['"]axios['"]\s*\)/.test(source)) {
+    errors.push("imports 'axios' which is not installed — use the global `fetch()` instead");
+  }
+  if (/import\s*\{[^}]*\btool\b[^}]*\}\s*from\s+['"]ai['"]|require\s*\(\s*['"]ai['"]\s*\)/.test(source)) {
+    errors.push("imports `tool` from 'ai' — the runtime wraps your exports automatically; remove this import");
+  }
+  return errors;
+}
+
+/**
+ * Build hint strings for common shape mistakes detected by the regex but not
+ * surfaced as a missing-export error. Helps the LLM self-correct on this turn
+ * instead of registering a plugin the loader can't open.
+ */
+function shapeHintsFor(source: string): string[] {
+  const hints: string[] = [];
+  if (/export\s+default\s+tool\s*\(/.test(source)) {
+    hints.push("default export with `tool()` is not accepted — use named ESM exports");
+  }
+  if (/^\s*exports\.\w+\s*=/m.test(source)) {
+    hints.push("CommonJS `exports.X = ...` is not accepted — use ESM `export const X = ...`");
+  }
+  return hints;
+}
+
 export function registerPluginTool(
   input: RegisterPluginToolInput,
   teamName: string,
@@ -106,10 +142,22 @@ export function registerPluginTool(
     return { success: false, error: `security scan failed: ${errors.join('; ')}` };
   }
 
-  // Validate interface exports
+  // Reject known-bad imports BEFORE the interface check — they would register
+  // successfully but fail later at dynamic-import time. Surface the actionable
+  // error here so the LLM gets corrected on this turn instead of next.
+  const importErrors = checkUnresolvableImports(source_code);
+  if (importErrors.length > 0) {
+    return { success: false, error: `unusable imports: ${importErrors.join('; ')}` };
+  }
+
   const interfaceValidation = validateInterface(source_code);
   if (!interfaceValidation.valid) {
-    return { success: false, error: `missing required exports: ${interfaceValidation.missing.join(', ')}` };
+    const hints = shapeHintsFor(source_code);
+    const hintMsg = hints.length > 0 ? ` (${hints.join('; ')})` : '';
+    return {
+      success: false,
+      error: `missing required exports: ${interfaceValidation.missing.join(', ')}${hintMsg}`,
+    };
   }
 
   // Ensure plugins directory exists and write source file

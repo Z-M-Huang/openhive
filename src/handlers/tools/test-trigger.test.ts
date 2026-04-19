@@ -195,4 +195,32 @@ describe('test_trigger concurrency', () => {
     const enqueued = taskQueue.getActiveForTeam('ops')[0];
     expect(enqueued?.options?.maxSteps).toBe(5);
   });
+
+  // Fix 5 (Bug A): the manual test_trigger path MUST propagate the
+  // trigger's `subagent` field into TaskOptions so the fired task runs
+  // under the same subagent as the cron-scheduled path.
+  it('Fix 5: subagent field from trigger config propagates into TaskOptions', () => {
+    configStore = createMockConfigStore([
+      { ...TRIGGER_FIXTURE, name: 'with-subagent', subagent: 'log-monitor' },
+    ]);
+    deps = { ...deps, configStore };
+
+    const r = call({ team: 'ops', trigger_name: 'with-subagent' }, 'root', deps);
+    expect(r.enqueued).toBe(true);
+    const enqueued = taskQueue.getActiveForTeam('ops')[0];
+    expect(enqueued?.options?.subagent).toBe('log-monitor');
+  });
+
+  it('Fix 5: max_steps override and subagent both land on TaskOptions', () => {
+    configStore = createMockConfigStore([
+      { ...TRIGGER_FIXTURE, name: 'combo', subagent: 'log-monitor' },
+    ]);
+    deps = { ...deps, configStore };
+
+    const r = call({ team: 'ops', trigger_name: 'combo', max_steps: 7 }, 'root', deps);
+    expect(r.enqueued).toBe(true);
+    const enqueued = taskQueue.getActiveForTeam('ops')[0];
+    expect(enqueued?.options?.subagent).toBe('log-monitor');
+    expect(enqueued?.options?.maxSteps).toBe(7);
+  });
 });

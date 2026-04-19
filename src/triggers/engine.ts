@@ -13,6 +13,7 @@ import type { TriggerDedup } from './dedup.js';
 import type { TriggerRateLimiter } from './rate-limiter.js';
 import { simpleHash, cronSlotKey, subagentScope } from './engine-helpers.js';
 import { checkOverlapPolicy as evalOverlapPolicy } from './overlap-policy.js';
+import { buildTriggerTaskOptions } from './task-options.js';
 
 export interface TriggerEngineLogger {
   info(msg: string, meta?: Record<string, unknown>): void;
@@ -338,13 +339,7 @@ export class TriggerEngine {
 
     // Snapshot task options from the live trigger config — subagent must
     // flow to the task consumer so the session is run with the chosen agent.
-    const options: TaskOptions | undefined =
-      effective.maxSteps !== undefined || effective.subagent !== undefined
-        ? {
-            maxSteps: effective.maxSteps,
-            subagent: effective.subagent,
-          }
-        : undefined;
+    const options: TaskOptions | undefined = buildTriggerTaskOptions(effective);
 
     const taskId = await this.opts.delegateTask(
       trigger.team,

@@ -17,7 +17,10 @@ import { runSession } from './ai-engine.js';
 import type { ProgressCallback, ProgressUpdate } from './ai-engine.js';
 import { buildSessionContext } from './context-builder.js';
 import { buildRuleCascade } from '../rules/cascade.js';
-import { resolveActiveSkill, loadActiveSkillContent } from './skill-loader.js';
+import { resolveActiveSkill, loadActiveSkillContent, loadSubagents } from './skill-loader.js';
+import type { SubagentDefinition } from './skill-loader.js';
+import { formatSubagentIdentity } from './subagent-prompt.js';
+import type { LoadedPluginInfo } from './tools/plugin-loader.js';
 import { buildMemorySection } from './memory-loader.js';
 import { scrubSecrets } from '../logging/credential-scrubber.js';
 import type { ChannelMessage, IInteractionStore, IMemoryStore, IVaultStore, ISenderTrustStore } from '../domain/interfaces.js';
@@ -128,6 +131,8 @@ function assembleSystemPrompt(
   topicName?: string,
   skillName?: string,
   subagent?: string,
+  subagentDef?: SubagentDefinition,
+  pluginTools?: readonly LoadedPluginInfo[],
 ): SystemPromptParts {
   const cascadeLogger = {
     info: (m: string, meta?: Record<string, unknown>) => deps.logger.info(m, meta),
@@ -161,7 +166,14 @@ function assembleSystemPrompt(
     });
   }
 
-  const skillsContent = subagent ? '' : loadActiveSkillContent(activeSkill);
+  // Fix 4: when running as a subagent, inject the subagent's full markdown as
+  // the active identity so the session executes under that role/boundaries —
+  // not the team orchestrator's. The orchestrator hop is skipped.
+  const skillsContent = subagent && subagentDef
+    ? formatSubagentIdentity(subagent, subagentDef, teamName)
+    : subagent
+      ? ''
+      : loadActiveSkillContent(activeSkill);
   const memorySection = buildMemorySection(deps.memoryStore, teamName);
 
   if (memorySection.length > 12000) {
@@ -186,6 +198,7 @@ function assembleSystemPrompt(
     allowedTools: teamConfig.allowed_tools,
     ruleCascade, skillsContent, memorySection,
     conversationHistory, topicName,
+    pluginTools,
   });
 }
 
@@ -224,9 +237,26 @@ export async function handleMessage(
     const vaultSecrets = deps.vaultStore?.getSecrets(teamName) ?? [];
     const credValues = vaultSecrets.map((entry) => entry.value).filter((v) => v.length >= 8);
 
-    const tools = await assembleTools(teamConfig, teamName, deps, registry, profileName, modelId, ctx, providerSecrets, credValues, opts?.sourceChannelId, deps.pluginToolStore);
+    // Fix 4: when opts.subagent is set, load the subagent definition once and
+    // pass it to both tool assembly (for plugin-tool injection from skills) and
+    // prompt assembly (for identity injection). Task-consumer already validated
+    // existence — but we still defensively check and surface a clean error.
+    let subagentDef: SubagentDefinition | undefined;
+    if (opts?.subagent) {
+      const subagents = loadSubagents(deps.runDir, teamName);
+      subagentDef = subagents[opts.subagent];
+      if (!subagentDef) {
+        return {
+          ok: false,
+          error: `subagent '${opts.subagent}' not found in team '${teamName}'`,
+          durationMs: Date.now() - startMs,
+        };
+      }
+    }
 
-    const system = assembleSystemPrompt(teamConfig, teamName, deps, opts?.sourceChannelId, opts?.topicId, opts?.topicName, opts?.skill, opts?.subagent);
+    const tools = await assembleTools(teamConfig, teamName, deps, registry, profileName, modelId, ctx, providerSecrets, credValues, opts?.sourceChannelId, deps.pluginToolStore, subagentDef);
+
+    const system = assembleSystemPrompt(teamConfig, teamName, deps, opts?.sourceChannelId, opts?.topicId, opts?.topicName, opts?.skill, opts?.subagent, subagentDef, tools.pluginInfos);
     const safeOnProgress = opts?.onProgress && credValues.length > 0
       ? (update: ProgressUpdate) => {
           opts.onProgress!({ ...update, content: scrubSecrets(update.content, [], credValues) });

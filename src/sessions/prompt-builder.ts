@@ -20,6 +20,13 @@ export interface PromptBuilderOpts {
   readonly memorySection: string;
   readonly conversationHistory?: string;
   readonly topicName?: string;
+  /**
+   * Plugin tools loaded into this session (namespaced as `<team>.<tool>` plus
+   * their description text). When non-empty, the tool-availability note lists
+   * them under the ADR-39 plugin section and downgrades `web_fetch` from
+   * "preferred" to "fall-back only" so the LLM doesn't default to raw HTTP.
+   */
+  readonly pluginTools?: readonly PluginToolInfo[];
 }
 
 /** Two-part system prompt for cache-friendly Anthropic requests. */
@@ -52,7 +59,7 @@ export function buildSystemPrompt(opts: PromptBuilderOpts): SystemPromptParts {
   dynamicSections.push(buildCoreInstructions(opts.cwd));
 
   // 5. Tool availability note
-  dynamicSections.push(buildToolAvailabilityNote(opts.allowedTools));
+  dynamicSections.push(buildToolAvailabilityNote(opts.allowedTools, opts.pluginTools));
 
   // AC-27: Credential key names are never injected into the prompt. Agents
   // discover keys via `vault_list` at point of use; values are only returned
@@ -122,18 +129,23 @@ export function buildToolAvailabilityNote(
     }
   }
 
-  // web_fetch guidance when available
+  // web_fetch guidance when available — wording flips when plugins exist so
+  // the LLM doesn't default to raw HTTP over a registered plugin tool.
   const hasWebFetch = allowedTools.includes('web_fetch') ||
     allowedTools.some(e => e.endsWith('*'));
   if (hasWebFetch) {
-    lines.push('- **web_fetch** — ENABLED (preferred for HTTP requests)');
+    if (pluginTools.length > 0) {
+      lines.push('- **web_fetch** — ENABLED (fall-back only — prefer the plugin tools listed below)');
+    } else {
+      lines.push('- **web_fetch** — ENABLED (preferred for HTTP requests)');
+    }
   }
 
   // Plugin section
   lines.push('');
   lines.push('## Plugin Tools (Plugin-First Invariant — ADR-39)');
   if (pluginTools.length > 0) {
-    lines.push('The following plugin tools are registered. PREFER these over Bash/curl for their documented domain:');
+    lines.push('The following plugin tools are registered. PREFER these over Bash/curl/web_fetch for their documented domain:');
     for (const plugin of pluginTools) {
       lines.push(`- **${plugin.name}** — ${plugin.description}`);
     }

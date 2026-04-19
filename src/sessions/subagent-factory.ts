@@ -23,6 +23,8 @@ import { z } from 'zod';
 import type { SubagentDefinition } from './skill-loader.js';
 import type { ProviderRegistryProvider } from './provider-registry.js';
 import { loadPluginTools } from './tools/plugin-loader.js';
+import { buildUseSkillTool } from './tools/skill-tools.js';
+import { formatSubagentIdentity } from './subagent-prompt.js';
 import type { IPluginToolStore } from '../domain/interfaces.js';
 
 export interface BuildSubagentToolsOpts {
@@ -131,8 +133,20 @@ export async function buildSubagentTools(
               opts.pluginToolStore,
               opts.runDir,
             );
-            Object.assign(skillTools, loaded);
+            Object.assign(skillTools, loaded.tools);
           }
+        }
+        // Fix 6: register `use_skill` for the legacy delegated path so a
+        // ≥2-skill subagent can fetch skill bodies on demand. The shape cast
+        // is needed because legacy callers pass partial subagent records that
+        // omit some SubagentDefinition fields irrelevant to the loader.
+        // Gated on opts.teamName because the body-rewrite (namespacing bare
+        // plugin refs into <team>.<tool>) requires the team prefix; in the
+        // teamName-less legacy mode no plugin tools were loaded above either,
+        // so a `use_skill` body that names bare tools would be useless.
+        const skillCount = (def.resolvedSkills ?? []).length;
+        if (skillCount >= 1 && opts.teamName) {
+          Object.assign(skillTools, buildUseSkillTool(def as unknown as SubagentDefinition, opts.teamName));
         }
         // Preserve opts.tools reference when no plugin tools are added, so
         // callers using strict reference equality checks (e.g. tests with toBe)
@@ -142,9 +156,20 @@ export async function buildSubagentTools(
             ? (opts.tools ?? {})
             : { ...(opts.tools ?? {}), ...skillTools };
 
+        // Fix 6: inject the shared subagent directive (and eager-inline the
+        // single skill body when the subagent has exactly one skill) so the
+        // legacy delegated path matches the in-place subagent path.
+        // Pass opts.teamName so the eager-inlined skill body has bare plugin
+        // refs rewritten to namespaced form (matches use_skill behaviour).
+        const augmentedSystem = formatSubagentIdentity(
+          name,
+          def as unknown as SubagentDefinition,
+          opts.teamName,
+        );
+
         const res = await generateText({
           model: model as LanguageModel,
-          system: def.prompt,
+          system: augmentedSystem,
           prompt: task,
           tools: toolsForInvocation,
           stopWhen,

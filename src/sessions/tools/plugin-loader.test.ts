@@ -3,8 +3,8 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadPluginTools } from './plugin-loader.js';
+import type { LoadedPluginTools } from './plugin-loader.js';
 import type { IPluginToolStore, PluginToolMeta } from '../../domain/interfaces.js';
-import type { ToolSet } from 'ai';
 
 // ── Shared helpers for AC-15.x tests ──────────────────────────────────────────
 
@@ -47,7 +47,7 @@ type LoadPluginToolsWithLogger = (
   pluginToolStore: IPluginToolStore,
   runDir: string,
   logger?: { warn: (msg: string, meta?: Record<string, unknown>) => void; error?: (msg: string, meta?: Record<string, unknown>) => void },
-) => Promise<ToolSet>;
+) => Promise<LoadedPluginTools>;
 
 const loadPlugin = loadPluginTools as LoadPluginToolsWithLogger;
 
@@ -86,9 +86,10 @@ describe('loadPluginTools', () => {
     );
     store.upsert({ teamName: 'ops-team', toolName: 'query_loggly', status: 'active' } as PluginToolMeta);
 
-    const tools = await loadPlugin('ops-team', ['query_loggly'], ['*'], store, runDir, logger);
+    const { tools, infos } = await loadPlugin('ops-team', ['query_loggly'], ['*'], store, runDir, logger);
 
     expect(tools['ops-team.query_loggly']).toBeDefined();
+    expect(infos).toEqual([{ name: 'ops-team.query_loggly', description: 'Query Loggly' }]);
     expect(logger.warn).not.toHaveBeenCalled();
   });
 
@@ -101,13 +102,13 @@ describe('loadPluginTools', () => {
     );
     store.upsert({ teamName: 'ops-team', toolName: 'legacy', status: 'active' } as PluginToolMeta);
 
-    const tools = await loadPlugin('ops-team', ['legacy'], ['*'], store, runDir, logger);
+    const { tools } = await loadPlugin('ops-team', ['legacy'], ['*'], store, runDir, logger);
 
     expect(tools['ops-team.legacy']).toBeDefined();
   });
 
   it('skips reserved tool names', async () => {
-    const tools = await loadPlugin('ops-team', ['bash', 'read'], ['*'], store, runDir, logger);
+    const { tools } = await loadPlugin('ops-team', ['bash', 'read'], ['*'], store, runDir, logger);
     expect(tools['ops-team.bash']).toBeUndefined();
     expect(tools['ops-team.read']).toBeUndefined();
   });
@@ -119,7 +120,7 @@ describe('loadPluginTools', () => {
     );
     store.upsert({ teamName: 'ops-team', toolName: 'inactive', status: 'deprecated' } as PluginToolMeta);
 
-    const tools = await loadPlugin('ops-team', ['inactive'], ['*'], store, runDir, logger);
+    const { tools } = await loadPlugin('ops-team', ['inactive'], ['*'], store, runDir, logger);
     expect(tools['ops-team.inactive']).toBeUndefined();
   });
 
@@ -130,7 +131,7 @@ describe('loadPluginTools', () => {
     );
     store.upsert({ teamName: 'ops-team', toolName: 'foo', status: 'active' } as PluginToolMeta);
 
-    const tools = await loadPlugin('ops-team', ['foo'], ['Read'], store, runDir, logger);
+    const { tools } = await loadPlugin('ops-team', ['foo'], ['Read'], store, runDir, logger);
     expect(tools['ops-team.foo']).toBeUndefined();
   });
 
@@ -141,7 +142,7 @@ describe('loadPluginTools', () => {
     );
     store.upsert({ teamName: 'ops-team', toolName: 'weird', status: 'active' } as PluginToolMeta);
 
-    const tools = await loadPlugin('ops-team', ['weird'], ['*'], store, runDir, logger);
+    const { tools } = await loadPlugin('ops-team', ['weird'], ['*'], store, runDir, logger);
 
     expect(tools['ops-team.weird']).toBeUndefined();
     expect(logger.warn).toHaveBeenCalledWith(
@@ -162,7 +163,7 @@ describe('loadPluginTools', () => {
     store.upsert({ teamName: 'ops-team', toolName: 'broken', status: 'active' } as PluginToolMeta);
     store.upsert({ teamName: 'ops-team', toolName: 'valid', status: 'active' } as PluginToolMeta);
 
-    const tools = await loadPlugin('ops-team', ['broken', 'valid'], ['*'], store, runDir, logger);
+    const { tools } = await loadPlugin('ops-team', ['broken', 'valid'], ['*'], store, runDir, logger);
 
     expect(tools['ops-team.broken']).toBeUndefined();
     expect(tools['ops-team.valid']).toBeDefined();
@@ -191,13 +192,15 @@ describe('plugin-loader AC-15.1 reserved names', () => {
     const runDir = await writePluginFixture('ops', 'bash');
     createdDirs.push(runDir);
     const result = await loadPluginTools('ops', ['bash'], ['*'], store, runDir, { warn });
-    expect(result).toEqual({});
+    expect(result.tools).toEqual({});
+    expect(result.infos).toEqual([]);
   });
 
   it('skips reserved tool name "Read" case-insensitively', async () => {
     const store = makePluginStore({ ops: { Read: { status: 'active' } } });
     const result = await loadPluginTools('ops', ['Read'], ['*'], store, '/tmp', { warn: vi.fn() });
-    expect(result).toEqual({});
+    expect(result.tools).toEqual({});
+    expect(result.infos).toEqual([]);
   });
 });
 

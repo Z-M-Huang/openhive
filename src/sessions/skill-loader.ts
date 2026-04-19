@@ -21,6 +21,14 @@ export interface SubagentDefinition {
   readonly prompt: string;
   readonly skills?: string[];
   /**
+   * Map of skill-name → human description text taken from the
+   * `## Skills` bullet (`- skill_name — Human description`). Used as the
+   * one-liner shown in the lazy-load skill catalog so the LLM can decide
+   * which skill to load via `use_skill` without reading every body.
+   * Bullets without a `—` separator are absent from the map.
+   */
+  readonly skillDescriptions?: Readonly<Record<string, string>>;
+  /**
    * Resolved skill files referenced by this subagent. Each entry contains
    * the skill's name, full content, and parsed required tools list.
    * Populated from each referenced skill file (AC-10).
@@ -49,6 +57,7 @@ interface ParsedSubagent {
   readonly name: string;
   readonly description: string;
   readonly skills: string[];
+  readonly skillDescriptions: Record<string, string>;
   readonly boundaries: string;
   readonly communicationStyle: string;
   /**
@@ -81,11 +90,17 @@ function parseSubagent(filename: string, content: string): ParsedSubagent {
 
   const skillsMatch = content.match(/##\s+Skills\s*\n([\s\S]*?)(?=\n##|\n$|$)/);
   const skills: string[] = [];
+  const skillDescriptions: Record<string, string> = {};
   if (skillsMatch) {
     const lines = skillsMatch[1].split('\n');
     for (const line of lines) {
-      const match = line.match(/^-\s+(\S+)/);
-      if (match) skills.push(match[1]);
+      // Match `- skill_name [— description]` — the description (anything after
+      // the em-dash or hyphen separator) is captured for the lazy-load catalog.
+      const match = line.match(/^-\s+(\S+)(?:\s+[—-]\s+(.+))?$/);
+      if (match) {
+        skills.push(match[1]);
+        if (match[2]) skillDescriptions[match[1]] = match[2].trim();
+      }
     }
   }
 
@@ -115,6 +130,7 @@ function parseSubagent(filename: string, content: string): ParsedSubagent {
     name,
     description,
     skills,
+    skillDescriptions,
     boundaries,
     communicationStyle,
     hasCommunicationStyleHeader: commHeader,
@@ -170,6 +186,7 @@ export function loadSubagents(
       skills: def.skills,
       resolvedSkills,
     };
+    if (Object.keys(def.skillDescriptions).length > 0) entry.skillDescriptions = def.skillDescriptions;
     if (def.boundaries) entry.boundaries = def.boundaries;
     if (def.communicationStyle) entry.communicationStyle = def.communicationStyle;
 

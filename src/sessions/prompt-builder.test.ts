@@ -249,3 +249,22 @@ describe('AC-15.3 — web_fetch preference', () => {
     expect(note.toLowerCase()).toMatch(/web_fetch|delegate to a subagent/);
   });
 });
+
+describe('Fix 4.5 — web_fetch wording flips when plugins are present', () => {
+  it('emits "preferred for HTTP requests" when no plugins are loaded', () => {
+    const note = buildToolAvailabilityNote(['*'], []);
+    expect(note).toContain('preferred for HTTP requests');
+    expect(note).toContain('No plugin tools are loaded');
+  });
+
+  it('emits "fall-back only" wording when plugins are loaded', () => {
+    const note = buildToolAvailabilityNote(
+      ['*'],
+      [{ name: 'ops-team.fetch_loggly_logs', description: 'Fetch recent Loggly logs' }]
+    );
+    expect(note).toContain('fall-back only');
+    expect(note).toContain('prefer the plugin tools listed below');
+    expect(note).not.toContain('preferred for HTTP requests');
+    expect(note).not.toContain('No plugin tools are loaded');
+  });
+});

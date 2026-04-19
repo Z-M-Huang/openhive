@@ -44,19 +44,40 @@ Browser tools require the team to have `browser:` config. Use `browser_navigate(
 
 ### Plugin Tools
 
-Plugin tools are team-local TypeScript `tool()` definitions for reusable capabilities not covered by built-in tools. Register them deliberately:
+Plugin tools are team-local TypeScript modules with **named ESM exports**. Each plugin lives at `plugins/<tool_name>.ts` and exports exactly three names:
 
+```ts
+import { z } from 'zod';
+
+export const description = "<one-line description shown to the model>";
+
+export const inputSchema = z.object({
+  // parameters here
+});
+
+export async function execute(input: z.infer<typeof inputSchema>) {
+  // implementation; return a JSON-serializable value
+}
+```
+
+**Allowed imports:** `zod` only. Use the global `fetch()` for HTTP. Do **not** import:
+- `@openhive/ai-sdk` — does not exist (registration is rejected)
+- `axios` — not a project dependency; use `fetch` instead (registration is rejected)
+- `tool` from any package — the runtime wraps `{description, inputSchema, execute}` automatically
+
+**Forbidden in source:** `eval`, `Function(...)`, `child_process`, `execSync`, `spawnSync`, `Bun.spawn`, `process.env`, hardcoded secrets. Any of these fails the security scan.
+
+**Erasable TS syntax only:** Node 22's built-in type stripping accepts `export const X`, `export async function`, type annotations, and `z.infer<typeof T>`. It does NOT accept enums, runtime namespaces, parameter properties, decorators, or import aliases.
+
+**Registration flow:**
 1. Check existing skills, plugin tools, and built-in tools first.
-2. Call `register_plugin_tool({ tool_name, source_code })` to write and verify the source.
-3. Only rely on the tool after registration returns status `active`.
-4. Add the bare tool name to the skill's `## Required Tools` section.
-5. Ensure `allowed_tools` permits `{team_name}.{tool_name}` or `{team_name}.*`.
+2. Call `register_plugin_tool({ tool_name, source_code })`. If it returns an error mentioning `@openhive/ai-sdk`, `axios`, default-export, or CommonJS, fix the source per the message.
+3. Add the bare tool name to the skill's `## Required Tools` section.
+4. Ensure `allowed_tools` permits `{team_name}.{tool_name}` or `{team_name}.*`.
 
-**Naming:** snake_case only (`^[a-z][a-z0-9_]*$`). Reserved names (read, write, edit, glob, grep, bash) cannot be used.
+**Naming:** snake_case only (`^[a-z][a-z0-9_]*$`). Reserved names (`read`, `write`, `edit`, `glob`, `grep`, `bash`) cannot be used.
 
-**Security:** Source is scanned for forbidden patterns (eval, child_process, process.env) and hardcoded secrets. If verification fails, fix the source and re-register.
-
-**Namespace:** Plugin tools are namespaced as `{teamName}.{toolName}` at runtime.
+**Namespace:** Plugin tools appear at runtime as `{teamName}.{toolName}`.
 
 ### Communication Patterns
 

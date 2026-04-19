@@ -8,6 +8,7 @@ import type { OrgTree } from '../../domain/org-tree.js';
 import type { ITriggerConfigStore, ITaskQueueStore } from '../../domain/interfaces.js';
 import { checkTeamBusy } from './team-busy-guard.js';
 import { TaskStatus } from '../../domain/types.js';
+import { buildTriggerTaskOptions } from '../../triggers/task-options.js';
 
 export const TestTriggerInputSchema = z.object({
   team: z.string().min(1),
@@ -111,7 +112,8 @@ export function testTrigger(
 
   // Enqueue with test correlation ID (not trigger: prefix — no breaker accounting)
   const correlationId = `test-trigger:${input.trigger_name}:${Date.now()}`;
-  const taskId = deps.taskQueue.enqueue(input.team, entry.task, 'normal', 'trigger', sourceChannelId, correlationId, { maxSteps });
+  const taskOptions = buildTriggerTaskOptions(entry, maxSteps);
+  const taskId = deps.taskQueue.enqueue(input.team, entry.task, 'normal', 'trigger', sourceChannelId, correlationId, taskOptions);
 
   deps.log('Test trigger fired', { team: input.team, trigger: input.trigger_name, taskId, maxSteps });
   return {

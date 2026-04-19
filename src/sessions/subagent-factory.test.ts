@@ -197,7 +197,14 @@ describe('buildSubagentTools', () => {
     expect(mockGenerateText).toHaveBeenCalledTimes(1);
     const callArgs = mockGenerateText.mock.calls[0][0] as Record<string, unknown>;
     expect(callArgs['model']).toEqual({ modelId: 'test-model' });
-    expect(callArgs['system']).toBe('You are a DevOps engineer.');
+    // Fix 6: subagent-factory now wraps the raw def.prompt with the shared
+    // `--- Active Subagent ---` header plus the standing `--- Subagent Default
+    // Behavior ---` directive so skill → plugin → generic routing is enforced
+    // on the legacy delegated path too. The original prompt text must still be
+    // present verbatim inside the augmented system string.
+    expect(callArgs['system']).toContain('You are a DevOps engineer.');
+    expect(callArgs['system']).toContain('--- Active Subagent: solo ---');
+    expect(callArgs['system']).toContain('--- Subagent Default Behavior ---');
     expect(callArgs['prompt']).toBe('deploy to production');
     expect(callArgs['tools']).toBe(sharedTools);
     // stopWhen is whatever stepCountIs(7) returned from the mock

@@ -19,6 +19,39 @@ export interface PluginLoaderLogger {
   error?(msg: string, meta?: Record<string, unknown>): void;
 }
 
+/**
+ * `{name, description}` pair for one loaded plugin tool. Surfaced so the
+ * prompt-builder can list the namespaced tools under the ADR-39 plugin
+ * section and downgrade `web_fetch`'s "preferred" wording (Fix 4.5).
+ */
+export interface LoadedPluginInfo {
+  readonly name: string;
+  readonly description: string;
+}
+
+export interface LoadedPluginTools {
+  readonly tools: ToolSet;
+  readonly infos: readonly LoadedPluginInfo[];
+}
+
+/**
+ * Best-effort description extraction. Used when the plugin uses the legacy
+ * default-export form (where description is buried in the AI SDK Tool
+ * wrapper) or a named-export matching the tool name. Falls back to a generic
+ * "Plugin tool …" string when introspection isn't possible.
+ */
+function extractDescription(
+  mod: Record<string, unknown>,
+  toolName: string,
+  toolValue: unknown,
+): string {
+  if (typeof mod['description'] === 'string') return mod['description'];
+  // AI SDK `Tool` objects expose `description` on the wrapper.
+  const t = toolValue as { description?: unknown } | undefined;
+  if (t && typeof t.description === 'string') return t.description;
+  return `Plugin tool ${toolName} (no description)`;
+}
+
 export async function loadPluginTools(
   teamName: string,
   requiredTools: string[],
@@ -26,8 +59,9 @@ export async function loadPluginTools(
   pluginToolStore: IPluginToolStore,
   runDir: string,
   logger?: PluginLoaderLogger,
-): Promise<ToolSet> {
+): Promise<LoadedPluginTools> {
   const tools: ToolSet = {};
+  const infos: LoadedPluginInfo[] = [];
 
   for (const toolName of requiredTools) {
     if (RESERVED_TOOL_NAMES.includes(toolName.toLowerCase())) continue;
@@ -55,6 +89,7 @@ export async function loadPluginTools(
       const toolDef = mod['default'] as ToolSet[string] | undefined;
       if (toolDef) {
         tools[namespacedName] = toolDef;
+        infos.push({ name: namespacedName, description: extractDescription(mod, toolName, toolDef) });
         continue;
       }
 
@@ -69,6 +104,7 @@ export async function loadPluginTools(
           inputSchema: mod['inputSchema'] as never,
           execute: mod['execute'] as never,
         });
+        infos.push({ name: namespacedName, description: mod['description'] });
         continue;
       }
 
@@ -76,6 +112,7 @@ export async function loadPluginTools(
       const toolDefByName = mod[toolName] as ToolSet[string] | undefined;
       if (toolDefByName) {
         tools[namespacedName] = toolDefByName;
+        infos.push({ name: namespacedName, description: extractDescription(mod, toolName, toolDefByName) });
         continue;
       }
 
@@ -93,5 +130,5 @@ export async function loadPluginTools(
     }
   }
 
-  return tools;
+  return { tools, infos };
 }

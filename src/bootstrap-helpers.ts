@@ -34,6 +34,7 @@ import { TaskStatus, TeamStatus } from './domain/types.js';
 import type { AppLogger } from './logging/logger.js';
 import { seedLearningTrigger, seedReflectionTrigger } from './handlers/tools/spawn-team.js';
 import { loadSubagents } from './sessions/skill-loader.js';
+import { buildTriggerTaskOptions } from './triggers/task-options.js';
 
 export interface ChannelDeps { readonly dataDir: string }
 
@@ -108,10 +109,7 @@ export function initTriggerEngine(
       // (defensive, keeps backwards compatibility for any non-engine caller).
       let effectiveOptions: import('./domain/types.js').TaskOptions | undefined = options;
       if (!effectiveOptions && triggerName) {
-        const entry = triggerConfigStore.get(team, triggerName);
-        if (entry?.maxSteps !== undefined || entry?.subagent !== undefined) {
-          effectiveOptions = { maxSteps: entry?.maxSteps, subagent: entry?.subagent };
-        }
+        effectiveOptions = buildTriggerTaskOptions(triggerConfigStore.get(team, triggerName));
       }
       const taskId = taskQueueStore.enqueue(team, task, (priority ?? 'normal') as import('./domain/types.js').TaskPriority, 'trigger', sourceChannelId, correlationId, effectiveOptions);
       return Promise.resolve(taskId);

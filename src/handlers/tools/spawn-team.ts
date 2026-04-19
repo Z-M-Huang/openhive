@@ -241,9 +241,9 @@ function enqueueInitTask(
 
   const sharedSteps =
     'Follow the v0.5.0 five-layer hierarchy (Main Agent → Team Orchestrator → Subagent → Skill → Plugin): ' +
-    '(1) Author one or more subagents under subagents/ — each subagent markdown declares its role, boundaries, and communication style. ' +
-    '(2) Create and register plugins under plugins/ for deterministic tool capabilities (use register_plugin_tool for runtime registration). ' +
-    '(3) Create skills under skills/ that subagents can invoke to do repeatable work. ' +
+    '(1) Author one or more subagents under subagents/ — each subagent markdown declares (a) `## Role`, (b) `## Boundaries`, (c) `## Communication Style`, and (d) `## Skills` listing the skills it can run as `- skill_name — short description`. The `## Skills` section is REQUIRED for any subagent that uses skills or plugin tools — it is the only binding (ADR-40). ' +
+    '(2) Create plugins under plugins/<tool_name>.ts and register each via register_plugin_tool. The source MUST use named ESM exports (`export const description`, `export const inputSchema`, `export async function execute`). Imports allowed: `zod` only. Use the global `fetch()` for HTTP. Do NOT import `@openhive/ai-sdk` (does not exist), `axios` (not installed), or `tool` from any package (runtime wraps automatically). See system-rules/tool-guidelines.md for the canonical template. ' +
+    '(3) Create skills under skills/ that subagents invoke. Each skill declares its `## Required Tools` listing bare plugin tool names. ' +
     '(4) Use memory_save to record your team identity, key decisions, and initial context. ' +
     '(5) Respond with a brief, user-friendly summary of your new capabilities.';
   const initPayload = initContext
